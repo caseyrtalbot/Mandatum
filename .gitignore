@@ -1,0 +1,11 @@
+.DS_Store
+.codex-log/
+target/
+build/
+.build/
+DerivedData/
+node_modules/
+dist/
+coverage/
+*.log
+*.tmp

@@ -1,0 +1,20 @@
+[workspace]
+members = [
+  "crates/app",
+  "crates/commands",
+  "crates/core",
+  "crates/pty",
+  "crates/renderer",
+  "crates/terminal-vt",
+  "crates/workflows",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96"
+
+[workspace.dependencies]
+ntw-core = { path = "crates/core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
