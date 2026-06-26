@@ -164,10 +164,13 @@ For the runtime and renderer, verify:
   not connect `NativePtySession` output to `mandatum-terminal-vt` or render a
   real terminal grid.
 
-## Milestone 4 Real Terminal Runtime Slice Verification
+## Milestone 4 Real Terminal Pane Verification
 
-This slice connects real PTY-backed shell processes to visible terminal panes
-using the current fake/basic `terminal-vt` parser. Run from the repo root:
+Milestone 4 is complete. Visible terminal panes run real PTY-backed shells whose
+output is parsed by the hardened `VteTerminalAdapter` (default backend behind
+`TerminalAdapter`), rendered with styling and a scrollback/selection viewport,
+and driven through a keyboard copy mode and an in-place PTY restart. Run from the
+repo root:
 
 ```sh
 cargo fmt --check
@@ -181,14 +184,15 @@ git diff --check
 For the runtime and renderer, verify:
 
 - `cargo run` enters the alternate screen, spawns a shell for a visible terminal
-  pane, renders shell output, and restores the terminal on `Ctrl-Q`.
+  pane (`TERM=xterm-256color`), renders shell output, and restores the terminal
+  on `Ctrl-Q`.
 - Normal keys go to the focused PTY-backed shell while the command palette is
   closed.
 - `Ctrl-P` opens command palette mode. In palette mode, `v` split right, `s`
   split down, `Tab`/`l` focus next, `Shift-Tab`/`h` focus previous, `x` close,
-  `z` zoom, `n` new terminal intent, `f` float, `t` stack, `r` restart intent,
-  and `Esc` closes the palette.
-- Paste events write pasted text to the focused PTY.
+  `z` zoom, `n` new terminal intent, `f` float, `t` stack, `r` restart, `[`
+  enter copy mode, and `Esc` closes the palette.
+- Paste events write pasted text to the focused PTY (suppressed in copy mode).
 - PTY output is read on a background reader thread and fed into the per-pane
   `TerminalParser`.
 - Renderer receives borrowed terminal grid snapshots only; it does not own
@@ -196,11 +200,28 @@ For the runtime and renderer, verify:
 - PTYs are resized from renderer pane content geometry. Hidden panes from zoom
   or stack presentation must not be treated as stale runtime panes.
 - Process exit or PTY failures are visible in status.
-- Known limitation: the grid still uses the fake/basic parser, so shell escape
-  sequences can render visibly. That does not satisfy a future real VT parser
-  backend gate.
-- Known limitation: copy/selection and scrollback are still deferred.
-- `libghostty-vt` remains unbound.
+
+Parser hardening, scrollback, copy/selection, and restart are covered by tests:
+
+- `crates/terminal-vt`: VT-backend unit tests (SGR color/truecolor, cursor
+  addressing, erase display/line, carriage-return redraw, alternate screen,
+  bounded scrollback) plus the retained fake-adapter fixtures.
+- `crates/renderer`: scrollback viewport + selection highlight rendering.
+- `crates/commands`: copy-mode command target routing.
+- `crates/app` unit tests: copy-mode navigation/selection/extraction, OSC 52
+  base64 payload, and a real-PTY restart that replaces the live runtime for the
+  same `PaneId` while leaving core layout intact.
+- `crates/app/tests/terminal_smoke.rs`: real `/bin/sh` end-to-end checks that
+  SGR color and cursor addressing render without raw escape leakage, `echo`
+  round-trips, and `seq 1 200` is captured into bounded scrollback without
+  hanging. These stand in for the interactive `cargo run` smoke where an
+  automated terminal is unavailable.
+
+Deferred (not part of the Milestone 4 gate):
+
+- `libghostty-vt` backend binding remains unbound.
+- Native OS mouse selection, semantic selection, and rich clipboard history.
+- Task/agent workflow panes (Milestone 5+).
 
 ## Minimum Quality Gate
 

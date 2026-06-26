@@ -15,6 +15,7 @@ pub enum CommandId {
     FocusPrevious,
     ClosePane,
     RestartPane,
+    EnterCopyMode,
     ZoomPane,
     FloatPane,
     StackPanes,
@@ -79,6 +80,11 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         category: CommandCategory::Pane,
     },
     Command {
+        id: CommandId::EnterCopyMode,
+        label: "Copy Mode",
+        category: CommandCategory::Pane,
+    },
+    Command {
         id: CommandId::ZoomPane,
         label: "Zoom Pane",
         category: CommandCategory::Layout,
@@ -131,12 +137,39 @@ pub fn command_for_id(command_id: CommandId) -> Option<&'static Command> {
         .find(|command| command.id == command_id)
 }
 
+/// Where a command's effect is applied. Most commands map to a core action;
+/// a few drive app-runtime/presentation state that core does not model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandTarget {
+    /// Resolves to a `CoreAction` via `action_for_command` and is dispatched
+    /// through `dispatch_command`.
+    Core,
+    /// Handled by the app runtime; never mutates durable core state.
+    Runtime(RuntimeCommand),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeCommand {
+    /// Enter keyboard scrollback/selection (copy) mode for the focused pane.
+    EnterCopyMode,
+}
+
+pub fn command_target(command_id: CommandId) -> CommandTarget {
+    match command_id {
+        CommandId::EnterCopyMode => CommandTarget::Runtime(RuntimeCommand::EnterCopyMode),
+        _ => CommandTarget::Core,
+    }
+}
+
 pub fn dispatch_command(
     workspace: &mut Workspace,
     context: &CommandContext,
     command_id: CommandId,
 ) -> Result<ActionOutcome, CommandError> {
     command_for_id(command_id).ok_or(CommandError::UnknownCommand(command_id))?;
+    if let CommandTarget::Runtime(_) = command_target(command_id) {
+        return Err(CommandError::NotACoreCommand(command_id));
+    }
     let action = action_for_command(command_id, context);
     workspace
         .apply_action(action)
@@ -159,6 +192,7 @@ pub fn action_for_command(command_id: CommandId, context: &CommandContext) -> Co
         CommandId::FocusPrevious => CoreAction::FocusPrevious,
         CommandId::ClosePane => CoreAction::CloseFocused,
         CommandId::RestartPane => CoreAction::RestartFocused,
+        CommandId::EnterCopyMode => unreachable!("EnterCopyMode is a runtime command"),
         CommandId::ZoomPane => CoreAction::ToggleZoomFocused,
         CommandId::FloatPane => CoreAction::FloatFocused,
         CommandId::StackPanes => CoreAction::StackFocusedWithNext,
@@ -170,6 +204,7 @@ pub fn action_for_command(command_id: CommandId, context: &CommandContext) -> Co
 #[derive(Debug)]
 pub enum CommandError {
     UnknownCommand(CommandId),
+    NotACoreCommand(CommandId),
     Workspace(WorkspaceError),
 }
 
@@ -177,6 +212,10 @@ impl fmt::Display for CommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownCommand(command_id) => write!(formatter, "unknown command {command_id:?}"),
+            Self::NotACoreCommand(command_id) => write!(
+                formatter,
+                "command {command_id:?} is handled by the app runtime, not core"
+            ),
             Self::Workspace(error) => write!(formatter, "{error}"),
         }
     }
@@ -232,5 +271,37 @@ mod tests {
         assert!(command_ids.contains(&CommandId::StackPanes));
         assert!(command_ids.contains(&CommandId::SaveWorkspace));
         assert!(command_ids.contains(&CommandId::RestoreWorkspace));
+    }
+
+    #[test]
+    fn enter_copy_mode_is_a_runtime_command() {
+        assert_eq!(
+            command_target(CommandId::EnterCopyMode),
+            CommandTarget::Runtime(RuntimeCommand::EnterCopyMode)
+        );
+        assert_eq!(command_target(CommandId::RestartPane), CommandTarget::Core);
+    }
+
+    #[test]
+    fn dispatch_rejects_runtime_commands_instead_of_mutating_core() {
+        let mut workspace = Workspace::new("w", PathBuf::from("/tmp/p"));
+        let context = CommandContext::for_project("w", "/tmp/p");
+
+        let result = dispatch_command(&mut workspace, &context, CommandId::EnterCopyMode);
+
+        assert!(matches!(
+            result,
+            Err(CommandError::NotACoreCommand(CommandId::EnterCopyMode))
+        ));
+        assert_eq!(workspace.active_session().panes().len(), 1);
+    }
+
+    #[test]
+    fn built_in_commands_include_copy_mode() {
+        assert!(
+            BUILT_IN_COMMANDS
+                .iter()
+                .any(|command| command.id == CommandId::EnterCopyMode)
+        );
     }
 }

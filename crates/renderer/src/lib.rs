@@ -6,7 +6,7 @@
 use mandatum_core::{
     FloatingRect, LayoutNode, PaneId, PaneKind, PaneSpec, Session, SplitAxis, Workspace,
 };
-use mandatum_terminal_vt::{CellStyle, GridPosition, TerminalGrid};
+use mandatum_terminal_vt::{CellStyle, Color as VtColor, TerminalGrid};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout as RatatuiLayout, Rect},
@@ -14,6 +14,45 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+
+/// A point in the combined scrollback-plus-screen buffer, in absolute
+/// coordinates: rows `0..scrollback_len` index history, rows at and beyond
+/// `scrollback_len` index the live screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct SelectionPoint {
+    pub row: usize,
+    pub column: u16,
+}
+
+impl SelectionPoint {
+    pub fn new(row: usize, column: u16) -> Self {
+        Self { row, column }
+    }
+}
+
+/// Read-only presentation state describing how a terminal pane's grid is being
+/// viewed: how far it is scrolled into history, an optional ordered selection
+/// span, and an optional copy-mode cursor. The default is "follow live output".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct TerminalViewport {
+    /// Rows scrolled up from the live bottom. `0` follows live output.
+    pub scroll_offset: usize,
+    /// Inclusive selection span, pre-ordered so `start <= end` in reading order.
+    pub selection: Option<(SelectionPoint, SelectionPoint)>,
+    /// Copy-mode cursor position; `Some` only while a pane is in copy mode.
+    pub copy_cursor: Option<SelectionPoint>,
+}
+
+impl TerminalViewport {
+    /// The default viewport: following live output, no selection, no copy cursor.
+    pub fn live() -> Self {
+        Self::default()
+    }
+
+    fn in_copy_mode(&self) -> bool {
+        self.copy_cursor.is_some() || self.scroll_offset > 0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaletteItem<'a> {
@@ -44,11 +83,29 @@ pub struct RenderState<'a> {
 pub struct PaneTerminalGrid<'a> {
     pub pane_id: &'a PaneId,
     pub grid: &'a TerminalGrid,
+    pub viewport: TerminalViewport,
 }
 
 impl<'a> PaneTerminalGrid<'a> {
+    /// A pane terminal grid following live output (no scroll/selection).
     pub fn new(pane_id: &'a PaneId, grid: &'a TerminalGrid) -> Self {
-        Self { pane_id, grid }
+        Self {
+            pane_id,
+            grid,
+            viewport: TerminalViewport::live(),
+        }
+    }
+
+    pub fn with_viewport(
+        pane_id: &'a PaneId,
+        grid: &'a TerminalGrid,
+        viewport: TerminalViewport,
+    ) -> Self {
+        Self {
+            pane_id,
+            grid,
+            viewport,
+        }
     }
 }
 
@@ -67,10 +124,11 @@ impl<'a> TerminalGridView<'a> {
     }
 
     pub fn for_pane(&self, pane_id: &PaneId) -> Option<&'a TerminalGrid> {
-        self.panes
-            .iter()
-            .find(|pane| pane.pane_id == pane_id)
-            .map(|pane| pane.grid)
+        self.entry(pane_id).map(|pane| pane.grid)
+    }
+
+    pub fn entry(&self, pane_id: &PaneId) -> Option<&PaneTerminalGrid<'a>> {
+        self.panes.iter().find(|pane| pane.pane_id == pane_id)
     }
 }
 
@@ -228,18 +286,24 @@ fn render_pane(
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let title = pane_title(&pane_scene);
+
+    if matches!(pane.kind(), PaneKind::Terminal { .. })
+        && let Some(entry) = terminal_grids.entry(&pane_scene.id)
+    {
+        let title = pane_title(&pane_scene, entry.viewport.in_copy_mode());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(title);
+        render_terminal_grid(frame, pane_scene.area, block, entry.grid, entry.viewport);
+        return;
+    }
+
+    let title = pane_title(&pane_scene, false);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(title);
-
-    if matches!(pane.kind(), PaneKind::Terminal { .. })
-        && let Some(grid) = terminal_grids.for_pane(&pane_scene.id)
-    {
-        render_terminal_grid(frame, pane_scene.area, block, grid);
-        return;
-    }
 
     let cwd = pane
         .cwd()
@@ -261,9 +325,15 @@ fn render_pane(
     );
 }
 
-fn render_terminal_grid(frame: &mut Frame<'_>, area: Rect, block: Block<'_>, grid: &TerminalGrid) {
+fn render_terminal_grid(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'_>,
+    grid: &TerminalGrid,
+    viewport: TerminalViewport,
+) {
     let inner_area = pane_inner_area(area);
-    let lines = terminal_grid_lines(grid, inner_area.width, inner_area.height);
+    let lines = terminal_grid_lines(grid, viewport, inner_area.width, inner_area.height);
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -276,20 +346,46 @@ fn pane_inner_area(area: Rect) -> Rect {
     )
 }
 
-fn terminal_grid_lines(grid: &TerminalGrid, max_width: u16, max_height: u16) -> Vec<Line<'static>> {
-    let rows = grid.size().rows().min(max_height);
+fn terminal_grid_lines(
+    grid: &TerminalGrid,
+    viewport: TerminalViewport,
+    max_width: u16,
+    max_height: u16,
+) -> Vec<Line<'static>> {
+    let view_rows = usize::from(grid.size().rows().min(max_height));
     let columns = grid.size().columns().min(max_width);
+    let total_rows = grid.total_rows();
+    let scrollback_len = grid.scrollback_len();
     let cursor = grid.cursor();
 
-    (0..rows)
-        .map(|row| {
+    // Top visible absolute row, clamped so the viewport never runs off the end.
+    let max_top = total_rows.saturating_sub(view_rows);
+    let first_visible = max_top.saturating_sub(viewport.scroll_offset);
+
+    // The live cursor is only drawn when following live output and not in copy
+    // mode (copy mode draws its own cursor instead).
+    let show_live_cursor =
+        viewport.scroll_offset == 0 && viewport.copy_cursor.is_none() && cursor.visible();
+    let live_cursor_row = scrollback_len + usize::from(cursor.row());
+
+    (0..view_rows)
+        .map(|line| {
+            let absolute_row = first_visible + line;
             let spans = (0..columns)
                 .map(|column| {
-                    let position = GridPosition::new(row, column);
-                    let cell = grid.cell(position).copied().unwrap_or_default();
+                    let cell = grid.history_cell(absolute_row, column).unwrap_or_default();
                     let mut style = terminal_cell_style(cell.style());
 
-                    if cursor.visible() && cursor.position() == position {
+                    if selection_contains(viewport.selection, absolute_row, column) {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+
+                    let copy_cursor_here =
+                        viewport.copy_cursor == Some(SelectionPoint::new(absolute_row, column));
+                    let live_cursor_here = show_live_cursor
+                        && absolute_row == live_cursor_row
+                        && column == cursor.column();
+                    if copy_cursor_here || live_cursor_here {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
 
@@ -301,15 +397,57 @@ fn terminal_grid_lines(grid: &TerminalGrid, max_width: u16, max_height: u16) -> 
         .collect()
 }
 
+fn selection_contains(
+    selection: Option<(SelectionPoint, SelectionPoint)>,
+    row: usize,
+    column: u16,
+) -> bool {
+    let Some((start, end)) = selection else {
+        return false;
+    };
+    let after_start = row > start.row || (row == start.row && column >= start.column);
+    let before_end = row < end.row || (row == end.row && column <= end.column);
+    after_start && before_end
+}
+
 fn terminal_cell_style(style: CellStyle) -> Style {
     let mut cell_style = Style::default();
+    if style.foreground != VtColor::Default {
+        cell_style = cell_style.fg(map_color(style.foreground));
+    }
+    if style.background != VtColor::Default {
+        cell_style = cell_style.bg(map_color(style.background));
+    }
     if style.bold {
         cell_style = cell_style.add_modifier(Modifier::BOLD);
+    }
+    if style.dim {
+        cell_style = cell_style.add_modifier(Modifier::DIM);
+    }
+    if style.italic {
+        cell_style = cell_style.add_modifier(Modifier::ITALIC);
+    }
+    if style.underline {
+        cell_style = cell_style.add_modifier(Modifier::UNDERLINED);
     }
     if style.inverse {
         cell_style = cell_style.add_modifier(Modifier::REVERSED);
     }
+    if style.hidden {
+        cell_style = cell_style.add_modifier(Modifier::HIDDEN);
+    }
+    if style.strikethrough {
+        cell_style = cell_style.add_modifier(Modifier::CROSSED_OUT);
+    }
     cell_style
+}
+
+fn map_color(color: VtColor) -> Color {
+    match color {
+        VtColor::Default => Color::Reset,
+        VtColor::Indexed(index) => Color::Indexed(index),
+        VtColor::Rgb(red, green, blue) => Color::Rgb(red, green, blue),
+    }
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, status: Option<&str>) {
@@ -432,7 +570,7 @@ fn pane_kind_label(kind: &PaneKind) -> &'static str {
     }
 }
 
-fn pane_title(pane: &PaneScene) -> String {
+fn pane_title(pane: &PaneScene, copy_mode: bool) -> String {
     let mut parts = vec![pane.title.clone()];
     if pane.focused {
         parts.push("focused".to_owned());
@@ -445,6 +583,9 @@ fn pane_title(pane: &PaneScene) -> String {
     }
     if pane.zoomed {
         parts.push("zoom".to_owned());
+    }
+    if copy_mode {
+        parts.push("copy".to_owned());
     }
     format!(" {} ", parts.join(" | "))
 }
@@ -563,9 +704,11 @@ mod tests {
     #[test]
     fn terminal_grid_lines_preserve_content_and_cursor() {
         let mut parser = TerminalParser::new(TerminalSize::new(8, 2).unwrap());
-        parser.feed(b"sh\nok").unwrap();
+        // A real PTY emits CRLF; the hardened backend treats LF as line feed
+        // (column preserved) and CR as carriage return.
+        parser.feed(b"sh\r\nok").unwrap();
 
-        let lines = terminal_grid_lines(parser.grid(), 8, 2);
+        let lines = terminal_grid_lines(parser.grid(), TerminalViewport::live(), 8, 2);
 
         assert_eq!(
             lines[0]
@@ -587,6 +730,48 @@ mod tests {
         );
         assert!(
             lines[1].spans[2]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn viewport_scrolls_into_history_and_highlights_selection() {
+        let mut parser = TerminalParser::new(TerminalSize::new(4, 2).unwrap());
+        parser.feed(b"aaa\r\nbbb\r\nccc\r\nddd").unwrap();
+        let grid = parser.grid();
+        assert_eq!(grid.scrollback_len(), 2);
+
+        // Scrolling up by one row brings the previous line into view from history.
+        let scrolled = TerminalViewport {
+            scroll_offset: 1,
+            selection: None,
+            copy_cursor: None,
+        };
+        let lines = terminal_grid_lines(grid, scrolled, 4, 2);
+        let text = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text, vec!["bbb", "ccc"]);
+
+        // A selection over the top visible row (absolute row 1) reverses its cells.
+        let selected = TerminalViewport {
+            scroll_offset: 1,
+            selection: Some((SelectionPoint::new(1, 0), SelectionPoint::new(1, 2))),
+            copy_cursor: Some(SelectionPoint::new(1, 2)),
+        };
+        let lines = terminal_grid_lines(grid, selected, 4, 2);
+        assert!(
+            lines[0].spans[0]
                 .style
                 .add_modifier
                 .contains(Modifier::REVERSED)

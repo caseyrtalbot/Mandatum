@@ -28,25 +28,23 @@ This is also not an Xcode or Apple-native app project. Do not use Xcode.app, `.x
 
 ## Current Status
 
-This repo has completed Milestone 3 and the first Milestone 4 real-terminal
-runtime slice:
+This repo has completed Milestone 3 and Milestone 4 (real terminal pane):
 
 - Cargo workspace with `core`, `commands`, `workflows`, `pty`, `terminal-vt`, `renderer`, and `app` crates.
 - Renderer-neutral `core` domain for workspace, project, session, pane, layout, focus, actions, and JSON session persistence.
-- Minimal `commands` crate that maps command ids to core actions without owning layout mutation logic.
+- Minimal `commands` crate that maps command ids to core actions (and routes app-runtime commands such as copy mode), without owning layout mutation logic.
 - Minimal `workflows` crate for durable task/agent pane intent helpers only.
-- `terminal-vt` has the first fake parser adapter seam plus a `TerminalParser` owner that the app can keep one-per-pane and feed from PTY byte streams.
+- `terminal-vt` provides a hardened default VT parser (`VteTerminalAdapter`, built on the pure-Rust `vte` tokenizer) behind `TerminalAdapter`, with SGR styling, cursor addressing, erase/insert/delete, scroll region, alternate screen, and bounded scrollback. The original fake adapter is retained for fixtures.
 - `pty` has the native OS PTY seam plus split reader/writer/controller parts so the app can read output on a background thread while writing input and resizing from the event loop.
 - `libghostty-vt` has been evaluated as a future optional `terminal-vt` backend; no binding or dependency has been added.
-- `renderer` renders workspace layout state, pane chrome, focus, zoom, floating panes, status, command-palette overlay, and supplied terminal grid snapshots.
-- `app` launches from root `cargo run`, enters/restores the terminal, spawns PTY-backed shells for visible terminal panes, feeds PTY output into `terminal-vt`, sends normal key input and paste text back to the focused PTY, resizes PTYs from pane geometry, and dispatches workspace commands through `mandatum-commands`.
+- `renderer` renders workspace layout state, pane chrome, focus, zoom, floating panes, status, command-palette overlay, and styled terminal grid snapshots with a scrollback/selection-aware viewport.
+- `app` launches from root `cargo run`, enters/restores the terminal, spawns PTY-backed shells for visible terminal panes (`TERM=xterm-256color`), feeds PTY output into the hardened parser, sends normal key input and paste text back to the focused PTY, resizes PTYs from pane geometry, offers a keyboard copy/scrollback mode, restarts a pane's PTY in place, and dispatches workspace commands through `mandatum-commands`.
 
 Remaining limitations:
 
-- The terminal grid is still backed by the fake/basic parser, so shell escape
-  sequences can render visibly until a real VT parser backend is added.
-- Copy/selection, scrollback, restart registry behavior, task/agent workflow
-  panes, and `libghostty-vt` binding remain deferred.
+- `libghostty-vt` binding remains deferred; the local `vte`-based backend is the default.
+- Copy mode is a keyboard-first baseline (stream selection + OSC 52 clipboard). Native OS mouse selection, semantic selection, and rich clipboard history are out of scope.
+- Task/agent workflow panes are Milestone 5+.
 
 Current runtime controls:
 
@@ -56,7 +54,13 @@ Current runtime controls:
 - In command palette mode: `v` split right, `s` split down, `Tab`/`l` focus
   next, `Shift-Tab`/`h` focus previous, `x` close focused pane, `z` zoom
   focused pane, `n` new floating terminal intent, `f` float focused pane, `t`
-  stack focused pane, `r` restart focused pane intent, `Esc` close palette.
+  stack focused pane, `r` restart focused pane, `[` enter copy mode, `Esc`
+  close palette.
+- In copy mode (scrollback + selection): `h`/`j`/`k`/`l` or arrows move, `PageUp`/`PageDown`
+  scroll a page, `g`/`G` jump to top/bottom, `0`/`$` line start/end, `v` or
+  `Space` start selection, `c` clear selection, `y`/`Enter` copy the selection
+  (via OSC 52) and exit, `q`/`Esc` exit. The host terminal must support OSC 52
+  for the copy to reach the system clipboard.
 
 Start with:
 

@@ -4,9 +4,13 @@
 //! input orchestration. Product mutations still go through `mandatum-commands`,
 //! and drawing still goes through `mandatum-renderer`.
 
+mod clipboard;
+mod copy_mode;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, io,
+    fmt,
+    io::{self, Write},
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
@@ -22,7 +26,8 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use mandatum_commands::{
-    BUILT_IN_COMMANDS, CommandCategory, CommandContext, CommandError, CommandId, dispatch_command,
+    BUILT_IN_COMMANDS, CommandCategory, CommandContext, CommandError, CommandId, CommandTarget,
+    RuntimeCommand, command_target, dispatch_command,
 };
 use mandatum_core::{ActionOutcome, PaneId, PaneKind, PersistenceRequest, Workspace};
 use mandatum_pty::{
@@ -30,11 +35,13 @@ use mandatum_pty::{
     NativePtyWriter, PtyEvent, PtySessionId, PtySize, ResizeIntent, SpawnIntent,
 };
 use mandatum_renderer::{
-    PaletteItem, PaletteView, PaneTerminalGrid, RenderState, TerminalGridView, pane_content_area,
-    render_with_terminal_grids,
+    PaletteItem, PaletteView, PaneTerminalGrid, RenderState, SelectionPoint, TerminalGridView,
+    TerminalViewport, pane_content_area, render_with_terminal_grids,
 };
-use mandatum_terminal_vt::{TerminalAdapterError, TerminalParser, TerminalSize};
+use mandatum_terminal_vt::{TerminalAdapterError, TerminalGrid, TerminalParser, TerminalSize};
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+
+use crate::{clipboard::osc52_sequence, copy_mode::CopyModeState};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(40);
 const PTY_READ_CHUNK_BYTES: usize = 8192;
@@ -52,6 +59,10 @@ pub fn run_with_config(config: AppConfig) -> Result<(), AppError> {
     while !app.should_quit() {
         app.tick_runtime();
         draw(&mut terminal, &app)?;
+
+        if let Some(payload) = app.take_clipboard_payload() {
+            write_clipboard_payload(&payload)?;
+        }
 
         if event::poll(POLL_INTERVAL)? {
             app.handle_event(event::read()?);
@@ -94,6 +105,9 @@ pub struct AppState {
     status: String,
     last_redraw: Instant,
     terminal_panes: BTreeMap<PaneId, TerminalPaneRuntime>,
+    copy_mode: Option<CopyModeState>,
+    clipboard_payload: Option<Vec<u8>>,
+    last_copied: Option<String>,
     runtime_tx: Sender<PtyRuntimeEvent>,
     runtime_rx: Receiver<PtyRuntimeEvent>,
 }
@@ -116,6 +130,9 @@ impl AppState {
             status: "ready".to_owned(),
             last_redraw: Instant::now(),
             terminal_panes: BTreeMap::new(),
+            copy_mode: None,
+            clipboard_payload: None,
+            last_copied: None,
             runtime_tx,
             runtime_rx,
         }
@@ -145,6 +162,21 @@ impl AppState {
         self.terminal_panes.len()
     }
 
+    pub fn copy_mode_active(&self) -> bool {
+        self.copy_mode.is_some()
+    }
+
+    /// The text most recently copied via copy mode, for verification and tests.
+    pub fn last_copied(&self) -> Option<&str> {
+        self.last_copied.as_deref()
+    }
+
+    /// Take the pending OSC 52 clipboard payload, if any, so the run loop can
+    /// write it to the host terminal. Clears it so it is written once.
+    pub fn take_clipboard_payload(&mut self) -> Option<Vec<u8>> {
+        self.clipboard_payload.take()
+    }
+
     pub fn palette_items(&self) -> Vec<PaletteItem<'static>> {
         BUILT_IN_COMMANDS
             .iter()
@@ -156,19 +188,33 @@ impl AppState {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
             Event::Resize(columns, rows) => self.handle_terminal_resize(columns, rows),
-            Event::Paste(text) => self.write_to_focused_terminal(text.as_bytes()),
+            // Paste only reaches the shell in normal mode; copy mode owns input.
+            Event::Paste(text) if self.copy_mode.is_none() => {
+                self.write_to_focused_terminal(text.as_bytes())
+            }
             _ => {}
         }
     }
 
     pub fn handle_terminal_resize(&mut self, columns: u16, rows: u16) {
         self.terminal_size = Some((columns, rows));
+        // Copy-mode coordinates address a specific grid geometry; a resize
+        // reshapes the buffer, so leave copy mode rather than track moved coordinates.
+        if self.copy_mode.is_some() {
+            self.copy_mode = None;
+        }
         self.reconcile_terminal_runtimes();
         self.status = format!("terminal resized to {columns}x{rows}");
         self.mark_redraw();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.copy_mode.is_some() {
+            self.handle_copy_mode_key(key);
+            self.mark_redraw();
+            return;
+        }
+
         match key_to_input(key, self.palette_open) {
             RuntimeInput::Quit => {
                 self.should_quit = true;
@@ -201,6 +247,13 @@ impl AppState {
     }
 
     pub fn dispatch(&mut self, command_id: CommandId) {
+        // Runtime commands change app presentation state, not durable core state,
+        // so they never go through the core dispatch path.
+        if let CommandTarget::Runtime(runtime_command) = command_target(command_id) {
+            self.dispatch_runtime_command(runtime_command);
+            return;
+        }
+
         match dispatch_command(&mut self.workspace, &self.command_context, command_id) {
             Ok(outcome) => {
                 self.status = status_for_outcome(command_id, outcome);
@@ -209,6 +262,12 @@ impl AppState {
             Err(error) => {
                 self.status = format!("command failed: {error}");
             }
+        }
+    }
+
+    fn dispatch_runtime_command(&mut self, runtime_command: RuntimeCommand) {
+        match runtime_command {
+            RuntimeCommand::EnterCopyMode => self.enter_copy_mode(),
         }
     }
 
@@ -264,7 +323,15 @@ impl AppState {
         }
 
         for (pane_id, size) in desired {
-            if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
+            let core_generation = self.pane_restart_generation(&pane_id);
+            let needs_restart = self
+                .terminal_panes
+                .get(&pane_id)
+                .is_some_and(|runtime| core_generation > runtime.restart_generation);
+
+            if needs_restart {
+                self.restart_terminal_pane(pane_id, size);
+            } else if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
                 if let Err(error) = runtime.resize(size) {
                     runtime.error = Some(error.to_string());
                     self.status = format!("PTY resize failed for {pane_id}: {error}");
@@ -273,6 +340,35 @@ impl AppState {
                 self.status = format!("PTY spawn failed for {pane_id}: {error}");
             }
         }
+    }
+
+    /// Tear down a pane's live PTY/parser/runtime and launch a fresh one for the
+    /// same `PaneId`. Core layout intent (the durable `PaneId` and its restart
+    /// generation) is preserved; no runtime handles are serialized.
+    fn restart_terminal_pane(&mut self, pane_id: PaneId, size: PtySize) {
+        if let Some(mut runtime) = self.terminal_panes.remove(&pane_id) {
+            runtime.shutdown();
+        }
+        // A restart invalidates copy-mode coordinates for that pane.
+        if self
+            .copy_mode
+            .as_ref()
+            .is_some_and(|state| state.pane_id == pane_id)
+        {
+            self.copy_mode = None;
+        }
+        match self.spawn_terminal_pane(pane_id.clone(), size) {
+            Ok(()) => self.status = format!("restarted shell for {pane_id}"),
+            Err(error) => self.status = format!("PTY restart failed for {pane_id}: {error}"),
+        }
+    }
+
+    fn pane_restart_generation(&self, pane_id: &PaneId) -> u64 {
+        self.workspace
+            .active_session()
+            .pane(pane_id)
+            .map(|pane| pane.restart_generation())
+            .unwrap_or(0)
     }
 
     fn visible_terminal_pane_sizes(&self) -> Vec<(PaneId, PtySize)> {
@@ -318,11 +414,14 @@ impl AppState {
             .pane(&pane_id)
             .ok_or_else(|| TerminalRuntimeError::MissingPane(pane_id.clone()))?;
         let session_id = PtySessionId::new(pane_id.as_str().to_owned());
+        let restart_generation = pane.restart_generation();
         let mut intent = SpawnIntent::new(session_id.clone(), self.shell_program.clone(), size)?;
         if let Some(cwd) = pane.cwd() {
             intent = intent.with_cwd(cwd.clone());
         }
-        intent = intent.with_environment([("TERM", "dumb"), ("PS1", "mandatum$ ")]);
+        // The hardened parser handles real VT output, so advertise a capable
+        // terminal. The rest of the environment (PATH, HOME, prompt) is inherited.
+        intent = intent.with_environment([("TERM", "xterm-256color")]);
 
         let session = NativePtySession::spawn(intent)?;
         let parts = session.into_split()?;
@@ -338,6 +437,7 @@ impl AppState {
                 writer: parts.writer,
                 reader_thread: Some(reader_thread),
                 size,
+                restart_generation,
                 exit_status: None,
                 error: None,
             },
@@ -400,13 +500,131 @@ impl AppState {
     fn terminal_grid_items(&self) -> Vec<PaneTerminalGrid<'_>> {
         self.terminal_panes
             .iter()
-            .map(|(pane_id, runtime)| PaneTerminalGrid::new(pane_id, runtime.parser.grid()))
+            .map(|(pane_id, runtime)| {
+                let viewport = self.viewport_for(pane_id);
+                PaneTerminalGrid::with_viewport(pane_id, runtime.parser.grid(), viewport)
+            })
             .collect()
+    }
+
+    fn viewport_for(&self, pane_id: &PaneId) -> TerminalViewport {
+        match &self.copy_mode {
+            Some(state) if &state.pane_id == pane_id => TerminalViewport {
+                scroll_offset: state.scroll_offset,
+                selection: state.selection_span().map(|(start, end)| {
+                    (
+                        SelectionPoint::new(start.0, start.1),
+                        SelectionPoint::new(end.0, end.1),
+                    )
+                }),
+                copy_cursor: Some(SelectionPoint::new(state.cursor_row, state.cursor_col)),
+            },
+            _ => TerminalViewport::live(),
+        }
+    }
+
+    // --- Copy mode -------------------------------------------------------------
+
+    fn enter_copy_mode(&mut self) {
+        let focused = self.workspace.active_session().focused_pane_id().clone();
+        let Some(runtime) = self.terminal_panes.get(&focused) else {
+            self.status = format!("pane {focused} has no live terminal to copy from");
+            return;
+        };
+        self.copy_mode = Some(CopyModeState::enter(focused, runtime.parser.grid()));
+        self.palette_open = false;
+        self.status = "copy mode: hjkl/arrows move, v select, y/Enter copy, Esc exit".to_owned();
+    }
+
+    fn exit_copy_mode(&mut self) {
+        self.copy_mode = None;
+        self.status = "copy mode closed".to_owned();
+    }
+
+    fn handle_copy_mode_key(&mut self, key: KeyEvent) {
+        let Some(pane_id) = self.copy_mode.as_ref().map(|state| state.pane_id.clone()) else {
+            return;
+        };
+        if !self.terminal_panes.contains_key(&pane_id) {
+            self.copy_mode = None;
+            self.status = "copy mode closed: pane is no longer live".to_owned();
+            return;
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+            self.should_quit = true;
+            self.status = "quitting".to_owned();
+            return;
+        }
+
+        let action = {
+            let state = self.copy_mode.as_mut().expect("copy mode present");
+            let grid = self
+                .terminal_panes
+                .get(&pane_id)
+                .expect("runtime present")
+                .parser
+                .grid();
+            copy_mode_action(state, grid, key)
+        };
+
+        match action {
+            CopyModeAction::Continue => {}
+            CopyModeAction::Exit => self.exit_copy_mode(),
+            CopyModeAction::Copy => self.copy_selection(&pane_id),
+        }
+    }
+
+    fn copy_selection(&mut self, pane_id: &PaneId) {
+        let Some(text) = self.copy_mode.as_ref().and_then(|state| {
+            self.terminal_panes
+                .get(pane_id)
+                .map(|runtime| state.selected_text(runtime.parser.grid()))
+        }) else {
+            return;
+        };
+
+        self.clipboard_payload = Some(osc52_sequence(&text));
+        let count = text.chars().count();
+        self.last_copied = Some(text);
+        self.copy_mode = None;
+        self.status = format!("copied {count} char(s) to clipboard");
     }
 
     fn mark_redraw(&mut self) {
         self.last_redraw = Instant::now();
     }
+}
+
+enum CopyModeAction {
+    Continue,
+    Exit,
+    Copy,
+}
+
+fn copy_mode_action(
+    state: &mut CopyModeState,
+    grid: &TerminalGrid,
+    key: KeyEvent,
+) -> CopyModeAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => return CopyModeAction::Exit,
+        KeyCode::Char('y') | KeyCode::Enter => return CopyModeAction::Copy,
+        KeyCode::Char('k') | KeyCode::Up => state.move_up(1, grid),
+        KeyCode::Char('j') | KeyCode::Down => state.move_down(1, grid),
+        KeyCode::Char('h') | KeyCode::Left => state.move_left(1, grid),
+        KeyCode::Char('l') | KeyCode::Right => state.move_right(1, grid),
+        KeyCode::PageUp => state.page_up(grid),
+        KeyCode::PageDown => state.page_down(grid),
+        KeyCode::Char('g') | KeyCode::Home => state.move_to_top(grid),
+        KeyCode::Char('G') | KeyCode::End => state.move_to_bottom(grid),
+        KeyCode::Char('0') => state.line_start(grid),
+        KeyCode::Char('$') => state.line_end(grid),
+        KeyCode::Char('v') | KeyCode::Char(' ') => state.set_anchor(),
+        KeyCode::Char('c') => state.clear_anchor(),
+        _ => {}
+    }
+    CopyModeAction::Continue
 }
 
 impl Drop for AppState {
@@ -484,8 +702,17 @@ fn key_to_palette_input(key: KeyEvent) -> RuntimeInput {
         KeyCode::Char('f') => RuntimeInput::Dispatch(CommandId::FloatPane),
         KeyCode::Char('t') => RuntimeInput::Dispatch(CommandId::StackPanes),
         KeyCode::Char('r') => RuntimeInput::Dispatch(CommandId::RestartPane),
+        KeyCode::Char('[') => RuntimeInput::Dispatch(CommandId::EnterCopyMode),
         _ => RuntimeInput::Noop,
     }
+}
+
+fn write_clipboard_payload(payload: &[u8]) -> io::Result<()> {
+    // OSC 52 is processed by the host terminal regardless of the alternate
+    // screen, so writing it straight to stdout does not disturb the rendered UI.
+    let mut stdout = io::stdout();
+    stdout.write_all(payload)?;
+    stdout.flush()
 }
 
 pub struct TerminalGuard {
@@ -565,6 +792,7 @@ struct TerminalPaneRuntime {
     writer: NativePtyWriter,
     reader_thread: Option<JoinHandle<()>>,
     size: PtySize,
+    restart_generation: u64,
     exit_status: Option<ChildExitStatus>,
     error: Option<String>,
 }
@@ -898,5 +1126,145 @@ mod tests {
         assert_eq!(visible_sizes.len(), 1);
         assert!(terminal_ids.contains(&PaneId::new("pane-1")));
         assert!(terminal_ids.contains(&PaneId::new("pane-2")));
+    }
+
+    fn live_state() -> AppState {
+        AppState::new(AppConfig {
+            workspace_name: "Mandatum".to_owned(),
+            project_path: PathBuf::from("/tmp/mandatum"),
+            shell_program: "/bin/sh".to_owned(),
+            spawn_pty: true,
+        })
+    }
+
+    #[test]
+    fn restart_replaces_live_runtime_for_same_pane() {
+        let mut state = live_state();
+        state.handle_terminal_resize(80, 24);
+        assert_eq!(state.live_terminal_count(), 1);
+
+        let pane_id = PaneId::new("pane-1");
+        let before = state.terminal_panes.get(&pane_id).unwrap();
+        assert_eq!(before.restart_generation, 0);
+        let before_pid = before.controller.process_id();
+
+        state.dispatch(CommandId::RestartPane);
+
+        // The same pane identity still has exactly one live runtime, now tracking
+        // the bumped restart generation with a fresh child process.
+        assert_eq!(state.live_terminal_count(), 1);
+        let after = state.terminal_panes.get(&pane_id).unwrap();
+        assert_eq!(after.restart_generation, 1);
+        assert_ne!(before_pid, after.controller.process_id());
+        assert_eq!(
+            state.workspace().active_session().panes().len(),
+            1,
+            "restart must not change core layout"
+        );
+        assert!(state.status().contains("restarted shell"));
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn enter_copy_mode_without_live_terminal_is_a_noop() {
+        let mut state = state(); // spawn_pty = false, so no runtimes exist
+        state.dispatch(CommandId::EnterCopyMode);
+        assert!(!state.copy_mode_active());
+        assert!(state.status().contains("no live terminal"));
+    }
+
+    #[test]
+    fn copy_mode_enters_selects_and_copies_to_clipboard() {
+        let mut state = live_state();
+        state.handle_terminal_resize(80, 24);
+
+        // Enter copy mode through the palette command path.
+        state.dispatch(CommandId::EnterCopyMode);
+        assert!(state.copy_mode_active());
+
+        // Start a selection and copy it; copy mode exits and stages an OSC 52
+        // clipboard payload for the run loop to write.
+        state.handle_key(key(KeyCode::Char('v')));
+        state.handle_key(key(KeyCode::Char('y')));
+        assert!(!state.copy_mode_active());
+        assert!(state.last_copied().is_some());
+
+        let payload = state
+            .take_clipboard_payload()
+            .expect("clipboard payload staged");
+        assert_eq!(payload.first(), Some(&0x1b));
+        assert!(payload.starts_with(b"\x1b]52;c;"));
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn copy_mode_input_does_not_reach_the_shell() {
+        let mut state = live_state();
+        state.handle_terminal_resize(80, 24);
+        state.dispatch(CommandId::EnterCopyMode);
+
+        // A normal character key in copy mode is navigation, not shell input.
+        state.handle_key(key(KeyCode::Char('j')));
+        assert!(state.copy_mode_active());
+        assert!(!state.status().contains("sent"));
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn live_pane_survives_resize_and_tracks_new_geometry() {
+        let mut state = live_state();
+        state.handle_terminal_resize(80, 24);
+        let pane_id = PaneId::new("pane-1");
+        let first_size = state.terminal_panes.get(&pane_id).unwrap().size;
+
+        state.handle_terminal_resize(120, 40);
+
+        // The same live runtime survived and the PTY tracked the new geometry.
+        assert_eq!(state.live_terminal_count(), 1);
+        let runtime = state.terminal_panes.get(&pane_id).unwrap();
+        assert_ne!(
+            first_size, runtime.size,
+            "PTY size should follow pane geometry"
+        );
+        assert!(runtime.error.is_none(), "resize must not error the runtime");
+        assert_eq!(state.workspace().active_session().panes().len(), 1);
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn exited_child_is_surfaced_as_visible_status() {
+        let mut state = live_state();
+        state.handle_terminal_resize(80, 24);
+        let pane_id = PaneId::new("pane-1");
+
+        // Ask the shell to exit, then pump the runtime until the exit is observed.
+        state.write_to_focused_terminal(b"exit\r");
+        let mut observed = false;
+        for _ in 0..300 {
+            state.tick_runtime();
+            if state
+                .terminal_panes
+                .get(&pane_id)
+                .and_then(|runtime| runtime.exit_status)
+                .is_some()
+            {
+                observed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(observed, "child process exit was not observed");
+        assert!(
+            state.status().contains("exited"),
+            "exit must be visible in status, got {:?}",
+            state.status()
+        );
+
+        state.shutdown();
     }
 }

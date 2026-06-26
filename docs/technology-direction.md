@@ -84,7 +84,7 @@ Do not fork Ghostty.
 
 Do not adopt Ghostty's macOS app architecture.
 
-Evaluate `libghostty-vt` only behind `terminal-vt` after the Rust core and fake parser adapter exist. The 2026-06-25 feasibility spike found it promising as a future optional backend, but a real binding should wait for explicit Zig/CMake toolchain and upstream API pinning.
+Evaluate `libghostty-vt` only behind `terminal-vt`. The 2026-06-25 feasibility spike found it promising as a future optional backend, but a real binding should wait for explicit Zig/CMake toolchain and upstream API pinning. Milestone 4 instead hardened the parser with a local Rust backend: `VteTerminalAdapter`, built on the pure-Rust `vte` escape-sequence tokenizer, is now the default behind `TerminalAdapter`. `libghostty-vt` remains a deferred optional backend, not the default.
 
 ## What This Means For `/plan`
 

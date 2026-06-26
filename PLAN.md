@@ -6,9 +6,10 @@ Prepare and execute Mandatum, a greenfield terminal-native workspace for develop
 
 This repo began as a planning scaffold. Milestone 0 decisions are accepted,
 Milestone 1 has a Cargo workspace plus renderer-neutral core implementation,
-Milestone 2 has fake terminal parser, native PTY, and `libghostty-vt`
+Milestone 2 has the terminal parser, native PTY, and `libghostty-vt`
 feasibility seams, Milestone 3 has the runnable terminal shell, and Milestone 4
-has started with a PTY-backed terminal runtime slice.
+is complete: real PTY-backed terminal panes with a hardened VT parser,
+scrollback, a keyboard copy/selection baseline, and in-place PTY restart.
 
 ## Current State
 
@@ -40,17 +41,23 @@ Created:
 - `TerminalParser` owner in `crates/terminal-vt`
 - PTY-backed shell spawning, output feeding, key/paste input, pane resize, and
   process-exit status in `crates/app`
+- hardened default VT parser backend (`VteTerminalAdapter` on the `vte`
+  tokenizer) behind `TerminalAdapter` in `crates/terminal-vt`
+- bounded, runtime-owned scrollback with a scrollback/selection viewport in the
+  renderer
+- keyboard copy mode with stream selection and OSC 52 clipboard copy in
+  `crates/app`
+- in-place PTY restart registry keyed by `PaneId` in `crates/app`
 
 Not yet created:
 
-- real terminal parser backend or `libghostty-vt` binding
-- copy/selection baseline
-- scrollback
-- restart registry behavior
+- `libghostty-vt` binding (still a deferred optional backend)
+- native OS mouse selection, semantic selection, rich clipboard history
 - task/agent workflow pane runtime
 
-The current terminal pane is useful for basic shell interaction, but the fake
-parser still renders some shell escape sequences visibly.
+The terminal pane now runs a normal interactive shell: common VT output (shell
+prompts, command output, line redraws, clears, and ANSI styling) renders without
+exposing raw escape sequences.
 
 ## Product Summary
 

@@ -465,3 +465,143 @@ Verification:
   palette split/focus/zoom works, hidden panes are not killed by zoom, and
   `Ctrl-Q` restores the terminal.
 - Boundary scans for `core`, `pty`, and `terminal-vt` dependency leakage.
+
+## 2026-06-26: Hardened VT Parser via the `vte` Backend
+
+Status: Accepted
+
+Decision:
+
+Harden the terminal parser by adding `VteTerminalAdapter`, a local VT state
+machine built on the pure-Rust `vte` escape-sequence tokenizer, behind the
+existing `TerminalAdapter` trait. Make it the default backend selected by
+`TerminalParser::new`. Keep `FakeTerminalAdapter` for fixtures only. Do not bind
+`libghostty-vt`.
+
+Context:
+
+The first Milestone 4 slice used the fake/basic adapter, which ignores CSI/SGR
+sequences, so a real shell with `TERM` set to a capable terminal would leak raw
+escape sequences into the grid. Milestone 4 completion requires common VT output
+(prompts, command output, line redraws, clears, ANSI styling) to render cleanly.
+
+Options Considered:
+
+- Bind `libghostty-vt` now. Rejected: still blocked on Zig/CMake toolchain and
+  upstream API pinning, and would add FFI risk to the milestone.
+- Hand-roll a full CSI/OSC/DCS tokenizer. Rejected: re-implements a well-solved,
+  fiddly problem (UTF-8, parameters, intermediates, string terminators) with
+  higher bug risk.
+- Use the `vte` crate's tokenizer and implement only the grid semantics
+  (SGR, cursor motion, erase/edit, scroll region, alternate screen) on top.
+  Accepted.
+
+Rationale:
+
+`vte` is the battle-tested Paul Williams state machine used by Alacritty. It is
+pure Rust (no FFI, no GUI), so it does not violate any `terminal-vt` boundary,
+and it lets the milestone focus on grid behavior rather than tokenization. The
+app and renderer continue to name only `TerminalAdapter`/`TerminalParser`, so the
+backend choice stays isolated. `TERM` for spawned shells moved from `dumb` to
+`xterm-256color` now that real escapes are handled.
+
+Consequences:
+
+- `crates/terminal-vt` gains a single external dependency, `vte` (which pulls
+  only `arrayvec` and `memchr`, both pure Rust). No forbidden boundary tokens.
+- `CellStyle` expanded to carry foreground/background `Color` plus bold, dim,
+  italic, underline, inverse, hidden, and strikethrough; the renderer maps these
+  to Ratatui styles.
+- `libghostty-vt` remains a documented, deferred optional backend.
+
+Verification:
+
+- `crates/terminal-vt` VT-backend unit tests and retained fake-adapter fixtures.
+- `crates/app/tests/terminal_smoke.rs` real-`/bin/sh` checks that SGR color and
+  cursor addressing render without raw escape leakage.
+
+## 2026-06-26: Scrollback, Copy Mode, and OSC 52 Clipboard
+
+Status: Accepted
+
+Decision:
+
+Add bounded scrollback as terminal-presentation state owned by `terminal-vt`'s
+`TerminalGrid` (read-only to the renderer, never serialized into core). Add an
+app-owned keyboard copy mode that navigates the combined scrollback-plus-screen
+buffer, makes a stream selection, and copies via the OSC 52 escape sequence.
+Route the "Copy Mode" command as an app-runtime command, not a core action.
+
+Context:
+
+Milestone 4 requires bounded scrollback independent of durable core state and a
+minimal, documented, keyboard-first selection/copy baseline that does not break
+normal shell input.
+
+Options Considered:
+
+- Put scrollback in core durable session state. Rejected: it is unbounded,
+  volatile presentation state and must not be serialized.
+- Use a platform clipboard crate (e.g. `arboard`). Rejected: pulls macOS
+  AppKit/objc, brushing against the no-Apple-GUI constraint, and does not work
+  over SSH.
+- Emit OSC 52 to the host terminal. Accepted: terminal-native, dependency-free,
+  SSH-friendly; the only cost is that the host terminal must support OSC 52.
+
+Rationale:
+
+Scrollback belongs with the grid that produces it, so the parser pushes
+scrolled-off primary-screen rows into a bounded ring; the alternate screen does
+not accumulate scrollback. Copy mode is presentation state, so it lives in the
+app and is reached through the command palette, not the core dispatch path. A new
+`CommandTarget` split lets `commands` mark a command as `Core` or `Runtime`
+without fabricating a fake `CoreAction`.
+
+Consequences:
+
+- `commands` gains `CommandId::EnterCopyMode`, `CommandTarget`, and
+  `RuntimeCommand`; `dispatch_command` rejects runtime commands so the app
+  handles them locally.
+- The renderer gains a `TerminalViewport` (scroll offset, selection span, copy
+  cursor) and reads scrollback read-only.
+- A terminal resize exits copy mode rather than tracking moved coordinates.
+
+Verification:
+
+- `crates/app` copy-mode and clipboard unit tests; renderer viewport test;
+  commands target-routing tests.
+
+## 2026-06-26: In-Place PTY Restart Registry
+
+Status: Accepted
+
+Decision:
+
+Implement restart by tracking each live runtime's `restart_generation` and, when
+core's `RestartFocused` bumps a pane's generation, tearing down the pane's PTY,
+parser, reader thread, and scrollback and spawning a fresh PTY for the same
+`PaneId`. Restart is reached through the existing command path
+(`CommandId::RestartPane`), not by direct core mutation in the app.
+
+Context:
+
+Core already modeled restart by incrementing a durable `restart_generation`, but
+the app never acted on it, so the live PTY was never replaced.
+
+Rationale:
+
+Comparing core's generation to the runtime's recorded generation during runtime
+reconciliation makes restart deterministic for live, exited, and failed panes:
+any generation bump replaces the runtime. The durable `PaneId` and layout intent
+are preserved, and no process IDs, PTY handles, parser objects, thread handles,
+or scrollback are serialized into core.
+
+Consequences:
+
+- `reconcile_terminal_runtimes` distinguishes restart, resize, and spawn.
+- A restart clears copy mode for the affected pane.
+
+Verification:
+
+- `crates/app` real-PTY test asserting the same `PaneId` gets a fresh child
+  process and a bumped recorded generation while core layout is unchanged.

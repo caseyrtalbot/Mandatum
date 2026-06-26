@@ -178,6 +178,35 @@ Recommended early defaults:
 
 Do not make F-keys the primary path.
 
+## Copy Mode and Scrollback (Milestone 4 baseline)
+
+Terminal panes keep a bounded scrollback history and expose a keyboard-first
+copy mode. Copy mode is presentation state owned by the app runtime; it never
+mutates core layout or the parser grid.
+
+Enter copy mode from the command palette (`Ctrl-P` then `[`, or the "Copy Mode"
+command). Inside copy mode:
+
+- `h`/`j`/`k`/`l` or arrow keys move the copy cursor through the visible grid and scrollback.
+- `PageUp`/`PageDown` scroll a page; `g`/`G` jump to the top/bottom of history.
+- `0`/`$` move to the start/end of the line.
+- `v` or `Space` starts a selection at the cursor; `c` clears it.
+- `y` or `Enter` copies the selection (or the cursor's line when nothing is selected) and exits.
+- `q` or `Esc` exits without copying.
+
+Copy uses the OSC 52 escape sequence to set the host terminal's clipboard, so it
+works over SSH and needs no platform clipboard dependency. The host terminal
+must support OSC 52 for the copy to reach the system clipboard. Normal shell
+input is never intercepted unless copy mode is explicitly active, and a terminal
+resize exits copy mode rather than tracking moved coordinates.
+
+This is the minimal documented baseline. Native OS mouse selection, semantic
+selection, and rich clipboard history are out of scope for this milestone. Copy
+mode reads the live grid, so a pane that keeps producing output while you select
+can shift the buffer under the selection; the baseline does not freeze output.
+For stable selection, copy from a quiescent pane (or scroll into settled
+scrollback). Output-freezing copy mode is a later refinement.
+
 ## Mouse Philosophy
 
 Mouse support should feel native and precise:

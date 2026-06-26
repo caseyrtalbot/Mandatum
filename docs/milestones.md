@@ -106,31 +106,49 @@ Validation:
 
 Goal: connect one real process to one visible terminal pane.
 
-Status: Started with a real PTY-backed terminal runtime slice. `cargo run`
-spawns shells for visible terminal panes, reads PTY output on background reader
-threads, feeds bytes into the current `terminal-vt` parser owner, renders
-terminal grid snapshots, sends normal key input and paste text back to the
-focused PTY, resizes PTYs from pane geometry, and reports process exits. The
-grid still uses the fake/basic parser, so full VT escape handling and
-copy/selection remain deferred.
+Status: Complete. `cargo run` spawns shells for visible terminal panes, reads
+PTY output on background reader threads, feeds bytes into a hardened VT parser
+behind `TerminalAdapter`, renders terminal grid plus scrollback snapshots, sends
+normal key input and paste text back to the focused PTY, resizes PTYs from pane
+geometry, reports process exits, supports a keyboard copy/scrollback mode, and
+restarts a pane's PTY in place for the same pane identity. The default parser
+backend is now a local VT state machine built on the pure-Rust `vte` tokenizer;
+the older fake/basic adapter is retained for fixtures only. `libghostty-vt`
+remains a deferred optional backend.
 
 Deliverables:
 
 - spawn shell: implemented for visible terminal panes
-- render terminal grid: implemented using the current fake/basic parser grid
+- terminal parser hardening: implemented as `VteTerminalAdapter` (SGR styling,
+  cursor addressing, erase/insert/delete, scroll region, alternate screen,
+  save/restore cursor) behind `TerminalAdapter`
+- render terminal grid: implemented, with colored/styled cells and a
+  scrollback-aware viewport
+- scrollback: implemented as bounded, runtime-owned terminal history (not in
+  durable core state)
 - send key input: implemented for normal keys when command palette is closed
-- paste: implemented through Crossterm paste events
+- paste: implemented through Crossterm paste events (suppressed in copy mode)
 - resize PTY with pane: implemented from renderer pane content geometry
-- copy/selection baseline: not implemented
+- copy/selection baseline: implemented as a keyboard copy mode (scrollback
+  navigation, stream selection, OSC 52 clipboard copy)
+- restart registry: implemented; a restart relaunches a fresh PTY for the same
+  `PaneId` without serializing runtime handles or mutating core layout
 - process exit handling: implemented as visible status
 
 Validation:
 
-- common shell interaction works
+- common shell interaction works without raw escape/control sequence leakage
 - terminal pane survives resize
 - output does not freeze UI under moderate load
 - failed child process is visible
-- restart registry behavior remains a later hardening step
+- restart creates a fresh PTY for the same pane and leaves core layout intact
+- scrollback is bounded and lives in runtime/presentation state
+- copy/selection baseline is implemented and documented
+
+Deferred to later milestones:
+
+- `libghostty-vt` backend binding
+- native OS mouse selection, rich clipboard history, semantic selection
 
 ## Milestone 5: Multi-Pane Coding Workflow
 
