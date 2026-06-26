@@ -96,7 +96,7 @@ Status: Accepted
 
 Decision:
 
-Use a Cargo workspace for Milestone 1. Implement only the renderer-neutral domain in `crates/core`, minimal command metadata/dispatch in `crates/commands`, durable task/agent intent helpers in `crates/workflows`, and compile-only placeholder boundaries for `crates/pty`, `crates/terminal-vt`, `crates/renderer`, and `crates/app`.
+Use a Cargo workspace for Milestone 1. Implement only the renderer-neutral domain in `crates/core`, minimal command metadata/dispatch in `crates/commands`, durable task/agent intent helpers in `crates/workflows`, and non-runtime boundary marker crates for `crates/pty`, `crates/terminal-vt`, `crates/renderer`, and `crates/app`.
 
 Context:
 
@@ -347,3 +347,121 @@ Verification:
   bindgen, or FFI dependency.
 - Boundary check: `core` and `pty` remain free of Ghostty/parser/renderer/app
   dependencies.
+
+## 2026-06-26: Runnable Placeholder Terminal Shell
+
+Status: Accepted
+
+Decision:
+
+Implement Milestone 3 as a terminal-native placeholder shell using Crossterm for
+terminal lifecycle/events and Ratatui for drawing. Keep the runtime in
+`crates/app`, the drawing code in `crates/renderer`, and all product mutations
+behind `mandatum-commands` dispatch into `mandatum-core`.
+
+Context:
+
+Milestones 1 and 2 created durable core state, command metadata, workflow
+intent helpers, terminal parser seams, and PTY seams. The next validation gate
+was a root `cargo run` app that visibly reflects core layout state without
+connecting a real PTY-backed terminal pane.
+
+Options Considered:
+
+- Continue with compile-only app and renderer placeholders.
+- Build a real PTY-backed terminal pane immediately.
+- Add an Apple-native GUI surface.
+- Add a narrow terminal runtime shell with placeholder rendering.
+
+Rationale:
+
+The placeholder shell proves terminal initialization/restoration, redraw,
+resize event handling, input mapping, command dispatch, and renderer/core
+composition before taking on terminal-grid snapshots. Crossterm and Ratatui
+are narrow terminal dependencies and keep the project buildable and verifiable
+from terminal commands.
+
+Consequences:
+
+- Root `cargo run` launches `mandatum-app`.
+- `crates/app` owns terminal lifecycle, event polling, key-to-command mapping,
+  command-palette state, and resize event handling.
+- `crates/renderer` owns placeholder scene construction and Ratatui drawing for
+  pane chrome, focus, zoom, floating panes, status, and command metadata.
+- `crates/core` remains free of terminal UI, PTY, parser, renderer, and app
+  runtime dependencies.
+- Real terminal process rendering, PTY byte feeding into `terminal-vt`, input
+  byte encoding, PTY resize by pane size, restart registry behavior, and
+  `libghostty-vt` binding remain deferred to later milestones.
+
+Verification:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
+- `cargo run`
+- Boundary scans for `core` and `pty` dependency leakage.
+
+## 2026-06-26: PTY-Backed Terminal Runtime Slice
+
+Status: Accepted
+
+Decision:
+
+Start Milestone 4 by wiring real PTY-backed shell processes into the terminal
+app while continuing to use the current fake/basic `terminal-vt` parser. Keep
+live runtime handles in `crates/app`, expose split PTY reader/writer/controller
+parts from `crates/pty`, wrap the current parser behind a `TerminalParser`
+owner in `crates/terminal-vt`, and let `crates/renderer` draw borrowed terminal
+grid snapshots.
+
+Context:
+
+Milestone 3 proved terminal lifecycle, command dispatch, resize events, and
+placeholder rendering. The next needed proof was end-to-end process I/O:
+spawning a shell, reading PTY output without blocking input writes, feeding the
+parser, drawing grid content, sending keyboard/paste input back, resizing PTYs
+from pane geometry, and surfacing child exit.
+
+Options Considered:
+
+- Bind `libghostty-vt` before runtime wiring.
+- Keep PTY reads synchronous inside the main event loop.
+- Add split PTY runtime parts and keep the fake parser for the first
+  end-to-end shell.
+
+Rationale:
+
+The current `NativePtySession` read path blocks, so app input would stall if the
+same object owned reads and writes in a single thread. Splitting reader,
+writer, and controller parts preserves `mandatum-pty` as a parser/app-neutral
+boundary while letting the app read on a background thread and write/resize from
+the event loop. Deferring `libghostty-vt` keeps this slice focused on runtime
+plumbing and avoids compounding it with FFI/toolchain risk.
+
+Consequences:
+
+- `crates/app` now depends on `mandatum-pty` and `mandatum-terminal-vt`.
+- `crates/renderer` now depends on `mandatum-terminal-vt` for grid snapshot
+  value types, but still does not own runtime handles or dispatch actions.
+- `crates/pty` remains independent of parser, renderer, app, core, and terminal
+  UI crates.
+- `crates/terminal-vt` remains independent of PTY, renderer, app, core, and
+  terminal UI crates.
+- Normal keys now go to the focused shell; workspace controls move behind
+  `Ctrl-P` command palette mode, with `Ctrl-Q` as the app quit shortcut.
+- The fake/basic parser can show shell escape sequences visibly. A real VT
+  parser backend remains a later gate.
+- Copy/selection, scrollback, restart registry behavior, and `libghostty-vt`
+  binding remain deferred.
+
+Verification:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
+- `cargo test -p mandatum-pty`
+- `cargo run` smoke: shell prompt renders, `echo M4_OK` roundtrips, command
+  palette split/focus/zoom works, hidden panes are not killed by zoom, and
+  `Ctrl-Q` restores the terminal.
+- Boundary scans for `core`, `pty`, and `terminal-vt` dependency leakage.

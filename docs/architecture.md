@@ -89,9 +89,10 @@ Owns OS-facing process mechanics:
 
 PTY must expose events to the runtime without knowing UI details.
 
-Current implementation covers the headless native PTY boundary only. App-level
-orchestration, parser feeding, and visible terminal panes belong to later
-runtime/renderer milestones.
+Current implementation covers the headless native PTY boundary plus split
+reader/writer/controller runtime parts. App-level orchestration now spawns
+visible PTY-backed shell panes and feeds output into `terminal-vt`, while `pty`
+remains independent of parser, renderer, app, and core crates.
 
 ### terminal-vt
 

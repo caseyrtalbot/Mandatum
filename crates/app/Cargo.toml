@@ -5,3 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+crossterm.workspace = true
+mandatum-commands.workspace = true
+mandatum-core.workspace = true
+mandatum-pty.workspace = true
+mandatum-renderer.workspace = true
+mandatum-terminal-vt.workspace = true
+ratatui.workspace = true

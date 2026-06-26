@@ -40,7 +40,7 @@ Recommended command surface:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-cargo run  # future Milestone 3 app-runtime verification
+cargo run  # Milestone 3 terminal app-runtime smoke verification
 ```
 
 ## Why Rust First

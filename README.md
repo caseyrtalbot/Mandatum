@@ -28,18 +28,35 @@ This is also not an Xcode or Apple-native app project. Do not use Xcode.app, `.x
 
 ## Current Status
 
-This repo has completed the first scaffold step and started Milestone 2:
+This repo has completed Milestone 3 and the first Milestone 4 real-terminal
+runtime slice:
 
 - Cargo workspace with `core`, `commands`, `workflows`, `pty`, `terminal-vt`, `renderer`, and `app` crates.
 - Renderer-neutral `core` domain for workspace, project, session, pane, layout, focus, actions, and JSON session persistence.
 - Minimal `commands` crate that maps command ids to core actions without owning layout mutation logic.
 - Minimal `workflows` crate for durable task/agent pane intent helpers only.
-- `terminal-vt` has the first fake parser adapter seam: plain grid, cursor, cell, capability, update, and adapter types with fixture-driven tests.
-- `pty` has the first native OS PTY seam: session/process identifiers, spawn/resize/restart intent, raw byte output, input writes, resize, child exit, kill, and bounded byte-buffer backpressure tests.
+- `terminal-vt` has the first fake parser adapter seam plus a `TerminalParser` owner that the app can keep one-per-pane and feed from PTY byte streams.
+- `pty` has the native OS PTY seam plus split reader/writer/controller parts so the app can read output on a background thread while writing input and resizing from the event loop.
 - `libghostty-vt` has been evaluated as a future optional `terminal-vt` backend; no binding or dependency has been added.
-- `renderer` and `app` remain compile-only placeholders. They do not implement runtime behavior yet.
+- `renderer` renders workspace layout state, pane chrome, focus, zoom, floating panes, status, command-palette overlay, and supplied terminal grid snapshots.
+- `app` launches from root `cargo run`, enters/restores the terminal, spawns PTY-backed shells for visible terminal panes, feeds PTY output into `terminal-vt`, sends normal key input and paste text back to the focused PTY, resizes PTYs from pane geometry, and dispatches workspace commands through `mandatum-commands`.
 
-There is still no runnable app shell, visible terminal pane, renderer integration, or `libghostty-vt` binding.
+Remaining limitations:
+
+- The terminal grid is still backed by the fake/basic parser, so shell escape
+  sequences can render visibly until a real VT parser backend is added.
+- Copy/selection, scrollback, restart registry behavior, task/agent workflow
+  panes, and `libghostty-vt` binding remain deferred.
+
+Current runtime controls:
+
+- Normal keys go to the focused PTY-backed shell.
+- `Ctrl-Q`: quit Mandatum and restore the terminal.
+- `Ctrl-P`: open/close command palette mode.
+- In command palette mode: `v` split right, `s` split down, `Tab`/`l` focus
+  next, `Shift-Tab`/`h` focus previous, `x` close focused pane, `z` zoom
+  focused pane, `n` new floating terminal intent, `f` float focused pane, `t`
+  stack focused pane, `r` restart focused pane intent, `Esc` close palette.
 
 Start with:
 
@@ -71,6 +88,7 @@ Current code verification:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo run
 ```
 
 Between phases, also run the doc hygiene scan in `docs/verification.md` and clear or label outdated status language before writing a handoff.

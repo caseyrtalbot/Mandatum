@@ -4,7 +4,11 @@
 
 Prepare and execute Mandatum, a greenfield terminal-native workspace for developers, closer to tmux/zellij than an IDE, and buildable entirely from terminal/Codex workflows.
 
-This repo began as a planning scaffold. Milestone 0 decisions are accepted, Milestone 1 has a Cargo workspace plus renderer-neutral core implementation, and Milestone 2 has fake terminal parser, native PTY, and `libghostty-vt` feasibility seams.
+This repo began as a planning scaffold. Milestone 0 decisions are accepted,
+Milestone 1 has a Cargo workspace plus renderer-neutral core implementation,
+Milestone 2 has fake terminal parser, native PTY, and `libghostty-vt`
+feasibility seams, Milestone 3 has the runnable terminal shell, and Milestone 4
+has started with a PTY-backed terminal runtime slice.
 
 ## Current State
 
@@ -30,16 +34,23 @@ Created:
 - first pure PTY abstraction seam in `crates/pty`
 - headless native OS PTY spawning, raw input/output, resize, child-exit, and kill wrapper in `crates/pty`
 - `libghostty-vt` feasibility spike documented in `docs/libghostty-vt-feasibility-spike.md`
-- compile-only placeholder crates for `renderer` and `app`
+- runnable Crossterm/Ratatui app shell in `crates/app`
+- Ratatui workspace and terminal-grid renderer in `crates/renderer`
+- split PTY reader/writer/controller runtime parts in `crates/pty`
+- `TerminalParser` owner in `crates/terminal-vt`
+- PTY-backed shell spawning, output feeding, key/paste input, pane resize, and
+  process-exit status in `crates/app`
 
 Not yet created:
 
-- terminal app runtime
-- app-level PTY orchestration and visible terminal panes
-- renderer
 - real terminal parser backend or `libghostty-vt` binding
+- copy/selection baseline
+- scrollback
+- restart registry behavior
+- task/agent workflow pane runtime
 
-This is intentional. Runtime behavior starts after the PTY/parser/renderer seams are ready.
+The current terminal pane is useful for basic shell interaction, but the fake
+parser still renders some shell escape sequences visibly.
 
 ## Product Summary
 

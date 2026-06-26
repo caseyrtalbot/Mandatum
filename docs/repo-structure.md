@@ -1,7 +1,9 @@
 # Repo Structure
 
-This is the implemented Milestone 1 shape plus the first Milestone 2
-`terminal-vt` fake parser seam and `pty` abstraction/native OS PTY seam.
+This is the implemented Milestone 3 shape plus the first Milestone 4
+real-terminal runtime slice: core domain, command/workflow intent seams, PTY and
+terminal parser seams, placeholder workspace shell, and PTY-backed terminal
+grid rendering through the current fake/basic parser.
 
 ```text
 Mandatum/
@@ -42,10 +44,10 @@ Mandatum/
 - `crates/core`: implemented pure domain and JSON persistence.
 - `crates/commands`: implemented command ids, labels, categories, and core-action dispatch.
 - `crates/workflows`: implemented durable task/agent pane intent helpers only.
-- `crates/pty`: PTY identifiers, spawn/resize/restart intent, output/exit events, bounded byte-buffer backpressure state, and headless native OS PTY session wrapper.
-- `crates/terminal-vt`: fake parser adapter seam with grid/cursor/cell/capability/update types and fixture-driven tests; `libghostty-vt` is evaluated but not bound.
-- `crates/renderer`: compile-only placeholder.
-- `crates/app`: compile-only placeholder, no runnable app shell yet.
+- `crates/pty`: PTY identifiers, spawn/resize/restart intent, output/exit events, bounded byte-buffer backpressure state, headless native OS PTY session wrapper, and split reader/writer/controller runtime parts.
+- `crates/terminal-vt`: fake parser adapter seam with grid/cursor/cell/capability/update types, `TerminalParser` ownership wrapper, and fixture-driven tests; `libghostty-vt` is evaluated but not bound.
+- `crates/renderer`: Ratatui renderer for core layout state, pane chrome, focus, zoom, floating panes, status, command palette overlay, and supplied terminal grid snapshots.
+- `crates/app`: Crossterm/Ratatui terminal runtime with lifecycle restoration, root binary, event loop, resize handling, PTY-backed shell spawning, PTY output reader threads, parser feeding, key/paste input routing, and command-palette state.
 
 ## Workspace Commands
 
@@ -53,6 +55,7 @@ Mandatum/
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo run
 ```
 
 ## Rules

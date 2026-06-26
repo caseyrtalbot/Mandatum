@@ -33,9 +33,10 @@ Your plan must cover:
 
 Historical prompt only; the runnable prototype clause below was superseded by
 the accepted core-first Milestone 1 and parser/PTY-seam-first Milestone 2 path.
-As of the current implementation, `crates/pty` has a headless native OS PTY
-session wrapper, but there is still no runnable app shell, renderer integration,
-or visible terminal pane.
+The current implementation now has the Milestone 3 runnable app shell plus the
+first Milestone 4 PTY-backed terminal runtime slice. It still uses the
+fake/basic parser and does not yet have copy/selection, scrollback, restart
+registry behavior, or `libghostty-vt` binding.
 
 After the plan is accepted, start `/goal` with:
 
@@ -100,7 +101,7 @@ Implementation starts only after:
 4. verification commands are defined.
 5. architecture boundaries are written into `AGENTS.md`.
 
-For current repo state, those gates are satisfied for Milestone 1. Milestone 2
-has started with the fake parser adapter seam and pure PTY abstraction seam.
-Use `README.md`, `docs/milestones.md`, `docs/repo-structure.md`, and
-`docs/verification.md` for current implementation status and phase gates.
+For current repo state, those gates are satisfied through the first Milestone 4
+runtime slice. Use `README.md`, `docs/milestones.md`,
+`docs/repo-structure.md`, and `docs/verification.md` for current implementation
+status and phase gates.

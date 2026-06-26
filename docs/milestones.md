@@ -80,6 +80,11 @@ Validation:
 
 Goal: create the first runnable terminal application shell.
 
+Status: Implemented as a placeholder terminal UI shell. `cargo run` launches
+Mandatum, restores the terminal on quit, renders core workspace layout state,
+handles resize events, dispatches existing command ids, and shows a command
+palette overlay. Real PTY-backed pane rendering remains Milestone 4.
+
 Deliverables:
 
 - terminal initialization/restoration
@@ -101,22 +106,31 @@ Validation:
 
 Goal: connect one real process to one visible terminal pane.
 
+Status: Started with a real PTY-backed terminal runtime slice. `cargo run`
+spawns shells for visible terminal panes, reads PTY output on background reader
+threads, feeds bytes into the current `terminal-vt` parser owner, renders
+terminal grid snapshots, sends normal key input and paste text back to the
+focused PTY, resizes PTYs from pane geometry, and reports process exits. The
+grid still uses the fake/basic parser, so full VT escape handling and
+copy/selection remain deferred.
+
 Deliverables:
 
-- spawn shell
-- render terminal grid
-- send key input
-- paste
-- resize PTY with pane
-- copy/selection baseline
-- process exit handling
+- spawn shell: implemented for visible terminal panes
+- render terminal grid: implemented using the current fake/basic parser grid
+- send key input: implemented for normal keys when command palette is closed
+- paste: implemented through Crossterm paste events
+- resize PTY with pane: implemented from renderer pane content geometry
+- copy/selection baseline: not implemented
+- process exit handling: implemented as visible status
 
 Validation:
 
 - common shell interaction works
 - terminal pane survives resize
 - output does not freeze UI under moderate load
-- failed child process is visible and restartable
+- failed child process is visible
+- restart registry behavior remains a later hardening step
 
 ## Milestone 5: Multi-Pane Coding Workflow
 

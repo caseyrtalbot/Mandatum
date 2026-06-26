@@ -334,6 +334,32 @@ impl NativePtySession {
         self.process_id
     }
 
+    pub fn into_split(mut self) -> Result<NativePtyParts, NativePtyError> {
+        let writer = self
+            .writer
+            .take()
+            .ok_or_else(|| NativePtyError::InputClosed {
+                session_id: self.session_id.clone(),
+            })?;
+
+        Ok(NativePtyParts {
+            controller: NativePtyController {
+                session_id: self.session_id.clone(),
+                process_id: self.process_id,
+                master: self.master,
+                child: self.child,
+            },
+            reader: NativePtyReader {
+                session_id: self.session_id.clone(),
+                reader: self.reader,
+            },
+            writer: NativePtyWriter {
+                session_id: self.session_id,
+                writer: Some(writer),
+            },
+        })
+    }
+
     pub fn read_output(
         &mut self,
         max_bytes: usize,
@@ -386,6 +412,189 @@ impl NativePtySession {
 
     pub fn close_input(&mut self) {
         self.writer.take();
+    }
+
+    pub fn resize(&self, intent: ResizeIntent) -> Result<(), NativePtyError> {
+        if intent.session_id() != &self.session_id {
+            return Err(NativePtyError::SessionMismatch {
+                expected: self.session_id.clone(),
+                actual: intent.session_id().clone(),
+            });
+        }
+
+        self.master
+            .resize(to_native_size(intent.size()))
+            .map_err(|error| NativePtyError::ResizeFailed {
+                session_id: self.session_id.clone(),
+                message: error.to_string(),
+            })
+    }
+
+    pub fn current_size(&self) -> Result<PtySize, NativePtyError> {
+        let native_size =
+            self.master
+                .get_size()
+                .map_err(|error| NativePtyError::SizeReadFailed {
+                    session_id: self.session_id.clone(),
+                    message: error.to_string(),
+                })?;
+
+        PtySize::new(native_size.cols, native_size.rows).map_err(|error| {
+            NativePtyError::SizeReadFailed {
+                session_id: self.session_id.clone(),
+                message: error.to_string(),
+            }
+        })
+    }
+
+    pub fn try_wait(&mut self) -> Result<Option<ChildExit>, NativePtyError> {
+        self.child
+            .try_wait()
+            .map(|status| {
+                status.map(|status| {
+                    ChildExit::new(
+                        self.session_id.clone(),
+                        self.process_id,
+                        child_exit_status(status),
+                    )
+                })
+            })
+            .map_err(|error| NativePtyError::WaitFailed {
+                session_id: self.session_id.clone(),
+                message: error.to_string(),
+            })
+    }
+
+    pub fn try_wait_event(&mut self) -> Result<Option<PtyEvent>, NativePtyError> {
+        Ok(self.try_wait()?.map(PtyEvent::ChildExited))
+    }
+
+    pub fn wait(&mut self) -> Result<ChildExit, NativePtyError> {
+        self.child
+            .wait()
+            .map(|status| {
+                ChildExit::new(
+                    self.session_id.clone(),
+                    self.process_id,
+                    child_exit_status(status),
+                )
+            })
+            .map_err(|error| NativePtyError::WaitFailed {
+                session_id: self.session_id.clone(),
+                message: error.to_string(),
+            })
+    }
+
+    pub fn wait_event(&mut self) -> Result<PtyEvent, NativePtyError> {
+        Ok(PtyEvent::ChildExited(self.wait()?))
+    }
+
+    pub fn kill(&mut self) -> Result<(), NativePtyError> {
+        self.child
+            .kill()
+            .map_err(|error| NativePtyError::KillFailed {
+                session_id: self.session_id.clone(),
+                message: error.to_string(),
+            })
+    }
+}
+
+pub struct NativePtyParts {
+    pub controller: NativePtyController,
+    pub reader: NativePtyReader,
+    pub writer: NativePtyWriter,
+}
+
+pub struct NativePtyReader {
+    session_id: PtySessionId,
+    reader: Box<dyn Read + Send>,
+}
+
+impl NativePtyReader {
+    pub fn session_id(&self) -> &PtySessionId {
+        &self.session_id
+    }
+
+    pub fn read_output(
+        &mut self,
+        max_bytes: usize,
+    ) -> Result<Option<ByteStreamEvent>, NativePtyError> {
+        if max_bytes == 0 {
+            return Ok(None);
+        }
+
+        let mut bytes = vec![0; max_bytes];
+        loop {
+            match self.reader.read(&mut bytes) {
+                Ok(0) => return Ok(None),
+                Ok(read_bytes) => {
+                    bytes.truncate(read_bytes);
+                    return Ok(Some(ByteStreamEvent::output(
+                        self.session_id.clone(),
+                        bytes,
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(NativePtyError::ReadFailed {
+                        session_id: self.session_id.clone(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    pub fn read_event(&mut self, max_bytes: usize) -> Result<Option<PtyEvent>, NativePtyError> {
+        Ok(self.read_output(max_bytes)?.map(PtyEvent::Output))
+    }
+}
+
+pub struct NativePtyWriter {
+    session_id: PtySessionId,
+    writer: Option<Box<dyn Write + Send>>,
+}
+
+impl NativePtyWriter {
+    pub fn session_id(&self) -> &PtySessionId {
+        &self.session_id
+    }
+
+    pub fn write_input(&mut self, bytes: &[u8]) -> Result<(), NativePtyError> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Err(NativePtyError::InputClosed {
+                session_id: self.session_id.clone(),
+            });
+        };
+
+        writer
+            .write_all(bytes)
+            .and_then(|()| writer.flush())
+            .map_err(|error| NativePtyError::WriteFailed {
+                session_id: self.session_id.clone(),
+                message: error.to_string(),
+            })
+    }
+
+    pub fn close_input(&mut self) {
+        self.writer.take();
+    }
+}
+
+pub struct NativePtyController {
+    session_id: PtySessionId,
+    process_id: Option<ChildProcessId>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
+impl NativePtyController {
+    pub fn session_id(&self) -> &PtySessionId {
+        &self.session_id
+    }
+
+    pub fn process_id(&self) -> Option<ChildProcessId> {
+        self.process_id
     }
 
     pub fn resize(&self, intent: ResizeIntent) -> Result<(), NativePtyError> {

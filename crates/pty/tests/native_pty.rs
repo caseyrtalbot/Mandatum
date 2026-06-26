@@ -175,3 +175,71 @@ fn native_pty_closed_input_rejects_later_writes() {
     session.kill().unwrap();
     let _ = session.wait().unwrap();
 }
+
+#[test]
+fn native_pty_split_supports_concurrent_read_write_and_control() {
+    let session = NativePtySession::spawn(shell_intent(
+        "native-split",
+        "stty -echo; IFS= read line; printf 'split:%s' \"$line\"",
+    ))
+    .unwrap();
+    let mut parts = session.into_split().unwrap();
+
+    assert_eq!(parts.reader.session_id().as_str(), "native-split");
+    assert_eq!(parts.writer.session_id().as_str(), "native-split");
+    assert_eq!(parts.controller.session_id().as_str(), "native-split");
+    assert!(parts.controller.process_id().is_some());
+
+    parts.writer.write_input(b"casey\n").unwrap();
+
+    let mut output = Vec::new();
+    for _ in 0..8 {
+        let Some(event) = parts.reader.read_event(1024).unwrap() else {
+            break;
+        };
+        let PtyEvent::Output(chunk) = event else {
+            panic!("expected output event");
+        };
+        output.extend(chunk.into_bytes());
+        if contains_bytes(&output, b"split:casey") {
+            break;
+        }
+    }
+
+    assert!(contains_bytes(&output, b"split:casey"));
+    assert_eq!(
+        parts.controller.wait().unwrap().status(),
+        ChildExitStatus::Exited { code: 0 }
+    );
+}
+
+#[test]
+fn native_pty_split_controller_resizes_matching_session_only() {
+    let session = NativePtySession::spawn(shell_intent("native-split-resize", "sleep 5")).unwrap();
+    let mut parts = session.into_split().unwrap();
+    let new_size = PtySize::new(90, 20).unwrap();
+
+    let mismatch = parts
+        .controller
+        .resize(ResizeIntent::new(PtySessionId::new("wrong"), new_size))
+        .unwrap_err();
+    assert_eq!(
+        mismatch,
+        NativePtyError::SessionMismatch {
+            expected: PtySessionId::new("native-split-resize"),
+            actual: PtySessionId::new("wrong"),
+        }
+    );
+
+    parts
+        .controller
+        .resize(ResizeIntent::new(
+            PtySessionId::new("native-split-resize"),
+            new_size,
+        ))
+        .unwrap();
+    assert_eq!(parts.controller.current_size().unwrap(), new_size);
+
+    parts.controller.kill().unwrap();
+    let _ = parts.controller.wait().unwrap();
+}

@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+
 use mandatum_terminal_vt::{
-    FakeTerminalAdapter, GridPosition, TerminalAdapter, TerminalAdapterError, TerminalSize,
+    FakeTerminalAdapter, GridPosition, TerminalAdapter, TerminalAdapterError, TerminalGrid,
+    TerminalParser, TerminalSize,
 };
 
 fn fixture(input: &[u8]) -> Vec<u8> {
@@ -35,13 +38,15 @@ fn fixture(input: &[u8]) -> Vec<u8> {
     output
 }
 
-fn trimmed_rows(adapter: &FakeTerminalAdapter) -> Vec<String> {
-    adapter
-        .grid()
-        .snapshot()
+fn trimmed_grid_rows(grid: &TerminalGrid) -> Vec<String> {
+    grid.snapshot()
         .into_iter()
         .map(|row| row.trim_end().to_owned())
         .collect()
+}
+
+fn trimmed_rows(adapter: &FakeTerminalAdapter) -> Vec<String> {
+    trimmed_grid_rows(adapter.grid())
 }
 
 #[test]
@@ -117,4 +122,51 @@ fn fake_parser_reports_invalid_utf8() {
     let error = adapter.feed(&[0xff]).unwrap_err();
 
     assert!(matches!(error, TerminalAdapterError::InvalidUtf8 { .. }));
+}
+
+#[test]
+fn terminal_parser_can_be_owned_per_pane_and_feed_pty_bytes() {
+    let mut panes = BTreeMap::new();
+    panes.insert(
+        "left",
+        TerminalParser::new(TerminalSize::new(8, 2).unwrap()),
+    );
+    panes.insert(
+        "right",
+        TerminalParser::new(TerminalSize::new(8, 2).unwrap()),
+    );
+
+    let left_update = panes
+        .get_mut("left")
+        .unwrap()
+        .feed_pty_bytes(b"left")
+        .unwrap();
+    let right_update = panes
+        .get_mut("right")
+        .unwrap()
+        .feed_pty_bytes(b"right")
+        .unwrap();
+
+    assert!(left_update.screen_changed);
+    assert!(right_update.screen_changed);
+    assert_eq!(
+        trimmed_grid_rows(panes.get("left").unwrap().grid()),
+        vec!["left", ""]
+    );
+    assert_eq!(
+        trimmed_grid_rows(panes.get("right").unwrap().grid()),
+        vec!["right", ""]
+    );
+}
+
+#[test]
+fn terminal_parser_delegates_resize_and_custom_adapter_feed() {
+    let adapter = FakeTerminalAdapter::new(TerminalSize::new(6, 2).unwrap());
+    let mut parser = TerminalParser::with_adapter(adapter);
+
+    parser.feed_pty_bytes(b"abcdef").unwrap();
+    parser.resize(TerminalSize::new(3, 1).unwrap());
+
+    assert_eq!(parser.size(), TerminalSize::new(3, 1).unwrap());
+    assert_eq!(trimmed_grid_rows(parser.grid()), vec!["abc"]);
 }

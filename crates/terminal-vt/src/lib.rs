@@ -302,6 +302,64 @@ pub trait TerminalAdapter {
     fn resize(&mut self, size: TerminalSize);
 }
 
+pub struct TerminalParser {
+    adapter: Box<dyn TerminalAdapter>,
+}
+
+impl TerminalParser {
+    pub fn new(size: TerminalSize) -> Self {
+        Self::with_adapter(FakeTerminalAdapter::new(size))
+    }
+
+    pub fn with_adapter(adapter: impl TerminalAdapter + 'static) -> Self {
+        Self {
+            adapter: Box::new(adapter),
+        }
+    }
+
+    pub fn capabilities(&self) -> TerminalCapabilities {
+        self.adapter.capabilities()
+    }
+
+    pub fn size(&self) -> TerminalSize {
+        self.adapter.size()
+    }
+
+    pub fn grid(&self) -> &TerminalGrid {
+        self.adapter.grid()
+    }
+
+    pub fn feed_pty_bytes(&mut self, bytes: &[u8]) -> Result<TerminalUpdate, TerminalAdapterError> {
+        self.adapter.feed(bytes)
+    }
+
+    pub fn resize(&mut self, size: TerminalSize) {
+        self.adapter.resize(size);
+    }
+}
+
+impl TerminalAdapter for TerminalParser {
+    fn capabilities(&self) -> TerminalCapabilities {
+        self.capabilities()
+    }
+
+    fn size(&self) -> TerminalSize {
+        self.size()
+    }
+
+    fn grid(&self) -> &TerminalGrid {
+        self.grid()
+    }
+
+    fn feed(&mut self, bytes: &[u8]) -> Result<TerminalUpdate, TerminalAdapterError> {
+        self.feed_pty_bytes(bytes)
+    }
+
+    fn resize(&mut self, size: TerminalSize) {
+        self.resize(size);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalAdapterError {
     InvalidUtf8 { message: String },
