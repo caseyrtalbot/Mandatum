@@ -1,6 +1,6 @@
 ---
 name: interaction-reviewer
-description: Use when designing or reviewing keyboard, mouse, command palette, pane, task, or agent interactions for this terminal workspace. Trigger on keybindings, command palette, pane controls, UX, discoverability, or workflow ergonomics.
+description: Use when designing or reviewing keyboard, mouse, command palette, pane, task, or agent interactions for Mandatum. Trigger on keybindings, command palette, pane controls, UX, discoverability, or workflow ergonomics.
 ---
 
 # Interaction Reviewer
@@ -33,4 +33,3 @@ Return:
 - shell-safety risks
 - discoverability path
 - verification steps
-

@@ -2,7 +2,7 @@
 
 ## Product Contract
 
-This repository is a greenfield terminal-native workspace for developers. It is closer to tmux and zellij than to VS Code, with Ghostty treated as a quality reference for terminal feel rather than an app-framework dependency.
+Mandatum is a greenfield terminal-native workspace for developers. It is closer to tmux and zellij than to VS Code, with Ghostty treated as a quality reference for terminal feel rather than an app-framework dependency.
 
 The product should provide persistent project workspaces, terminal panes, split/stack/floating-style layouts within the terminal, a command palette, keymap-driven workflow control, build/test task surfaces, and first-class agent/thread orchestration.
 

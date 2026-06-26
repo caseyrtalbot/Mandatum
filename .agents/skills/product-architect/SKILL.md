@@ -1,6 +1,6 @@
 ---
 name: product-architect
-description: Use when planning or reviewing product scope, non-goals, milestones, or architecture for this greenfield terminal-native workspace. Trigger on product principles, architecture plan, milestone planning, or "is this becoming an IDE?"
+description: Use when planning or reviewing Mandatum product scope, non-goals, milestones, or architecture. Trigger on product principles, architecture plan, milestone planning, or "is this becoming an IDE?"
 ---
 
 # Product Architect

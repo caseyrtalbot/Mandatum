@@ -40,7 +40,7 @@ Recommended command surface:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-cargo run
+cargo run  # future Milestone 3 app-runtime verification
 ```
 
 ## Why Rust First
@@ -48,6 +48,8 @@ cargo run
 Rust gives the best outcome for a terminal/Codex build:
 
 - mature terminal and PTY ecosystem
+- `portable-pty` can cover the headless native PTY seam without pulling parser,
+  renderer, app, or core dependencies into `crates/pty`
 - strong test tooling
 - simple command-line verification
 - good serialization/config support
@@ -82,7 +84,7 @@ Do not fork Ghostty.
 
 Do not adopt Ghostty's macOS app architecture.
 
-Evaluate `libghostty-vt` only behind `terminal-vt` after the Rust core and fake parser adapter exist.
+Evaluate `libghostty-vt` only behind `terminal-vt` after the Rust core and fake parser adapter exist. The 2026-06-25 feasibility spike found it promising as a future optional backend, but a real binding should wait for explicit Zig/CMake toolchain and upstream API pinning.
 
 ## What This Means For `/plan`
 

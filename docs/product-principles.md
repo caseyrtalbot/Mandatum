@@ -2,7 +2,7 @@
 
 ## Product Thesis
 
-This product is a terminal-native workspace for developers. It borrows the mental model of tmux and zellij, the surface-quality ambition of Ghostty, and the workflow needs of modern coding with build systems, tests, logs, and agents.
+Mandatum is a terminal-native workspace for developers. It borrows the mental model of tmux and zellij, the surface-quality ambition of Ghostty, and the workflow needs of modern coding with build systems, tests, logs, and agents.
 
 It is not an IDE. It is a coding session control surface.
 

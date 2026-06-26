@@ -2,7 +2,7 @@
 
 ## Goal
 
-Design a greenfield terminal-native workspace with strict boundaries between durable workspace state, PTY/process handling, terminal parsing, terminal rendering, application runtime, and developer workflow orchestration.
+Design Mandatum with strict boundaries between durable workspace state, PTY/process handling, terminal parsing, terminal rendering, application runtime, and developer workflow orchestration.
 
 The architecture must support a polished terminal user experience without trapping core behavior inside a terminal UI framework or any Apple-native app stack.
 
@@ -35,7 +35,10 @@ Dependency direction should move downward only where possible:
 
 ```text
 app -> renderer -> commands/workflows -> core
-app -> pty -> terminal-vt -> renderer
+app -> pty
+app -> terminal-vt
+app -> renderer
+renderer consumes terminal-vt snapshots/value types once that dependency is introduced
 ```
 
 The exact dependency graph may vary by implementation detail, but the domain rule is fixed: `core` cannot depend on terminal UI, PTY, parser, render, or platform types.
@@ -86,6 +89,10 @@ Owns OS-facing process mechanics:
 
 PTY must expose events to the runtime without knowing UI details.
 
+Current implementation covers the headless native PTY boundary only. App-level
+orchestration, parser feeding, and visible terminal panes belong to later
+runtime/renderer milestones.
+
 ### terminal-vt
 
 Owns the terminal parser adapter boundary:
@@ -96,7 +103,7 @@ Owns the terminal parser adapter boundary:
 - encode key and mouse input when appropriate
 - track terminal capabilities
 
-The first implementation may use a fake parser for tests. A later spike should evaluate `libghostty-vt` behind this boundary.
+The first implementation uses a fake parser for tests. The `libghostty-vt` spike found it feasible as a future optional backend behind this boundary; a real binding remains out of scope until the explicit binding gate is met.
 
 ### renderer
 

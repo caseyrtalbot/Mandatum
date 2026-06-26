@@ -1,9 +1,10 @@
 # Repo Structure
 
-This is the implemented Milestone 1 shape.
+This is the implemented Milestone 1 shape plus the first Milestone 2
+`terminal-vt` fake parser seam and `pty` abstraction/native OS PTY seam.
 
 ```text
-native-terminal-workspace/
+Mandatum/
   AGENTS.md
   README.md
   docs/
@@ -11,6 +12,7 @@ native-terminal-workspace/
     codex-goal.md
     ghostty-libghostty-evaluation.md
     interaction-model.md
+    libghostty-vt-feasibility-spike.md
     milestones.md
     product-principles.md
     rendering-strategy.md
@@ -35,13 +37,13 @@ native-terminal-workspace/
       terminal-conformance/
 ```
 
-## Milestone 1 Crate Status
+## Current Crate Status
 
 - `crates/core`: implemented pure domain and JSON persistence.
 - `crates/commands`: implemented command ids, labels, categories, and core-action dispatch.
 - `crates/workflows`: implemented durable task/agent pane intent helpers only.
-- `crates/pty`: compile-only placeholder.
-- `crates/terminal-vt`: compile-only placeholder.
+- `crates/pty`: PTY identifiers, spawn/resize/restart intent, output/exit events, bounded byte-buffer backpressure state, and headless native OS PTY session wrapper.
+- `crates/terminal-vt`: fake parser adapter seam with grid/cursor/cell/capability/update types and fixture-driven tests; `libghostty-vt` is evaluated but not bound.
 - `crates/renderer`: compile-only placeholder.
 - `crates/app`: compile-only placeholder, no runnable app shell yet.
 
@@ -53,6 +55,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-## Rule
+## Rules
 
-Keep Milestone 1 core renderer-neutral. Do not add PTY, parser, renderer, app-runtime, or terminal UI dependencies to `crates/core`.
+- Keep `crates/core` renderer-neutral. Do not add PTY, parser, renderer, app-runtime, or terminal UI dependencies to `crates/core`.
+- Keep phase language clear: docs may mention historical milestones, but current status sections must say which crates are implemented, placeholders, or deferred.

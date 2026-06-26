@@ -1,4 +1,4 @@
-//! Renderer-neutral workspace/session/layout domain for the terminal workspace.
+//! Renderer-neutral workspace/session/layout domain for Mandatum.
 
 mod action;
 mod ids;
@@ -28,14 +28,14 @@ mod tests {
     use super::*;
 
     fn workspace() -> Workspace {
-        Workspace::new("Terminal Workspace", PathBuf::from("/tmp/project"))
+        Workspace::new("Mandatum", PathBuf::from("/tmp/project"))
     }
 
     #[test]
     fn creates_workspace_with_default_project_session_and_pane() {
         let workspace = workspace();
 
-        assert_eq!(workspace.name(), "Terminal Workspace");
+        assert_eq!(workspace.name(), "Mandatum");
         assert_eq!(workspace.projects().len(), 1);
         assert_eq!(workspace.sessions().len(), 1);
 

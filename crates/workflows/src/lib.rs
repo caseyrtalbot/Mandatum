@@ -1,11 +1,11 @@
 //! Durable workflow intent helpers.
 //!
 //! Milestone 1 does not launch tasks or agents. This crate only shapes pane
-//! intent that can be handed to `ntw-core` for persistence.
+//! intent that can be handed to `mandatum-core` for persistence.
 
 use std::path::PathBuf;
 
-use ntw_core::{AgentPaneIntent, AgentStatus, PaneKind, TaskPaneIntent, TaskStatus};
+use mandatum_core::{AgentPaneIntent, AgentStatus, PaneKind, TaskPaneIntent, TaskStatus};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskRecipe {

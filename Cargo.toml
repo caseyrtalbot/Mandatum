@@ -15,6 +15,7 @@ edition = "2024"
 rust-version = "1.96"
 
 [workspace.dependencies]
-ntw-core = { path = "crates/core" }
+mandatum-core = { path = "crates/core" }
+portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

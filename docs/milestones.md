@@ -52,19 +52,27 @@ Validation:
 
 Goal: prove process and terminal-state seams.
 
+Status: Started with the fake parser adapter seam in `crates/terminal-vt`, the
+pure PTY abstraction and headless native OS PTY seams in `crates/pty`, and a
+`libghostty-vt` feasibility spike. Real `libghostty-vt` binding, renderer
+integration, visible terminal panes, and app runtime remain deferred.
+
 Deliverables:
 
 - PTY abstraction
+- headless native OS PTY spawning
 - fake terminal parser adapter
 - terminal adapter trait/interface
 - fixture-based stream tests
 - terminal capability model
-- libghostty-vt evaluation spike if feasible
+- libghostty-vt evaluation spike
 
 Validation:
 
 - fake parser can drive renderer-independent tests
 - PTY output can be consumed with bounded backpressure
+- native PTY sessions can spawn, read raw output, write input, resize, report
+  child exit, and kill without parser/UI coupling
 - child exit and restart are represented cleanly
 - adapter can be swapped without core changes
 

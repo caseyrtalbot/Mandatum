@@ -6,6 +6,11 @@ Do not fork Ghostty as the first move.
 
 Evaluate `libghostty-vt` or related libghostty surfaces behind a narrow terminal parser adapter. Treat Ghostty as a terminal substrate inspiration and possible dependency, not as the product architecture.
 
+Current spike result: `docs/libghostty-vt-feasibility-spike.md` found
+`libghostty-vt` feasible as a future optional backend, but not ready to bind in
+this repo until the Zig/CMake toolchain and upstream API pinning are explicit.
+The fake adapter remains the only compiled backend.
+
 ## Why Not Fork First
 
 Forking Ghostty would inherit:
@@ -76,13 +81,13 @@ Evaluate terminal substrates against:
 
 ## Spike Plan
 
-1. Build a fake parser adapter for tests.
-2. Build a simple PTY stream fixture.
-3. Feed recorded command output into the adapter.
-4. Render a simple terminal grid through the renderer contract.
-5. Replace fake adapter with libghostty-vt spike.
-6. Compare behavior and integration cost.
-7. Decide whether libghostty-vt is a dependency, optional backend, or deferred.
+1. Build a fake parser adapter for tests. Done.
+2. Build simple stream fixtures. Done.
+3. Feed recorded command output into the adapter. Done.
+4. Evaluate `libghostty-vt` against the adapter boundary. Done; see
+   `docs/libghostty-vt-feasibility-spike.md`.
+5. If a future binding is approved, add it as an optional backend behind
+   `terminal-vt` only.
 
 ## Decision Rule
 

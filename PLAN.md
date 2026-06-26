@@ -2,9 +2,9 @@
 
 ## Objective
 
-Prepare and execute a greenfield build of a terminal-native workspace for developers, closer to tmux/zellij than an IDE, and buildable entirely from terminal/Codex workflows.
+Prepare and execute Mandatum, a greenfield terminal-native workspace for developers, closer to tmux/zellij than an IDE, and buildable entirely from terminal/Codex workflows.
 
-This repo began as a planning scaffold. Milestone 0 decisions are now accepted, and Milestone 1 has a Cargo workspace plus renderer-neutral core implementation.
+This repo began as a planning scaffold. Milestone 0 decisions are accepted, Milestone 1 has a Cargo workspace plus renderer-neutral core implementation, and Milestone 2 has fake terminal parser, native PTY, and `libghostty-vt` feasibility seams.
 
 ## Current State
 
@@ -26,20 +26,24 @@ Created:
 - `crates/core`
 - `crates/commands`
 - `crates/workflows`
-- compile-only placeholder crates for `pty`, `terminal-vt`, `renderer`, and `app`
+- first fake parser adapter seam in `crates/terminal-vt`
+- first pure PTY abstraction seam in `crates/pty`
+- headless native OS PTY spawning, raw input/output, resize, child-exit, and kill wrapper in `crates/pty`
+- `libghostty-vt` feasibility spike documented in `docs/libghostty-vt-feasibility-spike.md`
+- compile-only placeholder crates for `renderer` and `app`
 
 Not yet created:
 
 - terminal app runtime
-- terminal parser adapter
-- PTY implementation
+- app-level PTY orchestration and visible terminal panes
 - renderer
+- real terminal parser backend or `libghostty-vt` binding
 
-This is intentional. Milestone 1 implements the durable core domain only; runtime behavior starts after the PTY/parser/renderer seams are ready.
+This is intentional. Runtime behavior starts after the PTY/parser/renderer seams are ready.
 
 ## Product Summary
 
-Build a terminal-native workspace for coding sessions:
+Build Mandatum as a terminal-native workspace for coding sessions:
 
 - persistent project workspaces
 - terminal panes
@@ -111,7 +115,7 @@ Your plan must cover:
 Milestone 1 implements the accepted core-first goal:
 
 ```text
-Implement Milestone 1: renderer-neutral core domain for the terminal-native workspace.
+Implement Milestone 1: renderer-neutral core domain for Mandatum.
 
 Create the selected build system and core module structure. Implement workspace, project, pane, layout, focus, command action, and session persistence models. Keep core independent from renderer, terminal app runtime, PTY, and terminal parser types. Add tests for layout, focus, action dispatch, and serialization.
 
@@ -120,10 +124,10 @@ Done when formatting, tests, and build/typecheck pass, and docs reflect the impl
 
 ## Deferred Decisions
 
-1. PTY crate details.
-2. Terminal parser adapter trait shape.
+1. OS PTY implementation details.
+2. Real terminal parser backend details behind the current fake adapter seam.
 3. `libghostty-vt` feasibility behind `terminal-vt`.
-4. Stream backpressure model.
+4. End-to-end runtime stream scheduling.
 5. Terminal capability model.
 6. Renderer backend and command palette UI.
 7. App lifecycle, config path, and persistence timing.

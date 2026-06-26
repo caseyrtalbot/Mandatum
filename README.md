@@ -1,12 +1,12 @@
-# Terminal Workspace
+# Mandatum
 
-A greenfield terminal workspace for developers: closer to tmux and zellij than to a general IDE, built entirely from terminal/Codex workflows.
+Mandatum is a greenfield terminal workspace for developers: closer to tmux and zellij than to a general IDE, built entirely from terminal/Codex workflows.
 
 The product thesis is simple: developers live in terminals, panes, sessions, builds, tests, logs, and agent threads. This project should make that environment fast, aesthetic, recoverable, programmable, and deeply usable without trying to replace an editor or requiring an Apple-native GUI stack.
 
 ## North Star
 
-Build a terminal-native workspace for coding sessions:
+Build Mandatum as a terminal-native workspace for coding sessions:
 
 - fast terminal panes
 - persistent project workspaces
@@ -28,15 +28,18 @@ This is also not an Xcode or Apple-native app project. Do not use Xcode.app, `.x
 
 ## Current Status
 
-This repo has completed the first scaffold step:
+This repo has completed the first scaffold step and started Milestone 2:
 
 - Cargo workspace with `core`, `commands`, `workflows`, `pty`, `terminal-vt`, `renderer`, and `app` crates.
 - Renderer-neutral `core` domain for workspace, project, session, pane, layout, focus, actions, and JSON session persistence.
 - Minimal `commands` crate that maps command ids to core actions without owning layout mutation logic.
 - Minimal `workflows` crate for durable task/agent pane intent helpers only.
-- Placeholder PTY, terminal parser, renderer, and app-runtime crates. They compile, but do not implement runtime behavior yet.
+- `terminal-vt` has the first fake parser adapter seam: plain grid, cursor, cell, capability, update, and adapter types with fixture-driven tests.
+- `pty` has the first native OS PTY seam: session/process identifiers, spawn/resize/restart intent, raw byte output, input writes, resize, child exit, kill, and bounded byte-buffer backpressure tests.
+- `libghostty-vt` has been evaluated as a future optional `terminal-vt` backend; no binding or dependency has been added.
+- `renderer` and `app` remain compile-only placeholders. They do not implement runtime behavior yet.
 
-Milestone 1 intentionally has no runnable app shell and no real PTY/parser/renderer integration.
+There is still no runnable app shell, visible terminal pane, renderer integration, or `libghostty-vt` binding.
 
 Start with:
 
@@ -69,3 +72,5 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+Between phases, also run the doc hygiene scan in `docs/verification.md` and clear or label outdated status language before writing a handoff.

@@ -28,7 +28,7 @@ Status: Accepted
 
 Decision:
 
-This repo is a greenfield terminal-native workspace. It should not reuse an existing Aetherspace code path or become an IDE-first product.
+Mandatum is a greenfield terminal-native workspace. It should not reuse an existing Aetherspace code path or become an IDE-first product.
 
 Context:
 
@@ -72,7 +72,7 @@ Options Considered:
 
 - Swift/AppKit/Metal native Mac app.
 - Zig-first systems app.
-- Rust-first terminal workspace.
+- Rust-first Mandatum workspace.
 
 Rationale:
 
@@ -159,3 +159,191 @@ Consequences:
 Verification:
 
 - Unit tests cover serialize/deserialize, unsupported schema, corrupt JSON, invalid session data, and runtime-handle exclusion strings.
+
+## 2026-06-25: Fake Terminal Parser Seam First
+
+Status: Accepted
+
+Decision:
+
+Start Milestone 2 by adding a fake terminal parser adapter seam in `crates/terminal-vt` before PTY runtime work or `libghostty-vt` integration.
+
+Context:
+
+The project needs renderer-independent terminal-state tests and a swappable adapter boundary before choosing a real parser backend.
+
+Options Considered:
+
+- Bind `libghostty-vt` immediately.
+- Start with PTY process lifecycle.
+- Start with a fake parser/grid adapter seam.
+
+Rationale:
+
+The fake adapter proves the public shape for feeding bytes, resizing, reading grid/cursor/cell state, and fixture testing without pulling parser, PTY, renderer, or app runtime dependencies into `core`.
+
+Consequences:
+
+- `crates/terminal-vt` now owns plain terminal grid, cursor, cell, capability, update, adapter, and fake-adapter types.
+- Runtime process orchestration, real renderer, app shell, and
+  `libghostty-vt` binding remain deferred. Later PTY decisions supersede the
+  deferred backpressure, child-exit, and headless spawning parts of this
+  parser-seam entry.
+- Phase handoffs must include hygiene checks so placeholder or historical docs do not masquerade as current state.
+
+Verification:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
+- Boundary check: `core` imports no PTY, terminal parser, renderer, app runtime, or terminal UI crates.
+
+## 2026-06-25: Pure PTY Abstraction Before OS Spawning
+
+Status: Accepted
+
+Decision:
+
+Start the PTY side of Milestone 2 with pure value types and bounded-buffer
+behavior before launching real processes.
+
+Context:
+
+The app runtime will later orchestrate PTY output into the terminal parser
+adapter. The PTY crate needs a stable byte/event contract first, without
+depending on parser, renderer, app, or core crates.
+
+Options Considered:
+
+- Bind OS PTY spawning immediately.
+- Couple PTY output directly to `terminal-vt`.
+- Define process/session intent, output events, child-exit state, restart
+  intent, and bounded backpressure first.
+
+Rationale:
+
+The pure seam makes PTY output testable and keeps parser and runtime choices
+outside the PTY crate. It also lets the app layer decide how PTY bytes are fed
+to `TerminalAdapter`.
+
+Consequences:
+
+- `crates/pty` owns PTY session/process identifiers, spawn/resize/restart
+  intent, byte-stream events, child exit, and bounded byte buffering.
+- This decision was the precursor to the later headless native OS PTY session
+  wrapper.
+- `crates/pty` does not depend on `terminal-vt`, renderer, app, or core.
+- App-level PTY orchestration and visible terminal panes remain later slices.
+
+Verification:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
+- Boundary check: `crates/pty` has no dependencies on parser, renderer, app,
+  core, or terminal UI crates.
+
+## 2026-06-25: Headless Native PTY Spawning Behind mandatum-pty
+
+Status: Accepted
+
+Decision:
+
+Add native OS PTY spawning inside `crates/pty` only, using `portable-pty` behind
+`mandatum-pty` value/event types.
+
+Context:
+
+The fake parser seam, pure PTY value seam, and `libghostty-vt` feasibility spike
+were already in place. The next Milestone 2 gap was proving that `SpawnIntent`
+can create a real PTY-backed process while still returning raw byte and child
+exit data without parser, renderer, app, or core coupling.
+
+Options Considered:
+
+- Keep PTY as value types only until the app runtime exists.
+- Hand-roll platform PTY calls.
+- Add a narrow native session wrapper around `portable-pty`.
+- Begin visible terminal pane work.
+
+Rationale:
+
+`portable-pty` provides the platform-specific open/spawn/read/write/resize/kill
+surface needed for the spike. Wrapping it in `NativePtySession` keeps the
+external crate contained inside `crates/pty` and preserves the local contract:
+raw byte output, input bytes, resize intent, child exit, and `PtyEvent` wrappers.
+
+Consequences:
+
+- `crates/pty` now depends on `portable-pty`.
+- `NativePtySession` is an opaque runtime handle, not durable session state.
+- Native PTY output remains raw bytes; no parser or UTF-8 assumption is added.
+- The wrapper can spawn, read output, write input, close input, resize, read the
+  current size, try-wait, wait, wait as a `PtyEvent`, and kill.
+- `core`, `terminal-vt`, `renderer`, and `app` do not depend on `portable-pty`.
+- App-level orchestration, terminal parser feeding, renderer integration,
+  visible terminal panes, and restart registries remain later work.
+
+Verification:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
+- `cargo test -p mandatum-pty`
+- Boundary check: `crates/pty` depends on `portable-pty` only, with no
+  `mandatum-terminal-vt`, `mandatum-renderer`, `mandatum-app`, `mandatum-core`, parser-specific, or
+  terminal UI runtime dependency.
+- Boundary check: `crates/core` still has no PTY/parser/renderer/app/runtime
+  dependency.
+
+## 2026-06-25: Defer libghostty-vt Binding Behind Optional Backend Gate
+
+Status: Accepted
+
+Decision:
+
+Treat `libghostty-vt` as feasible for a future optional `terminal-vt` backend,
+but do not bind it in the repo yet.
+
+Context:
+
+The fake adapter seam and pure PTY byte/event seam are now in place, so this was
+the right time to check whether Ghostty's VT library can sit behind
+`TerminalAdapter` without forcing Ghostty's app architecture into this product.
+
+Options Considered:
+
+- Add a direct Rust FFI binding now.
+- Vendor or submodule Ghostty now.
+- Keep the fake adapter only and defer the research.
+- Record an evidence-backed feasibility result and future binding gate.
+
+Rationale:
+
+The upstream C API has the required capability shape: terminal allocation, raw
+byte feeding, resize, cursor/metadata reads, grid/cell/style access, render-state
+snapshots, and input encoding helpers. However, upstream explicitly marks the
+API as work in progress, says signatures are still in flux, and this machine
+does not currently have `zig` or `cmake` on `PATH`, so a real binding cannot be
+verified in this phase.
+
+Consequences:
+
+- `libghostty-vt` remains a promising optional backend, not the default backend.
+- The fake adapter remains the only compiled `terminal-vt` backend.
+- No Cargo dependency, build script, vendored source, bindgen output, or
+  generated headers were added.
+- A future binding must pin upstream, provide an explicit Zig/CMake/prebuilt or
+  third-party binding story, avoid network fetches during normal Cargo builds,
+  keep all FFI inside `crates/terminal-vt`, and preserve normal `cargo test`
+  without Ghostty installed.
+- `core`, `pty`, `renderer`, and `app` must not depend on Ghostty directly.
+
+Verification:
+
+- `docs/libghostty-vt-feasibility-spike.md` records the upstream source
+  evidence, local toolchain check, adapter mapping, risks, and next binding gate.
+- Boundary check: `crates/terminal-vt/Cargo.toml` has no Ghostty, Zig, CMake,
+  bindgen, or FFI dependency.
+- Boundary check: `core` and `pty` remain free of Ghostty/parser/renderer/app
+  dependencies.

@@ -1,6 +1,6 @@
 # Codex Goal Setup
 
-This file preserves the bootstrapping prompts that produced the accepted Milestone 0-1 plan. Milestone 1 has since started as a Cargo workspace with a renderer-neutral core and compile-only runtime boundaries.
+This file preserves historical bootstrapping prompts that produced the accepted Milestone 0-1 plan. Do not treat the prompts below as current implementation status. Current status lives in `README.md`, `docs/milestones.md`, `docs/repo-structure.md`, and handoffs.
 
 ## First Prompt: Use Plan Mode
 
@@ -31,6 +31,12 @@ Your plan must cover:
 
 ## Goal Mode Prompt
 
+Historical prompt only; the runnable prototype clause below was superseded by
+the accepted core-first Milestone 1 and parser/PTY-seam-first Milestone 2 path.
+As of the current implementation, `crates/pty` has a headless native OS PTY
+session wrapper, but there is still no runnable app shell, renderer integration,
+or visible terminal pane.
+
 After the plan is accepted, start `/goal` with:
 
 ```text
@@ -38,12 +44,12 @@ Design and scaffold a greenfield terminal-native workspace for developers, close
 
 The product should provide persistent project workspaces, terminal panes, split/stack/floating-style layouts, a command palette, keymap-driven workflow control, build/test task surfaces, and first-class agent/thread orchestration. It must not become a general IDE: no built-in source editor, no heavy file explorer, no language-server-first architecture in the first milestone.
 
-Start by creating a Rust workspace foundation with docs, architecture boundaries, milestone plan, and a minimal runnable terminal prototype. Keep the workspace/session/layout/action core independent from rendering, terminal app runtime, PTY, and terminal parser implementation. Include a terminal parser adapter boundary suitable for evaluating libghostty-vt later.
+Start by creating a Rust workspace foundation with docs, architecture boundaries, and milestone plan. The original prompt also asked for a runnable prototype, but that clause was superseded by the accepted core-first and seam-first milestone path. Keep the workspace/session/layout/action core independent from rendering, terminal app runtime, PTY, and terminal parser implementation. Include a terminal parser adapter boundary suitable for evaluating libghostty-vt later.
 
 Done when:
 1. The repo has clear product principles, architecture docs, interaction model, and milestone plan.
 2. The codebase has a compilable Rust scaffold with separated core, PTY, terminal adapter, terminal renderer, app runtime, commands, and workflow modules.
-3. The first prototype can run from `cargo run`, render a placeholder terminal workspace with panes, and exercise layout/focus/actions through tests.
+3. Superseded: the original prompt expected a runnable placeholder prototype; current implementation status is documented outside this historical prompt block.
 4. The architecture explicitly documents what is greenfield, what is deferred, and what would be evaluated from Ghostty/libghostty.
 5. Core logic has unit tests for workspace, layout, focus, command dispatch, and session persistence.
 6. No implementation depends on an existing Aetherspace code path or copies its files.
@@ -94,4 +100,7 @@ Implementation starts only after:
 4. verification commands are defined.
 5. architecture boundaries are written into `AGENTS.md`.
 
-For the current repo state, those gates are satisfied for Milestone 1. Later milestones still need their own explicit gates.
+For current repo state, those gates are satisfied for Milestone 1. Milestone 2
+has started with the fake parser adapter seam and pure PTY abstraction seam.
+Use `README.md`, `docs/milestones.md`, `docs/repo-structure.md`, and
+`docs/verification.md` for current implementation status and phase gates.

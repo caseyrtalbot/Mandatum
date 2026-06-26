@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use ntw_core::{ActionOutcome, CoreAction, Workspace, WorkspaceError};
+use mandatum_core::{ActionOutcome, CoreAction, Workspace, WorkspaceError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CommandId {
@@ -188,7 +188,7 @@ impl std::error::Error for CommandError {}
 mod tests {
     use std::path::PathBuf;
 
-    use ntw_core::{ActionOutcome, PersistenceRequest};
+    use mandatum_core::{ActionOutcome, PersistenceRequest};
 
     use super::*;
 
