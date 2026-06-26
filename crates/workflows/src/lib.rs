@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use mandatum_core::{AgentPaneIntent, AgentStatus, PaneKind, TaskPaneIntent, TaskStatus};
+use mandatum_core::{AgentPaneIntent, AgentStatus, PaneKind, TaskPaneIntent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskRecipe {
@@ -21,7 +21,6 @@ impl TaskRecipe {
                 recipe_id: Some(self.id.clone()),
                 command: self.command.clone(),
                 cwd: Some(self.cwd.clone()),
-                status: TaskStatus::Pending,
             },
         }
     }
@@ -62,7 +61,16 @@ mod tests {
 
         let kind = recipe.pane_kind();
 
-        assert!(matches!(kind, PaneKind::Task { .. }));
+        assert_eq!(
+            kind,
+            PaneKind::Task {
+                intent: TaskPaneIntent {
+                    recipe_id: Some("build".to_owned()),
+                    command: "cargo build".to_owned(),
+                    cwd: Some(PathBuf::from("/tmp/project")),
+                },
+            }
+        );
     }
 
     #[test]

@@ -9,7 +9,8 @@ Evaluate `libghostty-vt` or related libghostty surfaces behind a narrow terminal
 Current spike result: `docs/libghostty-vt-feasibility-spike.md` found
 `libghostty-vt` feasible as a future optional backend, but not ready to bind in
 this repo until the Zig/CMake toolchain and upstream API pinning are explicit.
-The fake adapter remains the only compiled backend.
+The compiled default backend is now the local Rust `vte` parser behind
+`TerminalAdapter`; the fake adapter remains for fixtures only.
 
 ## Why Not Fork First
 

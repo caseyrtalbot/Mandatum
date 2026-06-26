@@ -33,10 +33,10 @@ Your plan must cover:
 
 Historical prompt only; the runnable prototype clause below was superseded by
 the accepted core-first Milestone 1 and parser/PTY-seam-first Milestone 2 path.
-The current implementation now has the Milestone 3 runnable app shell plus the
-first Milestone 4 PTY-backed terminal runtime slice. It still uses the
-fake/basic parser and does not yet have copy/selection, scrollback, restart
-registry behavior, or `libghostty-vt` binding.
+The current implementation has completed Milestone 3 and Milestone 4: a
+runnable app shell, PTY-backed terminal panes, hardened `vte` parser backend,
+scrollback, keyboard copy/selection baseline, and in-place PTY restart.
+`libghostty-vt` binding remains deferred.
 
 After the plan is accepted, start `/goal` with:
 
@@ -101,7 +101,6 @@ Implementation starts only after:
 4. verification commands are defined.
 5. architecture boundaries are written into `AGENTS.md`.
 
-For current repo state, those gates are satisfied through the first Milestone 4
-runtime slice. Use `README.md`, `docs/milestones.md`,
-`docs/repo-structure.md`, and `docs/verification.md` for current implementation
-status and phase gates.
+For current repo state, those gates are satisfied through completed Milestone 5A.
+Use `README.md`, `docs/milestones.md`, `docs/repo-structure.md`, and
+`docs/verification.md` for current implementation status and phase gates.

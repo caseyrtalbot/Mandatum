@@ -38,7 +38,8 @@ app -> renderer -> commands/workflows -> core
 app -> pty
 app -> terminal-vt
 app -> renderer
-renderer consumes terminal-vt snapshots/value types once that dependency is introduced
+renderer consumes terminal-vt snapshots/value types without owning parser
+mutation, PTY handles, or process/runtime state
 ```
 
 The exact dependency graph may vary by implementation detail, but the domain rule is fixed: `core` cannot depend on terminal UI, PTY, parser, render, or platform types.
@@ -104,7 +105,11 @@ Owns the terminal parser adapter boundary:
 - encode key and mouse input when appropriate
 - track terminal capabilities
 
-The first implementation uses a fake parser for tests. The `libghostty-vt` spike found it feasible as a future optional backend behind this boundary; a real binding remains out of scope until the explicit binding gate is met.
+The default implementation uses a local `vte`-backed parser behind
+`TerminalAdapter`; `FakeTerminalAdapter` remains for fixtures. The
+`libghostty-vt` spike found it feasible as a future optional backend behind
+this boundary, but a real binding remains out of scope until the explicit
+binding gate is met.
 
 ### renderer
 
@@ -209,7 +214,10 @@ Do not persist:
 - parser objects
 - GPU resources
 - process ids as durable truth
-- raw unbounded scrollback in the first milestone
+- unbounded scrollback or runtime-owned scrollback history; bounded scrollback
+  stays in terminal/runtime presentation state, not durable core state
+- live task status, exit state, output buffers, or reader/runtime tokens; the
+  first task slice stores command intent only and keeps status in app runtime
 
 ## Failure Model
 

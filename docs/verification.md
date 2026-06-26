@@ -1,8 +1,8 @@
 # Verification Plan
 
-## Current Scaffold Verification
+## Historical Scaffold Verification
 
-Until code exists, verify:
+At scaffold time, before implementation code existed, verification was:
 
 - expected docs exist
 - repo has Git initialized
@@ -101,8 +101,9 @@ For the native PTY seam, verify:
   types, or terminal UI runtime crates.
 - `crates/core` still has no PTY, parser, renderer, app runtime, terminal UI,
   platform UI, or `portable-pty` dependency.
-- Runnable app orchestration, parser feeding, renderer integration, visible
-  terminal panes, and restart registries remain later work.
+- At the Milestone 2 gate, runnable app orchestration, parser feeding, renderer
+  integration, visible terminal panes, and restart registries remained later
+  work. Current Milestone 4 coverage is documented below.
 
 ## Milestone 2 libghostty-vt Feasibility Verification
 
@@ -220,7 +221,125 @@ Deferred (not part of the Milestone 4 gate):
 
 - `libghostty-vt` backend binding remains unbound.
 - Native OS mouse selection, semantic selection, and rich clipboard history.
-- Task/agent workflow panes (Milestone 5+).
+- Task/agent workflow panes (Milestone 5B+).
+
+## Milestone 5A Workspace Persistence Verification
+
+Milestone 5A is complete. Mandatum persists durable workspace/session layout
+intent to `.mandatum/workspace.json` under the configured project path, restores
+that file on startup when present, and handles explicit save/restore commands
+from the app runtime. Run from the repo root:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run
+git diff --check
+```
+
+For app persistence, verify:
+
+- `SaveWorkspace` writes JSON through `Workspace::to_json` to
+  `.mandatum/workspace.json`, creating the app-controlled parent directory,
+  rejecting symlink/special-file paths, and using a same-directory temporary
+  file plus atomic rename.
+- startup restore and explicit `RestoreWorkspace` load JSON with
+  `Workspace::from_json` and stage fresh PTYs for visible terminal panes before
+  replacing the live workspace.
+- restore failure is visible in status and leaves the current workspace and
+  runtime panes intact, including valid-JSON restore attempts where fresh PTY
+  staging fails.
+- successful restore shuts down old pane runtimes, discards pending reader
+  events, swaps durable workspace state, clears copy-mode/clipboard runtime
+  presentation state, and activates staged fresh PTYs.
+- runtime reader events carry an app-local runtime token as well as the durable
+  restart generation so stale reader events cannot contaminate a fresh runtime.
+- saved JSON contains durable workspace/session/pane/layout/focus intent only;
+  it excludes PTY handles, process IDs, parser objects, renderer state, thread
+  handles, and runtime scrollback.
+- renderer scene geometry remains stable for restored split, stack, floating,
+  zoom, and focused layout intent.
+
+Milestone 5A tests cover:
+
+- `crates/app` unit tests for save success, explicit restore success, startup
+  restore status, restore failure preservation, runtime presentation clearing,
+  fresh live PTY spawn after restore, symlink rejection, oversized-file
+  rejection, and transactional rollback when PTY staging fails.
+- `crates/renderer` unit test proving restored workspace layout renders with
+  the same geometry as the pre-serialization workspace.
+- `crates/commands` unit test proving palette keys reach save/restore command
+  metadata.
+
+Deferred (not part of the Milestone 5A gate):
+
+- task pane process runtime and build/test recipes, which begin in Milestone 5B.
+- agent pane runtime and external agent/thread orchestration.
+- command history and broader keymap configuration.
+
+## Milestone 5B Task Runtime Slice Verification
+
+The current Milestone 5B task-runtime slice is complete when one configured
+shell task can be launched from the command palette, the focused task pane can
+be explicitly rerun or stopped, and all live task runtime state remains owned
+outside durable core state. Run from the repo root:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run
+git diff --check
+```
+
+For the task runtime slice, verify:
+
+- `Ctrl-P` then `b` dispatches `Run Task`, creates a durable task pane intent,
+  and launches the configured shell command through app-owned PTY runtime.
+- with a task pane focused, `Ctrl-P` then `r` dispatches `Rerun Task`, replaces
+  the app-owned runtime for the same `PaneId`, preserves durable command intent,
+  and allocates a fresh app-local runtime token.
+- with a task pane focused, `Ctrl-P` then `c` dispatches `Stop Task`, cancels a
+  pending launch or terminates the running app-owned runtime without mutating
+  core layout or durable task intent.
+- task output is parsed into an app-owned terminal grid and rendered through
+  read-only renderer task runtime views.
+- running, succeeded, failed, stopped, parser failure, reader failure, and wait
+  failure statuses are app runtime state, not durable core state.
+- a task launched or rerun while hidden by zoom is tracked as a pending app
+  runtime launch and starts once the task pane becomes visible unless stopped
+  before launch.
+- task spawn failure is visible through non-serialized app runtime status for
+  the task pane.
+- `RestartPane` remains shell-only for focused task panes; task rerun uses the
+  explicit runtime task command.
+- saved workspace JSON stores only task intent (`recipe_id`, `command`, `cwd`)
+  and excludes process handles, process IDs, parser state, reader threads,
+  runtime tokens, output buffers, runtime status, stopped state, and scrollback.
+- restore preserves task pane intent but does not automatically relaunch the
+  old task process; side-effecting tasks must be started explicitly.
+
+Milestone 5B task-runtime tests cover:
+
+- `crates/app` unit tests for configured task launch success, pending hidden
+  task launch/rerun, focused task rerun replacement, restored task inertness
+  until explicit rerun, focused task stop, pending hidden stop, spawn failure
+  status, nonzero task exit failure status, shell-only restart guard, old task
+  event rejection, and task runtime state exclusion from saved JSON.
+- `crates/commands` unit tests for run/rerun/stop task command metadata,
+  context-aware palette key routing, runtime target routing, and rejection by
+  core dispatch.
+- `crates/core` and `crates/workflows` tests for durable task command intent
+  without runtime status.
+- `crates/renderer` tests for task runtime status/output view lookup and
+  task-pane line rendering.
+
+Deferred after this task-runtime slice:
+
+- command history and task recipe configuration UI.
+- automatic restored-task relaunch or recovery policy.
+- agent pane runtime and external agent/thread orchestration.
 
 ## Minimum Quality Gate
 

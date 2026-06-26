@@ -71,18 +71,6 @@ pub struct TaskPaneIntent {
     pub recipe_id: Option<String>,
     pub command: String,
     pub cwd: Option<PathBuf>,
-    pub status: TaskStatus,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskStatus {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    Stopped,
-    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

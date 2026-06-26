@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Layout, PaneId, PaneKind, PaneSpec, ProjectId, SessionId, SplitDirection,
+    Layout, PaneId, PaneKind, PaneSpec, ProjectId, SessionId, SplitDirection, TaskPaneIntent,
     layout::LayoutMutationError,
 };
 
@@ -95,6 +95,11 @@ impl Session {
 
     pub fn add_terminal_pane(&mut self, title: impl Into<String>, cwd: Option<PathBuf>) -> PaneId {
         self.add_floating_pane(title, PaneKind::Terminal { command: None }, cwd)
+    }
+
+    pub fn add_task_pane(&mut self, title: impl Into<String>, intent: TaskPaneIntent) -> PaneId {
+        let cwd = intent.cwd.clone();
+        self.add_floating_pane(title, PaneKind::Task { intent }, cwd)
     }
 
     pub fn add_floating_pane(

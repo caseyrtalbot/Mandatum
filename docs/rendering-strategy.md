@@ -65,7 +65,16 @@ Create an interface that can render to the parent terminal:
 - pane borders/separators
 - overlays
 
-The first prototype can use placeholder cells. It does not need full terminal fidelity until the terminal parser adapter is validated.
+Milestone 4 validates styled terminal-grid snapshots from the default
+`TerminalAdapter` parser. Future renderer work should preserve the snapshot
+contract and improve interaction/polish without taking ownership of parser
+mutation, PTY handles, or runtime processes.
+
+Milestone 5B's task-runtime slices extend that contract with read-only task
+runtime views keyed by `PaneId`. The app owns the task PTY, parser, reader
+thread, runtime token, exit state, rerun/stop lifecycle, and status mutation;
+the renderer receives borrowed task status text and an optional terminal-grid
+output snapshot for drawing only.
 
 ## Performance Targets
 

@@ -16,6 +16,9 @@ pub enum CommandId {
     ClosePane,
     RestartPane,
     EnterCopyMode,
+    RunTask,
+    RerunTask,
+    StopTask,
     ZoomPane,
     FloatPane,
     StackPanes,
@@ -27,6 +30,7 @@ pub enum CommandId {
 pub enum CommandCategory {
     Project,
     Pane,
+    Task,
     Layout,
     Persistence,
 }
@@ -85,6 +89,21 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         category: CommandCategory::Pane,
     },
     Command {
+        id: CommandId::RunTask,
+        label: "Run Task",
+        category: CommandCategory::Task,
+    },
+    Command {
+        id: CommandId::RerunTask,
+        label: "Rerun Task",
+        category: CommandCategory::Task,
+    },
+    Command {
+        id: CommandId::StopTask,
+        label: "Stop Task",
+        category: CommandCategory::Task,
+    },
+    Command {
         id: CommandId::ZoomPane,
         label: "Zoom Pane",
         category: CommandCategory::Layout,
@@ -141,11 +160,25 @@ pub fn command_for_id(command_id: CommandId) -> Option<&'static Command> {
 pub enum CommandTarget {
     Core,
     Runtime(RuntimeCommand),
+    RuntimeTask(RuntimeTaskCommand),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeCommand {
     EnterCopyMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeTaskCommand {
+    RunConfiguredTask,
+    RerunFocusedTask,
+    StopFocusedTask,
+}
+
+impl CommandTarget {
+    pub fn is_runtime(self) -> bool {
+        !matches!(self, Self::Core)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,14 +197,34 @@ pub enum PaletteInput {
     Noop,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaletteContext {
+    pub focused_pane_is_task: bool,
+}
+
+impl PaletteContext {
+    pub const fn focused_task() -> Self {
+        Self {
+            focused_pane_is_task: true,
+        }
+    }
+}
+
 pub fn command_target(command_id: CommandId) -> CommandTarget {
     match command_id {
         CommandId::EnterCopyMode => CommandTarget::Runtime(RuntimeCommand::EnterCopyMode),
+        CommandId::RunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RunConfiguredTask),
+        CommandId::RerunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RerunFocusedTask),
+        CommandId::StopTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::StopFocusedTask),
         _ => CommandTarget::Core,
     }
 }
 
 pub fn resolve_palette_key(key: PaletteKey) -> PaletteInput {
+    resolve_palette_key_with_context(key, PaletteContext::default())
+}
+
+pub fn resolve_palette_key_with_context(key: PaletteKey, context: PaletteContext) -> PaletteInput {
     match key {
         PaletteKey::Escape => PaletteInput::Close,
         PaletteKey::Character('q') => PaletteInput::Quit,
@@ -188,7 +241,16 @@ pub fn resolve_palette_key(key: PaletteKey) -> PaletteInput {
         PaletteKey::Character('z') => PaletteInput::Dispatch(CommandId::ZoomPane),
         PaletteKey::Character('f') => PaletteInput::Dispatch(CommandId::FloatPane),
         PaletteKey::Character('t') => PaletteInput::Dispatch(CommandId::StackPanes),
+        PaletteKey::Character('r') if context.focused_pane_is_task => {
+            PaletteInput::Dispatch(CommandId::RerunTask)
+        }
         PaletteKey::Character('r') => PaletteInput::Dispatch(CommandId::RestartPane),
+        PaletteKey::Character('c') if context.focused_pane_is_task => {
+            PaletteInput::Dispatch(CommandId::StopTask)
+        }
+        PaletteKey::Character('b') => PaletteInput::Dispatch(CommandId::RunTask),
+        PaletteKey::Character('w') => PaletteInput::Dispatch(CommandId::SaveWorkspace),
+        PaletteKey::Character('o') => PaletteInput::Dispatch(CommandId::RestoreWorkspace),
         PaletteKey::Character('[') => PaletteInput::Dispatch(CommandId::EnterCopyMode),
         _ => PaletteInput::Noop,
     }
@@ -210,7 +272,7 @@ pub fn core_action_for_command(
     context: &CommandContext,
 ) -> Result<CoreAction, CommandError> {
     command_for_id(command_id).ok_or(CommandError::UnknownCommand(command_id))?;
-    if let CommandTarget::Runtime(_) = command_target(command_id) {
+    if command_target(command_id).is_runtime() {
         return Err(CommandError::NotACoreCommand(command_id));
     }
 
@@ -234,7 +296,12 @@ pub fn core_action_for_command(
         CommandId::StackPanes => CoreAction::StackFocusedWithNext,
         CommandId::SaveWorkspace => CoreAction::SaveWorkspace,
         CommandId::RestoreWorkspace => CoreAction::RestoreWorkspace,
-        CommandId::EnterCopyMode => return Err(CommandError::NotACoreCommand(command_id)),
+        CommandId::EnterCopyMode
+        | CommandId::RunTask
+        | CommandId::RerunTask
+        | CommandId::StopTask => {
+            return Err(CommandError::NotACoreCommand(command_id));
+        }
     })
 }
 
@@ -306,15 +373,30 @@ mod tests {
         assert!(command_ids.contains(&CommandId::SplitRight));
         assert!(command_ids.contains(&CommandId::SplitDown));
         assert!(command_ids.contains(&CommandId::StackPanes));
+        assert!(command_ids.contains(&CommandId::RunTask));
+        assert!(command_ids.contains(&CommandId::RerunTask));
+        assert!(command_ids.contains(&CommandId::StopTask));
         assert!(command_ids.contains(&CommandId::SaveWorkspace));
         assert!(command_ids.contains(&CommandId::RestoreWorkspace));
     }
 
     #[test]
-    fn enter_copy_mode_is_a_runtime_command() {
+    fn runtime_commands_are_not_core_commands() {
         assert_eq!(
             command_target(CommandId::EnterCopyMode),
             CommandTarget::Runtime(RuntimeCommand::EnterCopyMode)
+        );
+        assert_eq!(
+            command_target(CommandId::RunTask),
+            CommandTarget::RuntimeTask(RuntimeTaskCommand::RunConfiguredTask)
+        );
+        assert_eq!(
+            command_target(CommandId::RerunTask),
+            CommandTarget::RuntimeTask(RuntimeTaskCommand::RerunFocusedTask)
+        );
+        assert_eq!(
+            command_target(CommandId::StopTask),
+            CommandTarget::RuntimeTask(RuntimeTaskCommand::StopFocusedTask)
         );
         assert_eq!(command_target(CommandId::RestartPane), CommandTarget::Core);
     }
@@ -338,10 +420,48 @@ mod tests {
             PaletteInput::Dispatch(CommandId::EnterCopyMode)
         );
         assert_eq!(
+            resolve_palette_key(PaletteKey::Character('b')),
+            PaletteInput::Dispatch(CommandId::RunTask)
+        );
+        assert_eq!(
+            resolve_palette_key(PaletteKey::Character('r')),
+            PaletteInput::Dispatch(CommandId::RestartPane)
+        );
+        assert_eq!(
+            resolve_palette_key(PaletteKey::Character('w')),
+            PaletteInput::Dispatch(CommandId::SaveWorkspace)
+        );
+        assert_eq!(
+            resolve_palette_key(PaletteKey::Character('o')),
+            PaletteInput::Dispatch(CommandId::RestoreWorkspace)
+        );
+        assert_eq!(
             resolve_palette_key(PaletteKey::BackTab),
             PaletteInput::Dispatch(CommandId::FocusPrevious)
         );
         assert_eq!(resolve_palette_key(PaletteKey::Escape), PaletteInput::Close);
+    }
+
+    #[test]
+    fn focused_task_palette_keys_resolve_to_rerun_and_stop() {
+        assert_eq!(
+            resolve_palette_key_with_context(
+                PaletteKey::Character('r'),
+                PaletteContext::focused_task(),
+            ),
+            PaletteInput::Dispatch(CommandId::RerunTask)
+        );
+        assert_eq!(
+            resolve_palette_key_with_context(
+                PaletteKey::Character('c'),
+                PaletteContext::focused_task(),
+            ),
+            PaletteInput::Dispatch(CommandId::StopTask)
+        );
+        assert_eq!(
+            resolve_palette_key(PaletteKey::Character('c')),
+            PaletteInput::Noop
+        );
     }
 
     #[test]
@@ -365,5 +485,29 @@ mod tests {
                 .iter()
                 .any(|command| command.id == CommandId::EnterCopyMode)
         );
+    }
+
+    #[test]
+    fn built_in_task_commands_are_task_category_and_runtime_targets() {
+        for (command_id, expected_target) in [
+            (CommandId::RunTask, RuntimeTaskCommand::RunConfiguredTask),
+            (CommandId::RerunTask, RuntimeTaskCommand::RerunFocusedTask),
+            (CommandId::StopTask, RuntimeTaskCommand::StopFocusedTask),
+        ] {
+            let command = command_for_id(command_id).unwrap();
+
+            assert_eq!(command.category, CommandCategory::Task);
+            assert_eq!(
+                command_target(command_id),
+                CommandTarget::RuntimeTask(expected_target)
+            );
+
+            let mut workspace = Workspace::new("w", PathBuf::from("/tmp/p"));
+            let context = CommandContext::for_project("w", "/tmp/p");
+            let result = dispatch_command(&mut workspace, &context, command_id);
+
+            assert!(matches!(result, Err(CommandError::NotACoreCommand(id)) if id == command_id));
+            assert_eq!(workspace.active_session().panes().len(), 1);
+        }
     }
 }

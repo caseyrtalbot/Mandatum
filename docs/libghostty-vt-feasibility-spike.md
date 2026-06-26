@@ -152,8 +152,10 @@ Treat `libghostty-vt` as a promising optional backend, not the default backend
 yet.
 
 Do not add a Cargo dependency, vendored source, bindgen output, build script, or
-checked-in generated headers in this phase. The fake adapter remains the only
-compiled backend.
+checked-in generated headers in this phase.
+
+Current status update: Milestone 4 later added a local Rust `vte` backend as the
+compiled default behind `TerminalAdapter`; the fake adapter is now fixture-only.
 
 ## Next Binding Gate
 

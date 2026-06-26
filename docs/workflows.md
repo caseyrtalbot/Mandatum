@@ -10,12 +10,27 @@
 
 ## Primary Workflow: Build And Test
 
-1. User invokes `run build` or `run tests`.
-2. Product opens or reuses a task pane.
-3. Command runs in project context.
-4. Output streams live.
-5. Exit status is visible.
-6. Failure can be rerun, copied, or sent to an agent.
+Current task-runtime slice:
+
+1. User opens the command palette.
+2. User invokes `Run Task` (`Ctrl-P`, then `b`).
+3. Product opens a task pane with durable command intent.
+4. The configured shell command runs in project context through app-owned PTY
+   runtime.
+5. Output streams live in the task pane.
+6. Running, succeeded, and failed status is visible.
+7. With the task pane focused, user invokes `Rerun Task` (`Ctrl-P`, then `r`) to
+   replace the app-owned runtime for the same pane and durable command intent.
+8. With the task pane focused, user invokes `Stop Task` (`Ctrl-P`, then `c`) to
+   cancel a pending launch or terminate a running task without serializing live
+   process state.
+
+Later workflow work:
+
+- named build/test/dev-server recipes
+- task pane reuse
+- command history
+- forwarding a failure to an agent
 
 ## Primary Workflow: Agent Thread
 
@@ -35,7 +50,8 @@
 ## Recovery Workflow
 
 1. App restarts.
-2. Workspace restores project, layout, pane specs, and recent tasks.
-3. Dead processes are marked as exited/restartable.
-4. User can restart panes or reset workspace.
-
+2. Workspace restores project, layout, and pane specs from durable state.
+3. Visible terminal panes launch fresh live PTYs for the restored layout.
+4. Task pane command intent restores, but old task processes do not auto-relaunch.
+5. Task/agent runtime recovery remains later workflow work.
+6. User can restart panes or reset workspace.

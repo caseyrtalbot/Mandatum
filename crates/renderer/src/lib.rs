@@ -1,10 +1,11 @@
-//! Terminal renderer for Mandatum's placeholder workspace shell.
+//! Terminal renderer for Mandatum's workspace shell.
 //!
 //! This crate renders core workspace state and optional terminal grid snapshots.
 //! It does not dispatch product actions or own PTY/runtime lifecycle.
 
 use mandatum_core::{
-    FloatingRect, LayoutNode, PaneId, PaneKind, PaneSpec, Session, SplitAxis, Workspace,
+    FloatingRect, LayoutNode, PaneId, PaneKind, PaneSpec, Session, SplitAxis, TaskPaneIntent,
+    Workspace,
 };
 use mandatum_terminal_vt::{CellStyle, Color as VtColor, TerminalGrid};
 use ratatui::{
@@ -132,6 +133,96 @@ impl<'a> TerminalGridView<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneTaskRuntime<'a> {
+    pub pane_id: &'a PaneId,
+    pub status: &'a str,
+    pub output: Option<&'a TerminalGrid>,
+    pub viewport: TerminalViewport,
+}
+
+impl<'a> PaneTaskRuntime<'a> {
+    pub fn new(pane_id: &'a PaneId, status: &'a str) -> Self {
+        Self {
+            pane_id,
+            status,
+            output: None,
+            viewport: TerminalViewport::live(),
+        }
+    }
+
+    pub fn with_output(pane_id: &'a PaneId, status: &'a str, output: &'a TerminalGrid) -> Self {
+        Self {
+            pane_id,
+            status,
+            output: Some(output),
+            viewport: TerminalViewport::live(),
+        }
+    }
+
+    pub fn with_output_viewport(
+        pane_id: &'a PaneId,
+        status: &'a str,
+        output: &'a TerminalGrid,
+        viewport: TerminalViewport,
+    ) -> Self {
+        Self {
+            pane_id,
+            status,
+            output: Some(output),
+            viewport,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskRuntimeView<'a> {
+    pub panes: &'a [PaneTaskRuntime<'a>],
+}
+
+impl<'a> TaskRuntimeView<'a> {
+    pub const fn empty() -> Self {
+        Self { panes: &[] }
+    }
+
+    pub const fn new(panes: &'a [PaneTaskRuntime<'a>]) -> Self {
+        Self { panes }
+    }
+
+    pub fn entry(&self, pane_id: &PaneId) -> Option<&PaneTaskRuntime<'a>> {
+        self.panes.iter().find(|pane| pane.pane_id == pane_id)
+    }
+
+    pub fn output_for_pane(&self, pane_id: &PaneId) -> Option<&'a TerminalGrid> {
+        self.entry(pane_id).and_then(|pane| pane.output)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimePaneViews<'a> {
+    pub terminal_grids: TerminalGridView<'a>,
+    pub task_panes: TaskRuntimeView<'a>,
+}
+
+impl<'a> RuntimePaneViews<'a> {
+    pub const fn empty() -> Self {
+        Self {
+            terminal_grids: TerminalGridView::empty(),
+            task_panes: TaskRuntimeView::empty(),
+        }
+    }
+
+    pub const fn new(
+        terminal_grids: TerminalGridView<'a>,
+        task_panes: TaskRuntimeView<'a>,
+    ) -> Self {
+        Self {
+            terminal_grids,
+            task_panes,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceScene {
     pub panes: Vec<PaneScene>,
@@ -178,6 +269,18 @@ pub fn render_with_terminal_grids(
     state: RenderState<'_>,
     terminal_grids: TerminalGridView<'_>,
 ) {
+    render_with_runtime_views(
+        frame,
+        state,
+        RuntimePaneViews::new(terminal_grids, TaskRuntimeView::empty()),
+    );
+}
+
+pub fn render_with_runtime_views(
+    frame: &mut Frame<'_>,
+    state: RenderState<'_>,
+    runtime_views: RuntimePaneViews<'_>,
+) {
     let area = frame.area();
     let chunks = RatatuiLayout::default()
         .direction(Direction::Vertical)
@@ -189,7 +292,7 @@ pub fn render_with_terminal_grids(
         .split(area);
 
     render_header(frame, chunks[0], state.workspace);
-    render_workspace(frame, chunks[1], state.workspace, terminal_grids);
+    render_workspace(frame, chunks[1], state.workspace, runtime_views);
     render_status(frame, chunks[2], state.status);
 
     if state.palette.open {
@@ -261,11 +364,11 @@ fn render_workspace(
     frame: &mut Frame<'_>,
     area: Rect,
     workspace: &Workspace,
-    terminal_grids: TerminalGridView<'_>,
+    runtime_views: RuntimePaneViews<'_>,
 ) {
     let scene = scene_for_workspace(workspace, area);
     for pane in scene.panes {
-        render_pane(frame, pane, workspace.active_session(), terminal_grids);
+        render_pane(frame, pane, workspace.active_session(), runtime_views);
     }
 }
 
@@ -273,7 +376,7 @@ fn render_pane(
     frame: &mut Frame<'_>,
     pane_scene: PaneScene,
     session: &Session,
-    terminal_grids: TerminalGridView<'_>,
+    runtime_views: RuntimePaneViews<'_>,
 ) {
     let Some(pane) = session.pane(&pane_scene.id) else {
         return;
@@ -288,7 +391,7 @@ fn render_pane(
     };
 
     if matches!(pane.kind(), PaneKind::Terminal { .. })
-        && let Some(entry) = terminal_grids.entry(&pane_scene.id)
+        && let Some(entry) = runtime_views.terminal_grids.entry(&pane_scene.id)
     {
         let title = pane_title(&pane_scene, entry.viewport.in_copy_mode());
         let block = Block::default()
@@ -296,6 +399,24 @@ fn render_pane(
             .border_style(border_style)
             .title(title);
         render_terminal_grid(frame, pane_scene.area, block, entry.grid, entry.viewport);
+        return;
+    }
+
+    if let PaneKind::Task { intent } = pane.kind() {
+        let title = pane_title(&pane_scene, false);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(title);
+        render_task_pane(
+            frame,
+            pane_scene.area,
+            block,
+            &pane_scene,
+            pane,
+            intent,
+            runtime_views.task_panes.entry(&pane_scene.id),
+        );
         return;
     }
 
@@ -335,6 +456,85 @@ fn render_terminal_grid(
     let inner_area = pane_inner_area(area);
     let lines = terminal_grid_lines(grid, viewport, inner_area.width, inner_area.height);
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_task_pane(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'_>,
+    pane_scene: &PaneScene,
+    pane: &PaneSpec,
+    intent: &TaskPaneIntent,
+    runtime: Option<&PaneTaskRuntime<'_>>,
+) {
+    let inner_area = pane_inner_area(area);
+    let lines = task_pane_lines(
+        pane_scene,
+        pane,
+        intent,
+        runtime,
+        inner_area.width,
+        inner_area.height,
+    );
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn task_pane_lines(
+    pane_scene: &PaneScene,
+    pane: &PaneSpec,
+    intent: &TaskPaneIntent,
+    runtime: Option<&PaneTaskRuntime<'_>>,
+    max_width: u16,
+    max_height: u16,
+) -> Vec<Line<'static>> {
+    if max_height == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = vec![
+        Line::from(format!("{} {}", pane_scene.id, pane_scene.kind)),
+        Line::from(format!("title: {}", pane.title())),
+        Line::from(format!("command: {}", intent.command)),
+        Line::from(format!("cwd: {}", task_cwd_label(pane, intent))),
+        Line::from(format!(
+            "recipe: {}",
+            intent.recipe_id.as_deref().unwrap_or("ad hoc")
+        )),
+    ];
+
+    match runtime {
+        Some(runtime) => {
+            lines.push(Line::from(format!("runtime status: {}", runtime.status)));
+            if let Some(output) = runtime.output {
+                lines.push(Line::from("output:"));
+                let output_height = max_height.saturating_sub(lines.len() as u16);
+                lines.extend(terminal_grid_lines(
+                    output,
+                    runtime.viewport,
+                    max_width,
+                    output_height,
+                ));
+            } else {
+                lines.push(Line::from("output: no live grid attached"));
+            }
+        }
+        None => {
+            lines.push(Line::from("runtime status: unavailable"));
+            lines.push(Line::from("output: no live runtime attached"));
+        }
+    }
+
+    lines.truncate(usize::from(max_height));
+    lines
+}
+
+fn task_cwd_label(pane: &PaneSpec, intent: &TaskPaneIntent) -> String {
+    intent
+        .cwd
+        .as_ref()
+        .or_else(|| pane.cwd())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unset".to_owned())
 }
 
 fn pane_inner_area(area: Rect) -> Rect {
@@ -626,7 +826,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 mod tests {
     use std::path::PathBuf;
 
-    use mandatum_core::{CoreAction, PaneId, Workspace};
+    use mandatum_core::{CoreAction, PaneId, PaneKind, TaskPaneIntent, Workspace};
     use mandatum_terminal_vt::{TerminalAdapter, TerminalParser, TerminalSize};
     use ratatui::layout::Rect;
 
@@ -634,6 +834,13 @@ mod tests {
 
     fn workspace() -> Workspace {
         Workspace::new("Mandatum", PathBuf::from("/tmp/mandatum"))
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     #[test]
@@ -688,6 +895,46 @@ mod tests {
         let floating = scene.panes.iter().find(|pane| pane.floating).unwrap();
         assert_eq!(floating.id, PaneId::new("pane-2"));
         assert_eq!(floating.area, Rect::new(8, 4, 96, 28));
+    }
+
+    #[test]
+    fn restored_workspace_layout_renders_with_same_geometry() {
+        let mut workspace = workspace();
+        workspace.apply_action(CoreAction::SplitRight).unwrap();
+        workspace.apply_action(CoreAction::SplitDown).unwrap();
+        workspace.apply_action(CoreAction::FocusPrevious).unwrap();
+        workspace
+            .apply_action(CoreAction::StackFocusedWithNext)
+            .unwrap();
+        workspace
+            .apply_action(CoreAction::NewTerminal {
+                title: "scratch".to_owned(),
+                cwd: Some(PathBuf::from("/tmp/mandatum")),
+            })
+            .unwrap();
+
+        let restored = Workspace::from_json(&workspace.to_json().unwrap()).unwrap();
+        let area = Rect::new(0, 0, 120, 40);
+
+        assert_eq!(
+            scene_for_workspace(&restored, area),
+            scene_for_workspace(&workspace, area)
+        );
+        for pane_id in workspace.active_session().panes().keys() {
+            assert_eq!(
+                pane_content_area(&restored, area, pane_id),
+                pane_content_area(&workspace, area, pane_id)
+            );
+        }
+
+        let mut zoomed = restored.clone();
+        zoomed.apply_action(CoreAction::ToggleZoomFocused).unwrap();
+        let zoomed_restored = Workspace::from_json(&zoomed.to_json().unwrap()).unwrap();
+
+        assert_eq!(
+            scene_for_workspace(&zoomed_restored, area),
+            scene_for_workspace(&zoomed, area)
+        );
     }
 
     #[test]
@@ -788,5 +1035,113 @@ mod tests {
 
         assert!(view.for_pane(&pane_id).is_some());
         assert!(view.for_pane(&PaneId::new("pane-2")).is_none());
+    }
+
+    #[test]
+    fn task_runtime_view_looks_up_status_and_optional_output_by_pane() {
+        let pane_id = PaneId::new("pane-1");
+        let mut parser = TerminalParser::new(TerminalSize::new(8, 1).unwrap());
+        parser.feed(b"ok").unwrap();
+        let panes = [PaneTaskRuntime::with_output(
+            &pane_id,
+            "running: cargo test",
+            parser.grid(),
+        )];
+        let view = TaskRuntimeView::new(&panes);
+
+        assert_eq!(
+            view.entry(&pane_id).map(|entry| entry.status),
+            Some("running: cargo test")
+        );
+        assert!(view.output_for_pane(&pane_id).is_some());
+        assert!(view.entry(&PaneId::new("pane-2")).is_none());
+        assert!(view.output_for_pane(&PaneId::new("pane-2")).is_none());
+    }
+
+    #[test]
+    fn task_pane_lines_render_intent_with_live_runtime_status_and_output() {
+        let mut workspace = workspace();
+        let pane_id = workspace.active_session_mut().add_floating_pane(
+            "tests",
+            PaneKind::Task {
+                intent: TaskPaneIntent {
+                    recipe_id: Some("test".to_owned()),
+                    command: "cargo test".to_owned(),
+                    cwd: Some(PathBuf::from("/tmp/project")),
+                },
+            },
+            Some(PathBuf::from("/tmp/project")),
+        );
+        let pane = workspace.active_session().pane(&pane_id).unwrap();
+        let PaneKind::Task { intent } = pane.kind() else {
+            panic!("fixture must create a task pane");
+        };
+        let pane_scene = PaneScene {
+            id: pane_id.clone(),
+            title: pane.title().to_owned(),
+            kind: "task",
+            area: Rect::new(0, 0, 40, 12),
+            focused: false,
+            floating: true,
+            stacked: false,
+            zoomed: false,
+        };
+        let mut parser = TerminalParser::new(TerminalSize::new(16, 2).unwrap());
+        parser.feed(b"running 1 test\r\nFAILED").unwrap();
+        let runtime = PaneTaskRuntime::with_output(&pane_id, "failed: exit 101", parser.grid());
+
+        let lines = task_pane_lines(&pane_scene, pane, intent, Some(&runtime), 40, 10);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(text.iter().any(|line| line == "command: cargo test"));
+        assert!(text.iter().any(|line| line == "cwd: /tmp/project"));
+        assert!(text.iter().any(|line| line == "recipe: test"));
+        assert!(
+            text.iter()
+                .any(|line| line == "runtime status: failed: exit 101")
+        );
+        assert!(text.iter().any(|line| line.trim_end() == "running 1 test"));
+        assert!(text.iter().any(|line| line.trim_end() == "FAILED"));
+        assert!(!text.iter().any(|line| line.contains("Pending")));
+    }
+
+    #[test]
+    fn task_pane_lines_report_unavailable_when_no_runtime_view_exists() {
+        let mut workspace = workspace();
+        let pane_id = workspace.active_session_mut().add_floating_pane(
+            "build",
+            PaneKind::Task {
+                intent: TaskPaneIntent {
+                    recipe_id: Some("build".to_owned()),
+                    command: "cargo build".to_owned(),
+                    cwd: None,
+                },
+            },
+            Some(PathBuf::from("/tmp/mandatum")),
+        );
+        let pane = workspace.active_session().pane(&pane_id).unwrap();
+        let PaneKind::Task { intent } = pane.kind() else {
+            panic!("fixture must create a task pane");
+        };
+        let pane_scene = PaneScene {
+            id: pane_id,
+            title: pane.title().to_owned(),
+            kind: "task",
+            area: Rect::new(0, 0, 40, 10),
+            focused: false,
+            floating: true,
+            stacked: false,
+            zoomed: false,
+        };
+
+        let lines = task_pane_lines(&pane_scene, pane, intent, None, 40, 8);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(text.iter().any(|line| line == "cwd: /tmp/mandatum"));
+        assert!(
+            text.iter()
+                .any(|line| line == "runtime status: unavailable")
+        );
+        assert!(!text.iter().any(|line| line.contains("Running")));
     }
 }

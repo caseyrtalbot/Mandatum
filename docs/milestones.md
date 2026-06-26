@@ -27,7 +27,9 @@ Validation:
 
 Goal: implement renderer-neutral workspace state and actions.
 
-Status: Implemented as the first Cargo workspace scaffold. Runtime crates remain placeholders.
+Status: Implemented as the first Cargo workspace scaffold. Runtime crates are
+no longer placeholders; `pty`, `terminal-vt`, `renderer`, and `app` now have
+Milestone 4 implementations documented below.
 
 Deliverables:
 
@@ -52,10 +54,11 @@ Validation:
 
 Goal: prove process and terminal-state seams.
 
-Status: Started with the fake parser adapter seam in `crates/terminal-vt`, the
-pure PTY abstraction and headless native OS PTY seams in `crates/pty`, and a
-`libghostty-vt` feasibility spike. Real `libghostty-vt` binding, renderer
-integration, visible terminal panes, and app runtime remain deferred.
+Status: Implemented as the parser/PTY seam milestone. It added the fake parser
+adapter seam in `crates/terminal-vt`, pure PTY abstraction plus headless native
+OS PTY support in `crates/pty`, and the `libghostty-vt` feasibility spike.
+`libghostty-vt` binding remains deferred; app runtime, renderer integration,
+and visible PTY-backed panes were delivered in later milestones.
 
 Deliverables:
 
@@ -80,19 +83,20 @@ Validation:
 
 Goal: create the first runnable terminal application shell.
 
-Status: Implemented as a placeholder terminal UI shell. `cargo run` launches
-Mandatum, restores the terminal on quit, renders core workspace layout state,
-handles resize events, dispatches existing command ids, and shows a command
-palette overlay. Real PTY-backed pane rendering remains Milestone 4.
+Status: Implemented as the first runnable terminal UI shell. `cargo run`
+launches Mandatum, restores the terminal on quit, renders core workspace layout
+state, handles resize events, dispatches existing command ids, and shows a
+command palette overlay. Real PTY-backed pane rendering was delivered in
+Milestone 4.
 
 Deliverables:
 
 - terminal initialization/restoration
-- placeholder workspace scene inside the terminal
+- workspace scene inside the terminal
 - panes from core state
 - focus actions
 - split/resize actions
-- command palette placeholder
+- command palette overlay
 - basic settings/config path
 
 Validation:
@@ -150,25 +154,75 @@ Deferred to later milestones:
 - `libghostty-vt` backend binding
 - native OS mouse selection, rich clipboard history, semantic selection
 
-## Milestone 5: Multi-Pane Coding Workflow
+## Milestone 5A: Workspace Open/Restore And Layout Persistence
 
-Goal: support useful coding sessions.
+Goal: persist and restore durable workspace/session layout intent from disk.
+
+Status: Complete. Mandatum saves workspace JSON to `.mandatum/workspace.json`
+under the project path, restores that file on startup when present, exposes
+explicit save/restore commands through the command path, validates restored
+state and stages fresh PTYs before swapping workspaces, preserves the current
+workspace on restore failure, and activates fresh PTYs for restored visible
+terminal panes.
 
 Deliverables:
 
-- multiple terminal panes
-- project workspace open/restore
-- build/test task recipes
-- task status surfaces
-- rerun/stop commands
-- command history
-- layout persistence
+- app-level session path decision
+- startup restore path for a saved workspace
+- explicit save/restore command handling in `app`
+- fresh PTY runtime reconciliation for restored terminal panes
+- visible restore/save status and failure handling
+- tests proving restored layout intent does not include runtime handles,
+  process ids, parser state, scrollback, renderer state, or thread handles
 
 Validation:
 
-- user can run editor, shell, tests, and server together
+- saved workspace JSON contains durable core intent only
+- restore recreates panes/layout/focus from disk and launches fresh live PTYs
+  for visible terminal panes
+- restore failure is visible and does not corrupt the current workspace
+- `core` remains renderer-neutral and runtime-handle-free
+- docs and handoff identify task/agent workflow runtime as later work
+
+## Milestone 5B: Multi-Pane Coding Workflow
+
+Goal: support useful coding sessions.
+
+Status: Started. The first task-runtime slices are complete: `Run Task` creates
+a durable task pane intent and the app launches one configured shell command in
+that task pane; focused task panes can now be explicitly rerun or stopped.
+Live task process handles, parser state, reader threads, output buffers, exit
+state, runtime tokens, and status strings are owned by `crates/app`; durable
+core state stores only task command intent (`recipe_id`, `command`, and `cwd`).
+Renderer task status/output views are read-only runtime inputs. Tasks launched
+or rerun while hidden by zoom are tracked as pending app runtime launches;
+failed launches and stopped tasks surface app-owned status without serializing
+failure or stopped state.
+
+Deliverables:
+
+- multiple terminal panes beyond the current split/stack/floating baseline:
+  implemented before 5B
+- build/test task recipes: first configured shell command slice implemented
+- task status surfaces: first running/succeeded/failed status and output surface
+  implemented
+- rerun/stop commands: implemented for the focused task pane through app-owned
+  runtime commands
+- command history: deferred
+- layout persistence hardening on top of the Milestone 5A disk-backed baseline:
+  task intent persists; live task runtime does not auto-relaunch on restore
+
+Validation:
+
+- user can launch one configured shell task from the command palette
+- user can rerun or stop the focused task without mutating durable core state
 - workspace can close and reopen with useful intent restored
 - task failure is visible and actionable
+- `RestartPane` remains shell-only for task panes; task rerun uses explicit
+  runtime task command semantics
+- saved workspace JSON excludes task process handles, process IDs, parser state,
+  reader threads, runtime tokens, output buffers, runtime status, stopped state,
+  and scrollback
 
 ## Milestone 6: Agent Surface
 

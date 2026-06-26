@@ -10,6 +10,12 @@ Milestone 2 has the terminal parser, native PTY, and `libghostty-vt`
 feasibility seams, Milestone 3 has the runnable terminal shell, and Milestone 4
 is complete: real PTY-backed terminal panes with a hardened VT parser,
 scrollback, a keyboard copy/selection baseline, and in-place PTY restart.
+Milestone 5A is complete: the app can save and restore durable workspace/layout
+intent from disk and reconciles restored terminal panes with fresh PTYs. The
+first Milestone 5B slices are complete: the app can launch one configured
+shell command in a task pane and explicitly rerun or stop the focused task
+while keeping process handles, parser state, thread handles, output buffers,
+and status runtime outside durable core state.
 
 ## Current State
 
@@ -48,12 +54,20 @@ Created:
 - keyboard copy mode with stream selection and OSC 52 clipboard copy in
   `crates/app`
 - in-place PTY restart registry keyed by `PaneId` in `crates/app`
+- disk-backed workspace save/restore in `crates/app` at
+  `.mandatum/workspace.json`, using existing core JSON persistence and fresh
+  PTY reconciliation after restore
+- durable task pane command intent in `crates/core`/`crates/workflows`, `Run Task`,
+  `Rerun Task`, and `Stop Task` command metadata in `crates/commands`,
+  task-pane output/status presentation in `crates/renderer`, and app-owned task
+  process runtime launch/rerun/stop semantics in `crates/app`
 
 Not yet created:
 
 - `libghostty-vt` binding (still a deferred optional backend)
 - native OS mouse selection, semantic selection, rich clipboard history
-- task/agent workflow pane runtime
+- command history, named task recipe configuration, automatic restored-task
+  relaunch, and agent workflow pane runtime
 
 The terminal pane now runs a normal interactive shell: common VT output (shell
 prompts, command output, line redraws, clears, and ANSI styling) renders without
@@ -90,7 +104,9 @@ commands      command palette, keymaps, action registry
 workflows     builds, tests, tasks, agents, logs
 ```
 
-The first high-value implementation target is `core`, because it can be tested before committing to PTY, parser, or terminal-renderer details.
+The first high-value implementation target was `core`; current work should
+preserve that renderer-neutral boundary while evolving the PTY, parser,
+renderer, app, commands, and workflows crates.
 
 ## Accepted First `/plan`
 
@@ -140,21 +156,21 @@ Create the selected build system and core module structure. Implement workspace,
 Done when formatting, tests, and build/typecheck pass, and docs reflect the implemented boundaries.
 ```
 
-## Deferred Decisions
+## Post-Milestone 5B Task Runtime Deferred Decisions
 
-1. OS PTY implementation details.
-2. Real terminal parser backend details behind the current fake adapter seam.
-3. `libghostty-vt` feasibility behind `terminal-vt`.
-4. End-to-end runtime stream scheduling.
-5. Terminal capability model.
-6. Renderer backend and command palette UI.
-7. App lifecycle, config path, and persistence timing.
+1. Command history, named task recipe configuration UI, and automatic
+   restored-task relaunch policy.
+2. `libghostty-vt` binding as a future optional `terminal-vt` backend.
+3. Native OS mouse selection, semantic selection, and rich clipboard history.
+4. Terminal capability model beyond the current local `vte` backend.
+5. Agent workflow pane runtime and broader keymap configuration.
 
 ## Suggested Decision Biases
 
 - Choose Rust-first if the goal is terminal/Codex-friendly incremental progress.
-- Choose a pure core first before PTY, parser, or renderer coupling.
-- Use a fake terminal adapter before a full parser dependency.
+- Preserve the pure `core` boundary before adding runtime or workflow features.
+- Keep parser implementations behind `TerminalAdapter`; the local `vte` backend
+  is the current default, and the fake adapter is fixture-only.
 - Avoid a Ghostty fork until the workspace product proves itself.
 - Avoid Swift/AppKit/SwiftUI/Metal entirely for this repo.
 - Avoid a web UI unless terminal-native output is explicitly deprioritized.

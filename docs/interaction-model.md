@@ -94,11 +94,18 @@ It may be backed by a terminal process but should expose task metadata:
 - command
 - cwd
 - status
-- start time
-- exit code
-- failure summary
+- start time (deferred)
+- exit code (current runtime surfaces exit status text)
+- failure summary (deferred beyond raw exit/status text)
 - rerun action
 - stop action
+
+Current task runtime: `Run Task` from the command palette (`Ctrl-P`, then `b`)
+opens a task pane and runs one configured shell command. When a task pane is
+focused, `Ctrl-P` then `r` reruns the same durable task intent in the same pane,
+and `Ctrl-P` then `c` stops a pending or running task. The task pane stores
+durable command intent only; live running/succeeded/failed/stopped status and
+output are app runtime state.
 
 ### Agent Pane
 

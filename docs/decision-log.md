@@ -330,7 +330,9 @@ verified in this phase.
 Consequences:
 
 - `libghostty-vt` remains a promising optional backend, not the default backend.
-- The fake adapter remains the only compiled `terminal-vt` backend.
+- Current status update: Milestone 4 later added a local Rust `vte` backend as
+  the compiled default behind `TerminalAdapter`; the fake adapter is now
+  fixture-only.
 - No Cargo dependency, build script, vendored source, bindgen output, or
   generated headers were added.
 - A future binding must pin upstream, provide an explicit Zig/CMake/prebuilt or
@@ -450,10 +452,9 @@ Consequences:
   terminal UI crates.
 - Normal keys now go to the focused shell; workspace controls move behind
   `Ctrl-P` command palette mode, with `Ctrl-Q` as the app quit shortcut.
-- The fake/basic parser can show shell escape sequences visibly. A real VT
-  parser backend remains a later gate.
-- Copy/selection, scrollback, restart registry behavior, and `libghostty-vt`
-  binding remain deferred.
+- Superseded by later Milestone 4 hardening: the default parser is now the local
+  Rust `vte` backend, and copy mode, bounded scrollback, and in-place PTY
+  restart are implemented. `libghostty-vt` binding remains deferred.
 
 Verification:
 
@@ -479,10 +480,11 @@ trait. Make it the default backend selected by `TerminalParser::new`. Keep
 
 Context:
 
-The first Milestone 4 slice used the fake/basic adapter, which ignores CSI/SGR
-sequences, so a real shell with `TERM` set to a capable terminal would leak raw
-escape sequences into the grid. Milestone 4 completion requires common VT output
-(prompts, command output, line redraws, clears, ANSI styling) to render cleanly.
+The initial runtime slice used the fixture-oriented adapter, which ignores
+CSI/SGR sequences, so a real shell with `TERM` set to a capable terminal would
+leak raw escape sequences into the grid. Milestone 4 completion requires common
+VT output (prompts, command output, line redraws, clears, ANSI styling) to render
+cleanly.
 
 Options Considered:
 
@@ -604,3 +606,188 @@ Verification:
 
 - `crates/app` real-PTY test asserting the same `PaneId` gets a fresh child
   process and a bumped recorded generation while core layout is unchanged.
+
+## 2026-06-26: App-Owned Workspace Persistence File
+
+Status: Accepted
+
+Decision:
+
+Persist durable workspace/session layout intent from the app runtime to
+`.mandatum/workspace.json` under the configured project path. Use the existing
+`Workspace::to_json` and `Workspace::from_json` core APIs, but keep path
+selection, filesystem I/O, startup load, status messages, and runtime
+reconciliation in `crates/app`.
+
+Context:
+
+Milestone 5A needed disk-backed save/restore without turning core into a
+filesystem-aware runtime layer and without serializing live PTY, parser,
+renderer, thread, process, scrollback, copy-mode, or clipboard state.
+
+Rationale:
+
+Core already owns durable intent and validation. The app owns lifecycle and live
+terminal resources, so it is the correct place to choose the session file path,
+surface I/O failures, preserve the current workspace on bad restore data, and
+replace live pane runtimes after a successful restore. Restore must stage any
+required fresh PTYs before swapping workspace state so a valid JSON file cannot
+kill the current session when process launch fails.
+
+Consequences:
+
+- `SaveWorkspace` writes validated core JSON to `.mandatum/workspace.json` via a
+  same-directory temporary file and atomic rename after rejecting symlink or
+  special-file targets.
+- startup restore and explicit `RestoreWorkspace` parse and validate into a
+  temporary `Workspace` before replacing the current workspace.
+- restore stages fresh live PTYs for visible terminal panes before shutting down
+  old runtimes or swapping durable workspace state.
+- restore failure leaves the current workspace and live runtimes intact.
+- successful restore shuts down old runtimes, discards pending reader events,
+  clears presentation-only copy/clipboard state, and spawns fresh PTYs for
+  restored visible terminal panes.
+- runtime reader events include an app-local runtime token so old output for a
+  reused `PaneId` and restart generation cannot affect the current parser.
+- task/build runtime remains a later Milestone 5B concern; the first slice is
+  recorded in the next decision. Agent process runtime remains later work.
+
+Verification:
+
+- `crates/app` unit tests cover save success, explicit restore success, startup
+  restore, restore failure preservation, runtime presentation clearing, and
+  fresh live PTY spawn after restore, including PTY-staging rollback and unsafe
+  workspace file rejection.
+- `crates/renderer` unit test covers restored split, stack, floating, zoom, and
+  focus layout geometry.
+- full milestone gate remains `cargo fmt --check`, `cargo clippy --all-targets
+  -- -D warnings`, `cargo test`, `cargo run`, and `git diff --check`.
+
+## 2026-06-26: App-Owned Configured Task Runtime Slice
+
+Status: Accepted
+
+Decision:
+
+Start Milestone 5B with one configured shell task command. `Run Task` creates a
+durable task pane intent through a core action, then `crates/app` launches the
+configured command in that task pane through app-owned PTY/parser/runtime state.
+Core stores only task intent (`recipe_id`, `command`, and `cwd`); live task
+status and output are renderer inputs owned by app runtime.
+
+Context:
+
+Milestone 5A made workspace save/restore durable and transactional for terminal
+panes. The next smallest useful coding workflow was a task pane that can run a
+build/test-style command without putting process handles, PTYs, parser state,
+reader threads, output buffers, process IDs, or live status into serialized core
+state.
+
+Options Considered:
+
+- Store task status in `TaskPaneIntent`. Rejected: `running`/`failed` status is
+  live runtime truth, not durable intent.
+- Auto-relaunch task panes on restore. Rejected for the first slice because
+  build/test/dev-server commands can have side effects.
+- Reuse the existing app PTY reader/parser machinery for task output. Accepted:
+  it keeps process ownership in `app` and gives the renderer terminal-grid
+  output without new dependencies.
+
+Rationale:
+
+The same PTY/parser/runtime boundary that works for terminal panes can support a
+shell-backed task pane, but task command intent and task process lifecycle must
+remain separate. Creating the pane through `CoreAction::CreateTaskPane` keeps
+layout mutation inside core, while `CommandTarget::RuntimeTask` keeps command
+metadata from executing processes.
+
+Consequences:
+
+- `crates/core` no longer serializes `TaskStatus`; task pane intent is recipe id,
+  command, and cwd only.
+- `crates/commands` exposes `Run Task` as runtime task metadata, palette-bound
+  to `b`, and rejects it from core dispatch.
+- `crates/app` owns task PTY handles, parser, reader thread, runtime token, exit
+  status, and status string.
+- tasks launched while hidden are tracked as pending app runtime launches and
+  start when their pane becomes visible; failed launches are visible through
+  non-serialized app status.
+- `RestartPane` is blocked for focused task panes until explicit rerun semantics
+  exist.
+- `crates/renderer` receives read-only task status/output views keyed by `PaneId`.
+- Saved workspace JSON can restore task pane intent but not the old process.
+- Rerun/stop, named recipes, task history, stop semantics, and restored-task
+  recovery policy remain deferred.
+
+Verification:
+
+- `crates/app` tests cover configured task launch success, pending hidden launch,
+  spawn failure status, blocked task restart, nonzero task exit failure status,
+  and task runtime exclusion from saved JSON.
+- `crates/commands` tests cover runtime task metadata and core-dispatch
+  rejection.
+- `crates/core` and `crates/workflows` tests cover durable task intent without
+  runtime status.
+- `crates/renderer` tests cover task runtime status/output rendering inputs.
+
+## 2026-06-26: Focused Task Rerun And Stop Stay App-Owned
+
+Status: Accepted
+
+Decision:
+
+Add explicit focused task rerun and stop commands as app-runtime task commands.
+`Rerun Task` reuses the focused task pane's durable intent and `PaneId` while
+replacing the app-owned PTY/parser/runtime with a fresh runtime token. `Stop
+Task` cancels a pending task launch or terminates the running app-owned runtime
+and leaves only a non-serialized stopped status. `RestartPane` remains a
+terminal-pane restart command and is still blocked for task panes.
+
+Context:
+
+The configured task runtime slice proved task panes can run shell commands
+without serializing live runtime state. The next required behavior was to let a
+developer retry or stop the focused task without creating duplicate panes or
+using terminal restart generation as task lifecycle truth.
+
+Options Considered:
+
+- Reuse `CoreAction::RestartFocused` for tasks. Rejected: it bumps durable pane
+  restart generation and blurs terminal restart with task process lifecycle.
+- Create a new task pane on each rerun. Rejected: it would fragment output
+  surfaces and make `PaneId` less useful for renderer/runtime views.
+- Keep stopped runtime objects in `task_panes`. Rejected for the current slice:
+  removing the runtime after a successful stop makes late reader events fail the
+  runtime-token match and preserves stopped status.
+
+Rationale:
+
+Task rerun and stop are live process lifecycle operations. Keeping them in
+`crates/app` preserves the core persistence boundary: core still stores only
+`TaskPaneIntent { recipe_id, command, cwd }`, and renderer still receives
+read-only task status/output views. Context-aware palette routing lives in
+`crates/commands`, while the app supplies focused-pane context and owns the
+runtime effects.
+
+Consequences:
+
+- `crates/commands` exposes `Rerun Task` and `Stop Task` as task-category
+  runtime commands.
+- palette `r` remains terminal restart by default, but resolves to task rerun
+  when the focused pane is a task; palette `c` resolves to task stop only for a
+  focused task pane.
+- rerun replaces the live runtime for the same task pane and ignores old reader
+  events through the existing app-local runtime token.
+- stop removes pending launches or live task runtimes and surfaces stopped
+  status through app-owned, non-serialized runtime presentation state.
+- restored task panes remain inert until an explicit rerun command.
+- command history, named task recipe configuration, restored-task relaunch
+  policy, and agent pane runtime remain deferred.
+
+Verification:
+
+- `crates/app` tests cover same-pane rerun replacement, old-event rejection,
+  restored task inertness until explicit rerun, stop of a live task, stop of a
+  pending hidden task, and JSON exclusion of stopped/runtime state.
+- `crates/commands` tests cover task command metadata, context-aware palette
+  routing, runtime target routing, and rejection by core dispatch.

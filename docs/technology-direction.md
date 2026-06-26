@@ -40,7 +40,7 @@ Recommended command surface:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-cargo run  # Milestone 3 terminal app-runtime smoke verification
+cargo run  # interactive terminal/task smoke verification
 ```
 
 ## Why Rust First
@@ -93,7 +93,8 @@ Plan should assume:
 - Rust workspace
 - terminal app runtime
 - terminal renderer first
-- fake terminal parser first
+- default `TerminalAdapter` parser is the local `vte` backend; fake adapter is
+  fixture-only, and `libghostty-vt` remains optional/deferred
 - no Apple-native app stack
 - no Xcode
 - all verification through shell commands

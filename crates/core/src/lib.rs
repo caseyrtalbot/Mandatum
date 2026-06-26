@@ -11,9 +11,7 @@ mod workspace;
 pub use action::{ActionOutcome, CoreAction, PersistenceRequest};
 pub use ids::{PaneId, ProjectId, SessionId, WorkspaceId};
 pub use layout::{FloatingPane, FloatingRect, Layout, LayoutNode, SplitAxis, SplitDirection};
-pub use pane::{
-    AgentPaneIntent, AgentStatus, PaneKind, PaneSpec, StatusLogSource, TaskPaneIntent, TaskStatus,
-};
+pub use pane::{AgentPaneIntent, AgentStatus, PaneKind, PaneSpec, StatusLogSource, TaskPaneIntent};
 pub use persistence::{
     PersistedWorkspace, PersistenceError, SESSION_SCHEMA_VERSION, deserialize_workspace,
     serialize_workspace,
@@ -89,21 +87,28 @@ mod tests {
             .apply_action(CoreAction::StackFocusedWithNext)
             .unwrap();
 
-        let session = workspace.active_session_mut();
-        let floating = session.add_floating_pane(
-            "task",
-            PaneKind::Task {
-                intent: TaskPaneIntent {
-                    recipe_id: Some("build".to_owned()),
-                    command: "cargo build".to_owned(),
-                    cwd: Some(PathBuf::from("/tmp/project")),
-                    status: TaskStatus::Pending,
-                },
-            },
-            Some(PathBuf::from("/tmp/project")),
-        );
+        let intent = TaskPaneIntent {
+            recipe_id: Some("build".to_owned()),
+            command: "cargo build".to_owned(),
+            cwd: Some(PathBuf::from("/tmp/project")),
+        };
+        workspace
+            .apply_action(CoreAction::CreateTaskPane {
+                title: "task".to_owned(),
+                intent: intent.clone(),
+            })
+            .unwrap();
+
+        let session = workspace.active_session();
+        let floating = session.focused_pane_id();
 
         assert_eq!(floating.as_str(), "pane-3");
+        assert_eq!(
+            session.pane(floating).map(PaneSpec::kind),
+            Some(&PaneKind::Task {
+                intent: intent.clone(),
+            })
+        );
 
         let serialized = workspace.to_json().unwrap();
         assert!(serialized.contains(r#""type": "stack""#));
@@ -203,7 +208,6 @@ mod tests {
                     recipe_id: Some("test".to_owned()),
                     command: "cargo test".to_owned(),
                     cwd: Some(PathBuf::from("/tmp/project")),
-                    status: TaskStatus::Running,
                 },
             },
             Some(PathBuf::from("/tmp/project")),
@@ -227,9 +231,13 @@ mod tests {
         assert!(serialized.contains(r#""type": "task""#));
         assert!(serialized.contains(r#""type": "agent""#));
         assert!(!serialized.contains("process_id"));
+        assert!(!serialized.contains("runtime_token"));
+        assert!(!serialized.contains("reader_thread"));
+        assert!(!serialized.contains("JoinHandle"));
         assert!(!serialized.contains("pty"));
         assert!(!serialized.contains("parser"));
         assert!(!serialized.contains("renderer"));
         assert!(!serialized.contains("scrollback"));
+        assert!(!serialized.contains(r#""status": "running""#));
     }
 }

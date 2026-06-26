@@ -109,6 +109,10 @@ impl Workspace {
                 self.active_session_mut().add_terminal_pane(title, cwd);
                 Ok(self.mutated_outcome())
             }
+            CoreAction::CreateTaskPane { title, intent } => {
+                self.active_session_mut().add_task_pane(title, intent);
+                Ok(self.mutated_outcome())
+            }
             CoreAction::SplitRight => {
                 self.active_session_mut()
                     .split_focused(SplitDirection::Right)?;
