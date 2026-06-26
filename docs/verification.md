@@ -167,10 +167,9 @@ For the runtime and renderer, verify:
 ## Milestone 4 Real Terminal Pane Verification
 
 Milestone 4 is complete. Visible terminal panes run real PTY-backed shells whose
-output is parsed by the hardened `VteTerminalAdapter` (default backend behind
-`TerminalAdapter`), rendered with styling and a scrollback/selection viewport,
-and driven through a keyboard copy mode and an in-place PTY restart. Run from the
-repo root:
+output is parsed by the hardened default backend behind `TerminalAdapter`,
+rendered with styling and a scrollback/selection viewport, and driven through a
+keyboard copy mode and an in-place PTY restart. Run from the repo root:
 
 ```sh
 cargo fmt --check
@@ -213,9 +212,9 @@ Parser hardening, scrollback, copy/selection, and restart are covered by tests:
   same `PaneId` while leaving core layout intact.
 - `crates/app/tests/terminal_smoke.rs`: real `/bin/sh` end-to-end checks that
   SGR color and cursor addressing render without raw escape leakage, `echo`
-  round-trips, and `seq 1 200` is captured into bounded scrollback without
-  hanging. These stand in for the interactive `cargo run` smoke where an
-  automated terminal is unavailable.
+  round-trips, and a POSIX shell loop printing `1..=200` is captured into
+  bounded scrollback without hanging. These stand in for the interactive
+  `cargo run` smoke where an automated terminal is unavailable.
 
 Deferred (not part of the Milestone 4 gate):
 

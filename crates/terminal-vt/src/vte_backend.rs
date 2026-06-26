@@ -230,6 +230,7 @@ impl TerminalState {
         self.scroll_bottom = self.primary.size().rows() - 1;
         self.wrap_pending = false;
         self.dirty = true;
+        self.primary.erase_in_display(2, CellStyle::default());
         self.primary.erase_in_display(3, CellStyle::default());
         self.primary.set_cursor(0, 0);
     }
@@ -401,6 +402,81 @@ impl TerminalState {
             _ => {}
         }
     }
+
+    fn dispatch_cursor_csi(&mut self, params: &Params, action: char) {
+        match action {
+            'H' | 'f' => {
+                let row = pos_param(params, 0);
+                let column = pos_param(params, 1);
+                self.set_cursor(row, column);
+            }
+            'A' => self.cursor_up(count_param(params, 0)),
+            'B' | 'e' => self.cursor_down(count_param(params, 0)),
+            'C' | 'a' => self.cursor_forward(count_param(params, 0)),
+            'D' => self.cursor_back(count_param(params, 0)),
+            'E' => self.cursor_next_line(count_param(params, 0)),
+            'F' => self.cursor_prev_line(count_param(params, 0)),
+            'G' | '`' => self.set_cursor_column(pos_param(params, 0)),
+            'd' => self.set_cursor_row(pos_param(params, 0)),
+            _ => {}
+        }
+    }
+
+    fn dispatch_edit_csi(&mut self, params: &Params, action: char) {
+        let pen = self.pen;
+        self.dirty = true;
+        match action {
+            'J' => self
+                .active_grid_mut()
+                .erase_in_display(mode_param(params, 0), pen),
+            'K' => self
+                .active_grid_mut()
+                .erase_in_line(mode_param(params, 0), pen),
+            'L' => {
+                let (top, bottom) = (self.scroll_top, self.scroll_bottom);
+                self.active_grid_mut()
+                    .insert_lines(count_param(params, 0), top, bottom, pen);
+            }
+            'M' => {
+                let (top, bottom) = (self.scroll_top, self.scroll_bottom);
+                self.active_grid_mut()
+                    .delete_lines(count_param(params, 0), top, bottom, pen);
+            }
+            '@' => self
+                .active_grid_mut()
+                .insert_chars(count_param(params, 0), pen),
+            'P' => self
+                .active_grid_mut()
+                .delete_chars(count_param(params, 0), pen),
+            'X' => self
+                .active_grid_mut()
+                .erase_chars(count_param(params, 0), pen),
+            _ => {}
+        }
+    }
+
+    fn dispatch_scroll_csi(&mut self, params: &Params, action: char) {
+        let pen = self.pen;
+        let (top, bottom) = (self.scroll_top, self.scroll_bottom);
+        self.dirty = true;
+        match action {
+            'S' => {
+                let capture = !self.using_alternate;
+                self.active_grid_mut().scroll_up_region(
+                    count_param(params, 0),
+                    top,
+                    bottom,
+                    capture,
+                    pen,
+                );
+            }
+            'T' => {
+                self.active_grid_mut()
+                    .scroll_down_region(count_param(params, 0), top, bottom, pen)
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Perform for TerminalState {
@@ -451,78 +527,14 @@ impl Perform for TerminalState {
             return;
         }
         let private = intermediates.first() == Some(&b'?');
-        let pen = self.pen;
 
         match action {
             'm' => self.apply_sgr(params),
-            'H' | 'f' => {
-                let row = pos_param(params, 0);
-                let column = pos_param(params, 1);
-                self.set_cursor(row, column);
+            'H' | 'f' | 'A' | 'B' | 'e' | 'C' | 'a' | 'D' | 'E' | 'F' | 'G' | '`' | 'd' => {
+                self.dispatch_cursor_csi(params, action)
             }
-            'A' => self.cursor_up(count_param(params, 0)),
-            'B' | 'e' => self.cursor_down(count_param(params, 0)),
-            'C' | 'a' => self.cursor_forward(count_param(params, 0)),
-            'D' => self.cursor_back(count_param(params, 0)),
-            'E' => self.cursor_next_line(count_param(params, 0)),
-            'F' => self.cursor_prev_line(count_param(params, 0)),
-            'G' | '`' => self.set_cursor_column(pos_param(params, 0)),
-            'd' => self.set_cursor_row(pos_param(params, 0)),
-            'J' => {
-                self.dirty = true;
-                self.active_grid_mut()
-                    .erase_in_display(mode_param(params, 0), pen);
-            }
-            'K' => {
-                self.dirty = true;
-                self.active_grid_mut()
-                    .erase_in_line(mode_param(params, 0), pen);
-            }
-            'L' => {
-                self.dirty = true;
-                let (top, bottom) = (self.scroll_top, self.scroll_bottom);
-                self.active_grid_mut()
-                    .insert_lines(count_param(params, 0), top, bottom, pen);
-            }
-            'M' => {
-                self.dirty = true;
-                let (top, bottom) = (self.scroll_top, self.scroll_bottom);
-                self.active_grid_mut()
-                    .delete_lines(count_param(params, 0), top, bottom, pen);
-            }
-            '@' => {
-                self.dirty = true;
-                self.active_grid_mut()
-                    .insert_chars(count_param(params, 0), pen);
-            }
-            'P' => {
-                self.dirty = true;
-                self.active_grid_mut()
-                    .delete_chars(count_param(params, 0), pen);
-            }
-            'X' => {
-                self.dirty = true;
-                self.active_grid_mut()
-                    .erase_chars(count_param(params, 0), pen);
-            }
-            'S' => {
-                self.dirty = true;
-                let (top, bottom) = (self.scroll_top, self.scroll_bottom);
-                let capture = !self.using_alternate;
-                self.active_grid_mut().scroll_up_region(
-                    count_param(params, 0),
-                    top,
-                    bottom,
-                    capture,
-                    pen,
-                );
-            }
-            'T' => {
-                self.dirty = true;
-                let (top, bottom) = (self.scroll_top, self.scroll_bottom);
-                self.active_grid_mut()
-                    .scroll_down_region(count_param(params, 0), top, bottom, pen);
-            }
+            'J' | 'K' | 'L' | 'M' | '@' | 'P' | 'X' => self.dispatch_edit_csi(params, action),
+            'S' | 'T' => self.dispatch_scroll_csi(params, action),
             'r' => self.set_scroll_region(params),
             's' => self.save_cursor(),
             'u' => self.restore_cursor(),
@@ -725,6 +737,21 @@ mod tests {
     }
 
     #[test]
+    fn erase_saved_lines_preserves_visible_screen() {
+        let mut adapter = adapter(8, 2);
+        adapter.feed(b"one\r\ntwo\r\nthree").unwrap();
+        assert!(adapter.grid().scrollback_len() > 0);
+
+        adapter.feed(b"\x1b[3J").unwrap();
+
+        assert_eq!(adapter.grid().scrollback_len(), 0);
+        assert!(
+            trimmed(&adapter).iter().any(|line| line.contains("three")),
+            "ED3 must not blank the active screen"
+        );
+    }
+
+    #[test]
     fn carriage_return_redraw_overwrites_line() {
         let mut adapter = adapter(12, 1);
         adapter.feed(b"progress 10%\rprogress 99%").unwrap();
@@ -770,6 +797,20 @@ mod tests {
         // grow from alt-screen scrolling.
         assert_eq!(trimmed(&adapter), vec!["main", ""]);
         assert_eq!(adapter.grid().scrollback_len(), scrollback_before);
+    }
+
+    #[test]
+    fn partial_scroll_regions_do_not_enter_scrollback() {
+        let mut adapter = adapter(8, 3);
+        adapter.feed(b"top\r\nmid\r\nbot").unwrap();
+
+        adapter.feed(b"\x1b[1;2r\x1b[2;1H\n").unwrap();
+
+        assert_eq!(
+            adapter.grid().scrollback_len(),
+            0,
+            "top-origin partial scroll regions are screen edits, not scrollback"
+        );
     }
 
     #[test]

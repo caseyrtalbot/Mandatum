@@ -27,7 +27,8 @@ use crossterm::{
 };
 use mandatum_commands::{
     BUILT_IN_COMMANDS, CommandCategory, CommandContext, CommandError, CommandId, CommandTarget,
-    RuntimeCommand, command_target, dispatch_command,
+    PaletteInput, PaletteKey, RuntimeCommand, command_target, dispatch_command,
+    resolve_palette_key,
 };
 use mandatum_core::{ActionOutcome, PaneId, PaneKind, PersistenceRequest, Workspace};
 use mandatum_pty::{
@@ -38,7 +39,7 @@ use mandatum_renderer::{
     PaletteItem, PaletteView, PaneTerminalGrid, RenderState, SelectionPoint, TerminalGridView,
     TerminalViewport, pane_content_area, render_with_terminal_grids,
 };
-use mandatum_terminal_vt::{TerminalAdapterError, TerminalGrid, TerminalParser, TerminalSize};
+use mandatum_terminal_vt::{TerminalGrid, TerminalParser, TerminalSize};
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use crate::{clipboard::osc52_sequence, copy_mode::CopyModeState};
@@ -425,8 +426,12 @@ impl AppState {
 
         let session = NativePtySession::spawn(intent)?;
         let parts = session.into_split()?;
-        let reader_thread =
-            spawn_reader_thread(pane_id.clone(), parts.reader, self.runtime_tx.clone());
+        let reader_thread = spawn_reader_thread(
+            pane_id.clone(),
+            restart_generation,
+            parts.reader,
+            self.runtime_tx.clone(),
+        );
         let parser = TerminalParser::new(to_terminal_size(size));
 
         self.terminal_panes.insert(
@@ -449,10 +454,17 @@ impl AppState {
     fn drain_runtime_events(&mut self) {
         while let Ok(event) = self.runtime_rx.try_recv() {
             match event {
-                PtyRuntimeEvent::Output { pane_id, bytes } => {
+                PtyRuntimeEvent::Output {
+                    pane_id,
+                    restart_generation,
+                    bytes,
+                } => {
                     let Some(runtime) = self.terminal_panes.get_mut(&pane_id) else {
                         continue;
                     };
+                    if runtime.restart_generation != restart_generation {
+                        continue;
+                    }
                     match runtime.parser.feed_pty_bytes(&bytes) {
                         Ok(_) => {
                             self.status = format!("read {} byte(s) from {pane_id}", bytes.len());
@@ -463,10 +475,23 @@ impl AppState {
                         }
                     }
                 }
-                PtyRuntimeEvent::ReaderClosed { pane_id } => {
+                PtyRuntimeEvent::ReaderClosed {
+                    pane_id,
+                    restart_generation,
+                } => {
+                    if !self.runtime_generation_matches(&pane_id, restart_generation) {
+                        continue;
+                    }
                     self.status = format!("PTY reader closed for {pane_id}");
                 }
-                PtyRuntimeEvent::Error { pane_id, message } => {
+                PtyRuntimeEvent::Error {
+                    pane_id,
+                    restart_generation,
+                    message,
+                } => {
+                    if !self.runtime_generation_matches(&pane_id, restart_generation) {
+                        continue;
+                    }
                     if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
                         runtime.error = Some(message.clone());
                     }
@@ -474,6 +499,12 @@ impl AppState {
                 }
             }
         }
+    }
+
+    fn runtime_generation_matches(&self, pane_id: &PaneId, restart_generation: u64) -> bool {
+        self.terminal_panes
+            .get(pane_id)
+            .is_some_and(|runtime| runtime.restart_generation == restart_generation)
     }
 
     fn poll_child_exits(&mut self) {
@@ -688,22 +719,25 @@ pub fn key_to_terminal_input(key: KeyEvent) -> Option<Vec<u8>> {
 }
 
 fn key_to_palette_input(key: KeyEvent) -> RuntimeInput {
+    let Some(key) = palette_key_for(key) else {
+        return RuntimeInput::Noop;
+    };
+
+    match resolve_palette_key(key) {
+        PaletteInput::Close => RuntimeInput::ClosePalette,
+        PaletteInput::Quit => RuntimeInput::Quit,
+        PaletteInput::Dispatch(command_id) => RuntimeInput::Dispatch(command_id),
+        PaletteInput::Noop => RuntimeInput::Noop,
+    }
+}
+
+fn palette_key_for(key: KeyEvent) -> Option<PaletteKey> {
     match key.code {
-        KeyCode::Esc => RuntimeInput::ClosePalette,
-        KeyCode::Char('q') => RuntimeInput::Quit,
-        KeyCode::Char('n') => RuntimeInput::Dispatch(CommandId::NewTerminal),
-        KeyCode::Char('v') => RuntimeInput::Dispatch(CommandId::SplitRight),
-        KeyCode::Char('s') => RuntimeInput::Dispatch(CommandId::SplitDown),
-        KeyCode::Char('h') => RuntimeInput::Dispatch(CommandId::FocusPrevious),
-        KeyCode::BackTab => RuntimeInput::Dispatch(CommandId::FocusPrevious),
-        KeyCode::Char('l') | KeyCode::Tab => RuntimeInput::Dispatch(CommandId::FocusNext),
-        KeyCode::Char('x') => RuntimeInput::Dispatch(CommandId::ClosePane),
-        KeyCode::Char('z') => RuntimeInput::Dispatch(CommandId::ZoomPane),
-        KeyCode::Char('f') => RuntimeInput::Dispatch(CommandId::FloatPane),
-        KeyCode::Char('t') => RuntimeInput::Dispatch(CommandId::StackPanes),
-        KeyCode::Char('r') => RuntimeInput::Dispatch(CommandId::RestartPane),
-        KeyCode::Char('[') => RuntimeInput::Dispatch(CommandId::EnterCopyMode),
-        _ => RuntimeInput::Noop,
+        KeyCode::Esc => Some(PaletteKey::Escape),
+        KeyCode::Tab => Some(PaletteKey::Tab),
+        KeyCode::BackTab => Some(PaletteKey::BackTab),
+        KeyCode::Char(character) => Some(PaletteKey::Character(character)),
+        _ => None,
     }
 }
 
@@ -827,9 +861,20 @@ impl TerminalPaneRuntime {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PtyRuntimeEvent {
-    Output { pane_id: PaneId, bytes: Vec<u8> },
-    ReaderClosed { pane_id: PaneId },
-    Error { pane_id: PaneId, message: String },
+    Output {
+        pane_id: PaneId,
+        restart_generation: u64,
+        bytes: Vec<u8>,
+    },
+    ReaderClosed {
+        pane_id: PaneId,
+        restart_generation: u64,
+    },
+    Error {
+        pane_id: PaneId,
+        restart_generation: u64,
+        message: String,
+    },
 }
 
 #[derive(Debug)]
@@ -892,15 +937,6 @@ impl From<NativePtyError> for TerminalRuntimeError {
     }
 }
 
-impl From<TerminalAdapterError> for TerminalRuntimeError {
-    fn from(error: TerminalAdapterError) -> Self {
-        Self::NativePty(NativePtyError::ReadFailed {
-            session_id: PtySessionId::new("terminal-parser"),
-            message: error.to_string(),
-        })
-    }
-}
-
 fn draw(terminal: &mut TerminalGuard, app: &AppState) -> io::Result<()> {
     let palette_items = app.palette_items();
     let terminal_grid_items = app.terminal_grid_items();
@@ -923,6 +959,7 @@ fn draw(terminal: &mut TerminalGuard, app: &AppState) -> io::Result<()> {
 
 fn spawn_reader_thread(
     pane_id: PaneId,
+    restart_generation: u64,
     mut reader: NativePtyReader,
     tx: Sender<PtyRuntimeEvent>,
 ) -> JoinHandle<()> {
@@ -932,18 +969,23 @@ fn spawn_reader_thread(
                 Ok(Some(PtyEvent::Output(output))) => {
                     let _ = tx.send(PtyRuntimeEvent::Output {
                         pane_id: pane_id.clone(),
+                        restart_generation,
                         bytes: output.into_bytes(),
                     });
                 }
                 Ok(Some(PtyEvent::ChildExited(_))) | Ok(Some(PtyEvent::BackpressureChanged(_))) => {
                 }
                 Ok(None) => {
-                    let _ = tx.send(PtyRuntimeEvent::ReaderClosed { pane_id });
+                    let _ = tx.send(PtyRuntimeEvent::ReaderClosed {
+                        pane_id,
+                        restart_generation,
+                    });
                     break;
                 }
                 Err(error) => {
                     let _ = tx.send(PtyRuntimeEvent::Error {
                         pane_id,
+                        restart_generation,
                         message: error.to_string(),
                     });
                     break;
@@ -1162,6 +1204,39 @@ mod tests {
             "restart must not change core layout"
         );
         assert!(state.status().contains("restarted shell"));
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn old_reader_events_after_restart_are_ignored() {
+        let mut state = live_state();
+        state.handle_terminal_resize(80, 24);
+        let pane_id = PaneId::new("pane-1");
+
+        state.dispatch(CommandId::RestartPane);
+        state
+            .runtime_tx
+            .send(PtyRuntimeEvent::Output {
+                pane_id: pane_id.clone(),
+                restart_generation: 0,
+                bytes: b"OLD_READER_OUTPUT".to_vec(),
+            })
+            .unwrap();
+        state.tick_runtime();
+
+        let rendered = state
+            .terminal_panes
+            .get(&pane_id)
+            .unwrap()
+            .parser
+            .grid()
+            .snapshot()
+            .join("\n");
+        assert!(
+            !rendered.contains("OLD_READER_OUTPUT"),
+            "old pre-restart output was applied to the fresh runtime"
+        );
 
         state.shutdown();
     }

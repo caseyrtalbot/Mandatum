@@ -137,21 +137,31 @@ pub fn command_for_id(command_id: CommandId) -> Option<&'static Command> {
         .find(|command| command.id == command_id)
 }
 
-/// Where a command's effect is applied. Most commands map to a core action;
-/// a few drive app-runtime/presentation state that core does not model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandTarget {
-    /// Resolves to a `CoreAction` via `action_for_command` and is dispatched
-    /// through `dispatch_command`.
     Core,
-    /// Handled by the app runtime; never mutates durable core state.
     Runtime(RuntimeCommand),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeCommand {
-    /// Enter keyboard scrollback/selection (copy) mode for the focused pane.
     EnterCopyMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteKey {
+    Character(char),
+    Tab,
+    BackTab,
+    Escape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteInput {
+    Close,
+    Quit,
+    Dispatch(CommandId),
+    Noop,
 }
 
 pub fn command_target(command_id: CommandId) -> CommandTarget {
@@ -161,23 +171,50 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
     }
 }
 
+pub fn resolve_palette_key(key: PaletteKey) -> PaletteInput {
+    match key {
+        PaletteKey::Escape => PaletteInput::Close,
+        PaletteKey::Character('q') => PaletteInput::Quit,
+        PaletteKey::Character('n') => PaletteInput::Dispatch(CommandId::NewTerminal),
+        PaletteKey::Character('v') => PaletteInput::Dispatch(CommandId::SplitRight),
+        PaletteKey::Character('s') => PaletteInput::Dispatch(CommandId::SplitDown),
+        PaletteKey::Character('h') | PaletteKey::BackTab => {
+            PaletteInput::Dispatch(CommandId::FocusPrevious)
+        }
+        PaletteKey::Character('l') | PaletteKey::Tab => {
+            PaletteInput::Dispatch(CommandId::FocusNext)
+        }
+        PaletteKey::Character('x') => PaletteInput::Dispatch(CommandId::ClosePane),
+        PaletteKey::Character('z') => PaletteInput::Dispatch(CommandId::ZoomPane),
+        PaletteKey::Character('f') => PaletteInput::Dispatch(CommandId::FloatPane),
+        PaletteKey::Character('t') => PaletteInput::Dispatch(CommandId::StackPanes),
+        PaletteKey::Character('r') => PaletteInput::Dispatch(CommandId::RestartPane),
+        PaletteKey::Character('[') => PaletteInput::Dispatch(CommandId::EnterCopyMode),
+        _ => PaletteInput::Noop,
+    }
+}
+
 pub fn dispatch_command(
     workspace: &mut Workspace,
     context: &CommandContext,
     command_id: CommandId,
 ) -> Result<ActionOutcome, CommandError> {
-    command_for_id(command_id).ok_or(CommandError::UnknownCommand(command_id))?;
-    if let CommandTarget::Runtime(_) = command_target(command_id) {
-        return Err(CommandError::NotACoreCommand(command_id));
-    }
-    let action = action_for_command(command_id, context);
+    let action = core_action_for_command(command_id, context)?;
     workspace
         .apply_action(action)
         .map_err(CommandError::Workspace)
 }
 
-pub fn action_for_command(command_id: CommandId, context: &CommandContext) -> CoreAction {
-    match command_id {
+pub fn core_action_for_command(
+    command_id: CommandId,
+    context: &CommandContext,
+) -> Result<CoreAction, CommandError> {
+    command_for_id(command_id).ok_or(CommandError::UnknownCommand(command_id))?;
+    if let CommandTarget::Runtime(_) = command_target(command_id) {
+        return Err(CommandError::NotACoreCommand(command_id));
+    }
+
+    Ok(match command_id {
         CommandId::OpenProject => CoreAction::OpenProject {
             name: context.project_name.clone(),
             path: context.project_path.clone(),
@@ -192,13 +229,13 @@ pub fn action_for_command(command_id: CommandId, context: &CommandContext) -> Co
         CommandId::FocusPrevious => CoreAction::FocusPrevious,
         CommandId::ClosePane => CoreAction::CloseFocused,
         CommandId::RestartPane => CoreAction::RestartFocused,
-        CommandId::EnterCopyMode => unreachable!("EnterCopyMode is a runtime command"),
         CommandId::ZoomPane => CoreAction::ToggleZoomFocused,
         CommandId::FloatPane => CoreAction::FloatFocused,
         CommandId::StackPanes => CoreAction::StackFocusedWithNext,
         CommandId::SaveWorkspace => CoreAction::SaveWorkspace,
         CommandId::RestoreWorkspace => CoreAction::RestoreWorkspace,
-    }
+        CommandId::EnterCopyMode => return Err(CommandError::NotACoreCommand(command_id)),
+    })
 }
 
 #[derive(Debug)]
@@ -280,6 +317,31 @@ mod tests {
             CommandTarget::Runtime(RuntimeCommand::EnterCopyMode)
         );
         assert_eq!(command_target(CommandId::RestartPane), CommandTarget::Core);
+    }
+
+    #[test]
+    fn core_action_mapping_rejects_runtime_commands_without_panicking() {
+        let context = CommandContext::for_project("w", "/tmp/p");
+
+        let result = core_action_for_command(CommandId::EnterCopyMode, &context);
+
+        assert!(matches!(
+            result,
+            Err(CommandError::NotACoreCommand(CommandId::EnterCopyMode))
+        ));
+    }
+
+    #[test]
+    fn palette_keys_resolve_to_command_metadata() {
+        assert_eq!(
+            resolve_palette_key(PaletteKey::Character('[')),
+            PaletteInput::Dispatch(CommandId::EnterCopyMode)
+        );
+        assert_eq!(
+            resolve_palette_key(PaletteKey::BackTab),
+            PaletteInput::Dispatch(CommandId::FocusPrevious)
+        );
+        assert_eq!(resolve_palette_key(PaletteKey::Escape), PaletteInput::Close);
     }
 
     #[test]

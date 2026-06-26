@@ -472,11 +472,10 @@ Status: Accepted
 
 Decision:
 
-Harden the terminal parser by adding `VteTerminalAdapter`, a local VT state
-machine built on the pure-Rust `vte` escape-sequence tokenizer, behind the
-existing `TerminalAdapter` trait. Make it the default backend selected by
-`TerminalParser::new`. Keep `FakeTerminalAdapter` for fixtures only. Do not bind
-`libghostty-vt`.
+Harden the terminal parser with a local VT state machine built on the pure-Rust
+`vte` escape-sequence tokenizer, hidden behind the existing `TerminalAdapter`
+trait. Make it the default backend selected by `TerminalParser::new`. Keep
+`FakeTerminalAdapter` for fixtures only. Do not bind `libghostty-vt`.
 
 Context:
 

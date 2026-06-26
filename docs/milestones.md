@@ -119,9 +119,9 @@ remains a deferred optional backend.
 Deliverables:
 
 - spawn shell: implemented for visible terminal panes
-- terminal parser hardening: implemented as `VteTerminalAdapter` (SGR styling,
-  cursor addressing, erase/insert/delete, scroll region, alternate screen,
-  save/restore cursor) behind `TerminalAdapter`
+- terminal parser hardening: implemented behind `TerminalAdapter` with a
+  pure-Rust `vte` tokenizer backend, SGR styling, cursor addressing,
+  erase/insert/delete, scroll region, alternate screen, and save/restore cursor
 - render terminal grid: implemented, with colored/styled cells and a
   scrollback-aware viewport
 - scrollback: implemented as bounded, runtime-owned terminal history (not in

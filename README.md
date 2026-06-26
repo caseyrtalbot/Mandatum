@@ -34,7 +34,7 @@ This repo has completed Milestone 3 and Milestone 4 (real terminal pane):
 - Renderer-neutral `core` domain for workspace, project, session, pane, layout, focus, actions, and JSON session persistence.
 - Minimal `commands` crate that maps command ids to core actions (and routes app-runtime commands such as copy mode), without owning layout mutation logic.
 - Minimal `workflows` crate for durable task/agent pane intent helpers only.
-- `terminal-vt` provides a hardened default VT parser (`VteTerminalAdapter`, built on the pure-Rust `vte` tokenizer) behind `TerminalAdapter`, with SGR styling, cursor addressing, erase/insert/delete, scroll region, alternate screen, and bounded scrollback. The original fake adapter is retained for fixtures.
+- `terminal-vt` provides a hardened default VT parser behind `TerminalAdapter`, built on the pure-Rust `vte` tokenizer, with SGR styling, cursor addressing, erase/insert/delete, scroll region, alternate screen, and bounded scrollback. The original fake adapter is retained for fixtures.
 - `pty` has the native OS PTY seam plus split reader/writer/controller parts so the app can read output on a background thread while writing input and resizing from the event loop.
 - `libghostty-vt` has been evaluated as a future optional `terminal-vt` backend; no binding or dependency has been added.
 - `renderer` renders workspace layout state, pane chrome, focus, zoom, floating panes, status, command-palette overlay, and styled terminal grid snapshots with a scrollback/selection-aware viewport.

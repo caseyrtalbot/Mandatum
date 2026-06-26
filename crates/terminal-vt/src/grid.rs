@@ -11,6 +11,8 @@ use std::collections::VecDeque;
 
 use crate::{CellStyle, GridPosition, TerminalCell, TerminalCursor, TerminalSize};
 
+const TAB_WIDTH: u16 = 8;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalGrid {
     size: TerminalSize,
@@ -200,9 +202,9 @@ impl TerminalGrid {
     }
 
     pub(crate) fn tab(&mut self, style: CellStyle) {
-        let next_stop = (self.cursor.column() / 8)
+        let next_stop = (self.cursor.column() / TAB_WIDTH)
             .saturating_add(1)
-            .saturating_mul(8);
+            .saturating_mul(TAB_WIDTH);
         let target = next_stop.min(self.size.columns().saturating_sub(1));
         while self.cursor.column() < target {
             self.put_styled(' ', style);
@@ -241,11 +243,11 @@ impl TerminalGrid {
                     *cell = blank;
                 }
             }
-            2 | 3 => {
+            2 => {
                 self.cells.fill(blank);
-                if mode == 3 {
-                    self.scrollback.clear();
-                }
+            }
+            3 => {
+                self.scrollback.clear();
             }
             _ => {
                 if let Some(cursor_index) = self.cell_index(self.cursor.position()) {
@@ -345,9 +347,11 @@ impl TerminalGrid {
         if top > bottom {
             return;
         }
+        let captures_full_screen_scrollback =
+            capture_scrollback && top == 0 && bottom == self.size.rows().saturating_sub(1);
         let blank = TerminalCell::blank_with_background(style);
         for _ in 0..count {
-            if capture_scrollback && top == 0 {
+            if captures_full_screen_scrollback {
                 let evicted = self.row_cells(top);
                 self.push_scrollback(evicted);
             }

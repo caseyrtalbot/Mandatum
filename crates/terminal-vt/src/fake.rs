@@ -1,7 +1,7 @@
 //! Minimal fixture parser backend.
 //!
-//! `FakeTerminalAdapter` predates the hardened [`crate::VteTerminalAdapter`] and
-//! is retained so renderer-independent fixtures can exercise grid behavior
+//! `FakeTerminalAdapter` predates the hardened default parser and is retained so
+//! renderer-independent fixtures can exercise grid behavior
 //! (printable text, carriage returns, wrapping, scroll, tab, and clear) without
 //! depending on a full VT state machine. It treats `\n` as a newline (carriage
 //! return plus line feed) and `\x0c` as clear; it does not interpret CSI escape

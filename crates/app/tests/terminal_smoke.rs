@@ -12,29 +12,29 @@ use mandatum_terminal_vt::{TerminalParser, TerminalSize};
 
 /// Run `script` under `/bin/sh -c`, feed all its PTY output through the default
 /// hardened parser, and return the parser for inspection.
-fn run_shell(script: &str, columns: u16, rows: u16) -> TerminalParser {
-    let size = PtySize::new(columns, rows).expect("non-zero pty size");
-    let intent = SpawnIntent::new(PtySessionId::new("smoke"), "/bin/sh", size)
-        .expect("spawn intent")
+fn run_shell(
+    script: &str,
+    columns: u16,
+    rows: u16,
+) -> Result<TerminalParser, Box<dyn std::error::Error>> {
+    let size = PtySize::new(columns, rows)?;
+    let intent = SpawnIntent::new(PtySessionId::new("smoke"), "/bin/sh", size)?
         .with_arguments(["-c", script])
         .with_environment([("TERM", "xterm-256color")]);
-    let mut session = NativePtySession::spawn(intent).expect("spawn shell");
-    let mut parser = TerminalParser::new(TerminalSize::new(columns, rows).expect("terminal size"));
+    let mut session = NativePtySession::spawn(intent)?;
+    let mut parser = TerminalParser::new(TerminalSize::new(columns, rows)?);
 
     loop {
-        match session.read_event(8192) {
-            Ok(Some(PtyEvent::Output(output))) => {
-                parser
-                    .feed_pty_bytes(&output.into_bytes())
-                    .expect("parser feed");
+        match session.read_event(8192)? {
+            Some(PtyEvent::Output(output)) => {
+                parser.feed_pty_bytes(&output.into_bytes())?;
             }
-            Ok(Some(_)) => {}
-            Ok(None) => break,
-            Err(_) => break,
+            Some(_) => {}
+            None => break,
         }
     }
-    let _ = session.wait();
-    parser
+    session.wait()?;
+    Ok(parser)
 }
 
 fn visible_text(parser: &TerminalParser) -> String {
@@ -48,12 +48,12 @@ fn visible_text(parser: &TerminalParser) -> String {
 }
 
 #[test]
-fn real_shell_color_output_does_not_leak_escapes() {
+fn real_shell_color_output_does_not_leak_escapes() -> Result<(), Box<dyn std::error::Error>> {
     let parser = run_shell(
         "printf '\\033[31;1mRED\\033[0m\\n'; printf 'plain text\\n'",
         24,
         6,
-    );
+    )?;
     let text = visible_text(&parser);
 
     assert!(
@@ -69,22 +69,24 @@ fn real_shell_color_output_does_not_leak_escapes() {
         !text.contains("[31") && !text.contains("[0m"),
         "raw SGR sequence leaked as text: {text:?}"
     );
+    Ok(())
 }
 
 #[test]
-fn real_shell_echo_round_trips() {
-    let parser = run_shell("echo M4_COMPLETE_SMOKE", 40, 4);
+fn real_shell_echo_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    let parser = run_shell("echo M4_COMPLETE_SMOKE", 40, 4)?;
     let text = visible_text(&parser);
     assert!(
         text.contains("M4_COMPLETE_SMOKE"),
         "echo did not round-trip: {text:?}"
     );
+    Ok(())
 }
 
 #[test]
-fn real_shell_cursor_addressing_does_not_leak() {
+fn real_shell_cursor_addressing_does_not_leak() -> Result<(), Box<dyn std::error::Error>> {
     // Clear screen, home the cursor, and address a position, then print.
-    let parser = run_shell("printf '\\033[2J\\033[3;5HXY\\033[1;1Htop'", 20, 6);
+    let parser = run_shell("printf '\\033[2J\\033[3;5HXY\\033[1;1Htop'", 20, 6)?;
     let text = visible_text(&parser);
     assert!(
         text.contains("top"),
@@ -96,16 +98,17 @@ fn real_shell_cursor_addressing_does_not_leak() {
         !text.contains("[2J") && !text.contains("[3;5H"),
         "CSI leaked: {text:?}"
     );
+    Ok(())
 }
 
 #[test]
-fn moderate_output_is_captured_into_bounded_scrollback() {
+fn moderate_output_is_captured_into_bounded_scrollback() -> Result<(), Box<dyn std::error::Error>> {
     // A pure POSIX-sh counting loop (no dependency on `seq`) printing 1..=200.
     let parser = run_shell(
         "i=1; while [ \"$i\" -le 200 ]; do echo \"$i\"; i=$((i+1)); done",
         16,
         5,
-    );
+    )?;
     let grid = parser.grid();
 
     // The run completed (did not hang) and the latest line is visible.
@@ -129,4 +132,5 @@ fn moderate_output_is_captured_into_bounded_scrollback() {
         first_history.trim_end() == "1",
         "expected first history row to be '1', got {first_history:?}"
     );
+    Ok(())
 }

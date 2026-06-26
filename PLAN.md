@@ -41,8 +41,8 @@ Created:
 - `TerminalParser` owner in `crates/terminal-vt`
 - PTY-backed shell spawning, output feeding, key/paste input, pane resize, and
   process-exit status in `crates/app`
-- hardened default VT parser backend (`VteTerminalAdapter` on the `vte`
-  tokenizer) behind `TerminalAdapter` in `crates/terminal-vt`
+- hardened default VT parser backend behind `TerminalAdapter`, built on the
+  `vte` tokenizer in `crates/terminal-vt`
 - bounded, runtime-owned scrollback with a scrollback/selection viewport in the
   renderer
 - keyboard copy mode with stream selection and OSC 52 clipboard copy in

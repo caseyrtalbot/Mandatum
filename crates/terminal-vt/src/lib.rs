@@ -1,9 +1,9 @@
 //! Terminal parser adapter boundary.
 //!
 //! `terminal-vt` owns terminal parser adapters and hides the concrete parser
-//! choice behind [`TerminalAdapter`]. The default backend is a local VT parser
-//! built on the pure-Rust [`vte`] tokenizer ([`VteTerminalAdapter`]); a
-//! [`FakeTerminalAdapter`] remains for renderer-independent fixtures.
+//! choice behind [`TerminalAdapter`]. The default backend is a local parser
+//! built on the pure-Rust [`vte`] tokenizer; a [`FakeTerminalAdapter`] remains
+//! for renderer-independent fixtures.
 //!
 //! `libghostty-vt` has been evaluated as a future optional backend, but this
 //! crate intentionally has no Ghostty, Zig, CMake, or FFI dependency. The only
@@ -17,7 +17,6 @@ use std::fmt;
 
 pub use fake::FakeTerminalAdapter;
 pub use grid::TerminalGrid;
-pub use vte_backend::VteTerminalAdapter;
 
 /// Bounded number of scrolled-off rows retained per terminal grid.
 pub const DEFAULT_SCROLLBACK_LIMIT: usize = 2000;
@@ -227,7 +226,7 @@ pub struct TerminalParser {
 
 impl TerminalParser {
     pub fn new(size: TerminalSize) -> Self {
-        Self::with_adapter(VteTerminalAdapter::new(size))
+        Self::with_adapter(vte_backend::VteTerminalAdapter::new(size))
     }
 
     pub fn with_adapter(adapter: impl TerminalAdapter + 'static) -> Self {
