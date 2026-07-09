@@ -288,6 +288,7 @@ dependencies = [
  "mandatum-core",
  "mandatum-pty",
  "mandatum-renderer",
+ "mandatum-scene",
  "mandatum-terminal-vt",
  "ratatui",
 ]
@@ -318,8 +319,7 @@ dependencies = [
 name = "mandatum-renderer"
 version = "0.1.0"
 dependencies = [
- "mandatum-core",
- "mandatum-terminal-vt",
+ "mandatum-scene",
  "ratatui",
 ]
 

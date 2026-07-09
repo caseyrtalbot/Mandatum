@@ -120,29 +120,33 @@ The current app implementation isolates these responsibilities in
 
 Live runtime state is never serialized as durable truth.
 
-### Scene Layer
+### Scene Layer (`mandatum-scene`)
 
 Owns renderer-neutral presentation:
 
-- pane bounds
+- pane bounds and all pane-rect layout math (`scene::layout`)
 - tiled, stacked, floating, and zoomed surfaces
-- terminal grid surfaces
-- task and agent summaries
+- terminal grid surfaces (`TerminalSurface`: windowed styled cells, cursor,
+  scrollback viewport, selection)
+- task and agent summaries (`PaneContent`)
 - command palette view model
 - status strips
 - overlays
 - hit targets
-- scrollback viewport
-- selection state
-- animation intent
+- neutral input event types (`scene::input`; wiring lands with the pointer
+  outcome)
 
 The scene layer is the interface between product state and frontend adapters.
+It is an engine-side crate (deps: `mandatum-core` + serde only) and never
+depends on the terminal engine; the app's `scene_builder` converts engine
+grids into scene surfaces.
 
 ### Frontend Adapters
 
 Own rendering and platform input:
 
-- terminal frontend
+- terminal frontend (`mandatum-renderer`: the ratatui adapter over
+  `mandatum-scene`; computes no layout, no direct terminal-engine dependency)
 - native window frontend
 - GPU-backed frontend
 - platform-specific frontend

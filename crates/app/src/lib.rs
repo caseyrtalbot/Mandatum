@@ -10,6 +10,7 @@ mod copy_mode;
 mod input;
 mod persistence;
 mod process_events;
+mod scene_builder;
 mod task_runtime;
 mod terminal_runtime;
 
@@ -18,3 +19,4 @@ pub use app_state::AppState;
 pub use input::{
     RuntimeInput, key_to_input, key_to_input_with_palette_context, key_to_terminal_input,
 };
+pub use scene_builder::build_workspace_scene;

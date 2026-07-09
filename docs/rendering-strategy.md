@@ -14,12 +14,22 @@ behavior.
 terminal/runtime data
   parser grids, task status, agent state, workflow history
 
-scene model
+scene model (mandatum-scene)
   pane bounds, surfaces, overlays, selections, hit targets, animation intent
 
-frontend adapter
+frontend adapter (mandatum-renderer is the terminal adapter)
   terminal drawing, native drawing, GPU drawing, platform input
 ```
+
+The scene contract is implemented: `mandatum-scene` owns the neutral scene
+types (`WorkspaceScene`, `PaneScene`, `TerminalSurface`, overlays, hit
+targets), all pane-rect layout math (`scene::layout`), and the neutral input
+event types (`scene::input`, types only until the pointer outcome wires
+them). The app builds a `WorkspaceScene` each frame (`scene_builder` converts
+terminal-engine grids into scene surfaces app-side), and `mandatum-renderer`
+is one adapter: it draws a scene with ratatui and computes no layout. A
+test-only plain-text frontend renders the same scenes to prove the contract
+is renderer-neutral.
 
 ## Scene Requirements
 
@@ -113,3 +123,11 @@ Rendering work is not complete until it has been checked under:
 - scrollback
 - selection
 - restored workspace
+
+## Resize And Rewrap
+
+Lines wrapped at a narrow width stay wrapped after the terminal grows
+(classic xterm behavior). This is deliberate for now: rewrap-on-resize is a
+terminal-engine concern and would belong in `mandatum-terminal-vt`'s grid,
+never in the scene or a frontend. Revisit only with adapter-conformance
+coverage for both backends.

@@ -11,13 +11,11 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use mandatum_commands::CommandError;
-use mandatum_renderer::{
-    PaletteView, RenderState, RuntimePaneViews, TaskRuntimeView, TerminalGridView,
-    render_with_runtime_views,
-};
+use mandatum_renderer::render;
+use mandatum_scene::SceneSize;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
-use crate::app_state::AppState;
+use crate::{app_state::AppState, scene_builder::build_workspace_scene};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(40);
 
@@ -181,25 +179,10 @@ impl From<CommandError> for AppError {
 }
 
 fn draw(terminal: &mut TerminalGuard, app: &AppState) -> io::Result<()> {
-    let palette_items = app.palette_items();
-    let terminal_grid_items = app.terminal_grid_items();
-    let task_runtime_items = app.task_runtime_items();
     terminal.terminal.draw(|frame| {
-        render_with_runtime_views(
-            frame,
-            RenderState {
-                workspace: app.workspace(),
-                palette: PaletteView {
-                    open: app.palette_open(),
-                    items: &palette_items,
-                },
-                status: Some(app.status()),
-            },
-            RuntimePaneViews::new(
-                TerminalGridView::new(&terminal_grid_items),
-                TaskRuntimeView::new(&task_runtime_items),
-            ),
-        );
+        let area = frame.area();
+        let scene = build_workspace_scene(app, SceneSize::new(area.width, area.height));
+        render(frame, &scene);
     })?;
     Ok(())
 }

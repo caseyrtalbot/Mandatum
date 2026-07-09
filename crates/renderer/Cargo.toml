@@ -4,7 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
+# Frontend adapter over the scene contract. Must not depend on the terminal
+# engine directly — enforced by the [L1-GATE] direct-dependency ban in
+# ci/conformance.sh.
 [dependencies]
-mandatum-core.workspace = true
-mandatum-terminal-vt.workspace = true
+mandatum-scene.workspace = true
 ratatui.workspace = true

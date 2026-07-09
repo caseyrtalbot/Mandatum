@@ -15,12 +15,8 @@ use mandatum_core::{
     ActionOutcome, CoreAction, PaneId, PaneKind, PersistenceRequest, TaskPaneIntent, Workspace,
 };
 use mandatum_pty::{NativePtyError, PtySize};
-use mandatum_renderer::{
-    PaletteItem, PaneTaskRuntime, PaneTerminalGrid, SelectionPoint, TerminalViewport,
-    pane_content_area,
-};
+use mandatum_scene::{PaletteEntry, SceneSize, layout::pane_content_rect};
 use mandatum_terminal_vt::TerminalGrid;
-use ratatui::layout::Rect;
 
 use crate::{
     app_shell::AppConfig,
@@ -29,6 +25,7 @@ use crate::{
     input::{RuntimeInput, key_to_input_with_palette_context},
     persistence::{PersistenceCoordinator, WorkspaceFileError},
     process_events::PtyRuntimeEvent,
+    scene_builder::PaneViewState,
     task_runtime::{
         TaskPaneRuntime, TaskRuntimeRegistry, prepare_task_pane_runtime, task_status_label,
     },
@@ -152,10 +149,10 @@ impl AppState {
         self.clipboard_payload.take()
     }
 
-    pub fn palette_items(&self) -> Vec<PaletteItem<'static>> {
+    pub fn palette_items(&self) -> Vec<PaletteEntry> {
         BUILT_IN_COMMANDS
             .iter()
-            .map(|command| PaletteItem::new(command.label, category_label(command.category)))
+            .map(|command| PaletteEntry::new(command.label, category_label(command.category)))
             .collect()
     }
 
@@ -816,7 +813,7 @@ impl AppState {
         let Some((columns, rows)) = self.terminal_size else {
             return Vec::new();
         };
-        let area = Rect::new(0, 0, columns, rows);
+        let frame = SceneSize::new(columns, rows);
         let session = workspace.active_session();
 
         session
@@ -827,7 +824,7 @@ impl AppState {
                     return None;
                 }
 
-                let content_area = pane_content_area(workspace, area, pane_id)?;
+                let content_area = pane_content_rect(workspace, frame, pane_id)?;
                 let size =
                     PtySize::new(content_area.width.max(1), content_area.height.max(1)).ok()?;
                 Some((pane_id.clone(), size))
@@ -1048,50 +1045,42 @@ impl AppState {
         }
     }
 
-    pub(crate) fn terminal_grid_items(&self) -> Vec<PaneTerminalGrid<'_>> {
+    /// The live terminal grid attached to a pane, if any.
+    pub(crate) fn terminal_grid(&self, pane_id: &PaneId) -> Option<&TerminalGrid> {
         self.terminal_panes
-            .iter()
-            .map(|(pane_id, runtime)| {
-                let viewport = self.viewport_for(pane_id);
-                PaneTerminalGrid::with_viewport(pane_id, runtime.parser.grid(), viewport)
-            })
-            .collect()
+            .get(pane_id)
+            .map(|runtime| runtime.parser.grid())
     }
 
-    pub(crate) fn task_runtime_items(&self) -> Vec<PaneTaskRuntime<'_>> {
-        let mut items = self
-            .task_panes
-            .iter()
-            .map(|(pane_id, task)| {
-                PaneTaskRuntime::with_output(
-                    pane_id,
-                    task.status.as_str(),
-                    task.runtime.parser.grid(),
-                )
-            })
-            .collect::<Vec<_>>();
-        items.extend(
-            self.task_panes
-                .status_items()
-                .map(|(pane_id, status)| PaneTaskRuntime::new(pane_id, status.as_str())),
-        );
-        items
-    }
-
-    fn viewport_for(&self, pane_id: &PaneId) -> TerminalViewport {
-        match &self.copy_mode {
-            Some(state) if &state.pane_id == pane_id => TerminalViewport {
-                scroll_offset: state.scroll_offset,
-                selection: state.selection_span().map(|(start, end)| {
-                    (
-                        SelectionPoint::new(start.0, start.1),
-                        SelectionPoint::new(end.0, end.1),
-                    )
-                }),
-                copy_cursor: Some(SelectionPoint::new(state.cursor_row, state.cursor_col)),
-            },
-            _ => TerminalViewport::live(),
+    /// The live task runtime view for a pane: its status label plus the
+    /// output grid when a runtime is attached. Falls back to the retained
+    /// status of a stopped/pending task.
+    pub(crate) fn task_view(&self, pane_id: &PaneId) -> Option<(&str, Option<&TerminalGrid>)> {
+        if let Some(task) = self.task_panes.get(pane_id) {
+            return Some((task.status.as_str(), Some(task.runtime.parser.grid())));
         }
+        self.task_panes
+            .statuses
+            .get(pane_id)
+            .map(|status| (status.as_str(), None))
+    }
+
+    /// How a pane's grid is being viewed: copy-mode scroll/selection/cursor
+    /// for the copy-mode pane, following live output otherwise.
+    pub(crate) fn pane_view_state(&self, pane_id: &PaneId) -> PaneViewState {
+        match &self.copy_mode {
+            Some(state) if &state.pane_id == pane_id => PaneViewState {
+                scroll_offset: state.scroll_offset,
+                selection: state.selection_span(),
+                copy_cursor: Some((state.cursor_row, state.cursor_col)),
+            },
+            _ => PaneViewState::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_mut(&mut self) -> &mut Workspace {
+        &mut self.workspace
     }
 
     // --- Copy mode -------------------------------------------------------------

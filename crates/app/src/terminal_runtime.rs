@@ -51,10 +51,6 @@ impl TerminalRuntimeRegistry {
         self.panes.keys()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&PaneId, &TerminalPaneRuntime)> {
-        self.panes.iter()
-    }
-
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (&PaneId, &mut TerminalPaneRuntime)> {
         self.panes.iter_mut()
     }

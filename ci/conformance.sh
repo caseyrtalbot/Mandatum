@@ -66,6 +66,26 @@ for name in ENGINE_SIDE:
             f"[L1] {name} transitively depends on forbidden crates: {sorted(hit)}"
         )
 
+# ---- [L1-GATE] direct-dependency bans across the render seam ------------
+# Frontend adapters consume the scene contract only. The ratatui renderer
+# must never reach the terminal engine directly; the app converts engine
+# grids into scene surfaces.
+DIRECT_DEP_BANS = {
+    "mandatum-renderer": {"mandatum-terminal-vt"},
+}
+for name, banned in DIRECT_DEP_BANS.items():
+    pkg = by_name.get(name)
+    if pkg is None:
+        continue
+    direct = {d["name"] for d in pkg["dependencies"]}
+    hit = direct & banned
+    if hit:
+        failures.append(
+            f"[L1] {name} directly depends on banned crates: {sorted(hit)}. "
+            "Frontends render scenes; the scene builder in the app owns the "
+            "engine-to-scene conversion."
+        )
+
 if failures:
     print("CONFORMANCE FAILURES:")
     for f in failures:

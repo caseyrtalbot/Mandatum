@@ -197,3 +197,40 @@ Consequences: approvals are enforced at the connector boundary (the agent
 process cannot bypass the gate); hook timeout is set high and a timeout
 maps to rejection; a FakeConnector provides deterministic approval flows
 for tests and red-team runs.
+
+## Accepted: Scene Output Contract Adopted; Neutral Input Wiring Deferred To The Pointer Outcome
+
+Status: accepted (2026-07-09)
+
+Decision: `mandatum-scene` now owns the full output contract — the
+`WorkspaceScene` model (geometry, styled terminal surfaces, pane content,
+overlays, header/status, hit targets) plus all pane-rect layout math in
+`scene::layout`. The app builds the scene each frame (`scene_builder`
+converts terminal-engine grids into neutral surfaces app-side), and
+`mandatum-renderer` is reduced to one ratatui adapter with a single
+`render(frame, &scene)` entry point and no direct terminal-engine
+dependency. The neutral input types (`scene::input`: keys, pointer events,
+paste, resize, focus) ship as types only; the app keeps consuming crossterm
+events directly.
+
+Rationale: the drawing-side seam lands first because it unblocks GPU
+frontends and the visibility surfaces immediately and is provable today
+(the frontend-parity test renders one real session scene through both the
+ratatui adapter and a plain-text frontend). Input neutrality lands with
+mouse support, which forces the event-translation layer anyway — wiring it
+now would add a translation shim with no consumer.
+
+Consequences:
+
+- frontends depend on `mandatum-scene` alone and never compute layout
+- the L1 gate additionally bans a direct `mandatum-renderer` ->
+  `mandatum-terminal-vt` dependency
+- split-separator hit targets are deliberately absent until drag-to-resize
+  (the percentage layout has no separator cells)
+- per-frame grid-to-surface conversion remains the accepted cost until
+  damage tracking is needed
+
+Verification: scene layout parity tests (geometry captured from the
+previous ratatui math), scene-builder content tests, renderer TestBackend
+tests, and the cross-frontend parity test in
+`crates/app/tests/frontend_parity.rs`.

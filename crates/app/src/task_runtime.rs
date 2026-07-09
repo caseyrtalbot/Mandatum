@@ -53,10 +53,6 @@ impl TaskRuntimeRegistry {
         self.runtimes.keys()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&PaneId, &TaskPaneRuntime)> {
-        self.runtimes.iter()
-    }
-
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (&PaneId, &mut TaskPaneRuntime)> {
         self.runtimes.iter_mut()
     }
@@ -75,12 +71,6 @@ impl TaskRuntimeRegistry {
             .retain(|pane_id| pane_ids.contains(pane_id));
         self.statuses
             .retain(|pane_id, _| pane_ids.contains(pane_id));
-    }
-
-    pub(crate) fn status_items(&self) -> impl Iterator<Item = (&PaneId, &String)> {
-        self.statuses
-            .iter()
-            .filter(|(pane_id, _)| !self.runtimes.contains_key(*pane_id))
     }
 }
 

@@ -10,5 +10,6 @@ mandatum-commands.workspace = true
 mandatum-core.workspace = true
 mandatum-pty.workspace = true
 mandatum-renderer.workspace = true
+mandatum-scene.workspace = true
 mandatum-terminal-vt.workspace = true
 ratatui.workspace = true
