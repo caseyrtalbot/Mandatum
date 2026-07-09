@@ -1418,6 +1418,7 @@ mod tests {
         );
     }
 
+    // [L5-GATE] Input reaches the child unless explicit workspace control intercepts.
     #[test]
     fn normal_keys_are_terminal_input_when_palette_is_closed() {
         assert_eq!(
@@ -1821,6 +1822,7 @@ mod tests {
         state.shutdown();
     }
 
+    // [L3-GATE] Events from a replaced runtime are rejected.
     #[test]
     fn old_reader_events_after_restart_are_ignored() {
         let mut state = live_state();
@@ -2499,6 +2501,7 @@ mod tests {
         state.shutdown();
     }
 
+    // [L3-GATE] Live runtime state never becomes durable truth.
     #[test]
     fn task_runtime_state_is_not_serialized_with_workspace_intent() {
         let temp = TestWorkspaceDir::new();

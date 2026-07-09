@@ -1,3 +1,5 @@
+// [L4-GATE] TerminalAdapter conformance: any backend must pass this suite;
+// backend swaps land only if fixture parity holds.
 use std::collections::BTreeMap;
 
 use mandatum_terminal_vt::{

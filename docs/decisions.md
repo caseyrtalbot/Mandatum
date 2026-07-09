@@ -101,3 +101,40 @@ Verification:
 - terminal conformance suite
 - backend fixture parity
 - dependency boundary checks
+
+## Accepted: Apache-2.0 License
+
+Status: accepted (2026-07-09)
+
+Decision: The repository is licensed Apache-2.0.
+
+Rationale: Standard permissive license for the Rust ecosystem with an
+explicit patent grant. The repo is pre-release; relicensing before any
+public release remains possible, so this is a low-cost reversible default.
+
+Consequences: LICENSE at repo root; contributions inherit it.
+
+## Accepted: One Gate Script For Local And Remote CI
+
+Status: accepted (2026-07-09)
+
+Decision: `ci/gate.sh` is the single source of truth for the merge gate
+(fmt, clippy -D warnings, build, test, conformance, doc-trace). GitHub
+Actions (`.github/workflows/ci.yml`) runs exactly that script.
+
+Rationale: Local runs and CI cannot drift if they execute the same script.
+Constitution laws are executable gates: L1/L2 as dependency scans
+(`ci/conformance.sh`), L3/L4/L5 as `[Lx-GATE]`-tagged tests, and
+`ci/doc-trace.sh` fails the build if any law loses its docs or its gate.
+
+Consequences: a merge that reddens a conformance gate does not land.
+
+## Accepted: Commit Directly To main
+
+Status: accepted (2026-07-09)
+
+Decision: This solo repository commits directly to main, gated by
+`ci/gate.sh` before each push, matching the repo's existing history.
+
+Rationale: No collaborators; the gate script provides the protection a PR
+flow would. Revisit when a second contributor appears.
