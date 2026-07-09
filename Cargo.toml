@@ -5,6 +5,7 @@ members = [
   "crates/core",
   "crates/pty",
   "crates/renderer",
+  "crates/scene",
   "crates/terminal-vt",
   "crates/workflows",
 ]
@@ -14,9 +15,14 @@ default-members = [
   "crates/core",
   "crates/pty",
   "crates/renderer",
+  "crates/scene",
   "crates/terminal-vt",
   "crates/workflows",
 ]
+# Frontend spikes live outside the workspace: they may depend on engine
+# crates, but their heavy frontend dependency trees never join the product
+# build or the CI gate. See docs/frontend-platform.md.
+exclude = ["spikes/frontend-wgpu"]
 resolver = "3"
 
 [workspace.package]
@@ -29,6 +35,7 @@ mandatum-core = { path = "crates/core" }
 mandatum-commands = { path = "crates/commands" }
 mandatum-pty = { path = "crates/pty" }
 mandatum-renderer = { path = "crates/renderer" }
+mandatum-scene = { path = "crates/scene" }
 mandatum-terminal-vt = { path = "crates/terminal-vt" }
 portable-pty = "0.9"
 ratatui = "0.29"

@@ -138,3 +138,62 @@ Decision: This solo repository commits directly to main, gated by
 
 Rationale: No collaborators; the gate script provides the protection a PR
 flow would. Revisit when a second contributor appears.
+
+## Accepted: Scene Lives In Its Own Engine-Side Crate
+
+Status: accepted (2026-07-09)
+
+Decision: The renderer-neutral frontend contract lives in a new
+`mandatum-scene` crate: the full `WorkspaceScene` output model (geometry,
+pane content, terminal cells, overlays, status, attention, hit targets)
+and the neutral input model frontends translate into. It depends on
+`mandatum-core` and serde only, and is listed as an engine-side crate in
+the L1 conformance gate.
+
+Context: `WorkspaceScene`/`PaneScene` currently live inside the ratatui
+renderer and use ratatui geometry types, so the "scene" is owned by one
+frontend — exactly what L1 forbids.
+
+Rationale: Core stays durable-intent only (scene is ephemeral presentation
+state, so it does not belong in core). Terminal cells are re-expressed as
+neutral scene cell types rather than importing `mandatum-terminal-vt`,
+because that crate carries the `vte` parser dependency (L4: no parser type
+leaks past the terminal engine).
+
+Consequences: frontends (ratatui today, GPU tomorrow) consume scenes and
+emit neutral input events; per-frame grid conversion is an accepted cost
+until damage tracking is needed.
+
+## Accepted: Agent Runtime Uses Threads And Channels, Not An Async Runtime
+
+Status: accepted (2026-07-09)
+
+Decision: `mandatum-agent-runtime` uses OS threads and std channels,
+mirroring the PTY runtime. No tokio/async-std anywhere in the workspace.
+
+Rationale: The workload is a handful of subprocess streams, not thousands
+of sockets. Threads keep the dependency tree small, match the existing
+runtime architecture, and keep the L1 forbidden-crate list enforceable.
+
+## Accepted: Approval Gate Via Connector-Side Permission Bridge
+
+Status: accepted (2026-07-09)
+
+Decision: The reference agent connector runs Claude Code headless
+(`claude -p --output-format stream-json`) with a generated settings file
+whose PreToolUse hook calls a Mandatum bridge. The bridge blocks on a Unix
+socket until the workstation user approves or rejects, then returns the
+hook permission decision. The connector protocol itself stays
+model-agnostic: any connector that can emit `ApprovalRequested` and accept
+a decision fits the trait.
+
+Evidence (probe, 2026-07-09): headless `claude -p` with a deny-returning
+PreToolUse hook streamed the tool_use event with the full command, blocked
+execution, and surfaced the deny reason in the result stream. Hook input
+carries tool_name, tool_input, cwd, and tool_use_id — enough to render
+command/scope/risk in the approval surface.
+
+Consequences: approvals are enforced at the connector boundary (the agent
+process cannot bypass the gate); hook timeout is set high and a timeout
+maps to rejection; a FakeConnector provides deterministic approval flows
+for tests and red-team runs.

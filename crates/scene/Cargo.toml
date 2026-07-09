@@ -1,0 +1,13 @@
+[package]
+name = "mandatum-scene"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+# Engine-side frontend contract: renderer-neutral scenes out, neutral input
+# events in. Enforced by [L1-GATE] in ci/conformance.sh — this crate's
+# dependency closure must never contain frontend, parser, process, or async
+# runtime crates.
+[dependencies]
+mandatum-core = { workspace = true }
+serde.workspace = true

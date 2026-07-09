@@ -324,6 +324,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mandatum-scene"
+version = "0.1.0"
+dependencies = [
+ "mandatum-core",
+ "serde",
+]
+
+[[package]]
 name = "mandatum-terminal-vt"
 version = "0.1.0"
 dependencies = [
