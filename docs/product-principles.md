@@ -1,126 +1,102 @@
 # Product Principles
 
-## Product Thesis
+## Thesis
 
-Mandatum is a terminal-native workspace for developers. It borrows the mental model of tmux and zellij, the surface-quality ambition of Ghostty, and the workflow needs of modern coding with build systems, tests, logs, and agents.
+Mandatum is a development workstation for terminal-centered builders. It brings
+shells, editors, builds, tests, servers, agents, diffs, approvals, logs, and
+recovery into one spatial session surface.
 
-It is not an IDE. It is a coding session control surface.
+The product should feel like a terminal environment expanded into a complete
+work loop: fast, precise, commandable, inspectable, and calm under load.
 
-The user should feel that the product understands a real development loop:
+## User
 
-1. choose a project
-2. open a workspace
-3. create terminal panes
-4. run editor, shell, build, tests, servers, and agents
-5. watch output and health
-6. rearrange context quickly
-7. preserve session state
-8. resume without rebuilding the mental map
+The first user is an experienced developer who already moves between terminal
+emulators, shell tools, editors, build systems, local servers, repository
+commands, and agent sessions.
 
-## Product Category
-
-Use this framing:
-
-```text
-Terminal-native workspace
-```
-
-Avoid these as primary labels:
-
-- IDE
-- code editor
-- terminal emulator clone
-- dashboard
-- AI IDE
-- project manager
-
-## Intended User
-
-The initial user is a developer who is comfortable in terminals and already uses tools such as tmux, zellij, Ghostty, iTerm, Neovim, Helix, Zed, Cursor, Claude Code, Codex, cargo, npm, uv, make, docker, and shell scripts.
-
-They want less friction coordinating work, not a simplified terminal.
+They do not need a simplified terminal. They need fewer blind spots while many
+pieces of work run at once.
 
 ## Core Promise
 
-Make the development session feel native, spatial, recoverable, and commandable.
+The user can always answer:
 
-The user should always know:
-
-- what project they are in
-- what panes are running
-- what commands are active
-- what failed
-- what needs attention
-- what agents are doing
-- how to jump, split, run, review, and recover
+- What project and session am I in?
+- What panes and processes are running?
+- What failed, and what command produced the failure?
+- Which agents are active, blocked, or waiting for approval?
+- Which files changed?
+- What can I rerun, stop, restart, restore, copy, search, or inspect?
+- What will survive app restart, machine sleep, or process failure?
 
 ## Product Pillars
 
-### 1. Terminal First
+### 1. Terminal Soul
 
-The terminal pane is the atomic unit. Shells, editors, REPLs, tests, servers, logs, and agents all run as terminal-backed surfaces unless there is a strong reason to create a native non-terminal surface.
+Terminals remain first-class. Shells, editors, REPLs, test runners, servers, and
+agent CLIs should run naturally without the workspace stealing their input.
 
-### 2. Workspace Native
+### 2. Workstation Visibility
 
-A workspace is not just a window. It is durable intent: project, layout, panes, commands, running tasks, agent threads, status, history, and user-defined recipes.
+The product should reveal running work, failures, approvals, changed files,
+ports, commands, task status, and agent state without forcing the user to hunt
+through disconnected panes.
 
-### 3. Commandable
+### 3. Spatial Control
 
-Every meaningful action should be reachable through a command palette and bindable to a key.
+Panes, stacks, floating surfaces, zoom, status overlays, and session maps should
+make work physically legible. Layout is part of memory.
 
-### 4. Recoverable
+### 4. Commandable Everything
 
-The product should gracefully recover from app restart, machine sleep, process exit, parser failure, pane crash, and corrupted session files.
+Every meaningful action should be reachable from the command palette and
+bindable to keyboard input. Direct manipulation should exist where it is faster:
+click, drag, resize, select, scroll, and inspect.
 
-### 5. Beautiful Under Load
+### 5. Recoverable By Design
 
-The product should look best during real work, not during an empty welcome screen. Dense output, multiple panes, failures, long-running commands, and agent logs must remain readable.
+The workspace persists durable intent and clearly explains live state that could
+not be restored. Restarting the app should not destroy the user's mental map.
 
-### 6. Terminal-Native Where It Matters
+### 6. Agents As Session Actors
 
-Use terminal-native affordances for panes, keyboard flow, mouse support where available, copy/paste, command discovery, status, and recovery. Do not depend on Apple-native GUI frameworks for the product surface.
+Agents are visible workers in the session. Their panes show objective, status,
+current action, approvals, changed files, commands, checks, blockers, and
+handoff state.
 
-### 7. Renderer-Neutral Core
+### 7. Renderer Optionality
 
-The workspace model should outlive the first terminal renderer and runtime. Keep core state portable and testable.
-
-## Non-Goals
-
-Do not build these in early milestones:
-
-- built-in general-purpose code editor
-- language server platform
-- full debugger
-- extension marketplace
-- file explorer as primary navigation
-- chat-first UI
-- task-management board
-- cloud sync
-- team collaboration
-- visual notebook
-- web dashboard
-
-## Product Anti-Patterns
-
-Avoid:
-
-- replacing shell conventions with proprietary equivalents
-- hiding raw command output behind summaries
-- turning every task into a card
-- overusing sidebars
-- making the command palette the only way to discover state
-- fighting child TUI applications for input and mouse control
-- building a fragile abstraction over terminals before terminal correctness is established
+Product behavior belongs in the engine and scene model, not in a frontend. A
+terminal frontend, native frontend, GPU-backed frontend, or platform-specific
+frontend should all be possible without rewriting the workstation model.
 
 ## Quality Bar
 
-The product should feel:
+The product must feel:
 
-- fast
-- quiet
-- stable
-- precise
-- terminal-native
-- keyboard fluent
-- visually restrained
-- trustworthy during failures
+- fast under output
+- visually crisp
+- quiet by default
+- dense without clutter
+- responsive to keyboard and pointer input
+- safe around child terminal apps
+- explicit during failures
+- recoverable after interruption
+- useful before it is feature-rich
+
+## Non-Goals
+
+Do not build these before the workstation loop is strong:
+
+- a general source editor
+- a standalone project-management board
+- a chat-first agent product
+- a decorative dashboard that hides raw output
+- a marketplace or extension ecosystem
+- a cloud collaboration layer
+- an onboarding-first landing surface
+
+Editor, language, debugger, and review integrations are valid later surfaces
+when they strengthen session visibility and do not swallow the terminal work
+loop.

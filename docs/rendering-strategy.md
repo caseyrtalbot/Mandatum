@@ -1,118 +1,115 @@
 # Rendering Strategy
 
-## Premise
+## Goal
 
-The product should feel as smooth and polished as a serious terminal application, but rendering should not contaminate the core workspace model.
+Mandatum should feel smooth, crisp, and stable while rendering dense development
+output across multiple panes, tasks, and agents.
 
-The first architecture decision is not "which renderer forever." The first decision is to keep a clean seam between terminal state, scene composition, and terminal presentation.
+Rendering must communicate structure without stealing ownership of product
+behavior.
 
-## Correction On Ghostty
+## Rendering Stack
 
-Ghostty is not primarily CPU-rendered. Its public docs describe a native terminal emulator using GPU acceleration, with OpenGL on Linux and Metal on macOS, plus an optimized CPU parser path.
+```text
+terminal/runtime data
+  parser grids, task status, agent state, workflow history
 
-The useful lesson for this repo is not "use Metal" or "fork Ghostty." The useful lesson is:
+scene model
+  pane bounds, surfaces, overlays, selections, hit targets, animation intent
 
-- strong terminal correctness
-- optimized parser
-- renderer tuned for terminal workloads
-- careful separation between terminal core and GUI consumers
+frontend adapter
+  terminal drawing, native drawing, GPU drawing, platform input
+```
 
-## Rendering Layers
+## Scene Requirements
 
-### Terminal State
+The scene model must describe:
 
-Terminal parser output:
-
-- grid cells
-- styles
-- cursor
-- selection
-- scrollback
-- image/graphics protocol metadata if supported
-- mouse protocol state
-
-### Scene Model
-
-Renderer-neutral representation:
-
-- workspace bounds
-- pane bounds
-- terminal surfaces
-- chrome surfaces
-- overlays
+- root workspace bounds
+- tiled pane surfaces
+- stacked pane surfaces
+- floating pane surfaces
+- zoomed pane surfaces
+- terminal grid surfaces
+- task output/status surfaces
+- agent status surfaces
 - command palette
-- status surfaces
+- session map
+- execution timeline
+- status strips
+- overlays
+- selection rectangles
+- cursor state
+- hit targets
 - animation intent
 
-### Backend Renderer
+No scene type should require a specific frontend framework.
 
-Terminal-specific implementation:
+## Visual Principles
 
-- terminal drawing backend
-- pane chrome
-- overlays
-- frame scheduling
+- Dense output must remain readable.
+- Pane chrome should be thin and useful.
+- Attention states should be clear without shouting.
+- Failures should be visible near the thing that failed.
+- Agent and task state should be glanceable.
+- Empty space should serve scanning, not decoration.
+- Motion should clarify state changes, not entertain.
 
-## Early Renderer Contract
+## Text And Terminal Quality
 
-Create an interface that can render to the parent terminal:
+The renderer should support:
 
-- rectangles
-- text runs
-- terminal grids or terminal-grid-derived views
-- cursor
-- selection
-- pane borders/separators
-- overlays
-
-Milestone 4 validates styled terminal-grid snapshots from the default
-`TerminalAdapter` parser. Future renderer work should preserve the snapshot
-contract and improve interaction/polish without taking ownership of parser
-mutation, PTY handles, or runtime processes.
-
-Milestone 5B's task-runtime slices extend that contract with read-only task
-runtime views keyed by `PaneId`. The app owns the task PTY, parser, reader
-thread, runtime token, exit state, rerun/stop lifecycle, and status mutation;
-the renderer receives borrowed task status text and an optional terminal-grid
-output snapshot for drawing only.
+- crisp monospace text
+- bold, dim, italic, underline, inverse, hidden, and strikethrough styles
+- ANSI indexed color
+- true color
+- stable cursor rendering
+- scrollback rendering
+- selection rendering
+- wrapped-line fidelity
+- alternate-screen behavior
+- copy/search affordances
 
 ## Performance Targets
 
 Initial targets:
 
-- responsive input under heavy output
-- no visible jank during pane resize
-- bounded memory growth for output streams
-- graceful backpressure
-- recoverable parser/render errors
+- responsive typing during moderate output
+- no visible freeze during pane resize
+- bounded memory growth for scrollback
+- stable redraw while tasks stream output
+- recoverable parser or render failures
 
-Later targets:
+Advanced targets:
 
 - smooth scrollback
-- synchronized rendering support if terminal parser supports it
-- high-DPI correctness
-- efficient glyph atlas
+- frame pacing suitable for native display refresh
 - low idle CPU
-- stable frame pacing
+- high-DPI correctness
+- efficient glyph caching
+- minimized redraw regions
+- large-output stress stability
 
-## What Not To Do First
+## Frontend Adapter Expectations
 
-Do not hand-roll a complete terminal emulator before evaluating `libghostty-vt`.
+Every frontend adapter must:
 
-Do not put product logic in draw calls.
+- render from scene data
+- emit input and hit-test events
+- avoid mutating product state directly
+- expose errors as runtime-visible status
+- support automated smoke tests where possible
 
-Do not make the core model depend on renderer coordinate types.
+## Quality Gates
 
-Do not block architecture work on GPU rendering.
+Rendering work is not complete until it has been checked under:
 
-Do not start by forking Ghostty.
-
-## Renderer Spike Questions
-
-Milestone 0 or 2 should answer:
-
-- Can the chosen terminal renderer handle dense multi-pane output?
-- Can terminal grid rendering be isolated behind a backend interface?
-- Can pane chrome and terminal content be composed without fighting selection?
-- Can frame scheduling avoid repainting the world on every byte?
-- Can the renderer preserve terminal usability under resize, scrollback, and mouse capture?
+- empty workspace
+- dense multi-pane output
+- rapid terminal output
+- task failure output
+- agent waiting-for-approval state
+- resize
+- scrollback
+- selection
+- restored workspace

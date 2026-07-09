@@ -2,261 +2,235 @@
 
 ## Goal
 
-Design Mandatum with strict boundaries between durable workspace state, PTY/process handling, terminal parsing, terminal rendering, application runtime, and developer workflow orchestration.
+Mandatum separates durable workstation intent, live runtime state, terminal
+state, scene composition, frontend rendering, workflow orchestration, and agent
+state.
 
-The architecture must support a polished terminal user experience without trapping core behavior inside a terminal UI framework or any Apple-native app stack.
+The architecture should let one engine support multiple frontends while keeping
+product behavior testable from shell commands.
 
-## High-Level Layers
-
-```text
-app
-  terminal application runtime, lifecycle, config loading, persistence, orchestration
-
-renderer
-  terminal drawing, pane chrome, overlays, frame scheduling, themes
-
-commands
-  command palette, keymap resolution, action registry, help/discovery surfaces
-
-workflows
-  build/test/task recipes, agent threads, logs, status, process groups
-
-terminal-vt
-  terminal parser adapter boundary, screen/grid model, capabilities, input encoding
-
-pty
-  process spawn, PTY read/write, resize, exit, stream backpressure
-
-core
-  workspace/session/layout/pane/action domain model and persistence
-```
-
-Dependency direction should move downward only where possible:
+## Layer Map
 
 ```text
-app -> renderer -> commands/workflows -> core
-app -> pty
-app -> terminal-vt
-app -> renderer
-renderer consumes terminal-vt snapshots/value types without owning parser
-mutation, PTY handles, or process/runtime state
+frontend adapters
+  draw scenes, collect input, report hit targets and platform events
+
+scene layer
+  panes, bounds, terminal surfaces, overlays, selections, animations, status
+
+runtime engine
+  PTYs, tasks, agents, process events, reader threads, live status, recovery
+
+terminal engine
+  parser adapters, grid snapshots, scrollback, styles, cursor, capabilities
+
+workflow layer
+  task recipes, server recipes, agent launch intent, command history
+
+command layer
+  palette entries, key routing, action metadata, context-aware command targets
+
+workspace engine
+  projects, sessions, panes, layout, focus, durable intent, persistence schema
 ```
 
-The exact dependency graph may vary by implementation detail, but the domain rule is fixed: `core` cannot depend on terminal UI, PTY, parser, render, or platform types.
+## Module Responsibilities
 
-## Modules
+### `core`
 
-### core
-
-Owns product state and pure behavior:
+Owns durable workstation state:
 
 - workspace identity
-- projects
-- sessions
-- panes
-- pane kinds
-- split/stack/floating/tab layout
-- focus
-- zoom
-- durable command recipes
-- actions
-- session serialization schema
-- migrations and recovery rules
+- project identity
+- session identity
+- pane identity and kind
+- layout tree, stacks, floating panes, zoom, focus
+- durable task and agent intent
+- core actions
+- persistence schema and validation
 
-Core should be heavily unit-tested and runnable without a terminal UI.
+`core` must not own live process handles, parser instances, threads, render
+resources, frontend framework types, or platform event types.
 
-Core should not own:
+### `commands`
 
-- PTY handles
-- threads
-- terminal parser objects
-- renderer resources
-- GPU resources
-- platform event types
+Owns command vocabulary:
 
-### pty
+- command ids and labels
+- command categories
+- palette routing
+- context-aware key resolution
+- durable core action targets
+- runtime command targets
 
-Owns OS-facing process mechanics:
+Commands describe what can be invoked. They do not perform process I/O, draw UI,
+or mutate layout except through `core`.
 
-- spawn shell/process
-- attach PTY
-- read stream
-- write input bytes
+### `pty`
+
+Owns PTY process mechanics:
+
+- spawn intent
+- process launch
+- byte input/output
 - resize
 - child exit
-- kill/restart
-- backpressure
-- process groups
+- termination
+- reader/writer/controller split
+- backpressure signals
 
-PTY must expose events to the runtime without knowing UI details.
+PTY events are raw runtime facts. They do not know about panes, rendering, or
+product workflow beyond session identity.
 
-Current implementation covers the headless native PTY boundary plus split
-reader/writer/controller runtime parts. App-level orchestration now spawns
-visible PTY-backed shell panes and feeds output into `terminal-vt`, while `pty`
-remains independent of parser, renderer, app, and core crates.
+### `terminal-vt`
 
-### terminal-vt
+Owns terminal state:
 
-Owns the terminal parser adapter boundary:
+- parser adapter interface
+- default parser backend
+- terminal grid
+- cell style
+- cursor state
+- scrollback
+- resize
+- terminal capabilities
+- parser errors
 
-- process byte streams into terminal state
-- expose screen/grid/cursor/style state
-- expose mouse protocol state
-- encode key and mouse input when appropriate
-- track terminal capabilities
+The app and scene layers should consume snapshots and value types without
+depending on a concrete parser backend.
 
-The default implementation uses a local `vte`-backed parser behind
-`TerminalAdapter`; `FakeTerminalAdapter` remains for fixtures. The
-`libghostty-vt` spike found it feasible as a future optional backend behind
-this boundary, but a real binding remains out of scope until the explicit
-binding gate is met.
+### Runtime Engine
 
-### renderer
+Owns live state:
 
-Owns presentation:
+- terminal pane runtime registry
+- task runtime registry
+- agent runtime registry
+- process event routing
+- reader-thread lifecycle
+- runtime tokens and replaced-runtime event rejection
+- live status strings
+- launch failures
+- stop/rerun/restart behavior
+- restore reconciliation
 
-- text grid drawing
-- cursor rendering
-- selection rendering
-- pane chrome
-- split separators
-- stack strips
+The current app implementation isolates these responsibilities in
+`app_shell`, `input`, `persistence`, `process_events`, `terminal_runtime`, and
+`task_runtime` modules under `crates/app`.
+
+Live runtime state is never serialized as durable truth.
+
+### Scene Layer
+
+Owns renderer-neutral presentation:
+
+- pane bounds
+- tiled, stacked, floating, and zoomed surfaces
+- terminal grid surfaces
+- task and agent summaries
+- command palette view model
+- status strips
 - overlays
-- command palette drawing
-- frame timing
-- smooth resize/scroll behavior
+- hit targets
+- scrollback viewport
+- selection state
+- animation intent
 
-Renderer should not decide product actions. It receives scene/state and emits input/hit-test events.
+The scene layer is the interface between product state and frontend adapters.
 
-### app
+### Frontend Adapters
 
-Owns terminal application orchestration:
+Own rendering and platform input:
 
-- terminal initialization/restoration
-- lifecycle
-- config loading
-- persistence timing
-- status/error routing
-- top-level event loop
-- clipboard
-- crash/panic restoration policy
+- terminal frontend
+- native window frontend
+- GPU-backed frontend
+- platform-specific frontend
 
-### commands
+Frontend adapters should draw a scene and emit input/hit-test events. They do
+not own product behavior.
 
-Owns command discovery and dispatch metadata:
+### `workflows`
 
-- command palette entries
-- command search/filtering
-- keymap loading
-- conflict detection
-- action labels
-- help overlay content
-- command availability rules
+Owns developer-workflow definitions:
 
-Command dispatch should call core/workflow/app services through explicit actions.
-
-### workflows
-
-Owns developer-session workflows:
-
-- build recipes
-- test recipes
-- dev server recipes
-- logs
+- task recipes
+- build/test/dev-server recipes
+- task history metadata
+- agent launch intent
+- agent result summaries
+- failure classification
 - command history
-- agent threads
-- approval surfaces
-- diff/review references
-- health/status probes
 
-Workflow code should not create layout mutations directly. It should request core actions.
+Workflow modules request core/runtime actions instead of mutating layout or
+process state directly.
 
-## Runtime Event Model
+## Event Model
 
-Prefer a central event loop with typed events:
+Use typed events across the runtime:
 
-- app events
-- key events
-- pointer events
-- PTY output
-- child exit
-- terminal parser updates
-- workflow/task status
-- agent status
-- render tick
-- resize
-- persistence timer
+- key input
+- pointer input
+- paste input
 - command invocation
+- PTY output
+- process exit
+- task status update
+- agent status update
+- approval request
+- file-change summary
+- parser update
+- frontend resize
+- render tick
+- persistence request
+- restore result
 
-Events should be explicit and testable.
+Events should carry enough identity to reject output from replaced
+runtimes.
 
 ## Durable State
 
-Persist intent, not live handles.
+Persist intent:
 
-Persist:
-
-- workspace id/name
-- project paths
-- pane specs
-- layout tree
+- workspaces
+- projects
+- sessions
+- panes
+- layout
 - focus
-- command recipes
-- task definitions
+- task command intent
+- agent objective and thread identity
 - user preferences
-- selected theme/keymap
-- last known working directory per pane
+- keymap/theme names
+- last known working directory
 
 Do not persist:
 
-- PTY handles
-- thread handles
-- parser objects
-- GPU resources
+- process handles
 - process ids as durable truth
-- unbounded scrollback or runtime-owned scrollback history; bounded scrollback
-  stays in terminal/runtime presentation state, not durable core state
-- live task status, exit state, output buffers, or reader/runtime tokens; the
-  first task slice stores command intent only and keeps status in app runtime
+- PTY handles
+- parser objects
+- thread handles
+- frontend window handles
+- GPU resources
+- live task status
+- live agent output streams
+- unbounded scrollback
 
 ## Failure Model
 
-Plan for:
+Every runtime failure should become visible state:
 
-- child process exits
-- PTY spawn failure
-- terminal parser error
-- config parse failure
-- session schema mismatch
-- corrupted session file
-- renderer initialization failure
-- app restart
-- machine sleep/wake
-- stuck agent/task
+- process spawn failure
+- process exit
+- parser error
+- reader failure
+- task failure
+- agent blocked
+- approval required
+- persistence failure
+- restore mismatch
+- frontend rendering failure
 
-Failures should be visible but not catastrophic. A failed pane should remain inspectable and restartable.
-
-## Greenfield Technology Posture
-
-Use the accepted terminal/Codex constraint as the technology starting point.
-
-Current recommendation:
-
-- Rust workspace first
-- terminal application runtime first
-- no Xcode, SwiftUI, AppKit, Metal, or Apple-native GUI dependency
-- renderer-neutral core
-- parser adapter boundary suitable for `libghostty-vt`
-- no Ghostty fork in the initial path
-
-## Architecture Validation Checklist
-
-Before accepting implementation:
-
-- Can `core` tests run without terminal UI?
-- Can a fake terminal parser be used in tests?
-- Can renderer be swapped without changing session state?
-- Can workspace layout be serialized without runtime handles?
-- Can commands be discovered without launching the terminal app?
-- Can PTY failure be represented in domain state?
-- Can agent/task status be represented without becoming a chat UI?
+Failures should leave enough information for the user to inspect, rerun,
+restart, stop, or recover.

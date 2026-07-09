@@ -2,105 +2,128 @@
 
 ## Product Contract
 
-Mandatum is a greenfield terminal-native workspace for developers. It is closer to tmux and zellij than to VS Code, with Ghostty treated as a quality reference for terminal feel rather than an app-framework dependency.
+Mandatum is a development workstation with a terminal soul and IDE-grade session
+visibility. It coordinates shells, editors, builds, tests, logs, agents, diffs,
+approvals, and recovery surfaces inside a modular workspace.
 
-The product should provide persistent project workspaces, terminal panes, split/stack/floating-style layouts within the terminal, a command palette, keymap-driven workflow control, build/test task surfaces, and first-class agent/thread orchestration.
+The product must feel fast, spatial, commandable, inspectable, recoverable, and
+beautiful under real development load.
 
-Do not build a general IDE in early milestones. Do not add a full source editor, language-server platform, heavy file explorer, extensions marketplace, debugger platform, or project-management dashboard unless a milestone explicitly asks for it.
+Agents should reason from the current spec set and the code on disk. Product
+docs should describe the current target state directly.
 
-Do not choose an Apple-native app stack. Xcode.app, `.xcodeproj`, SwiftUI, AppKit, Metal, MetalKit, CoreText-dependent renderer work, notarization-first packaging, and Apple GUI surfaces are out of scope for this repo. The project must be buildable, testable, and runnable from terminal commands under Codex.
+## Source Of Truth
 
-The first-class workflow is:
+Read these before planning product, architecture, or documentation changes:
 
-- open a project workspace
-- create terminal panes
-- split, stack, float, resize, and focus panes quickly
-- run builds, tests, scripts, and agents
-- inspect output and status surfaces
-- preserve/reopen useful session state
-- stay keyboard-first with precise native mouse support
-
-## Greenfield Rule
-
-Treat this repo as greenfield. Do not copy files, architecture, runtime shape, code style, or internal abstractions from any prior Aetherspace build unless a future task explicitly asks for a comparison or migration.
-
-If the user references Aetherspace, tmux, zellij, Ghostty, Warp, iTerm, VS Code, Cursor, or another product, use them as product references only. Re-derive this codebase from the product contract and current repo docs.
+1. `PLAN.md`
+2. `docs/product-principles.md`
+3. `docs/architecture.md`
+4. `docs/frontend-platform.md`
+5. `docs/rendering-strategy.md`
+6. `docs/terminal-engine.md`
+7. `docs/agent-runtime.md`
+8. `docs/interaction-model.md`
+9. `docs/workflows.md`
+10. `docs/roadmap.md`
+11. `docs/verification.md`
+12. `docs/repo-structure.md`
+13. `docs/decisions.md`
 
 ## Architecture Rules
 
-Keep these boundaries strict:
+Keep product behavior behind engine and scene interfaces.
 
-- `core` owns workspace/session/layout/action state and must be renderer-neutral.
-- `pty` owns process lifecycle, terminal I/O, resize, child exit, and stream backpressure.
-- `terminal-vt` owns terminal parser adapters and hides concrete parser choices such as libghostty-vt.
-- `renderer` owns terminal drawing abstractions, terminal-grid presentation, pane chrome, overlays, and frame timing.
-- `app` owns the terminal application runtime, lifecycle, config loading, persistence triggers, and top-level orchestration.
-- `commands` owns command palette data, keymap resolution, action dispatch tables, and help text.
-- `workflows` owns builds, tests, task recipes, agent threads, logs, and command recipes.
+- `core` owns durable workspace, session, pane, layout, action, and persistence
+  intent. It must not depend on runtime handles, parser objects, renderer
+  resources, frontend frameworks, or platform UI types.
+- `pty` owns process lifecycle, PTY I/O, resize, exit, termination, and byte
+  events. It does not know how output is drawn.
+- `terminal-vt` owns terminal parser adapters, terminal grid state, style
+  snapshots, scrollback, cursor state, and terminal capabilities.
+- `commands` owns command metadata, palette routing, key resolution, and the
+  split between durable core actions and runtime commands.
+- `workflows` owns task recipes, build/test/dev-server intent, agent launch
+  intent, and workflow metadata.
+- Runtime modules own live process handles, reader threads, runtime tokens,
+  parser instances, launch state, and failure state.
+- The scene layer owns renderer-neutral presentation data: panes, bounds,
+  terminal snapshots, overlays, hit targets, selections, status surfaces, and
+  animation intent.
+- Frontend adapters render a scene and report input. They must not own product
+  behavior.
 
-No platform UI type may leak into `core`.
+## Frontend Rules
 
-No PTY handle, parser instance, window handle, render resource, or thread handle may be serialized into durable session state.
+Mandatum can have more than one frontend adapter. The current terminal frontend
+is useful, but it is not the whole product architecture.
 
-No renderer may own product or workflow logic.
+Frontend work must preserve these rules:
 
-No task runner may mutate layout state except through core actions.
+- Product logic stays in the engine.
+- Platform code stays behind an adapter.
+- Rendering code receives scene data and emits input/hit-test events.
+- A native or GPU-backed frontend may be introduced when it improves latency,
+  text quality, animation, pointer precision, accessibility, or platform fit.
+- A terminal frontend remains valuable for fast local verification and remote
+  sessions.
 
-No terminal parser adapter may assume a specific GUI toolkit.
+## Product Surface Rules
 
-## Design Rules
+Build the actual workstation surface first:
 
-Favor dense, calm, professional terminal surfaces.
+- live terminal panes
+- build/test/dev-server task panes
+- agent status panes
+- command palette
+- session map
+- searchable execution history
+- failure and approval surfaces
+- restore/recovery state
 
-Avoid IDE chrome. Avoid decorative dashboards. Avoid marketing-style UI. Avoid large empty panels, card grids, and explanatory onboarding screens as the primary product surface.
+Avoid landing pages, dashboards that hide raw output, decorative cards,
+chat-first layouts, and product behavior embedded in renderer code.
 
-Use command palette, spatial panes, and status surfaces as the primary workflow.
+## Agent Runtime Rules
 
-Every visible UI element must earn its place during a coding session.
+Agent panes are session actors, not chat sidebars.
 
-The product should feel terminal-native, fast, and stable before it feels feature-rich.
+Each agent surface should expose:
 
-Use text-first symbols sparingly and keep pane chrome restrained. Do not turn the surface into a toolbar-heavy IDE.
+- objective
+- current state
+- latest action
+- pending approvals
+- changed files
+- commands run
+- verification results
+- blockers
+- handoff summary
 
-## Interaction Rules
+## Documentation Rules
 
-Keyboard-first does not mean keyboard-only. Mouse interactions should support direct focus, split resizing, pane dragging when the terminal supports it, text selection where feasible, and clear fallback commands.
+Docs are product source of truth. When editing them:
 
-Default commands should be discoverable through the command palette and help overlay. Do not rely on F-key-heavy controls as the main interaction model.
-
-Global shortcuts must avoid breaking normal shell, editor, and TUI input.
-
-When a terminal application requests mouse capture or alternate-screen behavior, respect the child application unless the user invokes workspace-level controls.
-
-## Development Workflow
-
-Before implementation work, read:
-
-1. `docs/product-principles.md`
-2. `docs/architecture.md`
-3. `docs/interaction-model.md`
-4. `docs/milestones.md`
-5. `docs/codex-goal.md`
-
-For complex tasks, start in `/plan`. Convert accepted plans into `/goal` only when success criteria are measurable.
-
-Use subagents for independent read-heavy work such as technology scans, API surface research, UI reference analysis, terminal conformance research, and risk review. Avoid parallel write-heavy subagents touching the same files.
+- keep only current direction
+- remove contradictory instructions
+- remove references to missing files
+- avoid background-story paragraphs
+- keep spec files specific enough for future agents to act without guessing
+- update `README.md`, `PLAN.md`, and `docs/repo-structure.md` when the doc set changes
 
 ## Verification
 
 Before claiming completion:
 
-- run formatting for touched code
-- run unit tests for touched modules
-- run build/typecheck when code exists
-- verify architecture boundaries in touched files
-- verify docs still match the implementation
-- summarize what remains unimplemented
-
-If a verification command is unavailable because the project has not chosen a toolchain yet, say that explicitly and verify the scaffold with filesystem and git checks instead.
+- run documentation trace scans relevant to the change
+- run `cargo fmt --check` if Rust files changed
+- run `cargo clippy --all-targets -- -D warnings` if Rust files changed
+- run `cargo test` when behavior or contracts changed
+- run `git diff --check`
+- report any commands not run
 
 ## Done Means
 
-A task is done only when the artifact exists on disk, the relevant docs or tests have been updated, and the verification result has been reported.
-
-Do not claim a milestone is complete because a plan was written. Milestones complete when their stated validation criteria pass.
+A task is done only when the artifact exists on disk, source-of-truth docs match
+the artifact, verification has been run or explicitly scoped out, and remaining
+risks are named.

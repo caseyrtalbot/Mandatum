@@ -1,253 +1,141 @@
 # Interaction Model
 
-## Core Shape
+## Control Philosophy
 
-The workspace is a terminal application containing one or more project workspaces. Each workspace is made of panes. Panes can be shell panes, task output panes, agent panes, status/log panes, or future specialized terminal surfaces.
+The workspace should be keyboard fluent, pointer precise, and safe around child
+terminal applications.
 
-The user controls the workspace through:
+Normal terminal input passes through unless the user explicitly invokes
+workspace control.
 
-- direct terminal input
+## Primary Controls
+
+- direct typing into focused terminal/editor pane
 - command palette
-- keybindings
-- mouse/pointer actions
-- terminal command palette
-- contextual pane actions
+- leader/keymap actions
+- pointer focus and resizing
+- pane context menu
+- session map navigation
+- execution timeline search
+- status strip actions
 
-## Principles
+## Command Palette
 
-### Shell Input Is Sacred
+The command palette is the universal control surface.
 
-Normal shell/editor/TUI input must pass through unless the user explicitly invokes workspace control.
+It must support:
 
-Avoid global shortcuts that steal common shell/editor keys.
-
-### Command Palette Is The Primary Control Surface
-
-The command palette should support:
-
-- fuzzy command search
-- workspace actions
-- pane actions
-- build/test/task actions
-- agent actions
-- project actions
+- fuzzy search
 - recent commands
-- contextual commands for focused pane
+- context-aware commands
+- task commands
+- agent commands
+- pane commands
+- project/session commands
+- settings and keymap commands
+- approval commands
 
-Command labels must be short and action-oriented.
+Command labels should be short, verb-first, and stable.
 
-### Spatial Control Should Be Direct
+## Pane Interaction
 
-Users should be able to:
+Required pane actions:
 
-- click pane to focus
+- focus
+- split right/down
+- stack
+- float
+- dock
+- zoom
+- close
+- rename
+- restart terminal runtime
+- rerun task runtime
+- stop task runtime
+- pin agent pane
+- inspect status
+
+Pointer support should include:
+
+- click to focus
 - drag split separators
 - drag floating panes
 - double-click or command to zoom
-- use keyboard to focus next/previous
-- use keyboard to split, stack, float, close, restart, and rename
-
-### Discoverability Without Onboarding Bloat
-
-Use:
-
-- command palette
-- help overlay
-- status hints
-- native menu labels
-- concise empty states
-
-Avoid:
-
-- tutorial landing pages
-- long instruction panels
-- decorative cards
-- marketing copy
-
-## Pane Types
-
-### Terminal Pane
-
-Runs a shell or command under PTY.
-
-Required actions:
-
-- focus
-- split
-- close
-- restart
-- rename
-- zoom
-- float/dock
-- copy selection
-- paste
-- scrollback
-- clear
-- open command palette scoped to pane
-
-### Task Pane
-
-Runs a build, test, dev server, script, or recipe.
-
-It may be backed by a terminal process but should expose task metadata:
-
-- command
-- cwd
-- status
-- start time (deferred)
-- exit code (current runtime surfaces exit status text)
-- failure summary (deferred beyond raw exit/status text)
-- rerun action
-- stop action
-
-Current task runtime: `Run Task` from the command palette (`Ctrl-P`, then `b`)
-opens a task pane and runs one configured shell command. When a task pane is
-focused, `Ctrl-P` then `r` reruns the same durable task intent in the same pane,
-and `Ctrl-P` then `c` stops a pending or running task. The task pane stores
-durable command intent only; live running/succeeded/failed/stopped status and
-output are app runtime state.
-
-### Agent Pane
-
-Tracks an agent or Codex-like thread.
-
-It should not become a chat-first product. Treat it as a work surface with:
-
-- status
-- active objective
-- pending approvals
-- changed files
-- test results
-- logs
-- latest summary
-- open thread action
-
-### Status/Log Pane
-
-Shows structured project/workspace state:
-
-- running processes
-- failed tasks
-- dirty repos
-- active agents
-- ports
-- health probes
-
-## Layout Model
-
-Support:
-
-- split horizontal/vertical
-- stack/tab group
-- floating pane
-- zoom focused pane
-- project/workspace tabs inside the terminal
-- saved layouts
-
-Layout is durable intent, not renderer state.
-
-## Default Commands
-
-Early command vocabulary:
-
-- open project
-- new terminal
-- split right
-- split down
-- focus next
-- focus previous
-- close pane
-- restart pane
-- zoom pane
-- float pane
-- stack panes
-- run build
-- run tests
-- rerun last task
-- stop task
-- show agents
-- start agent
-- show command history
-- open settings
-- save workspace
-- restore workspace
-
-## Keybinding Philosophy
-
-Use a leader or command-mode approach for workspace-level controls.
-
-Recommended early defaults:
-
-- command palette: platform-native primary shortcut plus a terminal-safe fallback
-- leader key: configurable
-- focus next/previous: configurable
-- split/close/zoom/float: leader-based defaults
-
-Do not make F-keys the primary path.
-
-## Copy Mode and Scrollback (Milestone 4 baseline)
-
-Terminal panes keep a bounded scrollback history and expose a keyboard-first
-copy mode. Copy mode is presentation state owned by the app runtime; it never
-mutates core layout or the parser grid.
-
-Enter copy mode from the command palette (`Ctrl-P` then `[`, or the "Copy Mode"
-command). Inside copy mode:
-
-- `h`/`j`/`k`/`l` or arrow keys move the copy cursor through the visible grid and scrollback.
-- `PageUp`/`PageDown` scroll a page; `g`/`G` jump to the top/bottom of history.
-- `0`/`$` move to the start/end of the line.
-- `v` or `Space` starts a selection at the cursor; `c` clears it.
-- `y` or `Enter` copies the selection (or the cursor's line when nothing is selected) and exits.
-- `q` or `Esc` exits without copying.
-
-Copy uses the OSC 52 escape sequence to set the host terminal's clipboard, so it
-works over SSH and needs no platform clipboard dependency. The host terminal
-must support OSC 52 for the copy to reach the system clipboard. Normal shell
-input is never intercepted unless copy mode is explicitly active, and a terminal
-resize exits copy mode rather than tracking moved coordinates.
-
-This is the minimal documented baseline. Native OS mouse selection, semantic
-selection, and rich clipboard history are out of scope for this milestone. Copy
-mode reads the live grid, so a pane that keeps producing output while you select
-can shift the buffer under the selection; the baseline does not freeze output.
-For stable selection, copy from a quiescent pane (or scroll into settled
-scrollback). Output-freezing copy mode is a later refinement.
-
-## Mouse Philosophy
-
-Mouse support should feel native and precise:
-
-- click focus
-- drag resize
-- drag floating panes
 - select text
-- right-click context menu
-- hover affordances only when useful
+- open context menu
 
-If a child terminal application requests mouse capture, respect it.
+If a child terminal app requests mouse capture, the workspace must respect that
+until the user invokes workspace-level control.
 
-## Visual Density
+## Session Map
 
-Pane chrome should be useful but minimal.
+The session map shows:
 
-Each pane may show:
+- panes
+- tasks
+- agents
+- running servers
+- failed actors
+- waiting approvals
+- hidden/stacked/floating surfaces
 
-- short title
-- cwd/project chip
-- status icon
-- task/agent status
-- dirty/error indicator
+It should support jump-to-pane, focus waiting approval, focus failed task, and
+restore layout actions.
 
-Avoid permanent heavy toolbars.
+## Execution Timeline
+
+The timeline records:
+
+- shell commands
+- task launches
+- task exits
+- agent state changes
+- approvals
+- file-change summaries
+- verification results
+- restore events
+
+The timeline should be searchable and scoped by project, pane, task, or agent.
+
+## Copy, Search, And Scrollback
+
+Terminal panes need:
+
+- bounded scrollback
+- keyboard copy mode
+- pointer selection
+- semantic selection where possible
+- search within pane output
+- copy command output
+- copy failure block
+- copy changed-file list
+
+Copy and search are presentation/runtime concerns, not durable core state.
+
+## Status And Attention
+
+Attention should be explicit and restrained:
+
+- failed task
+- blocked agent
+- pending approval
+- crashed pane
+- restore failure
+- dirty repo
+- server health warning
+
+The user should be able to jump directly from an attention indicator to the
+surface that needs action.
 
 ## Accessibility
 
 Plan for:
 
 - keyboard-only operation
-- keyboard-only operation for all workspace controls
+- configurable keymaps
 - readable contrast
-- font size control
+- font scaling
 - reduced motion
-- screen reader labels for non-terminal UI
+- visible focus
+- descriptive labels for non-terminal surfaces
+- platform accessibility hooks in native frontends

@@ -1,35 +1,40 @@
 ---
 name: product-architect
-description: Use when planning or reviewing Mandatum product scope, non-goals, milestones, or architecture. Trigger on product principles, architecture plan, milestone planning, or "is this becoming an IDE?"
+description: Use when planning or reviewing Mandatum product scope, workstation surfaces, frontend strategy, roadmap gates, or architecture.
 ---
 
 # Product Architect
 
-Use this skill to keep the project aligned with the greenfield product contract.
+Use this skill to keep Mandatum aligned with the development workstation
+contract.
 
 ## Inputs
 
 Read first:
 
 1. `AGENTS.md`
-2. `docs/product-principles.md`
-3. `docs/architecture.md`
-4. `docs/milestones.md`
+2. `PLAN.md`
+3. `docs/product-principles.md`
+4. `docs/architecture.md`
+5. `docs/frontend-platform.md`
+6. `docs/roadmap.md`
 
 ## Workflow
 
-1. Identify the requested product or architecture decision.
-2. Check it against the product category: terminal-native workspace, closer to tmux/zellij than an IDE.
-3. Separate terminal substrate, workspace product, app shell, renderer, workflow orchestration, and agent surfaces.
-4. Flag any drift into IDE scope.
-5. Produce a concrete recommendation with tradeoffs and verification impact.
+1. Identify the product or architecture decision.
+2. Check it against the workstation promise: full session visibility across
+   terminals, tasks, agents, failures, approvals, diffs, and recovery.
+3. Separate engine behavior, runtime state, terminal state, scene data, frontend
+   adapters, workflows, and agent actors.
+4. Confirm product behavior stays out of frontend drawing code.
+5. Recommend the smallest next gate that produces decision-quality evidence.
 
 ## Output
 
 Return:
 
 - recommendation
-- why it fits or violates the product contract
+- why it fits the product contract
 - affected modules/docs
-- verification or milestone impact
+- verification impact
 - open decisions, only if truly blocking
