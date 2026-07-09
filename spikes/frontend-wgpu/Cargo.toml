@@ -1,0 +1,27 @@
+[package]
+name = "mandatum-frontend-wgpu-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[[bin]]
+name = "mandatum-frontend-wgpu-spike"
+path = "src/main.rs"
+
+# Engine crates the spike is allowed to path-depend on. The spike is a frontend
+# adapter only: it reads their public APIs and never copies product behavior.
+[dependencies]
+mandatum-pty = { path = "../../crates/pty" }
+mandatum-terminal-vt = { path = "../../crates/terminal-vt" }
+
+winit = "0.30"
+wgpu = "30"
+glyphon = "0.12"
+arboard = "3.6"
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
