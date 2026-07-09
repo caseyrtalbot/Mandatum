@@ -8,6 +8,7 @@
 //! vibes.
 
 mod gpu;
+mod scene_bridge;
 mod stats;
 mod terminal;
 
@@ -213,9 +214,14 @@ impl App {
         }
         let status = self.status_line();
         let selection = self.selection;
-        let session = self.session.as_ref().unwrap();
+        // Build the frontend-neutral scene, then paint from it. The renderer
+        // never sees the session or grid: grid -> scene lives in scene_bridge.
+        let scene = {
+            let session = self.session.as_ref().unwrap();
+            scene_bridge::build_scene(session, selection, &status)
+        };
         let gpu = self.gpu.as_mut().unwrap();
-        if let Some(present) = gpu.render(session, selection.as_ref(), &status) {
+        if let Some(present) = gpu.render(&scene) {
             if let Some(last) = self.last_present {
                 let d = present.duration_since(last).as_secs_f64() * 1000.0;
                 if d < IDLE_FRAME_CUTOFF_MS {

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 publish = false
+# The spike is the default binary; tui_probe is the external ratatui probe.
+default-run = "mandatum-frontend-wgpu-spike"
 
 [[bin]]
 name = "mandatum-frontend-wgpu-spike"
@@ -14,6 +16,10 @@ path = "src/main.rs"
 [dependencies]
 mandatum-pty = { path = "../../crates/pty" }
 mandatum-terminal-vt = { path = "../../crates/terminal-vt" }
+# The frontend contract. The GPU renderer (src/gpu.rs) consumes ONLY these
+# scene types; the terminal-vt -> scene conversion is isolated in
+# src/scene_bridge.rs, mirroring the product app's crates/app/src/scene_builder.rs.
+mandatum-scene = { path = "../../crates/scene" }
 
 winit = "0.30"
 wgpu = "30"

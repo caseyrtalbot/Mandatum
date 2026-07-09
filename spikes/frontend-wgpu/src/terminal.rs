@@ -48,25 +48,6 @@ pub struct Selection {
     pub end_col: u16,
 }
 
-impl Selection {
-    /// True if the given absolute cell falls inside the selection, using
-    /// reading order (start inclusive, end exclusive).
-    pub fn contains(&self, row: isize, col: u16) -> bool {
-        let (lo, hi) = if (self.start_row, self.start_col) <= (self.end_row, self.end_col) {
-            (
-                (self.start_row, self.start_col),
-                (self.end_row, self.end_col),
-            )
-        } else {
-            (
-                (self.end_row, self.end_col),
-                (self.start_row, self.start_col),
-            )
-        };
-        (row, col) >= lo && (row, col) < hi
-    }
-}
-
 /// A live shell session parsed into a terminal grid.
 pub struct TerminalSession {
     parser: TerminalParser,
@@ -241,11 +222,6 @@ impl TerminalSession {
         &self.shell_name
     }
 
-    /// True when the viewport is following live output (cursor should be drawn).
-    pub fn at_live_bottom(&self) -> bool {
-        self.scroll_offset == 0
-    }
-
     /// Absolute row index shown on the top visible line, given the current
     /// scroll offset. May be negative when history is shorter than the screen.
     pub fn top_absolute_row(&self) -> isize {
@@ -278,7 +254,9 @@ impl TerminalSession {
                 continue;
             }
             let from = if row == r0 { c0 } else { 0 };
-            let to = if row == r1 { c1 } else { self.cols };
+            // Inclusive end column, matching the scene contract's inclusive
+            // selection span so copied text agrees with the highlight.
+            let to = if row == r1 { c1.saturating_add(1) } else { self.cols };
             let mut line = String::new();
             for col in from..to.min(self.cols) {
                 let ch = grid

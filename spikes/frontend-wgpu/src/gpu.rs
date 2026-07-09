@@ -9,10 +9,12 @@ use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
-use mandatum_terminal_vt::{Color, TerminalCell};
+// The renderer consumes ONLY the scene contract. It never imports
+// mandatum-terminal-vt: the grid -> scene conversion lives in scene_bridge.rs,
+// so no parser type crosses into the paint path. This is the clean-adapter
+// boundary the spike is proving.
+use mandatum_scene::{PaneContent, SceneColor, WorkspaceScene};
 use winit::window::Window;
-
-use crate::terminal::{Selection, TerminalSession};
 
 const DEFAULT_FG: [u8; 3] = [220, 220, 224];
 const DEFAULT_BG: [u8; 3] = [18, 18, 22];
@@ -271,38 +273,34 @@ impl GpuText {
         self.cell_h = line_height;
     }
 
-    /// Render one frame from the session snapshot. Returns the instant right
-    /// after `present()` so the caller can measure input-to-present latency, or
-    /// `None` when the swapchain frame could not be acquired (skip).
-    pub fn render(
-        &mut self,
-        session: &TerminalSession,
-        selection: Option<&Selection>,
-        status: &str,
-    ) -> Option<Instant> {
-        let cols = session.cols();
-        let rows = session.rows();
-        let grid = session.grid();
-        let top_abs = session.top_absolute_row();
-        let cursor = grid.cursor();
+    /// Render one frame from a `WorkspaceScene`. Consumes only scene types: the
+    /// visible cells, styles, cursor/selection marks, and status come from the
+    /// scene, never from a grid or parser. Returns the instant right after
+    /// `present()` for input-to-present measurement, or `None` when the
+    /// swapchain frame could not be acquired (skip) or the scene has no terminal.
+    pub fn render(&mut self, scene: &WorkspaceScene) -> Option<Instant> {
+        // Find the single terminal surface and the cell origin of its pane.
+        let (pane, surface) = scene.panes.iter().find_map(|pane| match &pane.content {
+            PaneContent::Terminal(surface) => Some((pane, surface)),
+            _ => None,
+        })?;
+        let origin_x = pane.area.x as f32 * self.cell_w;
+        let origin_y = pane.area.y as f32 * self.cell_h;
+        let rows_count = surface.rows.len();
 
-        // Assemble foreground text (rich-text color runs) and background quads.
-        let mut screen_text = String::with_capacity(usize::from(cols + 1) * usize::from(rows));
+        // Assemble foreground text (rich-text color runs) and background quads,
+        // painting straight from the scene surface.
+        let mut screen_text = String::new();
         let mut runs: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
         let mut quads: Vec<f32> = Vec::with_capacity(1024);
 
-        for screen_row in 0..rows {
-            let abs = top_abs + screen_row as isize;
+        for (y, row) in surface.rows.iter().enumerate() {
+            let abs = surface.first_row + y;
+            let py = origin_y + y as f32 * self.cell_h;
             let mut run_start = screen_text.len();
             let mut run_color: Option<GColor> = None;
-            for col in 0..cols {
-                let cell = if abs >= 0 {
-                    grid.history_cell(abs as usize, col)
-                } else {
-                    None
-                }
-                .unwrap_or_else(TerminalCell::blank);
-                let style = cell.style();
+            for (x, cell) in row.iter().enumerate() {
+                let style = cell.style;
                 let (mut fg, mut bg) = (
                     resolve(style.foreground, DEFAULT_FG),
                     resolve(style.background, DEFAULT_BG),
@@ -311,17 +309,18 @@ impl GpuText {
                     std::mem::swap(&mut fg, &mut bg);
                 }
 
-                let selected = selection.map(|s| s.contains(abs, col)).unwrap_or(false);
-                let px = col as f32 * self.cell_w;
-                let py = screen_row as f32 * self.cell_h;
+                let column = x as u16;
+                let px = origin_x + x as f32 * self.cell_w;
                 if bg != DEFAULT_BG {
                     push_quad(&mut quads, px, py, self.cell_w, self.cell_h, [bg[0], bg[1], bg[2], 255]);
                 }
-                if selected {
+                if surface.selection_contains(abs, column) {
                     push_quad(&mut quads, px, py, self.cell_w, self.cell_h, SELECTION_BG);
                 }
+                if surface.cursor_at(abs, column) {
+                    push_quad(&mut quads, px, py, self.cell_w, self.cell_h, CURSOR_BG);
+                }
 
-                let ch = cell.character();
                 let gc = GColor::rgb(fg[0], fg[1], fg[2]);
                 if run_color != Some(gc) {
                     if let Some(prev) = run_color.take() {
@@ -330,7 +329,7 @@ impl GpuText {
                     run_start = screen_text.len();
                     run_color = Some(gc);
                 }
-                screen_text.push(ch);
+                screen_text.push(cell.character);
             }
             if let Some(prev) = run_color.take() {
                 runs.push((run_start..screen_text.len(), prev));
@@ -338,15 +337,9 @@ impl GpuText {
             screen_text.push('\n');
         }
 
-        // Cursor block (only while following live output).
-        if session.at_live_bottom() && cursor.visible() {
-            let px = cursor.column() as f32 * self.cell_w;
-            let py = cursor.row() as f32 * self.cell_h;
-            push_quad(&mut quads, px, py, self.cell_w, self.cell_h, CURSOR_BG);
-        }
-
-        // Status strip background across the last line.
-        let status_y = rows as f32 * self.cell_h;
+        // Status strip background just below the pane.
+        let status_y = origin_y + rows_count as f32 * self.cell_h;
+        let status = scene.status.as_deref().unwrap_or("ready");
         push_quad(
             &mut quads,
             0.0,
@@ -498,14 +491,15 @@ impl GpuText {
     }
 }
 
-/// Map an engine terminal color onto RGB, using the given default for
-/// `Color::Default`, the standard xterm palette for indexed colors, and a
-/// passthrough for direct RGB.
-fn resolve(color: Color, default: [u8; 3]) -> [u8; 3] {
+/// Map a scene color onto RGB, using the given default for
+/// `SceneColor::Default`, the standard xterm palette for ANSI/indexed colors,
+/// and a passthrough for direct RGB.
+fn resolve(color: SceneColor, default: [u8; 3]) -> [u8; 3] {
     match color {
-        Color::Default => default,
-        Color::Rgb(r, g, b) => [r, g, b],
-        Color::Indexed(i) => palette(i),
+        SceneColor::Default => default,
+        SceneColor::Rgb(r, g, b) => [r, g, b],
+        SceneColor::Ansi(i) => palette(i),
+        SceneColor::Indexed(i) => palette(i),
     }
 }
 

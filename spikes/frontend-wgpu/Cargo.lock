@@ -992,12 +992,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 
 [[package]]
+name = "mandatum-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mandatum-frontend-wgpu-spike"
 version = "0.1.0"
 dependencies = [
  "arboard",
  "glyphon",
  "mandatum-pty",
+ "mandatum-scene",
  "mandatum-terminal-vt",
  "pollster",
  "serde",
@@ -1011,6 +1020,14 @@ name = "mandatum-pty"
 version = "0.1.0"
 dependencies = [
  "portable-pty",
+]
+
+[[package]]
+name = "mandatum-scene"
+version = "0.1.0"
+dependencies = [
+ "mandatum-core",
+ "serde",
 ]
 
 [[package]]

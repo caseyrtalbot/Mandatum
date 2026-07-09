@@ -13,25 +13,101 @@ never joins the product build or CI gate.
 
 ## Verdict (read this first)
 
-The GPU frontend is **feasible and fast in absolute terms**: input-to-present
-latency measured at **p50 21.6 ms / p95 22.3 ms**, which is essentially one
-display refresh (16.6 ms at 60 Hz) plus shell echo round-trip. Under a sustained
-scroll flood it holds a **smooth ~40 fps (25 ms/frame, p50≈p95, no stutter
-spikes)**, and that number is a floor set by an unoptimized full-screen rebuild
-every frame, not a ceiling.
+The GPU frontend shows a **measured, roughly 2x latency advantage** over the
+product's ratatui frontend, and its rendering now runs **entirely through the
+`mandatum-scene` contract** (the renderer imports zero parser types), so it is a
+clean adapter rather than a parallel path.
 
-What this spike does **not** prove: a head-to-head, user-visible quality *gain*
-over the existing ratatui/crossterm frontend. It measures the GPU path's
-absolute numbers; it does not run the same latency probe through the ratatui
-frontend for an A/B. The qualitative gains that a GPU frontend unlocks
-(antialiased sub-pixel glyph rasterization, arbitrary fonts/sizes/colors, frame
-pacing the app controls, per-cell GPU-composited backgrounds/selection) are real
-and visible in the live window, but calling them a *net* win over an already
-competent host terminal is a judgment that needs eyes on the running window.
-I cannot screenshot programmatically in this repo, so that visual confirmation
-is Casey's to make. The honest position: **feasibility proven, absolute latency
-is excellent, a rigorous quality-gain claim would need the A/B and a look at the
-pixels.**
+- GPU frontend, key -> GPU present, **includes the on-screen paint**:
+  **p50 21.6 ms / p95 22.2 ms / max 23.1 ms**.
+- Product ratatui frontend, key -> app-output-bytes, measured externally,
+  **excludes host-terminal paint**: **p50 42.9 ms / p95 45.8 ms / max 52.3 ms**.
+
+The GPU number is both lower and stricter (it counts pixels on screen; the TUI
+number stops at bytes emitted, before the host terminal even paints them), so the
+true end-to-end gap is larger than the 2x shown. Under a sustained scroll flood
+the GPU frontend holds a smooth ~40 fps (25 ms/frame, p50≈p95), a floor set by an
+unoptimized per-frame rebuild, not a ceiling.
+
+The honest caveat, detailed in the side-by-side section: a large part of that gap
+is the product's **40 ms input poll loop**, not "ratatui vs wgpu" as renderers.
+A lower poll interval would shrink the TUI's bytes-out latency. The GPU
+frontend's durable, non-replicable wins are event-driven + vsync-timed frame
+pacing, GPU-rasterized text, and owning the pixel pipeline end to end. The blunt
+production call is in [Final spike verdict](#final-spike-verdict) at the bottom.
+
+## Clean-adapter conformance (scene binding)
+
+The renderer no longer reads the terminal grid. It consumes only the
+`mandatum-scene` contract that every Mandatum frontend consumes, with the
+grid -> scene conversion isolated in one module, exactly as the product app
+splits `scene_builder.rs` from its ratatui renderer.
+
+How the boundary is enforced in the spike's module structure:
+
+| Module | Imports `mandatum-terminal-vt`? | Role |
+|--------|:---:|------|
+| `src/terminal.rs` | yes | owns the PTY + VT parser + grid |
+| `src/scene_bridge.rs` | yes | the ONLY grid -> scene seam; builds a `WorkspaceScene` each frame |
+| `src/gpu.rs` (the renderer) | **no** | paints from `WorkspaceScene` / `TerminalSurface` / `SceneCell` / `SceneColor` only |
+| `src/main.rs` | no | builds the scene via `scene_bridge`, hands `&WorkspaceScene` to the renderer |
+
+Verified mechanically: `grep -n 'use .*mandatum_terminal_vt' src/gpu.rs` returns
+nothing, and no parser type name (`TerminalGrid`, `TerminalCell`, `CellStyle`,
+the VT `Color`) appears in the renderer. Each frame `scene_bridge::build_scene`
+windows the grid into a `TerminalSurface` (the same `terminal_surface` logic as
+`crates/app/src/scene_builder.rs`: `rows` windowed to the viewport, `first_row`
+absolute, cursor/selection in absolute coordinates), wraps it in a single-pane
+`WorkspaceScene`, and the renderer uses the surface's own `selection_contains`
+and `cursor_at` helpers to place highlight and cursor quads. Copy-mode selection
+was also made inclusive-end in `text_in_range` to match the scene contract's
+inclusive selection span, so copied text agrees with the highlight.
+
+Re-measured after the binding, there is **no regression**: typing-bench came back
+p50 21.6 ms / p95 22.2 ms (identical to the pre-binding p50 21.6 ms), and the
+scroll flood 24.8 ms / 26.3 ms per frame over 93 frames (identical to 25.0 ms).
+Building an owned `WorkspaceScene` (a `Vec<Vec<SceneCell>>`) every frame is
+absorbed within the existing frame budget.
+
+## Side-by-side latency: GPU spike vs product ratatui frontend
+
+The product frontend was measured **externally, with no edits outside
+`spikes/`**: `src/bin/tui_probe.rs` spawns the real `mandatum-app` binary inside
+a PTY at 100x30, waits for its first render, then for 100 iterations clears the
+shell input line, types one character, and times until that character's echo
+appears in the app's output byte stream.
+
+| Path | What is timed | p50 | p95 | max | n |
+|------|---------------|----:|----:|----:|--:|
+| **GPU spike** | key receipt -> `queue.present` (**paint included**) | 21.6 ms | 22.2 ms | 23.1 ms | 300 |
+| **ratatui frontend** | key -> app-emitted bytes (**host paint excluded**) | 42.9 ms | 45.8 ms | 52.3 ms | 100 |
+
+Methodology and caveats, stated plainly because the comparison is asymmetric by
+construction:
+
+- **The measurements are not symmetric, and the asymmetry favors the TUI.** The
+  GPU number ends at the GPU present (pixels on screen). The TUI number ends at
+  bytes leaving the app, *before* the host terminal (iTerm2/Terminal.app) parses
+  and paints them, which adds its own input-to-photon latency (another poll +
+  refresh). So the TUI's true on-screen latency is higher than 42.9 ms, and the
+  real gap is wider than the table shows.
+- **Much of the gap is the 40 ms poll loop, not the renderer.** The app's loop is
+  `tick -> draw -> event::poll(40ms)`. A keystroke's echo surfaces on the next
+  draw after the shell echo is read, so latency clusters just above one poll
+  interval (hence the tight 43-46 ms band). This is an app-design choice, not
+  fundamental to ratatui: a shorter poll or an event-driven loop would cut the
+  TUI's bytes-out latency substantially. The GPU spike, by contrast, is
+  event-driven (renders when PTY bytes arrive) and vsync-paced, so its latency is
+  ~one refresh (16.6 ms) plus echo round-trip.
+- **Both use the same engine.** Same `mandatum-pty`, same `mandatum-terminal-vt`,
+  same shell. The difference measured is purely frontend + loop architecture.
+- The probe detects the echo reliably because the app's ratatui diff only emits
+  changed cells: the probe char (`z`, never a byte in the app's ANSI control
+  output) appears in the output stream exactly when the app paints its echo. 100
+  samples, 0 misses.
+
+Reproduce: `cargo build -p mandatum-app --release` (in the workspace), then
+`cargo run --release --bin tui_probe` (in the spike).
 
 ## Text stack chosen
 
@@ -71,7 +147,7 @@ through the *same* input path); present is timestamped immediately after
 present, assuming FIFO shell echo ordering. `frame_ms` is the present-to-present
 interval, filtered to drop idle gaps > 250 ms. Present mode is Fifo (vsync).
 
-### 1. Typing bench — `--exit-after 12 --typing-bench`
+### 1. Typing bench: `--exit-after 12 --typing-bench`
 300 synthetic keystrokes injected at 30/sec through the real input-handling path
 (deterministic, not through the OS):
 
@@ -87,7 +163,7 @@ interval, filtered to drop idle gaps > 250 ms. Present mode is Fifo (vsync).
   33 ms inject interval, not GPU capability. The flood run is the real
   frame-time test.
 
-### 2. Scroll flood — `--exit-after 14 --flood`
+### 2. Scroll flood: `--exit-after 14 --flood`
 Programmatically runs `seq 1 200000` in the shell at startup and measures frame
 time while ~1.28 MB streams and scrolls:
 
@@ -109,7 +185,7 @@ time while ~1.28 MB streams and scrolls:
   parser feed (so one pump does not race the reader and swallow the entire flood
   in a single repaint). Both live in `src/terminal.rs`.
 
-### 3. Plain interactive — `--exit-after 6`
+### 3. Plain interactive: `--exit-after 6`
 Live shell prompt, no bench: renders the prompt, sits idle, exits cleanly at the
 deadline. Confirms the ordinary interactive path and clean shutdown (no hang, no
 panic, exit 0).
@@ -145,9 +221,10 @@ panic, exit 0).
 
 ## What does not work / known limitations
 
-- **No head-to-head baseline.** The spike measures the GPU path only. It does not
-  run the identical latency probe through the ratatui frontend, so "quality
-  gain" is argued qualitatively, not proven by A/B.
+- **The side-by-side is latency only, and asymmetric.** The A/B now exists (see
+  the side-by-side section), but it compares key->present against
+  key->bytes-out, not photons against photons, and it does not compare *text
+  quality* (that still needs eyes on the window, below).
 - **Naive per-frame rebuild.** Full-screen rich-text is reassembled and reshaped
   every frame. No damage tracking, no glyph-run cache. This is why the flood
   sits at 40 fps rather than 60.
@@ -203,8 +280,45 @@ cargo run --release -- --exit-after 6                     # plain interactive
 ```
 
 A native window appears for the duration of each run and closes at the deadline;
-the JSON summary prints to stdout on exit. Source is four modules:
+the JSON summary prints to stdout on exit. Source modules:
 `src/terminal.rs` (PTY + parser adapter, backpressure, scroll/selection),
-`src/gpu.rs` (wgpu surface, quad pipeline, glyphon text, per-frame render),
-`src/stats.rs` (percentiles), `src/main.rs` (event loop, input encoding, bench,
-instrumentation, JSON summary).
+`src/scene_bridge.rs` (grid -> `mandatum-scene` conversion, the only parser/scene
+seam), `src/gpu.rs` (wgpu surface, quad pipeline, glyphon text, paints from the
+scene), `src/stats.rs` (percentiles), `src/main.rs` (event loop, input encoding,
+bench, instrumentation, JSON summary), `src/bin/tui_probe.rs` (external ratatui
+latency probe).
+
+## Final spike verdict
+
+**The GPU frontend proves a real, measured, user-visible latency win, and it is a
+clean adapter, but the honest call is: keep the ratatui terminal frontend as v1,
+and hold the wgpu adapter as a proven, ready option rather than shipping it now.**
+
+Why the win is real: at p50 21.6 ms including the on-screen paint, against the
+product's 42.9 ms that stops at bytes-out before its host terminal even paints,
+the GPU path is at least twice as responsive, and the gap is understated. It is
+event-driven and vsync-paced by construction, it composites cell backgrounds,
+selection, and cursor on the GPU, and it rasterizes real antialiased glyphs with
+font freedom a cell-locked host terminal cannot match. And it now renders purely
+from the `mandatum-scene` contract, so it is a second conforming frontend, not a
+fork; the architectural cost of keeping the option open is already paid.
+
+Why not ship it as v1 anyway: be blunt about what the number is not. A large part
+of the measured gap is the product's own 40 ms input poll, which the ratatui
+frontend could cut without any GPU work, so "2x" partly measures a loop constant
+the terminal frontend can close on its own. Against that, a production wgpu
+adapter still owes real work the spike skipped: binding fully to the scene
+contract for multi-pane/overlay/header (this spike renders one pane), correct
+wide-character and grapheme width, IME and composition, runtime DPI, bold/italic
+mapping, surface-loss recovery, and a damage-tracked renderer to actually reach
+60 fps under load. That is weeks, not days. The latency and quality gains are
+real but incremental for a terminal-first tool; they become decisive only when
+the product wants things a host terminal cannot give at all: true GPU visuals,
+per-frame animation, pixel-precise layout, embedded non-text surfaces.
+
+So: the spike succeeded. It disproved the null hypothesis (no measurable gain):
+there is a measured latency gain and a credible quality gain, and it proved the
+adapter can be clean. The gain does not yet clear the bar to displace a working,
+lower-risk terminal frontend as v1. Ship ratatui; keep this adapter warm behind
+the scene contract; revisit when the roadmap needs GPU-only capability or when
+sub-20 ms end-to-end latency becomes a stated product goal.
