@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: full merge gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: ./ci/gate.sh
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Verify native build host
+        shell: bash
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          test "$host" = "${{ matrix.target }}"
+      - name: Build release binaries
+        run: |
+          cargo build --locked --release -p mandatum-app --bin mandatum
+          cargo build --locked --release -p mandatum-agent-runtime --bin mandatum-approval-bridge
+      - name: Package and verify archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          archive="mandatum-${TARGET}.tar.gz"
+          mkdir -p dist/stage
+          install -m 0755 target/release/mandatum dist/stage/mandatum
+          install -m 0755 target/release/mandatum-approval-bridge \
+            dist/stage/mandatum-approval-bridge
+          install -m 0644 LICENSE dist/stage/LICENSE
+          tar -C dist/stage -czf "dist/${archive}" \
+            mandatum mandatum-approval-bridge LICENSE
+
+          expected=$(printf '%s\n' LICENSE mandatum mandatum-approval-bridge | LC_ALL=C sort)
+          actual=$(tar -tzf "dist/${archive}" | LC_ALL=C sort)
+          test "$actual" = "$expected"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "$archive" >"${archive}.sha256")
+            (cd dist && sha256sum -c "${archive}.sha256")
+          else
+            (cd dist && shasum -a 256 "$archive" >"${archive}.sha256")
+            (cd dist && shasum -a 256 -c "${archive}.sha256")
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/mandatum-${{ matrix.target }}.tar.gz
+            dist/mandatum-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz' | wc -l)" -eq 4
+          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz.sha256' | wc -l)" -eq 4
+          for checksum in dist/*.tar.gz.sha256; do
+            (cd dist && sha256sum -c "$(basename "$checksum")")
+          done
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz dist/*.tar.gz.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "Mandatum $GITHUB_REF_NAME"

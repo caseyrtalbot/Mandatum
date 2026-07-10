@@ -12,9 +12,10 @@ LICENSE        Apache-2.0
 Cargo.toml     Rust workspace manifest (excludes spikes/frontend-wgpu)
 Cargo.lock     locked Rust dependencies
 rust-toolchain.toml  pinned gate toolchain
+install.sh     latest-release installer (checksum verification + both binaries)
 ci/            the merge gate: gate.sh, conformance.sh, doc-trace.sh
-.github/       GitHub Actions CI (runs ci/gate.sh), Dependabot config,
-               issue and PR templates
+.github/       GitHub Actions CI + tag-driven native release archives,
+               Dependabot config, issue and PR templates
 docs/          product and architecture specs
 docs/assets/   README frames: SVGs generated from real captured sessions
 crates/        implementation modules
@@ -102,6 +103,7 @@ The terminal app runtime:
 
 - `app_shell.rs`: terminal lifecycle, event-driven run loop, renderer handoff
 - `app_state.rs`: command dispatch, event application, runtime reconciliation
+- `app_state/tests.rs`: private app-state unit and live-PTY tests
 - `events.rs`: the unified app event channel (input / PTY / agent)
 - `frontend.rs`: crossterm-to-neutral input translation (the only module
   besides `app_shell.rs` allowed to name crossterm)
@@ -119,7 +121,8 @@ The terminal app runtime:
 - `copy_mode.rs`, `pointer.rs`, `clipboard.rs`: selection, pointer routing,
   OSC 52
 - `tests/frontend_parity.rs`: cross-frontend scene parity;
-  `tests/terminal_smoke.rs`: live PTY smoke
+  `tests/terminal_smoke.rs`: live PTY smoke;
+  `tests/distribution.rs`: public executable-name contract
 
 ### `crates/workflows`
 

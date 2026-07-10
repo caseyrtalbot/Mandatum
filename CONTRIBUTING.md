@@ -32,7 +32,9 @@ to discuss the design instead.
   CLI tests are `#[ignore]` and run explicitly.
 - **Every changed line traces to the change's purpose.** No drive-by
   refactors or restyling.
-- **Files stay under 800 lines.** Split modules rather than growing them.
+- **Prefer focused modules under 800 lines.** Existing oversized modules
+  should shrink when touched; do not grow one without documenting why a
+  split would make the design worse.
 - **New judgment calls go to `docs/decisions.md`** (status, decision,
   context, rationale, consequences). Docs are reconciled to code in the
   same change that alters behavior.
@@ -51,5 +53,5 @@ feat, fix, refactor, docs, test, chore, perf, ci.
 git clone https://github.com/caseyrtalbot/Mandatum.git
 cd Mandatum
 ./ci/gate.sh          # rustup installs the pinned toolchain automatically
-cargo run -p mandatum-app
+cargo run -p mandatum-app --bin mandatum
 ```

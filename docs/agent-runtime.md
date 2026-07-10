@@ -24,7 +24,9 @@ conformance gate). Owns:
   risk }` answered by `ApprovalDecision { approval_id, Approved | Rejected }`.
   Risk bands are advisory heuristics (`assess_command_risk`); the gate itself
   is the enforcement point.
-- `FakeConnector`: deterministic scripted connector used by every test.
+- `FakeConnector`: deterministic scripted connector used by the gate's agent
+  flows and the demo; two explicitly ignored tests exercise the live Claude
+  CLI connector.
 
 ### App integration (`crates/app`)
 
@@ -45,7 +47,8 @@ conformance gate). Owns:
   decisions remain visible after restart.
 - Connector selection: `AppConfig.agent_connector` (`fake | claude`,
   default `claude`; both kinds are wired, gated by
-  `every_configured_connector_kind_is_wired`). Tests wire `fake` everywhere.
+  `every_configured_connector_kind_is_wired`). Gate tests wire `fake`; the two
+  explicitly ignored connector tests run the live Claude CLI.
 - Model hint: `AppConfig.agent_model` flows into `AgentLaunchSpec.model`
   (`--model` for the Claude CLI). `AppConfig::from_current_dir` reads it from
   `MANDATUM_AGENT_MODEL`; `None` uses the connector's account default.

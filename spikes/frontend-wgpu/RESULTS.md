@@ -72,7 +72,7 @@ absorbed within the existing frame budget.
 ## Side-by-side latency: GPU spike vs product ratatui frontend
 
 The product frontend was measured **externally, with no edits outside
-`spikes/`**: `src/bin/tui_probe.rs` spawns the real `mandatum-app` binary inside
+`spikes/`**: `src/bin/tui_probe.rs` spawns the real `mandatum` binary inside
 a PTY at 100x30, waits for its first render, then for 100 iterations clears the
 shell input line, types one character, and times until that character's echo
 appears in the app's output byte stream.

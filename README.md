@@ -9,15 +9,17 @@ with first-class approvals, an execution timeline, and recovery that
 survives restarts.
 
 [![CI](https://github.com/caseyrtalbot/Mandatum/actions/workflows/ci.yml/badge.svg)](https://github.com/caseyrtalbot/Mandatum/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/caseyrtalbot/Mandatum)](https://github.com/caseyrtalbot/Mandatum/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.96](https://img.shields.io/badge/rust-1.96-orange.svg)](rust-toolchain.toml)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux-lightgrey.svg)](#quickstart)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux-lightgrey.svg)](#install)
 
 <img src="docs/assets/hero-approval.svg" alt="Mandatum workstation: a live shell, a failed check task, a dev-server pane, and a floating agent pane waiting for approval to run rm .flip, with the attention strip reading 1 approval waiting and 1 task failed" width="100%">
 
-*A real frame, not a mockup: an agent paused mid-task, asking permission
-to delete a file. The header knows a check failed, too. One keypress
-decides; the decision is kept forever in the timeline.*
+*Captured from the current binary: an agent paused mid-task, asking
+permission to delete a file. The header knows a check failed, too. One
+keypress decides; the decision persists across restarts in durable pane
+history and the timeline's bounded audit window.*
 
 </div>
 
@@ -42,7 +44,7 @@ structure around it.
 
 ## The tour
 
-| The fuzzy palette knows every command | The timeline remembers every fact |
+| The fuzzy palette knows every command | The timeline records durable workstation facts |
 |:---:|:---:|
 | <img src="docs/assets/palette.svg" alt="Fuzzy command palette filtering commands for the query sp, showing match highlights, chord hints, and greyed-out entries with the reason they are unavailable" width="100%"> | <img src="docs/assets/timeline.svg" alt="Execution timeline overlay listing commands dispatched, task runs with exit statuses, agent status changes, and approval decisions, filterable by pane, kind, and time" width="100%"> |
 
@@ -69,8 +71,8 @@ restore (live processes) are never faked.
 **Agents as session actors, not chat windows.** An agent pane shows
 objective, status, current action, latest summary, changed files, and
 output tail at a glance. The reference connector runs Claude Code headless
-(`claude -p`, stream-json); a deterministic FakeConnector drives every test
-and the demo. The connector contract is model-agnostic.
+(`claude -p`, stream-json); a deterministic FakeConnector drives scripted
+agent-flow tests and the demo. The connector contract is model-agnostic.
 
 **A real approval gate.** Gated actions block inside the connector via a
 PreToolUse hook that waits on a Unix socket until you decide in the
@@ -79,9 +81,9 @@ request renders with command, scope, and a risk heuristic; `y` approves,
 `n` rejects; decisions persist in the pane's approval history.
 
 **Visibility without decoration.** A header attention strip (approvals
-waiting, failed tasks, blocked agents; click to jump), a session map, an
-append-only execution timeline on disk, and session-wide output search
-with a query grammar (`pane:`, `kind:`).
+waiting, failed tasks, blocked agents; click to jump), a session map, a
+rotating append-only execution timeline on disk, and session-wide output
+search with a query grammar (`pane:`, `kind:`).
 
 **Commandable and bindable everything.** Fuzzy palette with context-aware
 ranking, a right-click context menu, and a config file where every command
@@ -98,7 +100,29 @@ p50 13.3 ms on the external probe (down from 42.6 ms on the old 40 ms poll
 loop). PTY floods are backpressured: a `yes` flood holds ~12 MB RSS and
 the app quits in under a second, measured on the release binary.
 
-## Quickstart
+## Install
+
+The installer supports Apple Silicon and Intel Macs plus arm64 and x86-64
+glibc Linux. It downloads the latest release, verifies its SHA-256 checksum,
+and puts both the `mandatum` command and its approval bridge in
+`~/.local/bin`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/caseyrtalbot/Mandatum/main/install.sh | sh
+```
+
+Make sure `~/.local/bin` is on `PATH`, then launch it by name:
+
+```sh
+mandatum
+```
+
+Set `MANDATUM_INSTALL_DIR` to install elsewhere, or download the archive and
+checksum directly from [GitHub Releases](https://github.com/caseyrtalbot/Mandatum/releases).
+Every archive contains `mandatum`, `mandatum-approval-bridge`, and the
+Apache-2.0 license.
+
+### Build from source
 
 Requires Rust (the exact toolchain is pinned in `rust-toolchain.toml`;
 rustup handles it automatically). macOS and Linux.
@@ -106,7 +130,9 @@ rustup handles it automatically). macOS and Linux.
 ```sh
 git clone https://github.com/caseyrtalbot/Mandatum.git
 cd Mandatum
-cargo run -p mandatum-app
+cargo install --locked --path crates/app --bin mandatum
+cargo install --locked --path crates/agent-runtime --bin mandatum-approval-bridge
+mandatum
 ```
 
 Three doors in, no manual required:
@@ -118,6 +144,8 @@ Three doors in, no manual required:
 | `F1` | help, generated from the live keymap |
 
 ### The five-minute demo
+
+From a source checkout:
 
 ```sh
 ./examples/live-slice/run.sh
@@ -231,7 +259,7 @@ Local runs and CI execute the same script on the same pinned toolchain.
 The conformance step is where the Constitution lives: dependency scans for
 L1/L2, `[Lx-GATE]`-tagged tests for L3/L4/L5, and a doc-trace gate that
 fails the build if any law loses its documentation or its test. Current
-suite: 410 tests (plus 2 ignored live-connector tests that exercise the
+suite: 411 tests (plus 2 ignored live-connector tests that exercise the
 real Claude CLI).
 
 Contributions: read [CONTRIBUTING.md](CONTRIBUTING.md) first; the gate and

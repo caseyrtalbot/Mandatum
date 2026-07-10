@@ -27,6 +27,12 @@ green `./ci/gate.sh`:
    PTY flood backpressure, session search, generated help/first-run/legends,
    calm failure states (`6b5c209`).
 
+Operational hardening after the charter added a public `mandatum` executable,
+checksum-verified release archives for macOS and Linux (the approval bridge
+ships beside the app), a latest-release installer, and cross-renderer-safe
+README captures. The Cargo package remains `mandatum-app`; package selection
+is an internal build concern, while `mandatum` is the user-facing command.
+
 ## Next horizon
 
 - **GPU adapter, when the conditions arrive.** The wgpu adapter stays warm

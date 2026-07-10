@@ -753,3 +753,42 @@ on 1.96.
 Rationale: the gate's guarantee is that local and CI run the same checks;
 that includes the toolchain. Bumps are deliberate: update the pin and fix
 any new lints in the same change.
+
+## Accepted: Public Distribution Ships The App And Approval Bridge Together
+
+Status: accepted (2026-07-10)
+
+Decision: the Cargo package remains `mandatum-app`, but its explicit public
+binary target is `mandatum`. Release archives and the installer always place
+`mandatum-approval-bridge` beside it; the Claude connector already resolves
+that sibling before falling back to `PATH`.
+
+Context: the inferred binary name was `mandatum-app`, which leaked an internal
+workspace role into the command users type. Installing only that package also
+omitted the separate approval bridge, leaving the advertised agent approval
+path incomplete. The project is not ready for a crates.io claim: its internal
+path dependencies are intentionally workspace-local and do not carry registry
+versions.
+
+Rationale: package names organize the repository; executable names are product
+interfaces. Keeping the package stable avoids churn in gates, probes, and
+developer commands, while an explicit binary target gives users the single
+`mandatum` entry point. Shipping the bridge in the same archive makes the
+secure agent path work without a second manual discovery step.
+
+Consequences:
+
+- tags matching `v*` run the full gate, then native arm64 and x86-64 builds on
+  macOS and Linux; each archive contains both executables plus `LICENSE`
+- every archive has a SHA-256 sidecar, and `install.sh` verifies it before
+  installing into `MANDATUM_INSTALL_DIR` (default `~/.local/bin`)
+- source installs remain documented as two explicit Cargo installs, one per
+  package, because Cargo requires package selection for a multi-package Git
+  source
+- `cargo install mandatum` is not advertised until a separately verified
+  crates.io publication decision exists
+
+Verification: the distribution procedure in `docs/verification.md`, the full
+merge gate, a disposable-root source-install smoke proving both executable
+names, release-workflow archive-content checks, and an unauthenticated
+latest-release installer smoke after publishing.

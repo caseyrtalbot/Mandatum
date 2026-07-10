@@ -1,6 +1,6 @@
 //! External latency probe for the product's ratatui/crossterm frontend.
 //!
-//! This does NOT edit or link the product. It spawns the real `mandatum-app`
+//! This does NOT edit or link the product. It spawns the real `mandatum`
 //! binary inside a PTY at a fixed size, waits for its first render, then for a
 //! run of iterations types one character into the app's PTY and times how long
 //! until the echoed character appears in the app's output stream.
@@ -208,5 +208,5 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 fn default_app_bin() -> String {
     // The workspace target dir (the spike is excluded and builds elsewhere).
-    format!("{}/../../target/release/mandatum-app", env!("CARGO_MANIFEST_DIR"))
+    format!("{}/../../target/release/mandatum", env!("CARGO_MANIFEST_DIR"))
 }

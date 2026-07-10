@@ -106,6 +106,39 @@ For agent work, prove:
   checks surface is aspirational; see docs/agent-runtime.md "Not Yet Built")
 - restore keeps agent intent without inventing live runtime state
 
+## Distribution Check
+
+The public command is `mandatum`, but a complete installation also needs
+`mandatum-approval-bridge` in the same directory so the Claude connector can
+resolve its fail-closed approval hook.
+
+Before a release change lands:
+
+```sh
+cargo build --locked --release -p mandatum-app --bin mandatum \
+  -p mandatum-agent-runtime --bin mandatum-approval-bridge
+bash -n install.sh
+```
+
+For a local install smoke, use a disposable root and prove both installed
+names rather than launching the TUI:
+
+```sh
+install_root="$(mktemp -d)"
+cargo install --locked --path crates/app --bin mandatum --root "$install_root"
+cargo install --locked --path crates/agent-runtime \
+  --bin mandatum-approval-bridge --root "$install_root"
+test -x "$install_root/bin/mandatum"
+test -x "$install_root/bin/mandatum-approval-bridge"
+```
+
+Tags matching `v*` run the full gate, then build native arm64 and x86-64
+archives for macOS and Linux. Each archive must contain exactly `mandatum`,
+`mandatum-approval-bridge`, and `LICENSE`, with a sibling `.sha256` file.
+After publishing, run `install.sh` against the unauthenticated latest-release
+URLs with a temporary `MANDATUM_INSTALL_DIR` and repeat the two executable
+assertions.
+
 ## Input Latency Regression Check
 
 The standing check for the terminal frontend's key-to-output latency. Run
