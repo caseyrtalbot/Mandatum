@@ -1366,7 +1366,8 @@ const SHELL_READY_COMMAND: &[u8] = b"printf '%s%s\\n' '__MANDATUM_SHELL_' 'READY
 
 /// Prove a freshly spawned shell is reading commands before interacting.
 /// The command's echoed input contains the marker only as two separated
-/// fragments, so only `printf` output can satisfy the exact-line check.
+/// fragments, so only `printf` output can satisfy the suffix check even when
+/// the startup prompt shares its row.
 fn wait_for_shell_ready(state: &mut AppState, pane_id: &PaneId) {
     state
         .terminal_panes
@@ -1384,7 +1385,10 @@ fn wait_for_shell_ready(state: &mut AppState, pane_id: &PaneId) {
                 .grid()
                 .snapshot()
                 .iter()
-                .any(|line| line.trim_end() == SHELL_READY_MARKER)
+                // dash can paint its prompt before the command's output on
+                // the same row. The echoed input cannot contain the assembled
+                // marker, so a suffix match still proves `printf` executed.
+                .any(|line| line.trim_end().ends_with(SHELL_READY_MARKER))
         })
     });
     assert!(
