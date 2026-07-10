@@ -9,3 +9,6 @@ dist/
 coverage/
 *.log
 *.tmp
+
+# Mandatum's own runtime/session state when the app runs inside this repo
+.mandatum/
