@@ -2,7 +2,13 @@ use std::{
     fmt,
     io::{self, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use crossterm::{
@@ -20,11 +26,20 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use crate::{
     app_state::AppState,
     config::{load_config, project_config_file, user_config_file},
+    events::AppEvent,
     frontend::translate_event,
     keymap::Keymap,
 };
 
-const POLL_INTERVAL: Duration = Duration::from_millis(40);
+/// Heartbeat when nothing arrives: child-exit polling and clock-driven UI.
+/// It is not an input latency floor — input wakes the loop immediately.
+const HEARTBEAT: Duration = Duration::from_millis(250);
+/// Redraw cap (~120 fps): under an event flood the loop keeps absorbing
+/// events and repaints at most once per interval instead of once per event.
+const MIN_REDRAW_INTERVAL: Duration = Duration::from_millis(8);
+/// How often the input thread checks its stop flag. `event::poll` returns
+/// the instant an event arrives, so this bounds only shutdown latency.
+const INPUT_STOP_CHECK: Duration = Duration::from_millis(100);
 
 pub fn run() -> Result<(), AppError> {
     run_with_config(AppConfig::from_current_dir()?)
@@ -36,32 +51,102 @@ pub fn run_with_config(config: AppConfig) -> Result<(), AppError> {
     let size = terminal.size()?;
     app.handle_terminal_resize(size.width, size.height);
 
+    let input_thread = InputThread::spawn(app.event_sender());
+    let result = event_loop(&mut terminal, &mut app);
+    // Stop the input thread before restoring the host terminal so it cannot
+    // consume keystrokes that belong to the parent shell after exit.
+    input_thread.stop_and_join();
+    terminal.restore()?;
+    result
+}
+
+/// The event-driven main loop: draw, then block until input or runtime
+/// activity arrives (or the heartbeat elapses). No fixed-interval polling —
+/// a keystroke wakes the loop the moment the input thread forwards it.
+fn event_loop(terminal: &mut TerminalGuard, app: &mut AppState) -> Result<(), AppError> {
+    let mut last_child_poll = Instant::now();
+    app.tick_runtime();
+
     while !app.should_quit() {
-        app.tick_runtime();
-        draw(&mut terminal, &mut app)?;
+        draw(terminal, app)?;
+        let last_draw = Instant::now();
 
         if let Some(payload) = app.take_clipboard_payload() {
             write_clipboard_payload(&payload)?;
         }
 
-        // Drain every buffered event each frame: pointer drags arrive far
-        // faster than the poll interval, and resizing must track the hand.
-        if event::poll(POLL_INTERVAL)? {
+        if app.wait_event(HEARTBEAT) {
+            // Burst drain for drag/flood responsiveness, then coalesce
+            // further arrivals until the redraw window opens so a flood
+            // repaints at the cap instead of per event. Blocking between
+            // arrivals keeps this idle-free (no busy spin).
+            app.drain_events();
             loop {
-                if let Some(input) = translate_event(event::read()?) {
-                    app.handle_event(input);
-                }
-                if app.should_quit() || !event::poll(Duration::ZERO)? {
+                let elapsed = last_draw.elapsed();
+                if app.should_quit() || elapsed >= MIN_REDRAW_INTERVAL {
                     break;
                 }
+                if !app.wait_event(MIN_REDRAW_INTERVAL - elapsed) {
+                    break;
+                }
+                app.drain_events();
             }
+        }
+
+        // Child exits surface on the heartbeat cadence, not per event.
+        if last_child_poll.elapsed() >= HEARTBEAT {
+            app.poll_child_exits();
+            last_child_poll = Instant::now();
         }
     }
 
     app.shutdown();
-    draw(&mut terminal, &mut app)?;
-    terminal.restore()?;
+    draw(terminal, app)?;
     Ok(())
+}
+
+/// Dedicated crossterm input reader. Lives in the frontend layer: it
+/// translates every event to neutral `mandatum_scene::input` values before
+/// forwarding, so nothing past this thread names crossterm ([L1-GATE]).
+struct InputThread {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl InputThread {
+    fn spawn(tx: Sender<AppEvent>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                match event::poll(INPUT_STOP_CHECK) {
+                    Ok(false) => {}
+                    Ok(true) => match event::read() {
+                        Ok(raw) => {
+                            if let Some(input) = translate_event(raw)
+                                && tx.send(AppEvent::Input(input)).is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    },
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop_and_join(mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +166,10 @@ pub struct AppConfig {
     pub keymap: Keymap,
     pub theme: Theme,
     pub reduced_motion: bool,
+    /// Surface byte-level PTY diagnostics in the status line (`[ui]
+    /// debug_status`). Off by default: diagnostics are noise that would
+    /// overwrite meaningful status on every read.
+    pub debug_status: bool,
     /// Validation problems from config loading, surfaced as a startup
     /// status line. A broken config never prevents launch.
     pub config_warnings: Vec<String>,
@@ -107,6 +196,7 @@ impl Default for AppConfig {
             keymap: Keymap::default(),
             theme: Theme::default(),
             reduced_motion: false,
+            debug_status: false,
             config_warnings: Vec::new(),
             user_config_file: None,
         }
@@ -145,6 +235,7 @@ impl AppConfig {
             keymap: loaded.keymap,
             theme: loaded.theme,
             reduced_motion: loaded.reduced_motion,
+            debug_status: loaded.debug_status,
             config_warnings: loaded.warnings,
             user_config_file,
         })

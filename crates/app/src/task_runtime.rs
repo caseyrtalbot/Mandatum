@@ -122,9 +122,14 @@ pub(crate) fn prepare_task_pane_runtime(
     let restart_generation = pane.restart_generation();
     let mut spawn_intent = SpawnIntent::new(session_id, shell_program.to_owned(), size)?
         .with_arguments(["-c", intent.command.as_str()]);
-    if let Some(cwd) = intent.cwd.as_ref().or_else(|| pane.cwd()) {
-        spawn_intent = spawn_intent.with_cwd(cwd.clone());
-    }
+    // Always resolved (intent -> pane -> project): an unset cwd would fall
+    // back to `$HOME` inside portable-pty and quietly run the user's task
+    // command in the wrong directory.
+    spawn_intent = spawn_intent.with_cwd(crate::terminal_runtime::resolve_pane_cwd(
+        workspace,
+        pane,
+        intent.cwd.as_ref(),
+    ));
     spawn_intent = spawn_intent.with_environment([("TERM", "xterm-256color")]);
 
     let session = NativePtySession::spawn(spawn_intent)?;

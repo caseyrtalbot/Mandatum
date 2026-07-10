@@ -1,8 +1,10 @@
 //! The remappable keymap: workspace-control chords plus palette letters.
 //!
-//! Defaults reproduce the pre-config behavior exactly: Ctrl+Q quits,
-//! Ctrl+P toggles the palette, no command has a global chord, and palette
-//! letters come from the `palette_key` data column in
+//! Defaults: Ctrl+Q quits, Ctrl+P toggles the palette, F1 opens Help
+//! (function keys are workspace keys already), Ctrl+Shift+F opens session
+//! search (the everywhere-search convention; the shift keeps plain Ctrl+F —
+//! readline forward-char — flowing to the child), and palette letters come
+//! from the `palette_key` data column in
 //! `mandatum_commands::BUILT_IN_COMMANDS`.
 //!
 //! Every global chord must carry an explicit command modifier (control, alt
@@ -27,7 +29,27 @@ impl Default for Keymap {
         Self {
             quit: Key::ctrl('q'),
             toggle_palette: Key::ctrl('p'),
-            command_chords: Vec::new(),
+            // Help ships on F1 by default: a stranger's universal key, and a
+            // workspace key already (no modifier required for function keys).
+            // Session search ships on Ctrl+Shift+F, the everywhere-search
+            // convention; terminals that cannot report shift+ctrl simply
+            // never produce the chord (the palette route still works), so no
+            // child keystroke is ever stolen by accident. Both rebindable
+            // like any command chord.
+            command_chords: vec![
+                (Key::plain(KeyCode::Function(1)), CommandId::ShowHelp),
+                (
+                    Key::new(
+                        KeyCode::Char('f'),
+                        Modifiers {
+                            control: true,
+                            shift: true,
+                            ..Modifiers::NONE
+                        },
+                    ),
+                    CommandId::SearchSession,
+                ),
+            ],
             palette: PaletteBindings::default(),
         }
     }
@@ -226,6 +248,29 @@ mod tests {
             keymap.palette.resolve_char('v'),
             Some(CommandId::SplitRight)
         );
+        // Help is the one default command chord, and it is rebindable.
+        assert_eq!(
+            keymap.chord_action(Key::plain(KeyCode::Function(1))),
+            Some(ChordAction::Dispatch(CommandId::ShowHelp))
+        );
+        // Session search ships on ctrl+shift+f (either character case), and
+        // plain ctrl+f stays with the child terminal.
+        assert_eq!(
+            keymap.chord_action(parse_chord("ctrl+shift+f").unwrap()),
+            Some(ChordAction::Dispatch(CommandId::SearchSession))
+        );
+        assert_eq!(
+            keymap.chord_action(Key::new(
+                KeyCode::Char('F'),
+                Modifiers {
+                    control: true,
+                    shift: true,
+                    ..Modifiers::NONE
+                }
+            )),
+            Some(ChordAction::Dispatch(CommandId::SearchSession))
+        );
+        assert_eq!(keymap.chord_action(Key::ctrl('f')), None);
     }
 
     #[test]

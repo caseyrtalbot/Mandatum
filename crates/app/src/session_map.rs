@@ -3,7 +3,9 @@
 //! `app_state` owns the open/close/jump wiring.
 
 use mandatum_core::{AgentStatus, PaneId, PaneKind, SessionId, Workspace};
-use mandatum_scene::{SceneSize, SessionMapOverlay, SessionMapRow, layout::session_map_rect};
+use mandatum_scene::{
+    SESSION_MAP_FOCUS_GLYPH, SceneSize, SessionMapOverlay, SessionMapRow, layout::session_map_rect,
+};
 
 /// Live overlay state while the session map is open. Runtime presentation
 /// only; never serialized.
@@ -44,7 +46,7 @@ pub(crate) fn session_map_rows(
             target: SessionMapTarget::Session(session_id.clone()),
             row: SessionMapRow {
                 depth: 0,
-                glyph: "▸".to_owned(),
+                glyph: SESSION_GLYPH.to_owned(),
                 label: format!(
                     "{} · {} · {} pane(s){active_mark}",
                     session_id,
@@ -91,12 +93,28 @@ pub(crate) fn session_map_rows(
     rows
 }
 
+/// The session-map glyphs and their meanings, in legend order. `pane_glyph`
+/// and the session heading draw from this table, and the overlay footer's
+/// legend is generated from it, so the two cannot drift. The focus marker is
+/// shared with frontends via [`SESSION_MAP_FOCUS_GLYPH`].
+pub(crate) const SESSION_MAP_GLYPH_LEGEND: &[(&str, &str)] = &[
+    ("▸", "session"),
+    ("❯", "terminal"),
+    ("▶", "task"),
+    ("◆", "agent"),
+    ("≡", "status"),
+    (SESSION_MAP_FOCUS_GLYPH, "focused"),
+];
+
+/// The glyph for a session heading row (legend entry 0).
+const SESSION_GLYPH: &str = SESSION_MAP_GLYPH_LEGEND[0].0;
+
 fn pane_glyph(kind: &PaneKind) -> &'static str {
     match kind {
-        PaneKind::Terminal { .. } => "❯",
-        PaneKind::Task { .. } => "▶",
-        PaneKind::Agent { .. } => "◆",
-        PaneKind::StatusLog { .. } => "≡",
+        PaneKind::Terminal { .. } => SESSION_MAP_GLYPH_LEGEND[1].0,
+        PaneKind::Task { .. } => SESSION_MAP_GLYPH_LEGEND[2].0,
+        PaneKind::Agent { .. } => SESSION_MAP_GLYPH_LEGEND[3].0,
+        PaneKind::StatusLog { .. } => SESSION_MAP_GLYPH_LEGEND[4].0,
     }
 }
 
@@ -121,18 +139,46 @@ pub(crate) fn agent_state_word(status: &AgentStatus) -> &'static str {
     }
 }
 
-/// Build the overlay scene for the current rows and selection.
+/// Build the overlay scene for the current rows and selection. The footer
+/// carries a legend for the glyphs actually on screen, generated from
+/// [`SESSION_MAP_GLYPH_LEGEND`] so it cannot drift from the rows.
 pub(crate) fn session_map_overlay(
     rows: &[SessionMapRowModel],
     selected: usize,
     size: SceneSize,
 ) -> SessionMapOverlay {
     let selected = selected.min(rows.len().saturating_sub(1));
+    let mut footer = "↑/↓ move · enter focus · esc close".to_owned();
+    if let Some(legend) = glyph_legend(rows) {
+        footer.push_str(&format!(" · {legend}"));
+    }
     SessionMapOverlay {
         area: session_map_rect(size),
         rows: rows.iter().map(|model| model.row.clone()).collect(),
         selected,
-        footer: "↑/↓ move · enter focus · esc close".to_owned(),
+        footer,
+    }
+}
+
+/// Legend entries for the glyphs present in `rows` (plus the focus marker
+/// when any row carries it), in the table's stable order.
+fn glyph_legend(rows: &[SessionMapRowModel]) -> Option<String> {
+    let any_focused = rows.iter().any(|model| model.row.focused);
+    let parts: Vec<String> = SESSION_MAP_GLYPH_LEGEND
+        .iter()
+        .filter(|(glyph, _)| {
+            if *glyph == SESSION_MAP_FOCUS_GLYPH {
+                any_focused
+            } else {
+                rows.iter().any(|model| model.row.glyph == *glyph)
+            }
+        })
+        .map(|(glyph, meaning)| format!("{glyph} {meaning}"))
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
     }
 }
 
@@ -140,7 +186,7 @@ pub(crate) fn session_map_overlay(
 mod tests {
     use std::path::PathBuf;
 
-    use mandatum_core::{AgentPaneIntent, CoreAction, TaskPaneIntent};
+    use mandatum_core::{AgentPaneIntent, CoreAction, StatusLogSource, TaskPaneIntent};
 
     use super::*;
 
@@ -243,5 +289,61 @@ mod tests {
         assert_eq!(overlay.selected, rows.len() - 1);
         assert_eq!(overlay.rows.len(), rows.len());
         assert!(overlay.footer.contains("enter focus"));
+    }
+
+    #[test]
+    fn every_row_glyph_has_a_legend_entry_and_the_footer_carries_it() {
+        // A workspace exercising every pane kind, so every glyph the map can
+        // emit appears; each must be decodable from the footer legend.
+        let mut workspace = Workspace::new("Mandatum", PathBuf::from("/tmp/project"));
+        workspace
+            .apply_action(CoreAction::CreateTaskPane {
+                title: "checks".to_owned(),
+                intent: TaskPaneIntent {
+                    recipe_id: None,
+                    command: "cargo test".to_owned(),
+                    cwd: None,
+                },
+            })
+            .unwrap();
+        workspace
+            .apply_action(CoreAction::CreateAgentPane {
+                title: "agent".to_owned(),
+                intent: AgentPaneIntent::draft("review"),
+                cwd: None,
+            })
+            .unwrap();
+        workspace.active_session_mut().add_floating_pane(
+            "log",
+            PaneKind::StatusLog {
+                source: StatusLogSource::Workspace,
+            },
+            None,
+        );
+
+        let rows = session_map_rows(&workspace, &|_| None);
+        let overlay = session_map_overlay(&rows, 0, SceneSize::new(120, 30));
+
+        for model in &rows {
+            let (_, meaning) = SESSION_MAP_GLYPH_LEGEND
+                .iter()
+                .find(|(glyph, _)| *glyph == model.row.glyph)
+                .unwrap_or_else(|| panic!("glyph {:?} missing from legend", model.row.glyph));
+            assert!(
+                overlay
+                    .footer
+                    .contains(&format!("{} {meaning}", model.row.glyph)),
+                "footer {:?} must explain glyph {:?}",
+                overlay.footer,
+                model.row.glyph
+            );
+        }
+        // The frontends' focus marker is explained too (a pane is focused).
+        assert!(rows.iter().any(|model| model.row.focused));
+        assert!(
+            overlay
+                .footer
+                .contains(&format!("{SESSION_MAP_FOCUS_GLYPH} focused"))
+        );
     }
 }

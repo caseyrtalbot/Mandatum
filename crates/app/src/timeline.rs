@@ -153,7 +153,9 @@ impl TimelineEventKind {
         }
     }
 
-    /// One-cell glyph for the overlay row.
+    /// One-cell glyph for the overlay row. Every glyph returned here MUST
+    /// have an entry in [`TIMELINE_GLYPH_LEGEND`] (tested), so the overlay
+    /// legend can never drift from what is drawn.
     pub(crate) fn glyph(&self) -> &'static str {
         match self {
             Self::CommandDispatched { .. } => "»",
@@ -235,6 +237,33 @@ impl TimelineEventKind {
     }
 }
 
+/// What each timeline glyph means, for the overlay footer legend and the
+/// help overlay. The companion test constructs every event kind (including
+/// every branch of the conditional glyphs) and asserts its glyph is listed
+/// here, so a new glyph without a legend entry fails the build's tests.
+pub(crate) const TIMELINE_GLYPH_LEGEND: &[(&str, &str)] = &[
+    ("»", "command"),
+    ("▶", "started"),
+    ("✓", "ok"),
+    ("✗", "failed"),
+    ("◆", "agent"),
+    ("?", "approval"),
+    ("!", "refused"),
+    ("▪", "saved"),
+    ("⟲", "restored"),
+    ("+", "pane opened"),
+    ("×", "pane closed"),
+    ("⟳", "config"),
+];
+
+/// The legend meaning of a timeline glyph, if it is a known glyph.
+pub(crate) fn timeline_glyph_meaning(glyph: &str) -> Option<&'static str> {
+    TIMELINE_GLYPH_LEGEND
+        .iter()
+        .find(|(candidate, _)| *candidate == glyph)
+        .map(|(_, meaning)| *meaning)
+}
+
 /// The append side of the timeline. `file: None` disables recording (test
 /// baselines without a workspace directory).
 pub(crate) struct TimelineLog {
@@ -277,7 +306,9 @@ impl TimelineLog {
             kind,
         };
         match append_event(&file, self.rotate_bytes, &event) {
-            Ok(()) => {}
+            // A transient failure must not show in the footer forever: the
+            // next successful append clears it.
+            Ok(()) => self.last_error = None,
             Err(error) => self.last_error = Some(error.to_string()),
         }
     }
@@ -479,21 +510,29 @@ fn read_events(file: &Path) -> Result<(Vec<TimelineEvent>, usize), TimelineFileE
             });
         }
     };
-    if len > READ_CAP_BYTES {
-        return Err(TimelineFileError::UnsafePath {
-            path: file.to_path_buf(),
-            message: format!("timeline file is too large: {len} byte(s), max {READ_CAP_BYTES}"),
-        });
-    }
-
     // Raw bytes, decoded per line: a line torn mid multi-byte character
     // costs exactly one counted malformed line, never the whole file (a
     // whole-file `read_to_string` would fail wholesale on invalid UTF-8).
+    //
+    // A file over the read cap (a single oversized event line can outrun
+    // rotation) must not blind the tail window: read the LAST cap-sized
+    // window, drop the leading fragment up to its first newline, and count
+    // that fragment as one skipped line. Newer events stay visible.
     let mut bytes = Vec::new();
-    let handle = fs::File::open(file).map_err(|source| TimelineFileError::Io {
+    let mut handle = fs::File::open(file).map_err(|source| TimelineFileError::Io {
         path: file.to_path_buf(),
         source,
     })?;
+    let mut oversized_head = 0;
+    if len > READ_CAP_BYTES {
+        handle
+            .seek(io::SeekFrom::Start(len - READ_CAP_BYTES))
+            .map_err(|source| TimelineFileError::Io {
+                path: file.to_path_buf(),
+                source,
+            })?;
+        oversized_head = 1;
+    }
     handle
         .take(READ_CAP_BYTES)
         .read_to_end(&mut bytes)
@@ -501,9 +540,16 @@ fn read_events(file: &Path) -> Result<(Vec<TimelineEvent>, usize), TimelineFileE
             path: file.to_path_buf(),
             source,
         })?;
+    if oversized_head == 1 {
+        match bytes.iter().position(|&byte| byte == b'\n') {
+            Some(newline) => bytes.drain(..=newline),
+            // One giant line fills the whole window: skip it entirely.
+            None => bytes.drain(..),
+        };
+    }
 
     let mut events = Vec::new();
-    let mut malformed = 0;
+    let mut malformed = oversized_head;
     for raw_line in bytes.split(|&byte| byte == b'\n') {
         let Ok(line) = std::str::from_utf8(raw_line) else {
             malformed += 1;
@@ -763,6 +809,58 @@ mod tests {
         assert!(tail.error.is_some());
     }
 
+    // A single event line larger than the read cap must not blind the tail
+    // window: the reader keeps the newest cap-sized window, skips the
+    // oversized fragment, and counts it.
+    #[test]
+    fn oversized_line_is_skipped_and_counted_not_the_whole_file() {
+        let dir = TempDir::new();
+        let mut log = TimelineLog::new(Some(dir.file()));
+        log.record(task_exit("pane-1", "succeeded: exit 0"));
+
+        // One giant (unparseable) line well over the 4 MiB cap.
+        let mut raw = fs::read(dir.file()).unwrap();
+        raw.extend_from_slice(
+            b"{\"at_ms\":1,\"event\":\"agent_objective_set\",\"pane\":\"p\",\"objective\":\"",
+        );
+        raw.extend(std::iter::repeat_n(b'x', (READ_CAP_BYTES + 1024) as usize));
+        raw.extend_from_slice(b"\"}\n");
+        fs::write(dir.file(), raw).unwrap();
+        log.record(task_exit("pane-2", "failed: exit 3"));
+
+        let tail = log.read_tail();
+        assert!(tail.error.is_none(), "{:?}", tail.error);
+        assert!(tail.malformed >= 1, "the oversized line is counted");
+        assert_eq!(
+            tail.events.last().map(|event| &event.kind),
+            Some(&task_exit("pane-2", "failed: exit 3")),
+            "events after the oversized line stay visible"
+        );
+    }
+
+    // A transient append failure clears once an append succeeds again; the
+    // footer must not report a stale error forever.
+    #[test]
+    fn transient_append_failure_clears_on_recovery() {
+        let dir = TempDir::new();
+        let target = dir.path.join("elsewhere.jsonl");
+        fs::write(&target, "").unwrap();
+        fs::create_dir_all(dir.file().parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, dir.file()).unwrap();
+
+        let mut log = TimelineLog::new(Some(dir.file()));
+        log.record(task_exit("pane-1", "succeeded: exit 0"));
+        assert!(log.last_error.is_some());
+
+        // The obstruction goes away; the next append heals the footer.
+        fs::remove_file(dir.file()).unwrap();
+        log.record(task_exit("pane-1", "failed: exit 3"));
+        assert!(log.last_error.is_none(), "{:?}", log.last_error);
+        let tail = log.read_tail();
+        assert!(tail.error.is_none(), "{:?}", tail.error);
+        assert_eq!(tail.events.len(), 1);
+    }
+
     #[test]
     fn disabled_log_records_nothing_and_reports_why() {
         let mut log = TimelineLog::new(None);
@@ -771,5 +869,82 @@ mod tests {
         let tail = log.read_tail();
         assert!(tail.events.is_empty());
         assert!(tail.error.as_deref().unwrap().contains("disabled"));
+    }
+
+    #[test]
+    fn every_emitted_glyph_has_a_legend_entry() {
+        // Every event kind, including every branch of the conditional
+        // glyphs (task exit, agent status, approval verdict). A new glyph
+        // without a legend entry fails here, so the legend cannot drift.
+        let pane = || "pane-1".to_owned();
+        let all_branches = vec![
+            TimelineEventKind::CommandDispatched {
+                command: "split-right".to_owned(),
+                pane: Some(pane()),
+            },
+            TimelineEventKind::TaskStarted {
+                pane: pane(),
+                command: "cargo test".to_owned(),
+            },
+            task_exit("pane-1", "succeeded: exit 0"),
+            task_exit("pane-1", "failed: exit 3"),
+            TimelineEventKind::AgentStatus {
+                pane: pane(),
+                status: "running".to_owned(),
+            },
+            TimelineEventKind::AgentStatus {
+                pane: pane(),
+                status: "failed".to_owned(),
+            },
+            TimelineEventKind::AgentStatus {
+                pane: pane(),
+                status: "complete".to_owned(),
+            },
+            TimelineEventKind::ApprovalRequested {
+                pane: pane(),
+                command: "rm -rf target".to_owned(),
+                scope: "/tmp".to_owned(),
+                risk: "high".to_owned(),
+            },
+            TimelineEventKind::ApprovalDecided {
+                pane: pane(),
+                command: "rm -rf target".to_owned(),
+                verdict: "approved".to_owned(),
+                decided_by: "user".to_owned(),
+            },
+            TimelineEventKind::ApprovalDecided {
+                pane: pane(),
+                command: "rm -rf target".to_owned(),
+                verdict: "rejected".to_owned(),
+                decided_by: "user".to_owned(),
+            },
+            TimelineEventKind::AgentObjectiveSet {
+                pane: pane(),
+                objective: "review".to_owned(),
+            },
+            TimelineEventKind::AgentLaunchRefused {
+                pane: pane(),
+                reason: "no connector".to_owned(),
+            },
+            TimelineEventKind::WorkspaceSaved {
+                path: "/tmp/w.json".to_owned(),
+            },
+            TimelineEventKind::WorkspaceRestored {
+                path: "/tmp/w.json".to_owned(),
+            },
+            TimelineEventKind::PaneCreated {
+                pane: pane(),
+                kind: "terminal".to_owned(),
+            },
+            TimelineEventKind::PaneClosed { pane: pane() },
+            TimelineEventKind::ConfigReloaded { warnings: 0 },
+        ];
+        for event in all_branches {
+            let glyph = event.glyph();
+            assert!(
+                timeline_glyph_meaning(glyph).is_some(),
+                "glyph {glyph:?} of {event:?} is missing from TIMELINE_GLYPH_LEGEND"
+            );
+        }
     }
 }

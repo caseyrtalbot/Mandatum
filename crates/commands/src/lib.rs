@@ -31,12 +31,18 @@ pub enum CommandId {
     SetAgentObjective,
     ShowTimeline,
     ShowSessionMap,
+    SearchSession,
     ZoomPane,
     FloatPane,
     DockPane,
     StackPanes,
     GrowPane,
     ShrinkPane,
+    MoveFloatLeft,
+    MoveFloatRight,
+    MoveFloatUp,
+    MoveFloatDown,
+    ShowHelp,
     SaveWorkspace,
     RestoreWorkspace,
     ReloadConfig,
@@ -230,6 +236,17 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         palette_key: Some('m'),
     },
     Command {
+        id: CommandId::SearchSession,
+        // Honest naming: exact/fuzzy text search over output, not embeddings.
+        label: "Search session output",
+        name: "search-session",
+        category: CommandCategory::App,
+        // Deliberately unbound: 'i' is the last free letter, and binding it
+        // would leave no bare key that seeds the palette filter. The routes
+        // are the ctrl+shift+f chord, the fuzzy palette, and the pane menu.
+        palette_key: None,
+    },
+    Command {
         id: CommandId::ZoomPane,
         label: "Zoom pane",
         name: "zoom-pane",
@@ -271,6 +288,45 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         name: "shrink-pane",
         category: CommandCategory::Layout,
         palette_key: Some('-'),
+    },
+    // The keyboard path for what pointer users do by dragging a float's
+    // title (accessibility: every pointer behavior has a keyboard route).
+    // No default letters: they are reachable by typing in the palette, and
+    // users who live in floats can bind chords.
+    Command {
+        id: CommandId::MoveFloatLeft,
+        label: "Move float left",
+        name: "move-float-left",
+        category: CommandCategory::Layout,
+        palette_key: None,
+    },
+    Command {
+        id: CommandId::MoveFloatRight,
+        label: "Move float right",
+        name: "move-float-right",
+        category: CommandCategory::Layout,
+        palette_key: None,
+    },
+    Command {
+        id: CommandId::MoveFloatUp,
+        label: "Move float up",
+        name: "move-float-up",
+        category: CommandCategory::Layout,
+        palette_key: None,
+    },
+    Command {
+        id: CommandId::MoveFloatDown,
+        label: "Move float down",
+        name: "move-float-down",
+        category: CommandCategory::Layout,
+        palette_key: None,
+    },
+    Command {
+        id: CommandId::ShowHelp,
+        label: "Help",
+        name: "help",
+        category: CommandCategory::App,
+        palette_key: Some('?'),
     },
     Command {
         id: CommandId::SaveWorkspace,
@@ -351,6 +407,14 @@ pub enum RuntimeCommand {
     ReloadConfig,
     ShowTimeline,
     ShowSessionMap,
+    SearchSession,
+    ShowHelp,
+    // Runtime, not core: the target position derives from the pane's current
+    // floating rect and the live frame size, which only the app knows.
+    MoveFloatLeft,
+    MoveFloatRight,
+    MoveFloatUp,
+    MoveFloatDown,
     Quit,
 }
 
@@ -416,6 +480,12 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
         CommandId::ReloadConfig => CommandTarget::Runtime(RuntimeCommand::ReloadConfig),
         CommandId::ShowTimeline => CommandTarget::Runtime(RuntimeCommand::ShowTimeline),
         CommandId::ShowSessionMap => CommandTarget::Runtime(RuntimeCommand::ShowSessionMap),
+        CommandId::SearchSession => CommandTarget::Runtime(RuntimeCommand::SearchSession),
+        CommandId::ShowHelp => CommandTarget::Runtime(RuntimeCommand::ShowHelp),
+        CommandId::MoveFloatLeft => CommandTarget::Runtime(RuntimeCommand::MoveFloatLeft),
+        CommandId::MoveFloatRight => CommandTarget::Runtime(RuntimeCommand::MoveFloatRight),
+        CommandId::MoveFloatUp => CommandTarget::Runtime(RuntimeCommand::MoveFloatUp),
+        CommandId::MoveFloatDown => CommandTarget::Runtime(RuntimeCommand::MoveFloatDown),
         CommandId::Quit => CommandTarget::Runtime(RuntimeCommand::Quit),
         CommandId::RunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RunConfiguredTask),
         CommandId::RerunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RerunFocusedTask),
@@ -583,6 +653,12 @@ pub fn core_action_for_command(
         | CommandId::ReloadConfig
         | CommandId::ShowTimeline
         | CommandId::ShowSessionMap
+        | CommandId::SearchSession
+        | CommandId::ShowHelp
+        | CommandId::MoveFloatLeft
+        | CommandId::MoveFloatRight
+        | CommandId::MoveFloatUp
+        | CommandId::MoveFloatDown
         | CommandId::Quit
         | CommandId::RunTask
         | CommandId::RerunTask
@@ -926,6 +1002,31 @@ mod tests {
             ),
             PaletteInput::Dispatch(CommandId::ZoomPane)
         );
+    }
+
+    #[test]
+    fn help_and_float_moves_are_runtime_commands() {
+        assert_eq!(
+            command_target(CommandId::ShowHelp),
+            CommandTarget::Runtime(RuntimeCommand::ShowHelp)
+        );
+        assert_eq!(command_id_for_name("help"), Some(CommandId::ShowHelp));
+        assert_eq!(
+            resolve_palette_key(PaletteKey::Character('?')),
+            PaletteInput::Dispatch(CommandId::ShowHelp)
+        );
+        for (command_id, expected) in [
+            (CommandId::MoveFloatLeft, RuntimeCommand::MoveFloatLeft),
+            (CommandId::MoveFloatRight, RuntimeCommand::MoveFloatRight),
+            (CommandId::MoveFloatUp, RuntimeCommand::MoveFloatUp),
+            (CommandId::MoveFloatDown, RuntimeCommand::MoveFloatDown),
+        ] {
+            assert_eq!(command_target(command_id), CommandTarget::Runtime(expected));
+            let mut workspace = Workspace::new("w", PathBuf::from("/tmp/p"));
+            let context = CommandContext::for_project("w", "/tmp/p");
+            let result = dispatch_command(&mut workspace, &context, command_id);
+            assert!(matches!(result, Err(CommandError::NotACoreCommand(id)) if id == command_id));
+        }
     }
 
     #[test]

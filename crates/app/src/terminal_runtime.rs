@@ -1,13 +1,22 @@
-use std::{collections::BTreeMap, fmt, sync::mpsc::Sender, thread::JoinHandle};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    path::PathBuf,
+    sync::{Arc, mpsc::Sender},
+    thread::JoinHandle,
+};
 
-use mandatum_core::{PaneId, Workspace};
+use mandatum_core::{PaneId, PaneSpec, Workspace};
 use mandatum_pty::{
     ChildExitStatus, NativePtyController, NativePtyError, NativePtyReader, NativePtySession,
     NativePtyWriter, PtySessionId, PtySize, ResizeIntent, SpawnIntent,
 };
 use mandatum_terminal_vt::{TerminalParser, TerminalSize};
 
-use crate::process_events::{PtyRuntimeEvent, spawn_reader_thread};
+use crate::{
+    events::AppEvent,
+    process_events::{PtyFlowControl, spawn_reader_thread},
+};
 
 #[derive(Default)]
 pub(crate) struct TerminalRuntimeRegistry {
@@ -84,6 +93,9 @@ pub(crate) struct TerminalPaneRuntime {
     pub(crate) controller: NativePtyController,
     pub(crate) writer: NativePtyWriter,
     pub(crate) reader_thread: Option<JoinHandle<()>>,
+    /// The reader thread's backpressure gate; `stop()` before joining so a
+    /// reader blocked on a full gate cannot deadlock shutdown.
+    pub(crate) flow: Arc<PtyFlowControl>,
     pub(crate) size: PtySize,
     pub(crate) restart_generation: u64,
     pub(crate) runtime_token: u64,
@@ -113,6 +125,7 @@ impl TerminalPaneRuntime {
     pub(crate) fn shutdown(&mut self) {
         self.writer.close_input();
         let _ = self.controller.kill();
+        self.flow.stop();
         if let Some(handle) = self.reader_thread.take() {
             let _ = handle.join();
         }
@@ -121,6 +134,7 @@ impl TerminalPaneRuntime {
     pub(crate) fn stop(&mut self) -> Result<(), NativePtyError> {
         self.writer.close_input();
         let result = self.controller.kill();
+        self.flow.stop();
         if let Some(handle) = self.reader_thread.take() {
             let _ = handle.join();
         }
@@ -138,11 +152,7 @@ pub(crate) struct PendingTerminalPaneRuntime {
 }
 
 impl PendingTerminalPaneRuntime {
-    pub(crate) fn activate(
-        self,
-        pane_id: PaneId,
-        tx: Sender<PtyRuntimeEvent>,
-    ) -> TerminalPaneRuntime {
+    pub(crate) fn activate(self, pane_id: PaneId, tx: Sender<AppEvent>) -> TerminalPaneRuntime {
         let Self {
             reader,
             controller,
@@ -151,8 +161,15 @@ impl PendingTerminalPaneRuntime {
             restart_generation,
             runtime_token,
         } = self;
-        let reader_thread =
-            spawn_reader_thread(pane_id, restart_generation, runtime_token, reader, tx);
+        let flow = PtyFlowControl::new();
+        let reader_thread = spawn_reader_thread(
+            pane_id,
+            restart_generation,
+            runtime_token,
+            reader,
+            tx,
+            Arc::clone(&flow),
+        );
         let parser = TerminalParser::new(to_terminal_size(size));
 
         TerminalPaneRuntime {
@@ -160,6 +177,7 @@ impl PendingTerminalPaneRuntime {
             controller,
             writer,
             reader_thread: Some(reader_thread),
+            flow,
             size,
             restart_generation,
             runtime_token,
@@ -226,9 +244,7 @@ pub(crate) fn prepare_terminal_pane_runtime(
     let session_id = PtySessionId::new(pane_id.as_str().to_owned());
     let restart_generation = pane.restart_generation();
     let mut intent = SpawnIntent::new(session_id, shell_program.to_owned(), size)?;
-    if let Some(cwd) = pane.cwd() {
-        intent = intent.with_cwd(cwd.clone());
-    }
+    intent = intent.with_cwd(resolve_pane_cwd(workspace, pane, None));
     // The hardened parser handles real VT output, so advertise a capable
     // terminal. The rest of the environment (PATH, HOME, prompt) is inherited.
     intent = intent.with_environment([("TERM", "xterm-256color")]);
@@ -244,6 +260,22 @@ pub(crate) fn prepare_terminal_pane_runtime(
         restart_generation,
         runtime_token,
     })
+}
+
+/// The working directory a pane's process actually runs in: explicit intent
+/// first, then the pane's durable cwd, then the active project's directory.
+/// Spawns always pass a cwd — leaving it unset would silently fall back to
+/// the user's `$HOME` (portable-pty's default), running project commands in
+/// the wrong directory.
+pub(crate) fn resolve_pane_cwd(
+    workspace: &Workspace,
+    pane: &PaneSpec,
+    intent_cwd: Option<&PathBuf>,
+) -> PathBuf {
+    intent_cwd
+        .or_else(|| pane.cwd())
+        .cloned()
+        .unwrap_or_else(|| workspace.active_project_path().to_owned())
 }
 
 pub(crate) fn to_terminal_size(size: PtySize) -> TerminalSize {

@@ -54,6 +54,15 @@ fn render_scene_to_text(scene: &WorkspaceScene) -> Vec<String> {
             );
             lines.push(timeline.footer.clone());
         }
+        Some(OverlayScene::Search(search)) => {
+            lines.extend(
+                search
+                    .items
+                    .iter()
+                    .map(|item| format!("{}  {}", item.source, item.text)),
+            );
+            lines.push(search.footer.clone());
+        }
         Some(OverlayScene::SessionMap(map)) => {
             lines.extend(
                 map.rows
@@ -66,6 +75,17 @@ fn render_scene_to_text(scene: &WorkspaceScene) -> Vec<String> {
         }
         Some(OverlayScene::ContextMenu(menu)) => {
             lines.extend(menu.items.iter().map(|item| item.label.clone()));
+        }
+        Some(OverlayScene::Help(help)) => {
+            lines.extend(
+                help.items
+                    .iter()
+                    .map(|item| format!("{}  {}", item.label, item.keys)),
+            );
+            lines.push(help.footer.clone());
+        }
+        Some(OverlayScene::Welcome(welcome)) => {
+            lines.extend(welcome.lines.iter().cloned());
         }
         None => {}
     }
@@ -99,11 +119,19 @@ fn render_scene_to_ratatui(scene: &WorkspaceScene) -> Vec<String> {
         .collect()
 }
 
+/// One isolated directory per test: a fixed temp path would grow a real
+/// timeline file across runs and let concurrent test runs interfere.
+fn isolated_project_dir(name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&path).expect("test temp dir should be created");
+    path
+}
+
 #[test]
 fn same_scene_renders_equivalent_content_in_both_frontends() {
-    let project_path = std::env::temp_dir();
+    let project_path = isolated_project_dir("mandatum-frontend-parity-test");
     let mut state = AppState::new(AppConfig {
-        workspace_file: project_path.join("mandatum-frontend-parity-test.json"),
+        workspace_file: project_path.join("workspace.json"),
         project_path,
         task_command: "printf TASK_OK".to_owned(),
         agent_objective: "test objective".to_owned(),
@@ -163,9 +191,9 @@ fn same_scene_renders_equivalent_content_in_both_frontends() {
 fn attention_header_reaches_both_frontends() {
     use mandatum_commands::CommandId;
 
-    let project_path = std::env::temp_dir();
+    let project_path = isolated_project_dir("mandatum-frontend-parity-attention");
     let mut state = AppState::new(AppConfig {
-        workspace_file: project_path.join("mandatum-frontend-parity-attention.json"),
+        workspace_file: project_path.join("workspace.json"),
         project_path,
         agent_objective: "test objective".to_owned(),
         ..AppConfig::default()

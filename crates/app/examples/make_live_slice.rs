@@ -4,7 +4,9 @@
 //! Usage: `cargo run -p mandatum-app --example make_live_slice -- <dir>`
 //! writes `<dir>/.mandatum/workspace.json`. The recorded project path is
 //! `"."` so the file is portable: launch Mandatum from `<dir>` and every
-//! cwd resolves there. `examples/live-slice/run.sh` drives the whole demo.
+//! cwd resolves there — task intents leave `cwd` unset on purpose, and the
+//! spawn path resolves an unset cwd to the project path (never `$HOME`).
+//! `examples/live-slice/run.sh` drives the whole demo.
 
 use std::{env, fs, path::PathBuf, process::ExitCode};
 

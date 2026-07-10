@@ -23,6 +23,10 @@ pub struct LoadedConfig {
     pub keymap: Keymap,
     pub theme: Theme,
     pub reduced_motion: bool,
+    /// Surface byte-level runtime diagnostics ("read N byte(s)") in the
+    /// status line. Off by default: they are debugging noise that would
+    /// overwrite meaningful status on every PTY read.
+    pub debug_status: bool,
     pub shell_program: Option<String>,
     pub task_command: Option<String>,
     pub agent_connector: Option<AgentConnectorKind>,
@@ -307,6 +311,10 @@ fn apply_ui(config: &mut LoadedConfig, table: toml::Table, label: &str) {
             ("reduced_motion", other) => config.warnings.push(format!(
                 "{label}: ui.reduced_motion must be true or false, got {other}"
             )),
+            ("debug_status", toml::Value::Boolean(flag)) => config.debug_status = flag,
+            ("debug_status", other) => config.warnings.push(format!(
+                "{label}: ui.debug_status must be true or false, got {other}"
+            )),
             (unknown, _) => config
                 .warnings
                 .push(format!("{label}: unknown key 'ui.{unknown}'")),
@@ -538,6 +546,7 @@ attention = "bright-yellow"
 
 [ui]
 reduced_motion = true
+debug_status = true
 
 [shell]
 program = "/bin/zsh"
@@ -578,6 +587,7 @@ model = "claude-opus-4-6"
         assert_eq!(config.theme.focus_border, SceneColor::Rgb(0xff, 0x88, 0x00));
         assert_eq!(config.theme.attention, SceneColor::Ansi(11));
         assert!(config.reduced_motion);
+        assert!(config.debug_status);
         assert_eq!(config.shell_program.as_deref(), Some("/bin/zsh"));
         assert_eq!(config.task_command.as_deref(), Some("cargo check"));
         assert_eq!(config.agent_connector, Some(AgentConnectorKind::Fake));

@@ -100,6 +100,39 @@ For agent work, prove:
 - verification results attach to the agent actor
 - restore keeps agent intent without inventing live runtime state
 
+## Input Latency Regression Check
+
+The standing check for the terminal frontend's key-to-output latency. Run
+it after any change to the run loop, input path, PTY event plumbing, or
+redraw policy.
+
+Procedure:
+
+```sh
+cargo build -p mandatum-app --release
+cd spikes/frontend-wgpu && cargo run --release --bin tui_probe
+```
+
+The probe spawns the real release binary inside a PTY at 100x30, types 100
+characters into its shell, and times each until the echo appears in the
+app's output bytes (host-terminal paint excluded). It prints one JSON line
+with p50/p95/max. Also sanity-check idle CPU: run the app in a PTY, idle
+30 seconds, and compare `ps -o cputime` deltas — the event-driven loop
+must idle at ~0% (no busy spin).
+
+Reference numbers (2026-07-09, M-series MacBook, release build):
+
+| Loop | p50 | p95 | max | idle CPU (30 s) |
+|------|----:|----:|----:|----------------:|
+| 40 ms `event::poll` (before) | 42.62 ms | 44.09 ms | 45.54 ms | 0.13 s (~0.4%) |
+| event-driven (after) | 13.30 ms | 15.04 ms | 15.27 ms | 0.03 s (~0.1%) |
+
+Regression bar: p50 must stay well under 25 ms. A p50 drifting back toward
+40 ms means something reintroduced interval polling into the wake path.
+The floor is the shell echo round-trip plus the ~8 ms redraw-cap window,
+so numbers meaningfully below ~9 ms require changing the cap, not the
+loop.
+
 ## The Stranger Test (Workstation Visibility)
 
 The charter bar for the visibility surfaces: a stranger looking at the

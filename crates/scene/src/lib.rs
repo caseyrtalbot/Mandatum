@@ -32,7 +32,8 @@ pub use style::{SceneCellStyle, SceneColor};
 pub use surface::{SceneCell, SurfacePosition, TerminalSurface};
 pub use theme::Theme;
 pub use workspace::{
-    AttentionSegment, ContextMenuEntry, ContextMenuOverlay, HeaderScene, HitTarget, HitTargetKind,
-    OverlayScene, PaletteEntry, PaletteOverlay, PromptOverlay, SessionMapOverlay, SessionMapRow,
-    StatusScene, TimelineEntry, TimelineOverlay, WorkspaceScene,
+    AttentionSegment, ContextMenuEntry, ContextMenuOverlay, HeaderScene, HelpEntry, HelpOverlay,
+    HitTarget, HitTargetKind, OverlayScene, PaletteEntry, PaletteOverlay, PromptOverlay,
+    SESSION_MAP_FOCUS_GLYPH, SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow,
+    StatusScene, TimelineEntry, TimelineOverlay, WelcomeOverlay, WorkspaceScene,
 };

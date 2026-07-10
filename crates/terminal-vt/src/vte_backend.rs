@@ -264,14 +264,35 @@ impl TerminalState {
         self.scroll_top = 0;
         self.scroll_bottom = self.primary.size().rows() - 1;
         self.wrap_pending = false;
-        self.mouse_normal = false;
-        self.mouse_button_event = false;
-        self.mouse_any_event = false;
-        self.mouse_sgr = false;
+        self.release_mouse_tracking();
         self.dirty = true;
         self.primary.erase_in_display(2, CellStyle::default());
         self.primary.erase_in_display(3, CellStyle::default());
         self.primary.set_cursor(0, 0);
+    }
+
+    /// DECSTR (`CSI ! p`): soft terminal reset. Restores conservative modes
+    /// without touching screen content or the cursor position. Crucially for
+    /// the workspace, it releases mouse tracking: a child that dies between
+    /// requesting the mouse and releasing it must not leave the pane
+    /// swallowing pointer input forever (L5 depends on `mouse_mode` telling
+    /// the truth).
+    fn soft_reset(&mut self) {
+        self.pen = CellStyle::default();
+        self.saved_cursor = None;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.active_grid().size().rows() - 1;
+        self.wrap_pending = false;
+        self.release_mouse_tracking();
+        self.dirty = true;
+        self.active_grid_mut().set_cursor_visible(true);
+    }
+
+    fn release_mouse_tracking(&mut self) {
+        self.mouse_normal = false;
+        self.mouse_button_event = false;
+        self.mouse_any_event = false;
+        self.mouse_sgr = false;
     }
 
     fn enter_alternate(&mut self) {
@@ -571,6 +592,15 @@ impl Perform for TerminalState {
             return;
         }
         let private = intermediates.first() == Some(&b'?');
+
+        // DECSTR (`CSI ! p`) carries the `!` intermediate; nothing else with
+        // intermediates is interpreted below.
+        if action == 'p' {
+            if intermediates == [b'!'] {
+                self.soft_reset();
+            }
+            return;
+        }
 
         match action {
             'm' => self.apply_sgr(params),

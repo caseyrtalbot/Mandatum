@@ -26,21 +26,37 @@ impl PaneScene {
     ///
     /// Owning these here keeps every frontend's line budget consistent: the
     /// scene builder windows a task's output surface to the space left after
-    /// these lines. Terminal content has no detail lines.
+    /// these lines. Terminal content has no detail lines. The pane's id,
+    /// kind, and title are deliberately absent — the border chrome already
+    /// states them, and repeating them here read as debug output.
     pub fn detail_lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            format!("{} {}", self.id, self.kind.label()),
-            format!("title: {}", self.title),
-        ];
+        let mut lines = Vec::new();
         match &self.content {
             PaneContent::Terminal(_) => return Vec::new(),
             PaneContent::Task(task) => {
                 lines.push(format!("command: {}", task.command));
                 lines.push(format!("cwd: {}", task.cwd_label));
-                lines.push(format!("recipe: {}", task.recipe_label));
+                // "recipe:" is reserved for a real recipe name; ad-hoc runs
+                // simply omit the row.
+                if let Some(recipe) = &task.recipe_label {
+                    lines.push(format!("recipe: {recipe}"));
+                }
                 match &task.status_label {
                     Some(status) => {
                         lines.push(format!("runtime status: {status}"));
+                        // A failed task states its way back on the same
+                        // rows that state the failure: the failing command
+                        // is already above, the exit status is on the
+                        // status line, and this line names the rerun route.
+                        if status.contains("failed") {
+                            let hint = task
+                                .rerun_hint
+                                .as_deref()
+                                .filter(|hint| !hint.is_empty())
+                                .map(|hint| format!("rerun: {hint} · right-click menu"))
+                                .unwrap_or_else(|| "rerun: right-click menu".to_owned());
+                            lines.push(hint);
+                        }
                         if task.output.is_some() {
                             lines.push("output:".to_owned());
                         } else {
@@ -56,6 +72,20 @@ impl PaneScene {
             PaneContent::Agent(agent) => {
                 lines.push(format!("objective: {}", agent.objective));
                 lines.push(format!("status: {}", agent.status_label));
+                // A failed agent keeps its failure reason and the way back
+                // on screen, not just in a transient status line.
+                if agent.status_role == AgentStatus::Failed {
+                    if let Some(error) = &agent.last_error {
+                        lines.push(format!("error: {error}"));
+                    }
+                    if let Some(hint) = agent
+                        .relaunch_hint
+                        .as_deref()
+                        .filter(|hint| !hint.is_empty())
+                    {
+                        lines.push(format!("relaunch: {hint} · right-click menu"));
+                    }
+                }
                 lines.push(format!(
                     "action: {}",
                     agent.current_action.as_deref().unwrap_or("idle")
@@ -93,8 +123,17 @@ impl PaneScene {
                 }
                 if !agent.output_tail.is_empty() {
                     lines.push("output:".to_owned());
-                    for line in &agent.output_tail {
+                    for (index, line) in agent.output_tail.iter().enumerate() {
                         lines.push(format!("  {line}"));
+                        // A command with nothing after it says so, instead
+                        // of leaving a bare "$ cmd" that reads as pending.
+                        let next_is_output = agent
+                            .output_tail
+                            .get(index + 1)
+                            .is_some_and(|next| !next.starts_with("$ "));
+                        if line.starts_with("$ ") && !next_is_output {
+                            lines.push("    (no output)".to_owned());
+                        }
                     }
                 }
             }
@@ -141,10 +180,17 @@ pub enum PaneContent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskContent {
     pub command: String,
+    /// The resolved working directory the command runs in (intent, pane, or
+    /// the project directory) — never an internal "unset".
     pub cwd_label: String,
-    pub recipe_label: String,
+    /// A real recipe name when the task came from one; `None` for ad-hoc
+    /// runs (no row is drawn).
+    pub recipe_label: Option<String>,
     /// Live runtime status; `None` when no runtime view exists for the pane.
     pub status_label: Option<String>,
+    /// The keyboard route to Rerun task (composed from the live keymap),
+    /// shown on failed tasks next to the right-click route.
+    pub rerun_hint: Option<String>,
     pub output: Option<TerminalSurface>,
 }
 
@@ -166,6 +212,12 @@ pub struct AgentContent {
     pub latest_summary: Option<String>,
     /// What the agent is doing right now (live only).
     pub current_action: Option<String>,
+    /// Why the session failed, from its `Failed` event (live only). Shown
+    /// persistently on a failed pane, not just in the status line.
+    pub last_error: Option<String>,
+    /// The keyboard route to Start agent (composed from the live keymap),
+    /// shown on failed panes as the relaunch affordance.
+    pub relaunch_hint: Option<String>,
     /// Full detail of the approval awaiting a decision (live only).
     pub pending_approval: Option<AgentApprovalPrompt>,
     /// Trailing raw output lines (live only; the builder caps the tail).
@@ -187,6 +239,11 @@ pub struct AgentApprovalPrompt {
     pub risk_basis: String,
     /// The decision keys frontends should surface ("y approve / n reject").
     pub key_hint: String,
+    /// Whether the approval header draws emphasized this frame. The app
+    /// alternates it at ~1 Hz off the heartbeat clock (steady `true` under
+    /// reduced motion), giving waiting-approval panes one calm pulse; it is
+    /// the only motion in the product.
+    pub pulse_on: bool,
 }
 
 /// A pane with no live content surface attached (a terminal pane before its
@@ -219,8 +276,9 @@ mod tests {
         TaskContent {
             command: "cargo test".to_owned(),
             cwd_label: "/tmp/project".to_owned(),
-            recipe_label: "test".to_owned(),
+            recipe_label: Some("test".to_owned()),
             status_label,
+            rerun_hint: Some("ctrl+p r".to_owned()),
             output,
         }
     }
@@ -238,14 +296,61 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "pane-1 task",
-                "title: tests",
                 "command: cargo test",
                 "cwd: /tmp/project",
                 "recipe: test",
                 "runtime status: failed: exit 101",
+                "rerun: ctrl+p r · right-click menu",
                 "output:",
             ]
+        );
+    }
+
+    // The border chrome already names the pane and its title; the body rows
+    // never repeat them, and "recipe:" only appears for a named recipe.
+    #[test]
+    fn detail_lines_carry_no_pane_id_title_or_adhoc_recipe_rows() {
+        let mut content = task_content(Some("running".to_owned()), None);
+        content.recipe_label = None;
+        let lines = pane(PaneContent::Task(content), PaneSceneKind::Task).detail_lines();
+        assert!(
+            !lines.iter().any(|line| line.contains("pane-1")
+                || line.starts_with("title:")
+                || line.starts_with("recipe:")),
+            "{lines:?}"
+        );
+        assert_eq!(lines[0], "command: cargo test");
+    }
+
+    // A failed task states its way back: the failing command, the exit
+    // status, and the rerun affordance all sit in the metadata rows.
+    #[test]
+    fn failed_task_detail_lines_carry_the_rerun_affordance() {
+        let failed = pane(
+            PaneContent::Task(task_content(Some("failed: exit 3".to_owned()), None)),
+            PaneSceneKind::Task,
+        );
+        let lines = failed.detail_lines();
+        assert!(lines.contains(&"command: cargo test".to_owned()));
+        assert!(lines.contains(&"runtime status: failed: exit 3".to_owned()));
+        assert!(lines.contains(&"rerun: ctrl+p r · right-click menu".to_owned()));
+
+        // Without a composed key hint the right-click route still shows.
+        let mut content = task_content(Some("failed: exit 3".to_owned()), None);
+        content.rerun_hint = None;
+        let lines = pane(PaneContent::Task(content), PaneSceneKind::Task).detail_lines();
+        assert!(lines.contains(&"rerun: right-click menu".to_owned()));
+
+        // A healthy task never shows the rerun row.
+        let running = pane(
+            PaneContent::Task(task_content(Some("running".to_owned()), None)),
+            PaneSceneKind::Task,
+        );
+        assert!(
+            !running
+                .detail_lines()
+                .iter()
+                .any(|line| line.starts_with("rerun:"))
         );
     }
 
@@ -269,9 +374,9 @@ mod tests {
             PaneContent::Task(task_content(None, None)),
             PaneSceneKind::Task,
         );
-        assert_eq!(with_output.detail_lines().len(), 7);
-        assert_eq!(without_output.detail_lines().len(), 7);
-        assert_eq!(unavailable.detail_lines().len(), 7);
+        assert_eq!(with_output.detail_lines().len(), 5);
+        assert_eq!(without_output.detail_lines().len(), 5);
+        assert_eq!(unavailable.detail_lines().len(), 5);
         assert!(
             unavailable
                 .detail_lines()
@@ -294,7 +399,7 @@ mod tests {
             PaneSceneKind::Terminal,
         );
         let lines = empty.detail_lines();
-        assert_eq!(lines[0], "pane-1 terminal");
+        assert_eq!(lines[0], "cwd: /tmp/project");
         assert!(lines.contains(&"restart generation: 2".to_owned()));
         assert!(lines.contains(&"no live PTY grid is attached to this pane".to_owned()));
 
@@ -308,13 +413,15 @@ mod tests {
                 changed_files: Vec::new(),
                 latest_summary: None,
                 current_action: None,
+                last_error: None,
+                relaunch_hint: None,
                 pending_approval: None,
                 output_tail: Vec::new(),
             }),
             PaneSceneKind::Agent,
         );
         let lines = agent.detail_lines();
-        assert_eq!(lines[0], "pane-1 agent");
+        assert_eq!(lines[0], "objective: review failing tests");
         assert!(lines.contains(&"objective: review failing tests".to_owned()));
         assert!(lines.contains(&"status: blocked".to_owned()));
         assert!(lines.contains(&"action: idle".to_owned()));
@@ -335,6 +442,8 @@ mod tests {
                 changed_files: vec!["src/lib.rs".to_owned(), "src/x.rs".to_owned()],
                 latest_summary: Some("patched the test".to_owned()),
                 current_action: Some("running cargo test".to_owned()),
+                last_error: None,
+                relaunch_hint: None,
                 pending_approval: Some(AgentApprovalPrompt {
                     command: "rm -rf target".to_owned(),
                     cwd: "/tmp/project".to_owned(),
@@ -342,6 +451,7 @@ mod tests {
                     risk_label: "high".to_owned(),
                     risk_basis: "removes files (rm)".to_owned(),
                     key_hint: "y approve / n reject".to_owned(),
+                    pulse_on: true,
                 }),
                 output_tail: vec!["$ cargo test".to_owned(), "1 test failed".to_owned()],
             }),
@@ -360,6 +470,71 @@ mod tests {
         assert!(lines.contains(&"  1 test failed".to_owned()));
         // No stale "pending approvals" counter next to the full block.
         assert!(!lines.contains(&"pending approvals: 1".to_owned()));
+    }
+
+    fn agent_content(status_role: AgentStatus, status_label: &str) -> AgentContent {
+        AgentContent {
+            objective: "fix the failing test".to_owned(),
+            status_label: status_label.to_owned(),
+            status_role,
+            pending_approvals: 0,
+            changed_file_count: 0,
+            changed_files: Vec::new(),
+            latest_summary: None,
+            current_action: None,
+            last_error: None,
+            relaunch_hint: None,
+            pending_approval: None,
+            output_tail: Vec::new(),
+        }
+    }
+
+    // A failed agent keeps its failure reason and relaunch route on the
+    // pane, not just in the transient status line.
+    #[test]
+    fn failed_agent_detail_lines_carry_the_error_and_relaunch_affordance() {
+        let mut content = agent_content(AgentStatus::Failed, "failed");
+        content.last_error = Some("the gated command was rejected".to_owned());
+        content.relaunch_hint = Some("ctrl+p g".to_owned());
+        let lines = pane(PaneContent::Agent(content), PaneSceneKind::Agent).detail_lines();
+        assert!(lines.contains(&"status: failed".to_owned()));
+        assert!(lines.contains(&"error: the gated command was rejected".to_owned()));
+        assert!(lines.contains(&"relaunch: ctrl+p g · right-click menu".to_owned()));
+
+        // A healthy agent shows neither row.
+        let mut content = agent_content(AgentStatus::Running, "running");
+        content.last_error = Some("stale".to_owned());
+        content.relaunch_hint = Some("ctrl+p g".to_owned());
+        let lines = pane(PaneContent::Agent(content), PaneSceneKind::Agent).detail_lines();
+        assert!(!lines.iter().any(|line| line.starts_with("error:")));
+        assert!(!lines.iter().any(|line| line.starts_with("relaunch:")));
+    }
+
+    // A bare "$ cmd" with nothing after it reads as pending; the tail says
+    // "(no output)" explicitly for commands that produced none.
+    #[test]
+    fn output_tail_marks_commands_without_output() {
+        let mut content = agent_content(AgentStatus::Complete, "complete");
+        content.output_tail = vec![
+            "$ cat .flip".to_owned(),
+            "$ rm .flip".to_owned(),
+            "removed".to_owned(),
+            "$ true".to_owned(),
+        ];
+        let lines = pane(PaneContent::Agent(content), PaneSceneKind::Agent).detail_lines();
+        let output_start = lines.iter().position(|line| line == "output:").unwrap();
+        assert_eq!(
+            &lines[output_start..],
+            &[
+                "output:",
+                "  $ cat .flip",
+                "    (no output)",
+                "  $ rm .flip",
+                "  removed",
+                "  $ true",
+                "    (no output)",
+            ]
+        );
     }
 
     #[test]

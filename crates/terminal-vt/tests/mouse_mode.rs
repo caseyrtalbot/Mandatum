@@ -62,6 +62,38 @@ fn vte_backend_maps_x10_tracking_and_clears_modes_on_reset() {
     assert_eq!(parser.mouse_mode(), MouseMode::default());
 }
 
+// [L4-GATE] DECSTR (`CSI ! p`, soft reset) must release mouse tracking in
+// every backend: a child that soft-resets (or a workspace that injects
+// DECSTR after a child dies mid-capture) must return the pointer to the
+// workspace, without the screen being wiped the way RIS wipes it.
+#[test]
+fn decstr_soft_reset_releases_mouse_tracking_in_every_backend() {
+    // vte backend: full tracking + SGR encoding on, then DECSTR.
+    let mut parser = vte(20, 4);
+    parser.feed_pty_bytes(b"before").unwrap();
+    parser.feed_pty_bytes(b"\x1b[?1003h\x1b[?1006h").unwrap();
+    assert_eq!(parser.mouse_mode().tracking, MouseTracking::AnyEvent);
+
+    parser.feed_pty_bytes(b"\x1b[!p").unwrap();
+    assert_eq!(parser.mouse_mode(), MouseMode::default());
+    assert!(!parser.capabilities().mouse_reporting);
+    // Soft reset preserves screen content (unlike RIS).
+    assert!(
+        parser
+            .grid()
+            .snapshot()
+            .iter()
+            .any(|row| row.contains("before")),
+        "DECSTR must not clear the screen"
+    );
+
+    // Fixture backend: never reports tracking, and DECSTR bytes keep it that
+    // way (the conformance default is Off either side of the reset).
+    let mut adapter = FakeTerminalAdapter::new(TerminalSize::new(20, 4).unwrap());
+    adapter.feed(b"\x1b[?1003h\x1b[!p").unwrap();
+    assert_eq!(adapter.mouse_mode(), MouseMode::default());
+}
+
 #[test]
 fn fake_backend_reports_no_mouse_request_even_when_fed_decset_bytes() {
     // The fixture backend does not interpret CSI sequences, so it must hold

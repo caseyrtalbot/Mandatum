@@ -109,6 +109,12 @@ construction:
 Reproduce: `cargo build -p mandatum-app --release` (in the workspace), then
 `cargo run --release --bin tui_probe` (in the spike).
 
+**Addendum (2026-07-09):** the poll-loop prediction above was confirmed. The
+product's run loop is now event-driven (dedicated input thread, unified event
+channel, ~8 ms redraw cap); the same probe measures **p50 13.3-13.5 ms /
+p95 ~15 ms / max ~18 ms**. The standing regression procedure and the
+before/after table live in `docs/verification.md`.
+
 ## Text stack chosen
 
 | Crate | Version | Role |

@@ -9,8 +9,9 @@
 //! by construction:
 //!   - TUI number  = key -> bytes emitted by the app (the app's ratatui diff
 //!     paints the echoed cell into its output). The HOST TERMINAL'S paint of
-//!     those bytes is NOT included, and the app runs a 40 ms input poll loop
-//!     (`event::poll(Duration::from_millis(40))`).
+//!     those bytes is NOT included. The app's run loop is event-driven (a
+//!     dedicated input thread wakes the main loop; ~8 ms redraw cap), so the
+//!     number includes the redraw-cap coalescing window but no poll interval.
 //!   - GPU number  = key -> GPU present, which DOES include the on-screen paint.
 //! So the TUI figure is if anything flattered (it stops at bytes-out, before
 //! pixels), yet still carries the poll-loop cost. The comparison table in
@@ -81,9 +82,9 @@ fn main() {
     });
 
     // Let the app enter its alternate screen, spawn the shell, and render the
-    // first prompt. The app repaints on a ~40 ms heartbeat, so there is no true
-    // idle to wait for; just give it a fixed initialization window, draining as
-    // we go, then clear whatever is buffered.
+    // first prompt. The app repaints on runtime events and a ~250 ms heartbeat,
+    // so there is no true idle to wait for; just give it a fixed initialization
+    // window, draining as we go, then clear whatever is buffered.
     let startup_end = Instant::now() + Duration::from_millis(2500);
     while Instant::now() < startup_end {
         let _ = rx.recv_timeout(Duration::from_millis(100));
@@ -147,7 +148,7 @@ fn main() {
 
     samples_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let notes = format!(
-        "frontend=ratatui/crossterm binary={app_bin} grid={COLS}x{ROWS} poll_loop=40ms samples={} misses={} disconnected={} measures=key->app-output-bytes (host-terminal paint NOT included)",
+        "frontend=ratatui/crossterm binary={app_bin} grid={COLS}x{ROWS} loop=event-driven samples={} misses={} disconnected={} measures=key->app-output-bytes (host-terminal paint NOT included)",
         samples_ms.len(),
         misses,
         disconnected,
@@ -191,8 +192,8 @@ fn wait_for_char(rx: &Receiver<Vec<u8>>, needle: u8, t0: Instant) -> WaitResult 
 }
 
 /// Drain all currently-buffered output without blocking. Used instead of an
-/// idle wait because the app repaints continuously (~40 ms), so there is never
-/// a true silent gap to wait on.
+/// idle wait because the app also repaints on a heartbeat, so there is never
+/// a guaranteed silent gap to wait on.
 fn drain_now(rx: &Receiver<Vec<u8>>) {
     while rx.try_recv().is_ok() {}
 }

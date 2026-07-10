@@ -75,8 +75,10 @@ fn mandatum_dark() -> Theme {
         header: SceneColor::Ansi(15),           // white
         header_background: SceneColor::Ansi(0), // black
         status: SceneColor::Ansi(7),            // gray
-        attention: SceneColor::Ansi(3),         // yellow
-        palette_border: SceneColor::Ansi(6),    // cyan
+        // Red, not yellow: focus is yellow in this theme, and "focused" and
+        // "needs attention" must never share a color.
+        attention: SceneColor::Ansi(1),
+        palette_border: SceneColor::Ansi(6), // cyan
         palette_selection: SceneColor::Default,
         selection_highlight: SceneColor::Default,
         agent_running: SceneColor::Ansi(2),  // green
@@ -111,13 +113,17 @@ fn mandatum_light() -> Theme {
 fn mandatum_high_contrast() -> Theme {
     Theme {
         name: "mandatum-high-contrast".to_owned(),
-        focus_border: SceneColor::Ansi(15), // bright white
+        // Focus must be unmistakable: bright yellow against the bright-white
+        // unfocused borders (the same focus-is-yellow convention as
+        // mandatum-dark), not white-on-white.
+        focus_border: SceneColor::Ansi(11), // bright yellow
         pane_border: SceneColor::Ansi(15),
         pane_title: SceneColor::Ansi(15),
         header: SceneColor::Ansi(15),
         header_background: SceneColor::Ansi(0),
         status: SceneColor::Ansi(15),
-        attention: SceneColor::Ansi(11), // bright yellow
+        // Bright red, not bright yellow: focus owns yellow here too.
+        attention: SceneColor::Ansi(9),
         palette_border: SceneColor::Ansi(15),
         palette_selection: SceneColor::Default,
         selection_highlight: SceneColor::Default,
@@ -146,5 +152,24 @@ mod tests {
             assert_eq!(&theme.name, name);
         }
         assert!(Theme::builtin("solarized").is_none());
+    }
+
+    #[test]
+    fn focused_pane_border_is_distinct_in_every_builtin_theme() {
+        // Accessibility: focus visibility must never rely on a modifier
+        // alone. Every built-in theme gives the focused border its own
+        // color, distinct from unfocused borders AND from the attention
+        // color, so "focused" and "needs attention" stay separate signals.
+        for name in Theme::BUILTIN_NAMES {
+            let theme = Theme::builtin(name).expect("builtin theme exists");
+            assert_ne!(
+                theme.focus_border, theme.pane_border,
+                "theme {name} must distinguish the focused pane border"
+            );
+            assert_ne!(
+                theme.focus_border, theme.attention,
+                "theme {name} must not reuse the attention color for focus"
+            );
+        }
     }
 }

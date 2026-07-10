@@ -25,6 +25,8 @@ use mandatum_agent_runtime::{
 };
 use mandatum_core::{AgentStatus, PaneId};
 
+use crate::events::AppEvent;
+
 /// How many trailing output lines the live view retains per agent pane.
 pub(crate) const AGENT_OUTPUT_TAIL_LINES: usize = 200;
 
@@ -45,17 +47,17 @@ pub(crate) fn spawn_agent_forwarder_thread(
     restart_generation: u64,
     runtime_token: u64,
     events: Receiver<AgentSessionEvent>,
-    tx: Sender<AgentRuntimeEvent>,
+    tx: Sender<AppEvent>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         while let Ok(event) = events.recv() {
             if tx
-                .send(AgentRuntimeEvent {
+                .send(AppEvent::Agent(AgentRuntimeEvent {
                     pane_id: pane_id.clone(),
                     restart_generation,
                     runtime_token,
                     event,
-                })
+                }))
                 .is_err()
             {
                 break;
@@ -118,6 +120,10 @@ pub(crate) struct AgentPaneRuntime {
     pub(crate) runtime_token: u64,
     /// What the agent is doing right now.
     pub(crate) current_action: Option<String>,
+    /// Why the session failed (its `Failed` event's reason), kept so the
+    /// pane can state the failure persistently, not just in the transient
+    /// status line.
+    pub(crate) last_error: Option<String>,
     /// Trailing output lines, capped at [`AGENT_OUTPUT_TAIL_LINES`].
     pub(crate) output_tail: VecDeque<String>,
     /// Full detail of the approval awaiting a decision.
@@ -151,7 +157,7 @@ pub(crate) fn activate_agent_session(
     restart_generation: u64,
     runtime_token: u64,
     session: AgentSession,
-    tx: Sender<AgentRuntimeEvent>,
+    tx: Sender<AppEvent>,
 ) -> AgentPaneRuntime {
     let AgentSession { events, control } = session;
     let forwarder_thread =
@@ -162,6 +168,7 @@ pub(crate) fn activate_agent_session(
         restart_generation,
         runtime_token,
         current_action: None,
+        last_error: None,
         output_tail: VecDeque::new(),
         pending_approval: None,
         closed: false,

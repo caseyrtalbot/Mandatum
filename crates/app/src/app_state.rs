@@ -20,11 +20,13 @@ use mandatum_core::{
 };
 use mandatum_pty::{NativePtyError, PtySize};
 use mandatum_scene::{
-    ContextMenuEntry, ContextMenuOverlay, HitTarget, HitTargetKind, PaletteOverlay, PaneSceneKind,
-    PromptOverlay, SceneRect, SceneSize, SessionMapOverlay, Theme, TimelineOverlay, WorkspaceScene,
+    ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind, PaletteOverlay,
+    PaneSceneKind, PromptOverlay, SceneRect, SceneSize, SearchOverlay, SessionMapOverlay, Theme,
+    TimelineOverlay, WelcomeOverlay, WorkspaceScene,
     input::{InputEvent, Key, KeyCode, PointerButton, PointerEvent, PointerKind},
     layout::{
-        context_menu_rect, layout_separators, palette_overlay_rect, pane_content_rect, prompt_rect,
+        context_menu_rect, help_overlay_rect, layout_separators, palette_item_window,
+        palette_overlay_rect, pane_content_rect, pane_inner_rect, prompt_rect, welcome_rect,
         workspace_scene_area,
     },
 };
@@ -39,6 +41,8 @@ use crate::{
     clipboard::osc52_sequence,
     config::{load_config, project_config_file},
     copy_mode::CopyModeState,
+    events::AppEvent,
+    help::{HelpViewState, filter_help_rows, help_route, help_rows, welcome_lines},
     input::{RuntimeInput, key_to_input_with_keymap},
     keymap::{ChordAction, Keymap, format_chord},
     palette::{PaletteRow, PaletteState, PaletteWorkspaceView, palette_footer, palette_rows},
@@ -46,6 +50,10 @@ use crate::{
     pointer::{encode_mouse_event, split_percent_for_pointer},
     process_events::PtyRuntimeEvent,
     scene_builder::PaneViewState,
+    search::{
+        SearchCorpus, SearchHitTarget, SearchSource, SearchSourceKind, SearchViewState,
+        scroll_offset_for_row, search_overlay,
+    },
     session_map::{
         SessionMapRowModel, SessionMapState, SessionMapTarget, session_map_overlay,
         session_map_rows,
@@ -66,6 +74,11 @@ use crate::{
     input::key_to_input,
     persistence::{MAX_WORKSPACE_FILE_BYTES, ensure_parent_dir, write_workspace_file},
 };
+
+/// The most events one `drain_events` call applies. Bounding per-call work
+/// keeps a flooding producer from starving the draw/redraw checks in the
+/// shell loop; the reader-side flow gates bound how much can queue at all.
+const DRAIN_EVENT_BUDGET: usize = 256;
 
 pub struct AppState {
     workspace: Workspace,
@@ -91,13 +104,24 @@ pub struct AppState {
     timeline: TimelineLog,
     /// The open timeline overlay, if any (modal, like the palette).
     timeline_view: Option<TimelineViewState>,
+    /// The open session-search overlay, if any (modal, like the palette).
+    search_view: Option<SearchViewState>,
     /// The open session-map overlay, if any (modal).
     session_map: Option<SessionMapState>,
+    /// The open help overlay, if any (modal, like the palette).
+    help_view: Option<HelpViewState>,
+    /// Whether the one-time first-run note is on screen. Set only when a
+    /// launch that asked to restore found no saved workspace; cleared by any
+    /// action (a saved workspace suppresses it on every later launch).
+    first_run_note: bool,
     /// The open Set-agent-objective prompt, if any (modal).
     objective_prompt: Option<ObjectivePrompt>,
     keymap: Keymap,
     theme: Theme,
     reduced_motion: bool,
+    /// Surface byte-level PTY diagnostics in the status line. Off by
+    /// default: they are noise that would bury meaningful status.
+    debug_status: bool,
     user_config_file: Option<PathBuf>,
     copy_mode: Option<CopyModeState>,
     clipboard_payload: Option<Vec<u8>>,
@@ -118,10 +142,11 @@ pub struct AppState {
     context_menu: Option<ContextMenuState>,
     /// The previous button press, for double-click detection.
     last_pane_click: Option<PaneClick>,
-    runtime_tx: Sender<PtyRuntimeEvent>,
-    runtime_rx: Receiver<PtyRuntimeEvent>,
-    agent_tx: Sender<AgentRuntimeEvent>,
-    agent_rx: Receiver<AgentRuntimeEvent>,
+    /// The unified event channel: frontend input, PTY reader, and agent
+    /// forwarder threads all send here, so the shell can block on arrival
+    /// instead of polling on an interval.
+    event_tx: Sender<AppEvent>,
+    event_rx: Receiver<AppEvent>,
     next_runtime_token: u64,
 }
 
@@ -130,8 +155,7 @@ impl AppState {
         let command_context =
             CommandContext::for_project(config.workspace_name.clone(), config.project_path.clone());
         let workspace = Workspace::new(config.workspace_name, config.project_path);
-        let (runtime_tx, runtime_rx) = mpsc::channel();
-        let (agent_tx, agent_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
         let restore_on_startup = config.restore_on_startup;
         let config_warnings = config.config_warnings;
         // The timeline lives beside the workspace file; a baseline with no
@@ -164,11 +188,15 @@ impl AppState {
             agent_model: config.agent_model,
             timeline: TimelineLog::new(timeline_file),
             timeline_view: None,
+            search_view: None,
             session_map: None,
+            help_view: None,
+            first_run_note: false,
             objective_prompt: None,
             keymap: config.keymap,
             theme: config.theme,
             reduced_motion: config.reduced_motion,
+            debug_status: config.debug_status,
             user_config_file: config.user_config_file,
             copy_mode: None,
             clipboard_payload: None,
@@ -179,10 +207,8 @@ impl AppState {
             pointer_view: None,
             context_menu: None,
             last_pane_click: None,
-            runtime_tx,
-            runtime_rx,
-            agent_tx,
-            agent_rx,
+            event_tx,
+            event_rx,
             next_runtime_token: 1,
         };
 
@@ -268,11 +294,13 @@ impl AppState {
 
     /// The permanent status-strip hint naming the workspace's entry points,
     /// from the live keymap. A stranger's first breadcrumb: the palette
-    /// chord and the right-click menu are always written on screen.
+    /// chord, the right-click menu, and the help key are always written on
+    /// screen.
     pub(crate) fn control_hint(&self) -> String {
         format!(
-            "{} commands · right-click menu",
-            format_chord(self.keymap.toggle_palette)
+            "{} commands · right-click menu · {} help",
+            format_chord(self.keymap.toggle_palette),
+            help_route(&self.keymap)
         )
     }
 
@@ -372,6 +400,22 @@ impl AppState {
     }
 
     pub fn handle_event(&mut self, event: InputEvent) {
+        // The first-run note dismisses on any action — a key, a paste, or a
+        // pointer press — and the action itself proceeds normally (the note
+        // is never modal). Resize and pointer motion are not actions.
+        if self.first_run_note
+            && matches!(
+                event,
+                InputEvent::Key(_)
+                    | InputEvent::Paste(_)
+                    | InputEvent::Pointer(PointerEvent {
+                        kind: PointerKind::Down | PointerKind::Wheel { .. },
+                        ..
+                    })
+            )
+        {
+            self.first_run_note = false;
+        }
         match event {
             InputEvent::Key(key) => self.handle_key(key),
             InputEvent::Resize(size) => self.handle_terminal_resize(size.width, size.height),
@@ -384,8 +428,14 @@ impl AppState {
             }
             InputEvent::Paste(text) if self.timeline_view.is_some() => {
                 if let Some(view) = self.timeline_view.as_mut() {
+                    view.push_query(&text, now_ms());
+                }
+                self.mark_redraw();
+            }
+            InputEvent::Paste(text) if self.search_view.is_some() => {
+                if let Some(view) = self.search_view.as_mut() {
                     view.query.push_str(&text);
-                    view.selected = 0;
+                    view.refresh();
                 }
                 self.mark_redraw();
             }
@@ -476,8 +526,18 @@ impl AppState {
             self.mark_redraw();
             return;
         }
+        if self.search_view.is_some() {
+            self.handle_search_key(key);
+            self.mark_redraw();
+            return;
+        }
         if self.session_map.is_some() {
             self.handle_session_map_key(key);
+            self.mark_redraw();
+            return;
+        }
+        if self.help_view.is_some() {
+            self.handle_help_key(key);
             self.mark_redraw();
             return;
         }
@@ -591,6 +651,20 @@ impl AppState {
                         &self.keymap.palette,
                     ) {
                         PaletteInput::Dispatch(command_id) => {
+                            // Fast paths honor the availability gate the
+                            // listed rows honor: a bare letter never
+                            // fire-and-fails where the row would be greyed,
+                            // and it reports the same reason.
+                            if let Err(reason) = crate::palette::availability(
+                                command_id,
+                                &self.palette_workspace_view(),
+                            ) {
+                                let label = mandatum_commands::command_for_id(command_id)
+                                    .map(|command| command.label)
+                                    .unwrap_or("Command");
+                                self.status = format!("{label} is unavailable: {reason}");
+                                return;
+                            }
                             self.palette = None;
                             self.dispatch(command_id);
                             return;
@@ -796,6 +870,16 @@ impl AppState {
             RuntimeCommand::ReloadConfig => self.reload_config(),
             RuntimeCommand::ShowTimeline => self.open_timeline(),
             RuntimeCommand::ShowSessionMap => self.open_session_map(),
+            RuntimeCommand::SearchSession => self.open_search(),
+            RuntimeCommand::ShowHelp => self.open_help(),
+            RuntimeCommand::MoveFloatLeft => {
+                self.move_focused_float(-i32::from(MOVE_FLOAT_STEP_COLUMNS), 0)
+            }
+            RuntimeCommand::MoveFloatRight => {
+                self.move_focused_float(i32::from(MOVE_FLOAT_STEP_COLUMNS), 0)
+            }
+            RuntimeCommand::MoveFloatUp => self.move_focused_float(0, -1),
+            RuntimeCommand::MoveFloatDown => self.move_focused_float(0, 1),
             RuntimeCommand::Quit => {
                 self.should_quit = true;
                 self.status = "quitting".to_owned();
@@ -818,6 +902,7 @@ impl AppState {
         self.keymap = loaded.keymap;
         self.theme = loaded.theme;
         self.reduced_motion = loaded.reduced_motion;
+        self.debug_status = loaded.debug_status;
         if let Some(shell_program) = loaded.shell_program {
             self.shell_program = shell_program;
         }
@@ -868,9 +953,59 @@ impl AppState {
     }
 
     pub fn tick_runtime(&mut self) {
-        self.drain_runtime_events();
-        self.drain_agent_events();
+        self.drain_events();
         self.poll_child_exits();
+    }
+
+    /// A clone of the unified event channel's send side, for the frontend's
+    /// input thread.
+    pub(crate) fn event_sender(&self) -> Sender<AppEvent> {
+        self.event_tx.clone()
+    }
+
+    /// Block until the next event arrives (and apply it) or `timeout`
+    /// elapses. Returns whether an event was applied. This is the shell's
+    /// one blocking wait: input, PTY output, and agent events all land on
+    /// the same channel, so nothing can arrive without waking the loop.
+    pub(crate) fn wait_event(&mut self, timeout: Duration) -> bool {
+        match self.event_rx.recv_timeout(timeout) {
+            Ok(event) => {
+                self.apply_app_event(event);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Apply what is already buffered without blocking (burst drain: pointer
+    /// drags and PTY floods arrive faster than any redraw), bounded to
+    /// [`DRAIN_EVENT_BUDGET`] events per call. The bound is what keeps a
+    /// producer that outruns the consumer (a `yes`/`cat` flood) from pinning
+    /// the loop in here forever: the shell always gets back to draw() and
+    /// the redraw-cap check between drains.
+    pub(crate) fn drain_events(&mut self) {
+        for _ in 0..DRAIN_EVENT_BUDGET {
+            if self.should_quit {
+                break;
+            }
+            match self.event_rx.try_recv() {
+                Ok(event) => self.apply_app_event(event),
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn apply_app_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::Input(input) => self.handle_event(input),
+            AppEvent::Pty(event, credit) => {
+                // Release the flow credit before parsing so the reader can
+                // admit its next chunk while this one is applied.
+                drop(credit);
+                self.apply_pty_runtime_event(event);
+            }
+            AppEvent::Agent(event) => self.apply_agent_runtime_event(event),
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -923,7 +1058,19 @@ impl AppState {
                 }
             },
             Err(WorkspaceFileError::Io { source, .. })
-                if source.kind() == io::ErrorKind::NotFound => {}
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                // First run: no saved workspace exists. Show the one-time
+                // orientation note and an orienting status line. Saving a
+                // workspace makes this branch unreachable on later launches.
+                self.first_run_note = true;
+                self.status = format!(
+                    "new workspace — {} commands · {} help",
+                    format_chord(self.keymap.toggle_palette),
+                    help_route(&self.keymap)
+                );
+                self.preserve_status_on_next_resize = true;
+            }
             Err(error) => {
                 self.status = format!("startup restore failed: {error}");
                 self.preserve_status_on_next_resize = true;
@@ -1009,7 +1156,9 @@ impl AppState {
         self.command_context = command_context_for_workspace(&self.workspace);
         self.copy_mode = None;
         self.timeline_view = None;
+        self.search_view = None;
         self.session_map = None;
+        self.help_view = None;
         self.objective_prompt = None;
         self.clipboard_payload = None;
         self.last_copied = None;
@@ -1022,15 +1171,23 @@ impl AppState {
         self.terminal_panes = runtimes
             .into_iter()
             .map(|(pane_id, runtime)| {
-                let active = runtime.activate(pane_id.clone(), self.runtime_tx.clone());
+                let active = runtime.activate(pane_id.clone(), self.event_tx.clone());
                 (pane_id, active)
             })
             .collect();
     }
 
     fn discard_pending_runtime_events(&mut self) {
-        while self.runtime_rx.try_recv().is_ok() {}
-        while self.agent_rx.try_recv().is_ok() {}
+        // Only runtime events from the replaced runtimes are stale; buffered
+        // input keeps its relative order because everything between two
+        // input events in the queue is discarded. Collect first: re-sending
+        // while draining the same channel would loop forever.
+        let pending: Vec<AppEvent> = std::iter::from_fn(|| self.event_rx.try_recv().ok()).collect();
+        for event in pending {
+            if matches!(event, AppEvent::Input(_)) {
+                let _ = self.event_tx.send(event);
+            }
+        }
     }
 
     fn write_to_focused_terminal(&mut self, bytes: &[u8]) {
@@ -1042,7 +1199,12 @@ impl AppState {
 
         match runtime.write_input(bytes) {
             Ok(()) => {
-                self.status = format!("sent {} byte(s) to {focused}", bytes.len());
+                // Byte-level diagnostics are debug-only: writing them on
+                // every keystroke would bury meaningful status (failures,
+                // attention) under noise.
+                if self.debug_status {
+                    self.status = format!("sent {} byte(s) to {focused}", bytes.len());
+                }
             }
             Err(error) => {
                 runtime.error = Some(error.to_string());
@@ -1053,7 +1215,9 @@ impl AppState {
 
     fn run_configured_task(&mut self) {
         let intent = TaskPaneIntent {
-            recipe_id: Some("configured".to_owned()),
+            // No recipe: this is an ad-hoc run of the configured default
+            // command, and "recipe:" is reserved for real recipe names.
+            recipe_id: None,
             command: self.task_command.clone(),
             cwd: Some(self.command_context.project_path.clone()),
         };
@@ -1287,7 +1451,7 @@ impl AppState {
                     restart_generation,
                     runtime_token,
                     session,
-                    self.agent_tx.clone(),
+                    self.event_tx.clone(),
                 );
                 self.agent_panes.insert(pane_id.clone(), runtime);
                 self.update_agent_intent(&pane_id, |intent| {
@@ -1430,26 +1594,24 @@ impl AppState {
             })
     }
 
-    fn drain_agent_events(&mut self) {
-        while let Ok(runtime_event) = self.agent_rx.try_recv() {
-            let AgentRuntimeEvent {
-                pane_id,
-                restart_generation,
-                runtime_token,
-                event,
-            } = runtime_event;
-            // [L3-GATE] Events from a replaced agent runtime are rejected:
-            // apply an event only if the pane's current generation and token
-            // match the stamp the forwarder recorded at launch.
-            let current = self.agent_panes.get(&pane_id).is_some_and(|runtime| {
-                runtime.restart_generation == restart_generation
-                    && runtime.runtime_token == runtime_token
-            });
-            if !current {
-                continue;
-            }
-            self.apply_agent_event(pane_id, event);
+    fn apply_agent_runtime_event(&mut self, runtime_event: AgentRuntimeEvent) {
+        let AgentRuntimeEvent {
+            pane_id,
+            restart_generation,
+            runtime_token,
+            event,
+        } = runtime_event;
+        // [L3-GATE] Events from a replaced agent runtime are rejected:
+        // apply an event only if the pane's current generation and token
+        // match the stamp the forwarder recorded at launch.
+        let current = self.agent_panes.get(&pane_id).is_some_and(|runtime| {
+            runtime.restart_generation == restart_generation
+                && runtime.runtime_token == runtime_token
+        });
+        if !current {
+            return;
         }
+        self.apply_agent_event(pane_id, event);
     }
 
     /// Fold one accepted agent session event into state: the durable subset
@@ -1550,6 +1712,11 @@ impl AppState {
             AgentSessionEvent::Failed { error } => {
                 if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
                     runtime.current_action = None;
+                    // Keep the reason on the pane: the status line is
+                    // transient, a failure must stay legible until the
+                    // agent is relaunched (a relaunch replaces this
+                    // registry entry, clearing it).
+                    runtime.last_error = Some(error.clone());
                 }
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Failed;
@@ -1933,9 +2100,12 @@ impl AppState {
             pane_id.clone(),
             size,
         )?
-        .activate(pane_id.clone(), self.runtime_tx.clone());
+        .activate(pane_id.clone(), self.event_tx.clone());
         self.terminal_panes.insert(pane_id.clone(), runtime);
-        self.status = format!("spawned shell for {pane_id}");
+        self.status = format!(
+            "spawned shell for {} · {pane_id}",
+            pane_status_name(&self.workspace, &pane_id)
+        );
         Ok(())
     }
 
@@ -1956,7 +2126,7 @@ impl AppState {
             pane_id.clone(),
             size,
         )?
-        .activate(pane_id.clone(), self.runtime_tx.clone());
+        .activate(pane_id.clone(), self.event_tx.clone());
         self.task_panes
             .insert(pane_id.clone(), TaskPaneRuntime::running(runtime));
         self.timeline.record(TimelineEventKind::TaskStarted {
@@ -1977,86 +2147,88 @@ impl AppState {
             })
     }
 
-    fn drain_runtime_events(&mut self) {
-        while let Ok(event) = self.runtime_rx.try_recv() {
-            match event {
-                PtyRuntimeEvent::Output {
-                    pane_id,
-                    restart_generation,
-                    runtime_token,
-                    bytes,
-                } => {
-                    if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
-                        if runtime.restart_generation != restart_generation
-                            || runtime.runtime_token != runtime_token
-                        {
-                            continue;
-                        }
-                        match runtime.parser.feed_pty_bytes(&bytes) {
-                            Ok(_) => {
+    fn apply_pty_runtime_event(&mut self, event: PtyRuntimeEvent) {
+        match event {
+            PtyRuntimeEvent::Output {
+                pane_id,
+                restart_generation,
+                runtime_token,
+                bytes,
+            } => {
+                if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
+                    if runtime.restart_generation != restart_generation
+                        || runtime.runtime_token != runtime_token
+                    {
+                        return;
+                    }
+                    match runtime.parser.feed_pty_bytes(&bytes) {
+                        Ok(_) => {
+                            // Read diagnostics never overwrite the visible
+                            // status: a PTY flood must not bury a failure or
+                            // attention message under byte counts.
+                            if self.debug_status {
                                 self.status =
                                     format!("read {} byte(s) from {pane_id}", bytes.len());
                             }
-                            Err(error) => {
-                                runtime.error = Some(error.to_string());
-                                self.status =
-                                    format!("terminal parser failed for {pane_id}: {error}");
-                            }
                         }
-                    } else if let Some(task) = self.task_panes.get_mut(&pane_id) {
-                        if task.runtime.restart_generation != restart_generation
-                            || task.runtime.runtime_token != runtime_token
-                        {
-                            continue;
+                        Err(error) => {
+                            runtime.error = Some(error.to_string());
+                            self.status = format!("terminal parser failed for {pane_id}: {error}");
                         }
-                        match task.runtime.parser.feed_pty_bytes(&bytes) {
-                            Ok(_) => {
+                    }
+                } else if let Some(task) = self.task_panes.get_mut(&pane_id) {
+                    if task.runtime.restart_generation != restart_generation
+                        || task.runtime.runtime_token != runtime_token
+                    {
+                        return;
+                    }
+                    match task.runtime.parser.feed_pty_bytes(&bytes) {
+                        Ok(_) => {
+                            if self.debug_status {
                                 self.status =
                                     format!("read {} task byte(s) from {pane_id}", bytes.len());
                             }
-                            Err(error) => {
-                                task.runtime.error = Some(error.to_string());
-                                task.status = format!("task parser failed: {error}");
-                                self.status = format!("task parser failed for {pane_id}: {error}");
-                            }
+                        }
+                        Err(error) => {
+                            task.runtime.error = Some(error.to_string());
+                            task.status = format!("task parser failed: {error}");
+                            self.status = format!("task parser failed for {pane_id}: {error}");
                         }
                     }
                 }
-                PtyRuntimeEvent::ReaderClosed {
-                    pane_id,
-                    restart_generation,
-                    runtime_token,
-                } => {
-                    if !self.runtime_generation_matches(&pane_id, restart_generation, runtime_token)
-                    {
-                        continue;
-                    }
-                    if let Some(task) = self.task_panes.get_mut(&pane_id) {
-                        if task.runtime.exit_status.is_some() {
-                            continue;
-                        }
-                        task.status = "task reader closed".to_owned();
-                    }
-                    self.status = format!("PTY reader closed for {pane_id}");
+            }
+            PtyRuntimeEvent::ReaderClosed {
+                pane_id,
+                restart_generation,
+                runtime_token,
+            } => {
+                if !self.runtime_generation_matches(&pane_id, restart_generation, runtime_token) {
+                    return;
                 }
-                PtyRuntimeEvent::Error {
-                    pane_id,
-                    restart_generation,
-                    runtime_token,
-                    message,
-                } => {
-                    if !self.runtime_generation_matches(&pane_id, restart_generation, runtime_token)
-                    {
-                        continue;
+                if let Some(task) = self.task_panes.get_mut(&pane_id) {
+                    if task.runtime.exit_status.is_some() {
+                        return;
                     }
-                    if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
-                        runtime.error = Some(message.clone());
-                    } else if let Some(task) = self.task_panes.get_mut(&pane_id) {
-                        task.runtime.error = Some(message.clone());
-                        task.status = format!("task reader failed: {message}");
-                    }
-                    self.status = format!("PTY reader failed for {pane_id}: {message}");
+                    task.status = "task reader closed".to_owned();
                 }
+                self.status = format!("PTY reader closed for {pane_id}");
+            }
+            PtyRuntimeEvent::Error {
+                pane_id,
+                restart_generation,
+                runtime_token,
+                message,
+            } => {
+                if !self.runtime_generation_matches(&pane_id, restart_generation, runtime_token) {
+                    return;
+                }
+                if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
+                    runtime.error = Some(message.clone());
+                } else if let Some(task) = self.task_panes.get_mut(&pane_id) {
+                    task.runtime.error = Some(message.clone());
+                    task.status = format!("task reader failed: {message}");
+                }
+                self.status = format!("PTY reader failed for {pane_id}: {message}");
             }
         }
     }
@@ -2076,7 +2248,9 @@ impl AppState {
         })
     }
 
-    fn poll_child_exits(&mut self) {
+    /// Heartbeat work: notice exited children. Called from `tick_runtime`
+    /// and on the shell's heartbeat cadence rather than per event.
+    pub(crate) fn poll_child_exits(&mut self) {
         for (pane_id, runtime) in self.terminal_panes.iter_mut() {
             if runtime.exit_status.is_some() {
                 continue;
@@ -2085,8 +2259,11 @@ impl AppState {
             match runtime.controller.try_wait() {
                 Ok(Some(exit)) => {
                     runtime.exit_status = Some(exit.status());
-                    self.status =
-                        format!("PTY {pane_id} exited: {}", exit_status_label(exit.status()));
+                    self.status = format!(
+                        "{} exited: {} · {pane_id}",
+                        pane_status_name(&self.workspace, pane_id),
+                        exit_status_label(exit.status())
+                    );
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -2121,7 +2298,11 @@ impl AppState {
                         command,
                         exit: task.status.clone(),
                     });
-                    self.status = format!("task {pane_id} {}", task.status);
+                    self.status = format!(
+                        "{} {} · {pane_id}",
+                        pane_status_name(&self.workspace, pane_id),
+                        task.status
+                    );
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -2237,6 +2418,11 @@ impl AppState {
             self.status = "objective unchanged".to_owned();
             return;
         }
+        if self.help_view.is_some() {
+            // Help rows are informational, not actionable: any press closes.
+            self.close_help();
+            return;
+        }
         if self.timeline_view.is_some() {
             if let Some(HitTargetKind::TimelineItem(index)) =
                 target.as_ref().map(|target| target.kind.clone())
@@ -2247,6 +2433,19 @@ impl AppState {
                 self.jump_to_selected_timeline_entry(Some(index));
             } else {
                 self.close_timeline();
+            }
+            return;
+        }
+        if self.search_view.is_some() {
+            if let Some(HitTargetKind::SearchItem(index)) =
+                target.as_ref().map(|target| target.kind.clone())
+            {
+                if let Some(view) = self.search_view.as_mut() {
+                    view.selected = index;
+                }
+                self.activate_search_hit(Some(index));
+            } else {
+                self.close_search();
             }
             return;
         }
@@ -2506,6 +2705,51 @@ impl AppState {
         }
     }
 
+    /// Keyboard float movement (the pointer path is `drag_float`): shift the
+    /// focused floating pane's durable rect one step, clamped to the same
+    /// bounds the drag path enforces.
+    fn move_focused_float(&mut self, dx: i32, dy: i32) {
+        let session = self.workspace.active_session();
+        let pane_id = session.focused_pane_id().clone();
+        let Some(rect) = session
+            .layout()
+            .floating()
+            .iter()
+            .find(|floating| floating.pane_id == pane_id)
+            .map(|floating| floating.rect.clone())
+        else {
+            self.status = "focused pane is not floating (Float pane first)".to_owned();
+            return;
+        };
+        // The same clamp the drag path applies; without a known frame size
+        // there is nothing to clamp against beyond zero.
+        let (max_x, max_y) = match self.terminal_size {
+            Some((columns, rows)) => {
+                let area = workspace_scene_area(SceneSize::new(columns, rows));
+                (
+                    i32::from(area.width.saturating_sub(2)),
+                    i32::from(area.height.saturating_sub(2)),
+                )
+            }
+            None => (i32::from(u16::MAX), i32::from(u16::MAX)),
+        };
+        let x = (i32::from(rect.x) + dx).clamp(0, max_x) as u16;
+        let y = (i32::from(rect.y) + dy).clamp(0, max_y) as u16;
+        match self.workspace.apply_action(CoreAction::MoveFloatingPane {
+            pane_id: pane_id.clone(),
+            x,
+            y,
+        }) {
+            Ok(_) => {
+                self.status = format!("moved {pane_id}");
+                if let Err(error) = self.reconcile_runtimes() {
+                    self.status = error.to_string();
+                }
+            }
+            Err(error) => self.status = format!("move failed: {error}"),
+        }
+    }
+
     fn drag_float(&mut self, pane_id: PaneId, grab_dx: u16, grab_dy: u16, pointer: PointerEvent) {
         let Some((columns, rows)) = self.terminal_size else {
             return;
@@ -2603,9 +2847,21 @@ impl AppState {
             }
             return;
         }
+        if self.search_view.is_some() {
+            if dy != 0 {
+                self.move_search_selection(isize::from(dy));
+            }
+            return;
+        }
         if self.session_map.is_some() {
             if dy != 0 {
                 self.move_session_map_selection(isize::from(dy));
+            }
+            return;
+        }
+        if self.help_view.is_some() {
+            if dy != 0 {
+                self.move_help_selection(isize::from(dy));
             }
             return;
         }
@@ -2864,6 +3120,8 @@ impl AppState {
         if !floating {
             commands.extend([CommandId::SplitRight, CommandId::SplitDown]);
         }
+        // Zoom is one toggle too: name the half that will actually happen.
+        let zoomed = self.workspace.active_session().layout().zoomed() == Some(pane_id);
         commands.push(CommandId::ZoomPane);
         // Float/dock is one toggle: offer the half that can actually run.
         commands.push(if floating {
@@ -2872,6 +3130,12 @@ impl AppState {
             CommandId::FloatPane
         });
         commands.push(CommandId::ClosePane);
+        // Session-wide, but pane output is what it searches: every pane's
+        // menu offers the search door.
+        commands.push(CommandId::SearchSession);
+        // Help closes the loop for pointer-first users: every menu ends
+        // with the door to the full keymap.
+        commands.push(CommandId::ShowHelp);
 
         // "Command palette" leads: the menu is one of the two mouse doors
         // into the palette (the other is the status strip).
@@ -2882,19 +3146,25 @@ impl AppState {
         }];
         items.extend(commands.into_iter().filter_map(|command_id| {
             let command = mandatum_commands::command_for_id(command_id)?;
+            // State-aware labels: a toggle names the half that will run.
+            let label = if command_id == CommandId::ZoomPane && zoomed {
+                "Unzoom pane".to_owned()
+            } else {
+                command.label.to_owned()
+            };
             Some(ContextMenuItem {
                 action: ContextMenuAction::Command(command_id),
-                label: command.label.to_owned(),
+                label,
                 hint: self.command_key_hint(command_id),
             })
         }));
         items
     }
 
-    /// The keyboard route to a command, for menu hints: a direct key where
-    /// one exists, else its global chord, else its palette letter spelled as
-    /// "<palette chord> <letter>".
-    fn command_key_hint(&self, command_id: CommandId) -> String {
+    /// The keyboard route to a command, for menu and pane hints: a direct
+    /// key where one exists, else its global chord, else its palette letter
+    /// spelled as "<palette chord> <letter>".
+    pub(crate) fn command_key_hint(&self, command_id: CommandId) -> String {
         if self.focused_agent_has_pending_approval() {
             if command_id == CommandId::ApproveAgentAction {
                 return "y".to_owned();
@@ -2906,11 +3176,14 @@ impl AppState {
         if let Some(chord) = self.keymap.chord_for(command_id) {
             return format_chord(chord);
         }
-        // Dock rides the float letter (one toggle key for the pair).
-        let letter_owner = if command_id == CommandId::DockPane {
-            CommandId::FloatPane
-        } else {
-            command_id
+        // Commands that ride another command's letter through a context
+        // substitution show that letter: Dock rides Float's (one toggle key
+        // for the pair), Rerun task rides Restart pane's (the task-pane
+        // substitution).
+        let letter_owner = match command_id {
+            CommandId::DockPane => CommandId::FloatPane,
+            CommandId::RerunTask => CommandId::RestartPane,
+            other => other,
         };
         if let Some(letter) = self.keymap.palette.key_for(letter_owner) {
             return format!("{} {letter}", format_chord(self.keymap.toggle_palette));
@@ -2986,6 +3259,12 @@ impl AppState {
                     Some(HitTargetKind::ContextMenuItem(index)) => {
                         self.run_context_menu_item(Some(index));
                     }
+                    // A press on the menu's own chrome (border, padding) is
+                    // not a row and not click-away: swallowing it as a
+                    // dismissal would punish a near-miss by one cell.
+                    _ if self
+                        .context_menu_area()
+                        .is_some_and(|area| area.contains(pointer.column, pointer.row)) => {}
                     // Click-away dismisses; the press is consumed.
                     _ => self.close_context_menu(),
                 }
@@ -3014,6 +3293,13 @@ impl AppState {
         self.status = "menu closed".to_owned();
     }
 
+    /// The open menu's on-screen rect, for chrome-click detection.
+    fn context_menu_area(&self) -> Option<SceneRect> {
+        let (columns, rows) = self.terminal_size?;
+        self.context_menu_overlay(SceneSize::new(columns, rows))
+            .map(|overlay| overlay.area)
+    }
+
     // --- Visibility overlays (timeline, session map, objective prompt) ----
 
     /// Open the execution timeline: read the durable tail once, newest
@@ -3021,7 +3307,9 @@ impl AppState {
     fn open_timeline(&mut self) {
         self.palette = None;
         self.context_menu = None;
+        self.search_view = None;
         self.session_map = None;
+        self.help_view = None;
         self.objective_prompt = None;
         let view = TimelineViewState::from_tail(self.timeline.read_tail());
         self.status = format!("timeline: {} event(s)", view.events.len());
@@ -3033,11 +3321,261 @@ impl AppState {
         self.status = "timeline closed".to_owned();
     }
 
+    /// Open session search: snapshot every live pane's scrollback+screen
+    /// text plus the timeline tail once, so results stay stable while panes
+    /// flood. The other modal surfaces close; copy mode exits because search
+    /// owns the keyboard while open.
+    fn open_search(&mut self) {
+        self.palette = None;
+        self.context_menu = None;
+        self.timeline_view = None;
+        self.session_map = None;
+        self.help_view = None;
+        self.objective_prompt = None;
+        self.copy_mode = None;
+        let corpus = self.build_search_corpus();
+        let view = SearchViewState::new(corpus);
+        self.status = format!(
+            "search: snapshot of {} pane source(s) + {} timeline event(s)",
+            view.source_count(),
+            view.timeline_event_count()
+        );
+        self.search_view = Some(view);
+    }
+
+    fn close_search(&mut self) {
+        self.search_view = None;
+        self.status = "search closed".to_owned();
+    }
+
+    /// Snapshot the searchable text: the active session's live terminal
+    /// grids, task output grids, and agent output tails (session pane
+    /// order), plus the timeline tail (newest first).
+    fn build_search_corpus(&self) -> SearchCorpus {
+        let session = self.workspace.active_session();
+        let mut sources = Vec::new();
+        for (pane_id, pane) in session.panes() {
+            match pane.kind() {
+                PaneKind::Terminal { .. } => {
+                    if let Some(grid) = self.terminal_grid(pane_id) {
+                        sources.push(SearchSource::from_grid(
+                            pane_id.clone(),
+                            pane.title(),
+                            SearchSourceKind::Terminal,
+                            grid,
+                        ));
+                    }
+                }
+                PaneKind::Task { .. } => {
+                    if let Some(task) = self.task_panes.get(pane_id) {
+                        sources.push(SearchSource::from_grid(
+                            pane_id.clone(),
+                            pane.title(),
+                            SearchSourceKind::Task,
+                            task.runtime.parser.grid(),
+                        ));
+                    }
+                }
+                PaneKind::Agent { .. } => {
+                    if let Some(runtime) = self.agent_panes.get(pane_id) {
+                        sources.push(SearchSource::from_lines(
+                            pane_id.clone(),
+                            pane.title(),
+                            SearchSourceKind::Agent,
+                            runtime.output_tail.iter(),
+                        ));
+                    }
+                }
+                PaneKind::StatusLog { .. } => {}
+            }
+        }
+        let mut timeline = self.timeline.read_tail().events;
+        timeline.reverse();
+        SearchCorpus { sources, timeline }
+    }
+
+    fn handle_search_key(&mut self, key: Key) {
+        if matches!(self.keymap.chord_action(key), Some(ChordAction::Quit)) {
+            self.should_quit = true;
+            self.status = "quitting".to_owned();
+            return;
+        }
+        let ctrl_only = key.mods.control && !key.mods.shift && !key.mods.alt && !key.mods.super_key;
+        if key.code == KeyCode::Up || (ctrl_only && key.code == KeyCode::Char('p')) {
+            self.move_search_selection(-1);
+            return;
+        }
+        if key.code == KeyCode::Down || (ctrl_only && key.code == KeyCode::Char('n')) {
+            self.move_search_selection(1);
+            return;
+        }
+        match key.code {
+            KeyCode::Escape => self.close_search(),
+            KeyCode::Enter => self.activate_search_hit(None),
+            KeyCode::Backspace => {
+                if let Some(view) = self.search_view.as_mut() {
+                    view.query.pop();
+                    view.refresh();
+                }
+            }
+            KeyCode::Char(character)
+                if !key.mods.control && !key.mods.alt && !key.mods.super_key =>
+            {
+                if let Some(view) = self.search_view.as_mut() {
+                    view.query.push(character);
+                    view.refresh();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn move_search_selection(&mut self, delta: isize) {
+        let Some(view) = self.search_view.as_mut() else {
+            return;
+        };
+        let count = view.results.len();
+        if count == 0 {
+            view.selected = 0;
+            return;
+        }
+        let current = view.selected.min(count - 1) as isize;
+        view.selected = (current + delta).clamp(0, count as isize - 1) as usize;
+    }
+
+    /// Enter/click on a search result. Pane hits focus the pane; terminal
+    /// hits also scroll the viewport to the matched row (the pointer-view
+    /// mechanics, so plain typing keeps flowing to the shell — L5). Timeline
+    /// hits open the timeline overlay positioned at the matched entry.
+    /// `index` overrides the selection for pointer activation.
+    fn activate_search_hit(&mut self, index: Option<usize>) {
+        let Some(view) = self.search_view.as_ref() else {
+            return;
+        };
+        if view.results.is_empty() {
+            self.status = if view.query.trim().is_empty() {
+                "type to search session output".to_owned()
+            } else {
+                format!("no output matches '{}'", view.query.trim())
+            };
+            return;
+        }
+        let row = index.unwrap_or(view.selected).min(view.results.len() - 1);
+        let hit = view.results[row].clone();
+
+        match hit.target {
+            SearchHitTarget::PaneRow { pane_id, row, kind } => {
+                if self.workspace.active_session().pane(&pane_id).is_none() {
+                    self.status = format!("pane {pane_id} is not in this session");
+                    return;
+                }
+                self.search_view = None;
+                self.focus_pane_for_pointer(&pane_id);
+                match kind {
+                    SearchSourceKind::Terminal => {
+                        self.scroll_pane_to_row(&pane_id, row, &hit.text, &hit.match_indices)
+                    }
+                    // Task output and agent tails render bottom-anchored
+                    // without a scrollable viewport; focus is the jump.
+                    SearchSourceKind::Task | SearchSourceKind::Agent => {
+                        self.status = format!("focused {pane_id} (its output view shows the tail)");
+                    }
+                }
+            }
+            SearchHitTarget::Timeline { event } => {
+                self.search_view = None;
+                self.open_timeline();
+                let Some(timeline) = self.timeline_view.as_mut() else {
+                    return;
+                };
+                match timeline
+                    .events
+                    .iter()
+                    .position(|candidate| candidate == &event)
+                {
+                    Some(position) => {
+                        timeline.selected = position;
+                        self.status = "timeline opened at the matched event".to_owned();
+                    }
+                    None => {
+                        self.status = "timeline opened; the matched event left the tail".to_owned();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scroll a terminal pane's viewport to an absolute buffer row via the
+    /// pointer-view mechanics, selecting the matched span so the hit is
+    /// visible. The search snapshot may be stale: rows that were pushed out
+    /// of the bounded buffer clamp to the oldest retained row, and a row
+    /// whose text has moved since the snapshot is named honestly instead of
+    /// pretending the jump landed.
+    fn scroll_pane_to_row(
+        &mut self,
+        pane_id: &PaneId,
+        row: usize,
+        expected_text: &str,
+        match_indices: &[usize],
+    ) {
+        let inner_height = self.terminal_size.and_then(|(columns, rows)| {
+            pane_content_rect(&self.workspace, SceneSize::new(columns, rows), pane_id)
+                .map(|rect| rect.height)
+        });
+        let Some(grid) = self.terminal_grid(pane_id) else {
+            self.status = format!("focused {pane_id} (no live terminal to scroll)");
+            return;
+        };
+        let total_rows = grid.total_rows();
+        let scrollback_len = grid.scrollback_len();
+        let columns = grid.size().columns();
+        let view_rows = usize::from(grid.size().rows().min(inner_height.unwrap_or(u16::MAX)));
+        let scrolled_out = row >= total_rows;
+        let target_row = row.min(total_rows.saturating_sub(1));
+        let scroll_offset = scroll_offset_for_row(total_rows, view_rows, target_row);
+        // Verify the snapshot row still holds the matched text (a flooding
+        // pane shifts absolute rows as the scrollback ring evicts).
+        let current_text = if target_row < scrollback_len {
+            grid.scrollback_row_text(target_row)
+        } else {
+            grid.row_text((target_row - scrollback_len) as u16)
+        };
+        let row_intact = !scrolled_out
+            && current_text.is_some_and(|text| text.trim_end() == expected_text.trim_end());
+        // Select the matched span so the row is visibly marked; the buffer
+        // stores one char per cell, so char indices are columns.
+        let selection = match (match_indices.first(), match_indices.last()) {
+            (Some(&first), Some(&last)) if row_intact && columns > 0 => {
+                let clamp = |index: usize| (index.min(usize::from(columns) - 1)) as u16;
+                Some(((target_row, clamp(first)), (target_row, clamp(last))))
+            }
+            _ => None,
+        };
+        // Keep the pointer-view invariant: offset 0 with no selection means
+        // following live output, represented as no view at all.
+        self.pointer_view = if scroll_offset == 0 && selection.is_none() {
+            None
+        } else {
+            Some(PointerView {
+                pane_id: pane_id.clone(),
+                scroll_offset,
+                selection,
+            })
+        };
+        self.status = if row_intact {
+            format!("{pane_id}: jumped to the matched row")
+        } else {
+            format!("{pane_id}: output moved since the search snapshot; showing where it was")
+        };
+    }
+
     /// Open the session map with the active session's focused pane selected.
     fn open_session_map(&mut self) {
         self.palette = None;
         self.context_menu = None;
         self.timeline_view = None;
+        self.search_view = None;
+        self.help_view = None;
         self.objective_prompt = None;
         let rows = self.session_map_row_models();
         let focused = self.workspace.active_session().focused_pane_id().clone();
@@ -3059,6 +3597,126 @@ impl AppState {
     fn close_session_map(&mut self) {
         self.session_map = None;
         self.status = "session map closed".to_owned();
+    }
+
+    /// Open the help overlay. Content is generated from the command table
+    /// and the LIVE keymap (`crate::help`), so rebinds are always reflected.
+    /// The other modal surfaces close.
+    fn open_help(&mut self) {
+        self.palette = None;
+        self.context_menu = None;
+        self.timeline_view = None;
+        self.search_view = None;
+        self.session_map = None;
+        self.objective_prompt = None;
+        self.help_view = Some(HelpViewState::default());
+        self.status = "help: type to filter, Esc close".to_owned();
+    }
+
+    fn close_help(&mut self) {
+        self.help_view = None;
+        self.status = "help closed".to_owned();
+    }
+
+    fn handle_help_key(&mut self, key: Key) {
+        match self.keymap.chord_action(key) {
+            Some(ChordAction::Quit) => {
+                self.should_quit = true;
+                self.status = "quitting".to_owned();
+                return;
+            }
+            // The help chord toggles: pressing it again closes.
+            Some(ChordAction::Dispatch(CommandId::ShowHelp)) => {
+                self.close_help();
+                return;
+            }
+            _ => {}
+        }
+        let ctrl_only = key.mods.control && !key.mods.shift && !key.mods.alt && !key.mods.super_key;
+        if key.code == KeyCode::Up || (ctrl_only && key.code == KeyCode::Char('p')) {
+            self.move_help_selection(-1);
+            return;
+        }
+        if key.code == KeyCode::Down || (ctrl_only && key.code == KeyCode::Char('n')) {
+            self.move_help_selection(1);
+            return;
+        }
+        match key.code {
+            KeyCode::Escape | KeyCode::Enter => self.close_help(),
+            KeyCode::Backspace => {
+                if let Some(view) = self.help_view.as_mut() {
+                    view.query.pop();
+                    view.selected = 0;
+                }
+            }
+            KeyCode::Char(character)
+                if !key.mods.control && !key.mods.alt && !key.mods.super_key =>
+            {
+                if let Some(view) = self.help_view.as_mut() {
+                    view.query.push(character);
+                    view.selected = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn move_help_selection(&mut self, delta: isize) {
+        let count = self
+            .help_view
+            .as_ref()
+            .map(|view| filter_help_rows(&help_rows(&self.keymap), &view.query).len())
+            .unwrap_or(0);
+        let Some(view) = self.help_view.as_mut() else {
+            return;
+        };
+        if count == 0 {
+            view.selected = 0;
+            return;
+        }
+        let current = view.selected.min(count - 1) as isize;
+        view.selected = (current + delta).clamp(0, count as isize - 1) as usize;
+    }
+
+    /// The help overlay for the current frame, `None` while closed.
+    pub(crate) fn help_overlay_scene(&self, size: SceneSize) -> Option<HelpOverlay> {
+        let view = self.help_view.as_ref()?;
+        let items = filter_help_rows(&help_rows(&self.keymap), &view.query);
+        let selected = if items.is_empty() {
+            None
+        } else {
+            Some(view.selected.min(items.len() - 1))
+        };
+        let area = help_overlay_rect(size);
+        let window = palette_item_window(pane_inner_rect(area), items.len(), selected);
+        let mut footer = String::new();
+        let hidden_above = window.start;
+        let hidden_below = items.len().saturating_sub(window.end);
+        if hidden_above > 0 || hidden_below > 0 {
+            footer.push_str(&format!("↑ {hidden_above} / ↓ {hidden_below} more · "));
+        }
+        footer.push_str("type to filter · ↑/↓ scroll · esc close");
+        Some(HelpOverlay {
+            area,
+            query: view.query.clone(),
+            items,
+            selected,
+            footer,
+        })
+    }
+
+    /// The one-time first-run note, `None` once anything has been done (or
+    /// when a saved workspace existed at launch). Only composed when no
+    /// modal overlay is above it.
+    pub(crate) fn welcome_overlay_scene(&self, size: SceneSize) -> Option<WelcomeOverlay> {
+        if !self.first_run_note {
+            return None;
+        }
+        let lines = welcome_lines(&self.keymap);
+        Some(WelcomeOverlay {
+            area: welcome_rect(size, lines.len() as u16),
+            lines,
+        })
     }
 
     /// Open the Set-agent-objective prompt for the focused agent pane,
@@ -3083,7 +3741,9 @@ impl AppState {
         self.palette = None;
         self.context_menu = None;
         self.timeline_view = None;
+        self.search_view = None;
         self.session_map = None;
+        self.help_view = None;
         self.objective_prompt = Some(ObjectivePrompt {
             pane_id: pane_id.clone(),
             input: objective,
@@ -3111,16 +3771,14 @@ impl AppState {
             KeyCode::Enter => self.jump_to_selected_timeline_entry(None),
             KeyCode::Backspace => {
                 if let Some(view) = self.timeline_view.as_mut() {
-                    view.query.pop();
-                    view.selected = 0;
+                    view.pop_query(now_ms());
                 }
             }
             KeyCode::Char(character)
                 if !key.mods.control && !key.mods.alt && !key.mods.super_key =>
             {
                 if let Some(view) = self.timeline_view.as_mut() {
-                    view.query.push(character);
-                    view.selected = 0;
+                    view.push_query(&character.to_string(), now_ms());
                 }
             }
             _ => {}
@@ -3128,11 +3786,10 @@ impl AppState {
     }
 
     fn move_timeline_selection(&mut self, delta: isize) {
-        let now = now_ms();
         let Some(view) = self.timeline_view.as_mut() else {
             return;
         };
-        let count = view.filtered_indices(now).len();
+        let count = view.filtered().len();
         if count == 0 {
             view.selected = 0;
             return;
@@ -3147,7 +3804,7 @@ impl AppState {
         let Some(view) = self.timeline_view.as_ref() else {
             return;
         };
-        let filtered = view.filtered_indices(now_ms());
+        let filtered = view.filtered().to_vec();
         if filtered.is_empty() {
             self.status = format!("no timeline event matches '{}'", view.query.trim());
             return;
@@ -3324,13 +3981,19 @@ impl AppState {
         let live = |pane_id: &PaneId| -> Option<String> {
             if let Some(runtime) = self.terminal_panes.get(pane_id) {
                 return Some(match runtime.exit_status {
-                    Some(status) => exited_state_word(status),
-                    None => "running".to_owned(),
+                    Some(status) => format!("exited: {}", exit_status_label(status)),
+                    // A live shell at a prompt is not doing work; "running"
+                    // would read as activity. "open" states what is true
+                    // without claiming to know whether a command runs.
+                    None => "open".to_owned(),
                 });
             }
             if let Some(task) = self.task_panes.get(pane_id) {
                 return Some(match task.runtime.exit_status {
-                    Some(status) => exited_state_word(status),
+                    // The retained status label ("failed: exit 3") — the
+                    // exact vocabulary the pane body and status line use,
+                    // so the same fact never reads two ways.
+                    Some(_) => task.status.clone(),
                     None => "running".to_owned(),
                 });
             }
@@ -3343,6 +4006,13 @@ impl AppState {
     pub(crate) fn timeline_overlay_scene(&self, size: SceneSize) -> Option<TimelineOverlay> {
         let view = self.timeline_view.as_ref()?;
         Some(timeline_overlay(view, size, now_ms()))
+    }
+
+    /// The session-search overlay for the current frame, `None` while
+    /// closed.
+    pub(crate) fn search_overlay_scene(&self, size: SceneSize) -> Option<SearchOverlay> {
+        let view = self.search_view.as_ref()?;
+        Some(search_overlay(view, size))
     }
 
     /// The session-map overlay for the current frame, `None` while closed.
@@ -3452,6 +4122,11 @@ const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 /// Rows scrolled per wheel tick over a terminal pane.
 const WHEEL_SCROLL_ROWS: usize = 3;
 
+/// Columns one keyboard float-move step covers (rows step by 1: terminal
+/// cells are roughly twice as tall as they are wide, so 2:1 keeps a step
+/// visually square).
+const MOVE_FLOAT_STEP_COLUMNS: u16 = 2;
+
 /// One armed pointer drag gesture, set on a button press over a target.
 #[derive(Clone)]
 enum PointerDrag {
@@ -3515,19 +4190,22 @@ struct ObjectivePrompt {
 }
 
 /// The header label for a configured connector kind.
+/// Status copy names panes by their user-facing title, with the id kept as
+/// trailing detail for audit ("checks failed: exit 3 · pane-5"): the title
+/// is what tells a glance WHICH task failed. Free function so callers
+/// holding mutable borrows of runtime registries can still name panes.
+fn pane_status_name(workspace: &Workspace, pane_id: &PaneId) -> String {
+    workspace
+        .active_session()
+        .pane(pane_id)
+        .map(|pane| pane.title().to_owned())
+        .unwrap_or_else(|| pane_id.to_string())
+}
+
 fn connector_kind_label(kind: AgentConnectorKind) -> &'static str {
     match kind {
         AgentConnectorKind::Fake => "fake",
         AgentConnectorKind::Claude => "claude",
-    }
-}
-
-/// One-word exited state for the session map ("exited:0", "exited:signal9").
-fn exited_state_word(status: mandatum_pty::ChildExitStatus) -> String {
-    match status {
-        mandatum_pty::ChildExitStatus::Exited { code } => format!("exited:{code}"),
-        mandatum_pty::ChildExitStatus::Signaled { signal } => format!("exited:signal{signal}"),
-        mandatum_pty::ChildExitStatus::Unknown => "exited:?".to_owned(),
     }
 }
 
@@ -3707,10 +4385,28 @@ mod tests {
 
     /// The shared test baseline: fake connector, no PTY spawning, no
     /// restore, default keymap and theme (see `AppConfig::default`).
+    ///
+    /// The baseline directory is unique per test-process run: a fixed
+    /// `/tmp/mandatum` path grew a real timeline file across runs and let
+    /// concurrent test runs interfere with each other.
     fn test_config() -> AppConfig {
+        use std::sync::OnceLock;
+        static BASELINE_DIR: OnceLock<PathBuf> = OnceLock::new();
+        let base = BASELINE_DIR.get_or_init(|| {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "mandatum-app-baseline-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("baseline temp dir should be created");
+            path
+        });
         AppConfig {
-            project_path: PathBuf::from("/tmp/mandatum"),
-            workspace_file: PathBuf::from("/tmp/mandatum/.mandatum/workspace.json"),
+            project_path: base.clone(),
+            workspace_file: base.join(".mandatum").join("workspace.json"),
             task_command: "printf TASK_OK".to_owned(),
             agent_objective: "test objective".to_owned(),
             ..AppConfig::default()
@@ -3812,16 +4508,20 @@ mod tests {
             state.status()
         );
 
-        // 'c' on a focused task pane means Stop Task.
+        // 'c' on a focused task pane means Stop Task — but nothing is
+        // running here, so the fast path reports the same greyed reason the
+        // palette row shows and stays open instead of fire-and-failing.
         state.handle_key(ctrl('p'));
         state.handle_key(key(KeyCode::Char('c')));
-        assert!(!state.palette_open());
+        assert!(state.palette_open());
         assert!(
-            state.status().contains("stopped before launch")
-                || state.status().contains("not running"),
+            state
+                .status()
+                .contains("Stop task is unavailable: task is not running"),
             "{}",
             state.status()
         );
+        state.handle_key(key(KeyCode::Escape));
     }
 
     #[test]
@@ -4117,6 +4817,8 @@ mod tests {
                 "Zoom pane",
                 "Float pane",
                 "Close pane",
+                "Search session output",
+                "Help",
             ]
         );
         // Every row names its keyboard route; the palette gateway row leads
@@ -4184,6 +4886,108 @@ mod tests {
             Some(&PaneId::new("pane-1")),
             "click-away must not dispatch a row"
         );
+    }
+
+    // State-aware menu labels: a zoomed pane's menu offers "Unzoom pane",
+    // and docking/floating already flips its row — the menu never names an
+    // action that would do the opposite of its label.
+    #[test]
+    fn context_menu_labels_reflect_zoom_state() {
+        let mut state = state();
+        state.dispatch(CommandId::SplitRight);
+        state.dispatch(CommandId::ZoomPane);
+        frame(&mut state);
+
+        send_pointer(&mut state, right_down(5, 5));
+        let scene = state.build_scene(POINTER_FRAME);
+        let Some(mandatum_scene::OverlayScene::ContextMenu(menu)) = &scene.overlay else {
+            panic!("right-click must open the context menu overlay");
+        };
+        let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
+        assert!(labels.contains(&"Unzoom pane"), "{labels:?}");
+        assert!(!labels.contains(&"Zoom pane"), "{labels:?}");
+        state.handle_key(key(KeyCode::Escape));
+
+        // Unzoomed, the plain label returns.
+        state.dispatch(CommandId::ZoomPane);
+        state.build_scene(POINTER_FRAME);
+        send_pointer(&mut state, right_down(5, 5));
+        let scene = state.build_scene(POINTER_FRAME);
+        let Some(mandatum_scene::OverlayScene::ContextMenu(menu)) = &scene.overlay else {
+            panic!("right-click must open the context menu overlay");
+        };
+        assert!(menu.items.iter().any(|item| item.label == "Zoom pane"));
+    }
+
+    // Every context-menu row names its keyboard route — on a task pane the
+    // Rerun row shows the restart letter it rides ("Rerun task" had none).
+    #[test]
+    fn every_context_menu_row_names_its_keyboard_route() {
+        let mut state = state();
+        state.dispatch(CommandId::RunTask);
+        let task_pane = state.workspace().active_session().focused_pane_id().clone();
+        frame(&mut state);
+
+        let scene = state.build_scene(POINTER_FRAME);
+        let title = scene
+            .hit_targets
+            .iter()
+            .find(|target| target.kind == HitTargetKind::PaneTitle(task_pane.clone()))
+            .expect("task pane title target");
+        send_pointer(&mut state, right_down(title.rect.x + 1, title.rect.y));
+
+        let scene = state.build_scene(POINTER_FRAME);
+        let Some(mandatum_scene::OverlayScene::ContextMenu(menu)) = &scene.overlay else {
+            panic!("right-click must open the context menu overlay");
+        };
+        for item in &menu.items {
+            assert!(
+                !item.chord_hint.is_empty(),
+                "menu row {:?} names no keyboard route",
+                item.label
+            );
+        }
+        let rerun = menu
+            .items
+            .iter()
+            .find(|item| item.label == "Rerun task")
+            .expect("task menu offers Rerun task");
+        assert_eq!(rerun.chord_hint, "ctrl+p r");
+    }
+
+    // A press on the menu's own border is a near-miss, not a dismissal:
+    // it neither runs a row nor swallows the menu.
+    #[test]
+    fn context_menu_border_click_does_not_dismiss() {
+        let mut state = state();
+        frame(&mut state);
+        send_pointer(&mut state, right_down(5, 5));
+        let scene = state.build_scene(POINTER_FRAME);
+        let Some(mandatum_scene::OverlayScene::ContextMenu(menu)) = &scene.overlay else {
+            panic!("right-click must open the context menu overlay");
+        };
+        let area = menu.area;
+
+        // Top border cell: inside the menu rect, not a row.
+        send_pointer(&mut state, left(PointerKind::Down, area.x, area.y));
+        let scene = state.build_scene(POINTER_FRAME);
+        assert!(
+            matches!(
+                &scene.overlay,
+                Some(mandatum_scene::OverlayScene::ContextMenu(_))
+            ),
+            "a border press must not dismiss the menu"
+        );
+        assert_eq!(
+            state.workspace().active_session().layout().zoomed(),
+            None,
+            "a border press must not run a row"
+        );
+
+        // A genuine click-away still dismisses.
+        send_pointer(&mut state, left(PointerKind::Down, 95, 28));
+        let scene = state.build_scene(POINTER_FRAME);
+        assert!(scene.overlay.is_none());
     }
 
     // The status strip is a clickable front door: left-click opens the
@@ -4634,9 +5438,23 @@ mod tests {
     fn command_errors_are_reported_as_status_instead_of_panicking() {
         let mut state = state();
 
+        // The fast path is gated: 'x' (Close pane) on the last pane reports
+        // the same reason the greyed palette row shows, palette stays open.
         state.handle_key(ctrl('p'));
         state.handle_key(key(KeyCode::Char('x')));
+        assert!(!state.should_quit());
+        assert!(state.palette_open());
+        assert!(
+            state
+                .status()
+                .contains("Close pane is unavailable: cannot close the last pane"),
+            "{}",
+            state.status()
+        );
+        state.handle_key(key(KeyCode::Escape));
 
+        // A core dispatch error still lands as status, never a panic.
+        state.dispatch(CommandId::ClosePane);
         assert!(!state.should_quit());
         assert!(state.status().contains("cannot remove the last tiled pane"));
     }
@@ -4915,6 +5733,255 @@ mod tests {
         false
     }
 
+    // A PTY output flood must not overwrite meaningful status with
+    // byte-count diagnostics: a failure status persists until something
+    // meaningful supersedes it, not until the next read.
+    #[test]
+    fn pty_output_flood_does_not_bury_meaningful_status() {
+        let mut state = live_state();
+        state.handle_terminal_resize(100, 30);
+        let pane_id = PaneId::new("pane-1");
+
+        // A meaningful status: a command that failed.
+        state.dispatch(CommandId::StopTask);
+        assert!(state.status().contains("not a task pane"));
+
+        // Flood the pane with output and drain it all.
+        state.write_to_focused_terminal(
+            b"i=1; while [ $i -le 50 ]; do echo NOISE_$i; i=$((i+1)); done\r",
+        );
+        let flooded = pump_runtime_until(&mut state, |state| {
+            grid_text(state, &pane_id).contains("NOISE_50")
+        });
+        assert!(flooded, "flood output never reached the grid");
+
+        assert!(
+            state.status().contains("not a task pane"),
+            "diagnostics buried the failure status: {}",
+            state.status()
+        );
+        assert!(!state.status().contains("byte(s)"));
+
+        state.shutdown();
+    }
+
+    // `[ui] debug_status = true` restores the byte-level diagnostics for
+    // debugging sessions.
+    #[test]
+    fn debug_status_config_restores_byte_diagnostics() {
+        let mut config = test_config();
+        config.spawn_pty = true;
+        config.debug_status = true;
+        let mut state = AppState::new(config);
+        state.handle_terminal_resize(100, 30);
+
+        let observed = pump_runtime_until(&mut state, |state| {
+            state.status().contains("byte(s) from pane-1")
+        });
+        assert!(
+            observed,
+            "debug diagnostics never surfaced: {}",
+            state.status()
+        );
+
+        state.shutdown();
+    }
+
+    // One drain call applies at most the budget, so a channel that never
+    // empties (a producer outrunning the consumer) can never pin the main
+    // loop inside drain_events and starve drawing.
+    #[test]
+    fn drain_events_bounds_work_per_call() {
+        let mut state = state();
+        let sender = state.event_sender();
+        let backlog = DRAIN_EVENT_BUDGET + 10;
+        for _ in 0..backlog {
+            sender
+                .send(AppEvent::Pty(
+                    PtyRuntimeEvent::Output {
+                        pane_id: PaneId::new("pane-none"),
+                        restart_generation: 0,
+                        runtime_token: 0,
+                        bytes: b"x".to_vec(),
+                    },
+                    None,
+                ))
+                .unwrap();
+        }
+
+        state.drain_events();
+        assert!(
+            state.event_rx.try_recv().is_ok(),
+            "one drain call must leave events beyond the budget queued"
+        );
+    }
+
+    // The flood regression the stranger test found: an infinite producer
+    // (`yes`) must leave the workstation bounded in memory, responsive to
+    // input, and quittable — the reader-side flow gate plus the bounded
+    // drain are what guarantee it.
+    #[test]
+    fn pty_flood_stays_bounded_responsive_and_quittable() {
+        let mut state = live_state();
+        state.handle_terminal_resize(100, 30);
+        let pane_id = PaneId::new("pane-1");
+        state.write_to_focused_terminal(b"yes\r");
+
+        // Pump the shell loop's shape against the live flood for a while.
+        let flood_window = Instant::now();
+        let mut saw_output = false;
+        while flood_window.elapsed() < Duration::from_millis(400) {
+            state.wait_event(Duration::from_millis(8));
+            state.drain_events();
+            saw_output = saw_output || grid_text(&state, &pane_id).contains('y');
+        }
+        assert!(saw_output, "the flood never reached the grid");
+        let in_flight = state
+            .terminal_panes
+            .get(&pane_id)
+            .expect("pane-1 runtime")
+            .flow
+            .in_flight_bytes();
+        assert!(
+            in_flight <= crate::process_events::MAX_IN_FLIGHT_BYTES,
+            "in-flight PTY bytes must stay under the gate cap, got {in_flight}"
+        );
+
+        // Input queued during the flood must land promptly: the quit chord
+        // takes effect within the shell's next few frames, not never.
+        state
+            .event_sender()
+            .send(AppEvent::Input(InputEvent::Key(Key::ctrl('q'))))
+            .unwrap();
+        let quit_wait = Instant::now();
+        while !state.should_quit() && quit_wait.elapsed() < Duration::from_secs(2) {
+            state.wait_event(Duration::from_millis(8));
+            state.drain_events();
+        }
+        assert!(
+            state.should_quit(),
+            "the quit chord starved behind the flood"
+        );
+
+        // And shutdown must join the flooded reader thread instead of
+        // deadlocking on its full flow gate.
+        let shutdown_wait = Instant::now();
+        state.shutdown();
+        assert!(
+            shutdown_wait.elapsed() < Duration::from_secs(5),
+            "shutdown took {:?} under flood",
+            shutdown_wait.elapsed()
+        );
+    }
+
+    // A task whose intent names no cwd must run in the project directory —
+    // never portable-pty's `$HOME` fallback, which silently ran user task
+    // commands in the wrong directory (the live-slice demo's checks pane
+    // exited 127 because `./flaky-check.sh` resolved against `$HOME`).
+    #[test]
+    fn task_with_unset_cwd_runs_in_the_project_directory_not_home() {
+        let mut config = test_config();
+        config.spawn_pty = true;
+        let project_dir = config.project_path.clone();
+        // An anchor only the project directory contains: the command exits 0
+        // only when it actually runs there.
+        fs::write(project_dir.join("cwd-anchor"), b"here").unwrap();
+
+        let mut state = AppState::new(config);
+        state.handle_terminal_resize(120, 40);
+        state
+            .workspace_mut()
+            .apply_action(CoreAction::CreateTaskPane {
+                title: "checks".to_owned(),
+                intent: TaskPaneIntent {
+                    recipe_id: Some("checks".to_owned()),
+                    command: "test -f ./cwd-anchor && touch RAN_IN_PROJECT".to_owned(),
+                    cwd: None,
+                },
+            })
+            .unwrap();
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        state.dispatch(CommandId::RerunTask);
+
+        let exited = pump_runtime_until(&mut state, |state| {
+            state
+                .task_panes
+                .get(&pane_id)
+                .is_some_and(|task| task.runtime.exit_status.is_some())
+        });
+        assert!(exited, "the task never exited");
+        let status = state.task_panes.get(&pane_id).unwrap().status.clone();
+        assert_eq!(status, "succeeded: exit 0", "task ran outside the project");
+        assert!(
+            project_dir.join("RAN_IN_PROJECT").exists(),
+            "the task's side effect must land in the project directory"
+        );
+
+        state.shutdown();
+    }
+
+    // The live-slice demo's smoke path: rerunning the checks pane (intent
+    // cwd unset, flaky script in the project dir) alternates exit 0 / exit
+    // 3, exactly as the stranger-test walkthrough promises.
+    #[test]
+    fn demo_checks_pane_reruns_alternate_exit_0_and_exit_3() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after Unix epoch")
+            .as_nanos();
+        let project_dir = std::env::temp_dir().join(format!(
+            "mandatum-demo-checks-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&project_dir).unwrap();
+        // The demo's flaky check: first run plants the marker and passes,
+        // the next sees it, removes it, and fails with exit 3.
+        fs::write(
+            project_dir.join("flaky-check.sh"),
+            "if [ -f .flip ]; then rm .flip; echo 'FAIL: marker present'; exit 3; \
+             else touch .flip; echo OK; fi\n",
+        )
+        .unwrap();
+
+        let mut config = test_config();
+        config.spawn_pty = true;
+        config.workspace_file = project_dir.join(".mandatum").join("workspace.json");
+        config.project_path = project_dir.clone();
+        let mut state = AppState::new(config);
+        state.handle_terminal_resize(120, 40);
+        state
+            .workspace_mut()
+            .apply_action(CoreAction::CreateTaskPane {
+                title: "checks".to_owned(),
+                intent: TaskPaneIntent {
+                    recipe_id: Some("checks".to_owned()),
+                    command: "sh ./flaky-check.sh".to_owned(),
+                    cwd: None,
+                },
+            })
+            .unwrap();
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+
+        let rerun_status = |state: &mut AppState| -> String {
+            state.dispatch(CommandId::RerunTask);
+            let exited = pump_runtime_until(state, |state| {
+                state
+                    .task_panes
+                    .get(&pane_id)
+                    .is_some_and(|task| task.runtime.exit_status.is_some())
+            });
+            assert!(exited, "the checks task never exited");
+            state.task_panes.get(&pane_id).unwrap().status.clone()
+        };
+
+        assert_eq!(rerun_status(&mut state), "succeeded: exit 0");
+        assert_eq!(rerun_status(&mut state), "failed: exit 3");
+        assert_eq!(rerun_status(&mut state), "succeeded: exit 0");
+
+        state.shutdown();
+        let _ = fs::remove_dir_all(&project_dir);
+    }
+
     // --- Pointer routing against live children ------------------------------
 
     /// The rendered grid text of a live terminal pane.
@@ -5081,21 +6148,32 @@ mod tests {
         let mut state = live_state();
         state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
         let pane_id = PaneId::new("pane-1");
-        state.handle_event(InputEvent::Paste("echo SELECT_ME\r".to_owned()));
-        // Wait for the output line (exactly the marker), not the echoed
-        // command line (which contains it). trim() rather than trim_end():
-        // host termios differ on whether LF implies CR (bash restores ONLCR,
-        // dash does not), so on some platforms the marker lands mid-row.
-        let printed = pump_runtime_until(&mut state, |state| {
+        // Wait for the shell prompt before pasting: pasting earlier races
+        // shell startup, and dash (Linux /bin/sh) then prints its prompt
+        // between the kernel echo and the command output, merging the marker
+        // into the prompt row ("$ SELECT_ME").
+        let prompted = pump_runtime_until(&mut state, |state| {
             state.terminal_panes.get(&pane_id).is_some_and(|runtime| {
                 runtime
                     .parser
                     .grid()
                     .snapshot()
                     .iter()
-                    .any(|line| line.trim() == "SELECT_ME")
+                    .any(|line| line.trim_end().ends_with('$'))
             })
         });
+        assert!(prompted, "shell prompt never appeared");
+        state.handle_event(InputEvent::Paste("echo SELECT_ME\r".to_owned()));
+        // Wait for the output line: ends with the marker but is not the
+        // echoed command line (which contains "echo").
+        let printed =
+            pump_runtime_until(&mut state, |state| {
+                state.terminal_panes.get(&pane_id).is_some_and(|runtime| {
+                    runtime.parser.grid().snapshot().iter().any(|line| {
+                        line.trim_end().ends_with("SELECT_ME") && !line.contains("echo")
+                    })
+                })
+            });
         assert!(
             printed,
             "marker output never reached the grid; rows:\n{}",
@@ -5116,7 +6194,7 @@ mod tests {
         let (grid_row, line) = snapshot
             .iter()
             .enumerate()
-            .find(|(_, line)| line.trim() == "SELECT_ME")
+            .find(|(_, line)| line.trim_end().ends_with("SELECT_ME") && !line.contains("echo"))
             .expect("marker row visible");
         assert_eq!(
             state
@@ -5179,12 +6257,19 @@ mod tests {
         send_pointer(&mut state, left(PointerKind::Up, 5, 6));
         assert!(state.pane_view_state(&pane_id).selection.is_none());
 
-        // Selection is not a mode: keys still flow to the child (L5).
+        // Selection is not a mode: keys still flow to the child (L5). The
+        // proof is end-to-end — the typed marker echoes in the child's grid
+        // (byte-count diagnostics no longer surface in the status line).
         send_pointer(&mut state, left(PointerKind::Down, 5, 5));
         send_pointer(&mut state, left(PointerKind::Drag, 12, 5));
         send_pointer(&mut state, left(PointerKind::Up, 12, 5));
-        state.handle_key(key(KeyCode::Char('w')));
-        assert!(state.status().contains("sent 1 byte(s)"));
+        for character in "TYPEDMARK".chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+        let echoed = pump_runtime_until(&mut state, |state| {
+            grid_text(state, &pane_id).contains("TYPEDMARK")
+        });
+        assert!(echoed, "typed keys never reached the child's PTY");
 
         state.shutdown();
     }
@@ -5339,13 +6424,16 @@ mod tests {
 
         state.dispatch(CommandId::RestartPane);
         state
-            .runtime_tx
-            .send(PtyRuntimeEvent::Output {
-                pane_id: pane_id.clone(),
-                restart_generation: 0,
-                runtime_token: 0,
-                bytes: b"OLD_READER_OUTPUT".to_vec(),
-            })
+            .event_tx
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::Output {
+                    pane_id: pane_id.clone(),
+                    restart_generation: 0,
+                    runtime_token: 0,
+                    bytes: b"OLD_READER_OUTPUT".to_vec(),
+                },
+                None,
+            ))
             .unwrap();
         state.tick_runtime();
 
@@ -5376,21 +6464,27 @@ mod tests {
 
         state.dispatch(CommandId::RestartPane);
         state
-            .runtime_tx
-            .send(PtyRuntimeEvent::ReaderClosed {
-                pane_id: pane_id.clone(),
-                restart_generation: before_generation,
-                runtime_token: before_token,
-            })
+            .event_tx
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::ReaderClosed {
+                    pane_id: pane_id.clone(),
+                    restart_generation: before_generation,
+                    runtime_token: before_token,
+                },
+                None,
+            ))
             .unwrap();
         state
-            .runtime_tx
-            .send(PtyRuntimeEvent::Error {
-                pane_id: pane_id.clone(),
-                restart_generation: before_generation,
-                runtime_token: before_token,
-                message: "STALE_TERMINAL_READER_ERROR".to_owned(),
-            })
+            .event_tx
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::Error {
+                    pane_id: pane_id.clone(),
+                    restart_generation: before_generation,
+                    runtime_token: before_token,
+                    message: "STALE_TERMINAL_READER_ERROR".to_owned(),
+                },
+                None,
+            ))
             .unwrap();
         state.tick_runtime();
 
@@ -5710,13 +6804,16 @@ mod tests {
         assert_eq!(intent.command, "printf 'TASK_ORIGINAL\\n'; sleep 5");
 
         state
-            .runtime_tx
-            .send(PtyRuntimeEvent::Output {
-                pane_id: pane_id.clone(),
-                restart_generation: before_generation,
-                runtime_token: before_token,
-                bytes: b"OLD_TASK_OUTPUT".to_vec(),
-            })
+            .event_tx
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::Output {
+                    pane_id: pane_id.clone(),
+                    restart_generation: before_generation,
+                    runtime_token: before_token,
+                    bytes: b"OLD_TASK_OUTPUT".to_vec(),
+                },
+                None,
+            ))
             .unwrap();
 
         let observed = pump_runtime_until(&mut state, |state| {
@@ -5803,13 +6900,16 @@ mod tests {
         assert_eq!(intent.command, command);
 
         state
-            .runtime_tx
-            .send(PtyRuntimeEvent::Output {
-                pane_id: pane_id.clone(),
-                restart_generation: before_generation,
-                runtime_token: before_token,
-                bytes: b"OLD_HIDDEN_RERUN_OUTPUT".to_vec(),
-            })
+            .event_tx
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::Output {
+                    pane_id: pane_id.clone(),
+                    restart_generation: before_generation,
+                    runtime_token: before_token,
+                    bytes: b"OLD_HIDDEN_RERUN_OUTPUT".to_vec(),
+                },
+                None,
+            ))
             .unwrap();
         state.tick_runtime();
         assert_eq!(
@@ -5911,13 +7011,16 @@ mod tests {
         assert!(state.status().contains("stopped"));
 
         state
-            .runtime_tx
-            .send(PtyRuntimeEvent::Error {
-                pane_id: pane_id.clone(),
-                restart_generation,
-                runtime_token,
-                message: "late reader error".to_owned(),
-            })
+            .event_tx
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::Error {
+                    pane_id: pane_id.clone(),
+                    restart_generation,
+                    runtime_token,
+                    message: "late reader error".to_owned(),
+                },
+                None,
+            ))
             .unwrap();
         state.tick_runtime();
         assert_eq!(
@@ -5992,12 +7095,15 @@ mod tests {
 
         let task = state.task_panes.get(&pane_id).unwrap();
         state
-            .runtime_tx
-            .send(PtyRuntimeEvent::ReaderClosed {
-                pane_id: pane_id.clone(),
-                restart_generation: task.runtime.restart_generation,
-                runtime_token: task.runtime.runtime_token,
-            })
+            .event_tx
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::ReaderClosed {
+                    pane_id: pane_id.clone(),
+                    restart_generation: task.runtime.restart_generation,
+                    runtime_token: task.runtime.runtime_token,
+                },
+                None,
+            ))
             .unwrap();
         state.tick_runtime();
 
@@ -6307,13 +7413,13 @@ mod tests {
 
         // A stale buffered event from the killed session must be dropped.
         state
-            .agent_tx
-            .send(crate::agent_runtime::AgentRuntimeEvent {
+            .event_tx
+            .send(AppEvent::Agent(crate::agent_runtime::AgentRuntimeEvent {
                 pane_id: pane_id.clone(),
                 restart_generation: before_generation,
                 runtime_token: before_token,
                 event: AgentSessionEvent::Summary("STALE_AGENT_SUMMARY".to_owned()),
-            })
+            }))
             .unwrap();
         state.tick_runtime();
 
@@ -6734,6 +7840,309 @@ mod tests {
         );
     }
 
+    // --- Session search ----------------------------------------------------
+
+    fn search_overlay_of(state: &mut AppState) -> mandatum_scene::SearchOverlay {
+        let scene = state.build_scene(SceneSize::new(120, 40));
+        match scene.overlay {
+            Some(mandatum_scene::OverlayScene::Search(search)) => search,
+            other => panic!("expected the search overlay, got {other:?}"),
+        }
+    }
+
+    fn type_into_search(state: &mut AppState, text: &str) {
+        for character in text.chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+    }
+
+    #[test]
+    fn search_opens_from_command_and_chord_stays_calm_on_zero_hits_and_esc_returns() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = isolated_state(&temp);
+
+        // The default chord opens it (the palette letter and menu row are
+        // alternate doors to the same command).
+        state.handle_key(parse_chord("ctrl+shift+f").unwrap());
+        let overlay = search_overlay_of(&mut state);
+        assert_eq!(overlay.query, "");
+        assert!(overlay.items.is_empty(), "empty query matches nothing");
+        assert!(overlay.footer.contains("enter jump · esc close"));
+        assert!(state.status().contains("search: snapshot"));
+
+        // Zero hits stay calm: Enter reports, the overlay stays open.
+        type_into_search(&mut state, "zzqxv");
+        state.handle_key(key(KeyCode::Enter));
+        assert!(state.status().contains("no output matches 'zzqxv'"));
+        let overlay = search_overlay_of(&mut state);
+        assert!(overlay.items.is_empty());
+
+        // Esc returns to the workspace.
+        state.handle_key(key(KeyCode::Escape));
+        let scene = state.build_scene(SceneSize::new(120, 40));
+        assert!(scene.overlay.is_none());
+        assert_eq!(state.status(), "search closed");
+
+        // The context menu offers the same command with its chord hint.
+        let items = state.context_menu_items(&PaneId::new("pane-1"));
+        let row = items
+            .iter()
+            .find(|item| item.label == "Search session output")
+            .expect("the pane menu offers session search");
+        assert_eq!(row.hint, "ctrl+shift+f");
+    }
+
+    #[test]
+    fn search_timeline_hits_open_the_timeline_at_the_matched_entry() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = isolated_state(&temp);
+        state.dispatch(CommandId::SplitRight); // records dispatch + pane-created
+
+        state.dispatch(CommandId::SearchSession);
+        type_into_search(&mut state, "kind:timeline created");
+        let overlay = search_overlay_of(&mut state);
+        assert!(!overlay.items.is_empty());
+        assert_eq!(overlay.items[0].source, "timeline");
+        assert!(overlay.items[0].text.contains("pane pane-2 created"));
+        assert_eq!(overlay.items[0].pane, None);
+
+        state.handle_key(key(KeyCode::Enter));
+        assert!(
+            state
+                .status()
+                .contains("timeline opened at the matched event")
+        );
+        let timeline = timeline_overlay_of(&mut state);
+        let selected = timeline.selected.expect("an entry is selected");
+        assert!(
+            timeline.items[selected]
+                .text
+                .contains("pane pane-2 created"),
+            "{:?}",
+            timeline.items[selected].text
+        );
+    }
+
+    #[test]
+    fn search_jumps_a_terminal_pane_to_the_matched_scrollback_row() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = AppState::new(temp.app_config(true, false));
+        state.handle_terminal_resize(100, 30);
+        // Print a marker, then bury it in scrollback with filler lines.
+        state.handle_event(InputEvent::Paste(
+            "echo SEARCH_MARK_XYZ; i=1; while [ $i -le 60 ]; do echo filler_$i; i=$((i+1)); done\r"
+                .to_owned(),
+        ));
+        assert!(
+            pump_runtime_until(&mut state, |state| {
+                grid_text(state, &PaneId::new("pane-1")).contains("filler_60")
+            }),
+            "shell output did not arrive"
+        );
+
+        state.dispatch(CommandId::SearchSession);
+        type_into_search(&mut state, "SEARCH_MARK_XYZ");
+        let overlay = search_overlay_of(&mut state);
+        assert!(!overlay.items.is_empty());
+        assert_eq!(overlay.items[0].pane, Some(PaneId::new("pane-1")));
+
+        state.handle_key(key(KeyCode::Enter));
+        assert!(
+            state.status().contains("jumped to the matched row"),
+            "{}",
+            state.status()
+        );
+        // The overlay closed, the pane is focused, and its viewport now
+        // shows the matched row (scrolled up from the live bottom).
+        let scene = state.build_scene(SceneSize::new(100, 30));
+        assert!(scene.overlay.is_none());
+        assert_eq!(focused(&state), "pane-1");
+        let pane = scene
+            .panes
+            .iter()
+            .find(|pane| pane.id == PaneId::new("pane-1"))
+            .expect("pane-1 in scene");
+        let mandatum_scene::PaneContent::Terminal(surface) = &pane.content else {
+            panic!("pane-1 must carry a terminal surface");
+        };
+        assert!(surface.scroll_offset > 0, "viewport must leave the bottom");
+        let visible: String = surface
+            .rows
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.character).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            visible.contains("SEARCH_MARK_XYZ"),
+            "the matched row must be inside the viewport:\n{visible}"
+        );
+        // The matched span is selected, so the hit is visibly marked.
+        assert!(surface.selection.is_some());
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn search_results_stay_stable_and_jumps_clamp_while_a_pane_floods() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = AppState::new(temp.app_config(true, false));
+        state.handle_terminal_resize(100, 30);
+        state.handle_event(InputEvent::Paste("echo FLOOD_TARGET_ABC\r".to_owned()));
+        assert!(pump_runtime_until(&mut state, |state| {
+            grid_text(state, &PaneId::new("pane-1")).contains("FLOOD_TARGET_ABC")
+        }));
+
+        // Snapshot, then flood the pane past the scrollback bound so the
+        // matched row's absolute coordinates are evicted.
+        state.dispatch(CommandId::SearchSession);
+        type_into_search(&mut state, "FLOOD_TARGET_ABC");
+        let before = search_overlay_of(&mut state);
+        assert!(!before.items.is_empty());
+        // While the overlay is open a paste edits the query, so the flood
+        // is written straight to the child's PTY — exactly a child that
+        // keeps producing output while the user reads search results.
+        state.write_to_focused_terminal(b"seq 1 2200\r");
+        let ring_full = |state: &AppState| {
+            state
+                .terminal_panes
+                .get(&PaneId::new("pane-1"))
+                .is_some_and(|runtime| {
+                    runtime.parser.grid().scrollback_len()
+                        >= runtime.parser.grid().scrollback_limit()
+                })
+        };
+        // A dedicated deadline: 2200 lines through a real PTY can outlast
+        // the standard pump budget on a loaded machine.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !ring_full(&state) && Instant::now() < deadline {
+            state.tick_runtime();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            ring_full(&state),
+            "the flood never filled the scrollback ring"
+        );
+
+        // Results are a snapshot: the flood changes nothing on screen.
+        let after = search_overlay_of(&mut state);
+        assert_eq!(before.items, after.items);
+        assert_eq!(before.overflow, after.overflow);
+
+        // Enter still lands calmly: the row's text moved, so the jump says
+        // so instead of pretending — and never panics.
+        state.handle_key(key(KeyCode::Enter));
+        assert!(
+            state
+                .status()
+                .contains("output moved since the search snapshot"),
+            "{}",
+            state.status()
+        );
+        assert!(!state.should_quit());
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn search_snapshot_spans_agent_output_and_pane_filters_narrow_it() {
+        use mandatum_agent_runtime::{FakeConnector, FakeStep};
+
+        let temp = TestWorkspaceDir::new();
+        let mut state = isolated_state(&temp);
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![FakeStep::Emit(
+            AgentSessionEvent::OutputChunk("AGENT_NEEDLE_42 in the tail".to_owned()),
+        )])));
+        state.dispatch(CommandId::StartAgent);
+        let agent_pane = state.workspace().active_session().focused_pane_id().clone();
+        assert!(pump_runtime_until(&mut state, |state| {
+            state
+                .agent_runtime_view(&agent_pane)
+                .is_some_and(|runtime| !runtime.output_tail.is_empty())
+        }));
+
+        state.dispatch(CommandId::SearchSession);
+        type_into_search(&mut state, "AGENT_NEEDLE_42");
+        let overlay = search_overlay_of(&mut state);
+        assert!(!overlay.items.is_empty());
+        assert!(overlay.items[0].source.contains("agent"));
+        assert_eq!(overlay.items[0].pane, Some(agent_pane.clone()));
+
+        // kind:/pane: filters narrow the same query.
+        state.handle_key(key(KeyCode::Escape));
+        state.dispatch(CommandId::SearchSession);
+        type_into_search(&mut state, "kind:terminal AGENT_NEEDLE_42");
+        let overlay = search_overlay_of(&mut state);
+        assert!(
+            overlay.items.is_empty(),
+            "agent output must not match kind:terminal"
+        );
+
+        // Enter on an agent hit focuses the pane (tails have no viewport).
+        state.handle_key(key(KeyCode::Escape));
+        state.dispatch(CommandId::SearchSession);
+        type_into_search(&mut state, &format!("pane:{agent_pane} NEEDLE"));
+        let overlay = search_overlay_of(&mut state);
+        assert!(!overlay.items.is_empty());
+        state.handle_key(key(KeyCode::Enter));
+        assert_eq!(focused(&state), agent_pane.as_str());
+        assert!(
+            state.status().contains("shows the tail"),
+            "{}",
+            state.status()
+        );
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn search_rows_are_clickable_and_click_away_dismisses() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = isolated_state(&temp);
+        state.handle_terminal_resize(120, 40);
+        state.dispatch(CommandId::SplitRight);
+
+        // Rows carry hit targets aligned with the drawn window; a click on
+        // the first row activates it like Enter.
+        state.dispatch(CommandId::SearchSession);
+        type_into_search(&mut state, "kind:timeline created");
+        let scene = state.build_scene(SceneSize::new(120, 40));
+        let target = scene
+            .hit_targets
+            .iter()
+            .find(|target| matches!(target.kind, HitTargetKind::SearchItem(0)))
+            .expect("the first search row must be clickable")
+            .clone();
+        state.handle_event(InputEvent::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            button: Some(PointerButton::Left),
+            column: target.rect.x,
+            row: target.rect.y,
+            mods: Modifiers::NONE,
+        }));
+        assert!(
+            state
+                .status()
+                .contains("timeline opened at the matched event"),
+            "{}",
+            state.status()
+        );
+
+        // Click-away dismisses the reopened overlay.
+        state.handle_key(key(KeyCode::Escape));
+        state.dispatch(CommandId::SearchSession);
+        state.build_scene(SceneSize::new(120, 40));
+        state.handle_event(InputEvent::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            button: Some(PointerButton::Left),
+            column: 0,
+            row: 0,
+            mods: Modifiers::NONE,
+        }));
+        let scene = state.build_scene(SceneSize::new(120, 40));
+        assert!(scene.overlay.is_none());
+        assert_eq!(state.status(), "search closed");
+    }
+
     #[test]
     fn session_map_navigates_and_focuses_across_sessions() {
         let temp = TestWorkspaceDir::new();
@@ -6897,5 +8306,60 @@ mod tests {
         );
 
         assert_eq!(focused(&state), "pane-2");
+    }
+
+    // A live shell sitting at a prompt is not "running" anything: the
+    // session map labels it "open" (exit states and task "running" keep
+    // their words).
+    #[test]
+    fn session_map_labels_a_live_shell_open_not_running() {
+        let mut state = live_state();
+        state.handle_terminal_resize(100, 30);
+        assert_eq!(state.live_terminal_count(), 1);
+
+        let rows = state.session_map_row_models();
+        let shell_row = rows
+            .iter()
+            .find(|model| {
+                matches!(
+                    &model.target,
+                    SessionMapTarget::Pane { pane_id, .. } if pane_id == &PaneId::new("pane-1")
+                )
+            })
+            .expect("the live shell has a session-map row");
+        assert_eq!(shell_row.row.state, "open");
+
+        state.shutdown();
+    }
+
+    // The failed-task attention segment is a jump too: one click lands on
+    // the failing pane.
+    #[test]
+    fn attention_failed_task_segment_click_jumps_to_the_failed_pane() {
+        let mut state = state();
+        state.dispatch(CommandId::RunTask);
+        let task_pane = state.workspace().active_session().focused_pane_id().clone();
+        state.set_task_status_for_test(&task_pane, "failed: exit 3");
+        state.dispatch(CommandId::FocusPrevious); // look away from the task
+        assert_ne!(focused(&state), task_pane.as_str());
+        frame(&mut state);
+
+        let scene = state.build_scene(POINTER_FRAME);
+        let segment = scene
+            .hit_targets
+            .iter()
+            .find(|target| {
+                matches!(
+                    &target.kind,
+                    HitTargetKind::AttentionSegment { pane: Some(pane), .. } if pane == &task_pane
+                )
+            })
+            .expect("a failed task must produce a clickable header segment");
+        send_pointer(
+            &mut state,
+            left(PointerKind::Down, segment.rect.x, segment.rect.y),
+        );
+
+        assert_eq!(focused(&state), task_pane.as_str());
     }
 }

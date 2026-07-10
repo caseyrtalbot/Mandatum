@@ -522,6 +522,62 @@ Consequences: the timeline is evidence, not truth — the workspace file
 remains the durable source of intent; a concurrent second process could
 lose a rotation race (accepted for a single-writer workstation log).
 
+## Accepted: Event-Driven Main Loop With Heartbeat And Redraw Cap
+
+Status: accepted (2026-07-09)
+
+Decision: the terminal frontend's run loop (`crates/app/src/app_shell.rs`)
+is event-driven. A dedicated input thread — frontend-layer, the only new
+code that names crossterm — reads events, translates them to neutral
+`mandatum_scene::input` values, and forwards them over the app's unified
+event channel. PTY reader and agent forwarder threads send into the same
+channel (`crates/app/src/events.rs`: `AppEvent::Input | Pty | Agent`), so
+the main loop has exactly one blocking wait (`mpsc::recv_timeout`) and can
+never miss a wake. Three constants govern cadence: a 250 ms heartbeat
+(child-exit polling and clock-driven UI when nothing arrives), an 8 ms
+redraw cap (~120 fps: under a flood the loop keeps absorbing events —
+blocking between arrivals, never spinning — and repaints at most once per
+interval), and a 100 ms input-thread stop-flag check (bounds shutdown
+latency only; `event::poll` wakes the instant an event arrives).
+
+Context: the previous loop woke on a fixed 40 ms `event::poll`, taxing
+every keystroke with up to one poll interval before it was even read. The
+GPU spike measured the cost: key-to-bytes-out p50 42.9 ms, with roughly
+half attributed to the poll loop (see "GPU Frontend Spike Verdict", which
+queued this fix).
+
+Rationale: one unified channel instead of a per-source waker keeps the
+wake path race-free with plain std mpsc (no async runtime — see "Agent
+Runtime Uses Threads And Channels"). The heartbeat replaces the poll as
+the only periodic work, so idle cost drops instead of rising. The redraw
+cap bounds worst-case paint work under PTY floods and 1000 Hz pointer
+drags while costing an isolated keystroke nothing (its first repaint is
+immediate; only the echo repaint can wait out the remainder of the 8 ms
+window). Burst draining before each draw is preserved for drag
+responsiveness. L5 is untouched: the input thread only moves where events
+are *read*; routing still happens in `app_state`.
+
+Consequences:
+
+- measured on the external probe: key-to-bytes-out p50 42.6 ms -> 13.3 ms
+  (p95 44.1 -> 15.0, max 45.5 -> 15.3); idle CPU 0.4% -> 0.1% over 30 s
+- `AppState` owns the channel; `event_sender()` hands the send side to the
+  frontend; `wait_event`/`drain_events`/`poll_child_exits` are the loop's
+  primitives, and `tick_runtime` (drain + child poll) keeps its test-facing
+  semantics
+- child exits surface within one heartbeat (~250 ms) instead of ~40 ms —
+  acceptable for a status line
+- the app quits ~100 ms after the final keystroke at worst (input-thread
+  join), imperceptible at exit
+- the latency floor now sits at echo round-trip plus the redraw window;
+  cutting deeper means lowering the cap or skipping the input-triggered
+  draw, neither needed today
+
+Verification: `docs/verification.md` "Input Latency Regression Check" (the
+tui_probe procedure and the before/after table); the full app test suite
+passes unchanged, including the [L3-GATE] stale-event and [L5-GATE]
+routing tests.
+
 ## Accepted: The Header Is a Scene-Carried Attention Strip
 
 Status: accepted (2026-07-09)
@@ -546,3 +602,139 @@ Verification: attention aggregation tests in the scene builder, the
 segment-restyle renderer test, the attention click test in `app_state`,
 and the cross-frontend parity tests, which now assert the header text and
 attention segments survive both frontends.
+
+## Accepted: Session Search Runs Over An Open-Time Snapshot
+
+Status: accepted (2026-07-09)
+
+Decision: "Search session output" (`CommandId::SearchSession`; default
+chord `ctrl+shift+f`, the fuzzy palette, every pane's context menu — no
+palette letter, deliberately: binding the last free letter would end
+bare-letter filter seeding in the empty palette) searches
+across the active session's live terminal grids (scrollback+screen via
+the existing grid text APIs, app-side — the scene crate gains no engine
+dependency), task output grids, agent output tails, and the
+execution-timeline tail. The engine (`crates/app/src/search.rs`)
+snapshots that text once when the overlay opens; each keystroke filters
+the snapshot with the timeline's query grammar (plain tokens
+fuzzy-subsequence-match with highlight indices; `pane:` /
+`kind:(terminal|task|agent|timeline)` filter structurally; tokens AND).
+Results group by source in pane order (timeline last), most recent first
+within a group, capped at 200 with an honest "+N beyond cap" count.
+
+Rationale: the snapshot is what makes search calm under load — a
+flooding pane cannot reshuffle results mid-read, and the flood test
+asserts exactly that. A per-keystroke live re-index was rejected as a
+latency tax with jitter for no workflow gain (reopen re-snapshots).
+Subsequence matching reuses `mandatum_commands::fuzzy` for consistency
+with the palette and timeline; a cheap linear pre-check gates the DP
+scorer so only the ≤200 displayed hits pay for highlight indices. The
+command label says "Search session output" because that is what it is —
+exact/fuzzy text search, not embeddings.
+
+Consequences:
+
+- Enter on a terminal hit focuses the pane and scrolls its viewport to
+  the matched row through the pointer-view mechanics (no copy-mode modal
+  keymap, so typing keeps flowing to the child — L5); the matched span
+  renders as a selection. Jumps verify the row still holds the matched
+  text and say "output moved since the search snapshot" when the bounded
+  scrollback (2000 rows) has evicted or shifted it, instead of pretending.
+- Task output and agent tails have no scrollable viewport; focus is the
+  jump there. Timeline hits open the timeline overlay positioned at the
+  matched entry.
+- The default `ctrl+shift+f` chord never collides with readline's
+  `ctrl+f`: chord matching requires the shift modifier, so terminals that
+  cannot report it simply never produce the chord.
+
+Verification: engine unit tests (grouping/recency, filter grammar, cap
+and overflow honesty, zero-hit calm, grid snapshot coverage, jump-offset
+math, pre-check/matcher agreement), app tests (open/Esc, chord and menu
+routes, timeline positioning, live scrollback jump with a real PTY,
+flood-stability with a rolled scrollback ring, agent-tail hits and
+`pane:`/`kind:` narrowing, clickable rows), a scene-builder hit-target
+test, a renderer test, and the search arm of the cross-frontend parity
+text renderer.
+
+## Accepted: PTY Backpressure Via Flow Credits Plus A Bounded Drain
+
+Status: accepted (2026-07-09)
+
+Decision: two bounds make the event loop calm under a PTY flood. (1) Each
+PTY reader thread owns a flow gate (`PtyFlowControl`,
+`crates/app/src/process_events.rs`): it must acquire a credit for every
+chunk before sending, blocks at 256 KiB in flight per pane — leaving the
+flooding child blocked in the kernel pipe instead of ballooning the app
+heap — and each credit travels with its event and releases on drop, so
+applied, stale-rejected, discarded, and channel-torn-down events all
+return capacity. `stop()` aborts a blocked acquire before the reader
+join, so shutdown and Stop task can never deadlock on a full gate. (2)
+`drain_events` applies at most 256 events per call, so a producer that
+outruns the consumer cannot pin the main loop inside the drain and starve
+the draw/redraw-cap checks.
+
+Context: the brilliance-pass external probe showed the previous unbounded
+pipeline wedging the whole workstation under `yes`: zero repaints, RSS
+3.8 GB in 12 s, quit requiring SIGKILL — despite the "Event-Driven Main
+Loop" decision's claim that a flood "repaints at most once per interval".
+That claim only became true with these bounds.
+
+Consequences:
+
+- worst-case queued PTY memory is 256 KiB per pane plus one chunk
+- input events queue behind at most that bounded backlog, so the quit
+  chord and typing stay responsive during a flood
+- a finite flood drains at full parser speed; only an infinite producer
+  is throttled, and it throttles in the child, not the workstation
+
+Verification: `process_events` gate unit tests (blocks at capacity,
+release unblocks, stop aborts), `drain_events_bounds_work_per_call`, and
+`pty_flood_stays_bounded_responsive_and_quittable` — a live `yes` flood
+asserting bounded in-flight bytes, quit within two seconds, and a
+non-deadlocking shutdown join.
+
+## Accepted: Help, First-Run, And Legends Are Generated Surfaces
+
+Status: accepted (2026-07-09)
+
+Decision: every orientation surface is generated from live data at the
+moment it is shown, never hand-maintained text. The help overlay
+(`crates/app/src/help.rs`; default chord `f1`, palette `?`, status-strip
+hint, last context-menu row) composes the command table joined with the
+live keymap (rebinds included), the palette fast-path rules, the mouse
+gestures with the L5 alt+click override note, and the glyph legends —
+filterable with the palette input pattern. The session-map and timeline
+overlays append a footer legend covering exactly the glyphs on screen,
+generated from the same tables (`SESSION_MAP_GLYPH_LEGEND`,
+`TIMELINE_GLYPH_LEGEND`) their rows draw from; completeness tests
+construct every event branch and pane kind and fail on any glyph missing
+a legend entry. The first-run note (shown only when a launch that asked
+to restore found no saved workspace) is eight generated lines naming the
+four doors — palette chord, right-click menu, help key, quit chord — and
+is not modal: any key, paste, or click dismisses it and the action still
+lands; a saved workspace suppresses it forever.
+
+Rationale: hand-written key text drifts the first time someone rebinds a
+chord; generated text plus drift-failing tests make staleness a compile
+or test failure instead of a stranger's confusion. F1 becomes the one
+default command chord because function keys are already workspace keys
+(the config boundary accepts them without a modifier) and F1 is the
+universal help key; it is rebindable like any chord.
+
+Accessibility in the same slice: Move float left/right/up/down close the
+last keyboard-parity gap (pointer-only float placement); the
+high-contrast theme's focus border becomes bright yellow (it was
+white-on-white with only a bold modifier), with per-theme distinctness
+asserted at the theme and renderer levels; and there is deliberately no
+`[ui] font_scale` key — the terminal frontend inherits the host
+terminal's font, so the key would be silently inert, which is worse than
+the loud unknown-key warning the config boundary produces today. The GPU
+adapter defines its own scaling contract when it lands.
+
+Verification: help-generation tests (rebound chord reflected, every
+command routed, L5 note present, both legends covered), first-run gating
+tests (fresh dir shows the note and orienting status; any action
+dismisses; a saved workspace suppresses on relaunch), glyph-legend
+completeness tests in `timeline.rs`/`session_map.rs`, focus-border
+distinctness tests, keyboard float-move tests, and the scene-equality
+reduced-motion test.

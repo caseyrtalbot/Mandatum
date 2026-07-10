@@ -34,8 +34,11 @@ pub fn render(frame: &mut Frame<'_>, scene: &WorkspaceScene, theme: &Theme) {
         Some(OverlayScene::Palette(palette)) => overlay::render_palette(frame, palette, theme),
         Some(OverlayScene::ContextMenu(menu)) => overlay::render_context_menu(frame, menu, theme),
         Some(OverlayScene::Timeline(timeline)) => overlay::render_timeline(frame, timeline, theme),
+        Some(OverlayScene::Search(search)) => overlay::render_search(frame, search, theme),
         Some(OverlayScene::SessionMap(map)) => overlay::render_session_map(frame, map, theme),
         Some(OverlayScene::Prompt(prompt)) => overlay::render_prompt(frame, prompt, theme),
+        Some(OverlayScene::Help(help)) => overlay::render_help(frame, help, theme),
+        Some(OverlayScene::Welcome(welcome)) => overlay::render_welcome(frame, welcome, theme),
         None => {}
     }
 }
@@ -124,9 +127,9 @@ mod tests {
     use mandatum_scene::{
         AgentApprovalPrompt, AgentContent, AgentStatus, AttentionSegment, ContextMenuEntry,
         ContextMenuOverlay, EmptyContent, PaletteEntry, PaletteOverlay, PaneContent, PaneId,
-        PaneScene, PaneSceneKind, PromptOverlay, SceneCell, SceneCellStyle, SceneSize,
-        SessionMapOverlay, SessionMapRow, SurfacePosition, TaskContent, TerminalSurface,
-        TimelineEntry, TimelineOverlay, layout,
+        PaneScene, PaneSceneKind, PromptOverlay, SceneCell, SceneCellStyle, SceneSize, SearchEntry,
+        SearchOverlay, SessionMapOverlay, SessionMapRow, SurfacePosition, TaskContent,
+        TerminalSurface, TimelineEntry, TimelineOverlay, layout,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -255,10 +258,10 @@ mod tests {
         let buffer = terminal.backend().buffer();
 
         assert!(rows[0].contains(label));
-        // The segment takes the theme's attention color (yellow in
+        // The segment takes the theme's attention color (red in
         // mandatum-dark) and bold; the base text keeps the header color.
         let segment_cell = buffer.cell((start, 0u16)).unwrap();
-        assert_eq!(segment_cell.fg, Color::Yellow);
+        assert_eq!(segment_cell.fg, Color::Red);
         assert!(segment_cell.modifier.contains(Modifier::BOLD));
         let base_cell = buffer.cell((1u16, 0u16)).unwrap();
         assert_eq!(base_cell.fg, Color::White);
@@ -316,13 +319,17 @@ mod tests {
 
     #[test]
     fn task_pane_renders_detail_lines_and_output_surface() {
-        let task = pane(PaneContent::Task(TaskContent {
+        let mut task = pane(PaneContent::Task(TaskContent {
             command: "cargo test".to_owned(),
             cwd_label: "/tmp/project".to_owned(),
-            recipe_label: "test".to_owned(),
+            recipe_label: Some("test".to_owned()),
             status_label: Some("failed: exit 101".to_owned()),
+            rerun_hint: Some("ctrl+p r".to_owned()),
             output: Some(text_surface(&["FAIL"])),
         }));
+        // Tall enough for the 6 detail rows (rerun affordance included)
+        // plus the output surface.
+        task.area = SceneRect::new(0, 1, 40, 11);
         let rows = buffer_rows(&draw(&scene(vec![task])));
         let all = rows.join("\n");
 
@@ -330,7 +337,94 @@ mod tests {
         assert!(all.contains("cwd: /tmp/project"));
         assert!(all.contains("recipe: test"));
         assert!(all.contains("runtime status: failed: exit 101"));
+        assert!(all.contains("rerun: ctrl+p r · right-click menu"));
         assert!(all.contains("FAIL"));
+    }
+
+    // The failed-status row is emphasized in the attention color, and
+    // detail lines wider than the pane truncate around an ellipsis that
+    // keeps the trailing exit code visible.
+    #[test]
+    fn failed_task_status_row_is_emphasized_and_truncates_keeping_the_exit_code() {
+        let mut task = pane(PaneContent::Task(TaskContent {
+            command: "sh ./scripts/very/long/path/flaky-check.sh --with-flags".to_owned(),
+            cwd_label: "/tmp/project".to_owned(),
+            recipe_label: Some("checks".to_owned()),
+            status_label: Some("failed: exit 3".to_owned()),
+            rerun_hint: Some("ctrl+p r".to_owned()),
+            output: None,
+        }));
+        // Narrow pane: 30 columns of frame, 28 of content.
+        task.area = SceneRect::new(0, 1, 30, 10);
+        let terminal = draw(&scene(vec![task]));
+        let rows = buffer_rows(&terminal);
+        let all = rows.join("\n");
+
+        // The long command truncates visibly instead of clipping silently.
+        assert!(all.contains('…'), "{all}");
+        // The status row keeps its load-bearing tail.
+        assert!(all.contains("exit 3"), "{all}");
+        let buffer = terminal.backend().buffer();
+        let status_row = (0..buffer.area.height)
+            .find(|y| rows[usize::from(*y)].contains("exit 3"))
+            .expect("status line rendered");
+        let cell = buffer.cell((2u16, status_row)).unwrap();
+        assert_eq!(cell.fg, Color::Red, "failure status takes attention color");
+        assert!(cell.modifier.contains(Modifier::BOLD));
+    }
+
+    // A floating pane must not let the panes underneath bleed through its
+    // unpainted cells.
+    #[test]
+    fn floating_pane_clears_the_cells_it_covers() {
+        // A tiled terminal pane full of Xs across its whole width,
+        // overlapped by a floating task pane whose metadata rows do not
+        // paint every covered cell.
+        let wide_surface = TerminalSurface {
+            rows: (0..8)
+                .map(|_| {
+                    (0..38)
+                        .map(|_| SceneCell {
+                            character: 'X',
+                            style: SceneCellStyle::default(),
+                        })
+                        .collect()
+                })
+                .collect(),
+            first_row: 0,
+            cursor: None,
+            scroll_offset: 0,
+            scrollback_len: 0,
+            selection: None,
+            copy_cursor: None,
+        };
+        let tiled = pane(PaneContent::Terminal(wide_surface));
+        let mut float = pane(PaneContent::Task(TaskContent {
+            command: "cargo test".to_owned(),
+            cwd_label: "/tmp".to_owned(),
+            recipe_label: Some("test".to_owned()),
+            status_label: Some("running".to_owned()),
+            rerun_hint: None,
+            output: None,
+        }));
+        float.id = PaneId::new("pane-2");
+        float.floating = true;
+        float.focused = false;
+        float.area = SceneRect::new(1, 2, 30, 9);
+        let terminal = draw(&scene(vec![tiled, float]));
+        let rows = buffer_rows(&terminal);
+
+        // Every interior float cell is owned by the float: no underlying X
+        // bleeds through rows or columns its metadata text does not paint.
+        for (y, row) in rows.iter().enumerate().take(10).skip(3) {
+            let inside: String = row.chars().skip(2).take(28).collect();
+            assert!(
+                !inside.contains('X'),
+                "row {y} bleeds underlying content: {row:?}"
+            );
+        }
+        // The tiled pane still shows outside the float.
+        assert!(rows[2].chars().skip(32).any(|character| character == 'X'));
     }
 
     #[test]
@@ -344,6 +438,8 @@ mod tests {
             changed_files: vec!["src/lib.rs".to_owned()],
             latest_summary: Some("patched".to_owned()),
             current_action: Some("cleaning target".to_owned()),
+            last_error: None,
+            relaunch_hint: None,
             pending_approval: Some(AgentApprovalPrompt {
                 command: "rm -rf target".to_owned(),
                 cwd: "/tmp/project".to_owned(),
@@ -351,6 +447,7 @@ mod tests {
                 risk_label: "high".to_owned(),
                 risk_basis: "removes files (rm)".to_owned(),
                 key_hint: "y approve / n reject".to_owned(),
+                pulse_on: true,
             }),
             output_tail: vec!["$ cargo test".to_owned()],
         }));
@@ -381,8 +478,64 @@ mod tests {
             .find(|y| rows[usize::from(*y)].contains("approval required"))
             .expect("approval line rendered");
         let cell = buffer.cell((2u16, approval_row)).unwrap();
-        assert_eq!(cell.fg, Color::Yellow);
+        assert_eq!(cell.fg, Color::Red);
         assert!(cell.modifier.contains(Modifier::BOLD));
+    }
+
+    // The approval header's ~1 Hz pulse: the scene's `pulse_on` flag is the
+    // only thing that toggles, and only the header's weight moves — the
+    // attention color and the rest of the block stay steady.
+    #[test]
+    fn approval_header_pulse_toggles_bold_only() {
+        let agent_content = |pulse_on: bool| {
+            PaneContent::Agent(AgentContent {
+                objective: "fix the failing test".to_owned(),
+                status_label: "waiting for approval".to_owned(),
+                status_role: AgentStatus::WaitingForApproval,
+                pending_approvals: 1,
+                changed_file_count: 0,
+                changed_files: Vec::new(),
+                latest_summary: None,
+                current_action: None,
+                last_error: None,
+                relaunch_hint: None,
+                pending_approval: Some(AgentApprovalPrompt {
+                    command: "rm -rf target".to_owned(),
+                    cwd: "/tmp/project".to_owned(),
+                    affected_path: None,
+                    risk_label: "high".to_owned(),
+                    risk_basis: "removes files (rm)".to_owned(),
+                    key_hint: "y approve / n reject".to_owned(),
+                    pulse_on,
+                }),
+                output_tail: Vec::new(),
+            })
+        };
+        let draw_phase = |pulse_on: bool| {
+            let mut agent_pane = pane(agent_content(pulse_on));
+            agent_pane.kind = PaneSceneKind::Agent;
+            agent_pane.area = SceneRect::new(0, 1, 60, 18);
+            let mut with_agent = scene(vec![agent_pane]);
+            with_agent.size = SceneSize::new(60, 22);
+            with_agent.status.area = SceneRect::new(0, 21, 60, 1);
+            draw(&with_agent)
+        };
+
+        for (pulse_on, expect_bold) in [(true, true), (false, false)] {
+            let terminal = draw_phase(pulse_on);
+            let rows = buffer_rows(&terminal);
+            let buffer = terminal.backend().buffer();
+            let approval_row = (0..buffer.area.height)
+                .find(|y| rows[usize::from(*y)].contains("approval required"))
+                .expect("approval line rendered");
+            let cell = buffer.cell((2u16, approval_row)).unwrap();
+            assert_eq!(cell.fg, Color::Red, "the color never moves");
+            assert_eq!(
+                cell.modifier.contains(Modifier::BOLD),
+                expect_bold,
+                "only the weight pulses"
+            );
+        }
     }
 
     #[test]
@@ -394,7 +547,10 @@ mod tests {
         let rows = buffer_rows(&draw(&scene(vec![empty])));
         let all = rows.join("\n");
 
-        assert!(all.contains("pane-1 terminal"));
+        assert!(
+            !all.contains("pane-1 terminal"),
+            "the body never repeats the border's pane identity"
+        );
         assert!(all.contains("cwd: /tmp/mandatum"));
         assert!(all.contains("restart generation: 1"));
         assert!(all.contains("no live PTY grid is attached"));
@@ -437,6 +593,8 @@ mod tests {
             changed_files: Vec::new(),
             latest_summary: None,
             current_action: None,
+            last_error: None,
+            relaunch_hint: None,
             pending_approval: None,
             output_tail: Vec::new(),
         }));
@@ -504,6 +662,60 @@ mod tests {
         assert!(all.contains("2m ago"));
         assert!(all.contains("failed: exit 3"));
         assert!(all.contains("1 malformed line(s) skipped"));
+    }
+
+    #[test]
+    fn search_overlay_renders_sources_matches_and_footer() {
+        let mut with_search = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
+        with_search.size = SceneSize::new(90, 24);
+        with_search.overlay = Some(OverlayScene::Search(SearchOverlay {
+            area: layout::search_overlay_rect(with_search.size),
+            query: "fail".to_owned(),
+            items: vec![
+                SearchEntry {
+                    source: "shell · pane-1 (terminal)".to_owned(),
+                    text: "1 test failed".to_owned(),
+                    match_indices: vec![7, 8, 9, 10],
+                    pane: Some(PaneId::new("pane-1")),
+                },
+                SearchEntry {
+                    source: "shell · pane-1 (terminal)".to_owned(),
+                    text: "FAILED tests::flaky".to_owned(),
+                    match_indices: vec![0, 1, 2, 3],
+                    pane: Some(PaneId::new("pane-1")),
+                },
+                SearchEntry {
+                    source: "timeline".to_owned(),
+                    text: "task pane-2 failed: exit 3: sh ./check.sh".to_owned(),
+                    match_indices: vec![12, 13, 14, 15],
+                    pane: None,
+                },
+            ],
+            selected: Some(0),
+            overflow: 3,
+            footer: "+3 beyond cap (narrow the query) · enter jump · esc close".to_owned(),
+        }));
+        let terminal = draw(&with_search);
+        let rows = buffer_rows(&terminal);
+        let all = rows.join("\n");
+
+        assert!(all.contains("Search Session Output"));
+        assert!(all.contains("> fail"));
+        assert!(all.contains("shell · pane-1 (terminal)"));
+        assert!(all.contains("1 test failed"));
+        assert!(all.contains("FAILED tests::flaky"));
+        assert!(all.contains("timeline"));
+        assert!(all.contains("+3 beyond cap"));
+        assert!(all.contains("enter jump"));
+        // A repeated source is elided on the following row, so the second
+        // pane-1 row shows only the matched line.
+        let first = rows
+            .iter()
+            .position(|row| row.contains("1 test failed"))
+            .expect("first hit rendered");
+        assert!(rows[first].contains("shell · pane-1 (terminal)"));
+        assert!(rows[first + 1].contains("FAILED tests::flaky"));
+        assert!(!rows[first + 1].contains("shell · pane-1 (terminal)"));
     }
 
     #[test]
@@ -669,6 +881,114 @@ mod tests {
 
         assert!(all.contains("letters run their key"));
         assert!(all.contains("shift+letter to search"));
+    }
+
+    #[test]
+    fn help_overlay_renders_headings_rows_keys_and_footer() {
+        use mandatum_scene::{HelpEntry, HelpOverlay};
+
+        let mut with_help = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
+        with_help.size = SceneSize::new(90, 24);
+        with_help.overlay = Some(OverlayScene::Help(HelpOverlay {
+            area: layout::help_overlay_rect(with_help.size),
+            query: String::new(),
+            items: vec![
+                HelpEntry {
+                    heading: true,
+                    label: "Layout".to_owned(),
+                    keys: String::new(),
+                },
+                HelpEntry {
+                    heading: false,
+                    label: "Split pane right".to_owned(),
+                    keys: "ctrl+p v".to_owned(),
+                },
+            ],
+            selected: Some(0),
+            footer: "type to filter · esc close".to_owned(),
+        }));
+        let terminal = draw(&with_help);
+        let rows = buffer_rows(&terminal);
+        let all = rows.join("\n");
+
+        assert!(all.contains("Help"));
+        assert!(all.contains("type to filter the keymap"));
+        assert!(all.contains("Layout"));
+        assert!(all.contains("Split pane right"));
+        assert!(all.contains("ctrl+p v"));
+        assert!(all.contains("esc close"));
+
+        // Headings are bold; entry rows are not.
+        let buffer = terminal.backend().buffer();
+        let find_cell = |needle: &str, marker: char| {
+            let y = (0..buffer.area.height)
+                .find(|y| rows[usize::from(*y)].contains(needle))
+                .unwrap_or_else(|| panic!("row containing {needle:?} rendered"));
+            let x = rows[usize::from(y)]
+                .chars()
+                .position(|character| character == marker)
+                .unwrap() as u16;
+            buffer.cell((x, y)).unwrap()
+        };
+        assert!(find_cell("Layout", 'L').modifier.contains(Modifier::BOLD));
+        assert!(
+            !find_cell("Split pane right", 'S')
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn welcome_overlay_renders_its_scene_lines() {
+        use mandatum_scene::WelcomeOverlay;
+
+        let mut with_welcome = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
+        with_welcome.size = SceneSize::new(80, 24);
+        let lines = vec![
+            "A workspace for terminals, tasks, and agents.".to_owned(),
+            "  ctrl+p  command palette".to_owned(),
+            "any key or click dismisses this note".to_owned(),
+        ];
+        with_welcome.overlay = Some(OverlayScene::Welcome(WelcomeOverlay {
+            area: layout::welcome_rect(with_welcome.size, lines.len() as u16),
+            lines,
+        }));
+        let all = buffer_rows(&draw(&with_welcome)).join("\n");
+
+        assert!(all.contains("Mandatum"));
+        assert!(all.contains("A workspace for terminals, tasks, and agents."));
+        assert!(all.contains("ctrl+p  command palette"));
+        assert!(all.contains("any key or click dismisses this note"));
+    }
+
+    #[test]
+    fn focused_border_is_visibly_distinct_in_every_builtin_theme() {
+        // Two tiled panes; only the first is focused. The border colors must
+        // differ in every built-in theme — including high-contrast, where
+        // white-on-white borders once made focus rely on bold alone.
+        let mut focused = pane(PaneContent::Terminal(text_surface(&["sh"])));
+        focused.area = SceneRect::new(0, 1, 30, 10);
+        let mut unfocused = pane(PaneContent::Terminal(text_surface(&["ok"])));
+        unfocused.id = PaneId::new("pane-2");
+        unfocused.focused = false;
+        unfocused.area = SceneRect::new(30, 1, 30, 10);
+        let workspace = scene(vec![focused, unfocused]);
+
+        for name in Theme::BUILTIN_NAMES {
+            let theme = Theme::builtin(name).unwrap();
+            let terminal = draw_with_theme(&workspace, &theme);
+            let buffer = terminal.backend().buffer();
+            let focused_border = buffer.cell((0u16, 1u16)).unwrap();
+            let unfocused_border = buffer.cell((35u16, 1u16)).unwrap();
+            assert_ne!(
+                focused_border.fg, unfocused_border.fg,
+                "theme {name} must give the focused border its own color"
+            );
+            assert!(
+                focused_border.modifier.contains(Modifier::BOLD),
+                "theme {name} keeps the bold reinforcement on focus"
+            );
+        }
     }
 
     #[test]

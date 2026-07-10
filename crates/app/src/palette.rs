@@ -141,8 +141,13 @@ pub(crate) fn palette_footer(hidden_above: usize, hidden_below: usize) -> String
 }
 
 /// Why a command is impossible right now, or `Ok` when it can run. Reasons
-/// surface in the greyed entry's detail text.
-fn availability(command_id: CommandId, view: &PaletteWorkspaceView) -> Result<(), String> {
+/// surface in the greyed entry's detail text, and the single-letter fast
+/// paths consult the same gate so a bare key can never fire-and-fail where
+/// the listed row would be greyed (`app_state::handle_palette_key`).
+pub(crate) fn availability(
+    command_id: CommandId,
+    view: &PaletteWorkspaceView,
+) -> Result<(), String> {
     let on_agent = view.focused_kind == PaneSceneKind::Agent;
     let on_task = view.focused_kind == PaneSceneKind::Task;
     match command_id {
@@ -206,6 +211,15 @@ fn availability(command_id: CommandId, view: &PaletteWorkspaceView) -> Result<()
         }
         CommandId::DockPane if !view.focused_is_floating => {
             Err("focused pane is not floating".to_owned())
+        }
+        // The keyboard float-move quartet needs a floating pane under focus.
+        CommandId::MoveFloatLeft
+        | CommandId::MoveFloatRight
+        | CommandId::MoveFloatUp
+        | CommandId::MoveFloatDown
+            if !view.focused_is_floating =>
+        {
+            Err("focused pane is not floating (Float pane first)".to_owned())
         }
         CommandId::GrowPane | CommandId::ShrinkPane => {
             if view.focused_is_floating {
@@ -272,11 +286,14 @@ fn enabled_detail(command_id: CommandId, category: CommandCategory) -> String {
 /// then the global chord, joined when both exist.
 fn key_hint(command_id: CommandId, keymap: &Keymap) -> Option<String> {
     let mut hints = Vec::new();
-    // Dock rides the float letter (one toggle key for the pair).
-    let letter_owner = if command_id == CommandId::DockPane {
-        CommandId::FloatPane
-    } else {
-        command_id
+    // Commands that ride another command's letter through a context
+    // substitution show that letter: Dock rides Float's (one toggle key for
+    // the pair), Rerun task rides Restart pane's (the task-pane
+    // substitution).
+    let letter_owner = match command_id {
+        CommandId::DockPane => CommandId::FloatPane,
+        CommandId::RerunTask => CommandId::RestartPane,
+        other => other,
     };
     if let Some(letter) = keymap.palette.key_for(letter_owner) {
         hints.push(letter.to_string());
@@ -303,6 +320,10 @@ fn previews_focused_pane(command_id: CommandId, focused: PaneSceneKind) -> bool 
         | CommandId::DockPane
         | CommandId::GrowPane
         | CommandId::ShrinkPane
+        | CommandId::MoveFloatLeft
+        | CommandId::MoveFloatRight
+        | CommandId::MoveFloatUp
+        | CommandId::MoveFloatDown
         | CommandId::StackPanes
         | CommandId::EnterCopyMode => true,
         CommandId::RerunTask | CommandId::StopTask => focused == PaneSceneKind::Task,
@@ -537,6 +558,34 @@ mod tests {
             float.entry.detail,
             "pane is already floating (use Dock pane)"
         );
+    }
+
+    #[test]
+    fn move_float_commands_gate_on_a_floating_focus() {
+        let keymap = Keymap::default();
+
+        let rows = palette_rows("", 0, &terminal_view(), &keymap);
+        let left = row(&rows, CommandId::MoveFloatLeft);
+        assert!(!left.enabled);
+        assert_eq!(
+            left.entry.detail,
+            "focused pane is not floating (Float pane first)"
+        );
+
+        let floating = PaletteWorkspaceView {
+            focused_is_floating: true,
+            focused_in_tiled_split: false,
+            ..terminal_view()
+        };
+        let rows = palette_rows("", 0, &floating, &keymap);
+        for command_id in [
+            CommandId::MoveFloatLeft,
+            CommandId::MoveFloatRight,
+            CommandId::MoveFloatUp,
+            CommandId::MoveFloatDown,
+        ] {
+            assert!(row(&rows, command_id).enabled);
+        }
     }
 
     #[test]

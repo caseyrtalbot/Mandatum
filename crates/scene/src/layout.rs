@@ -6,7 +6,9 @@
 //! renderer produced (cumulative boundaries rounded half-up), so adopting the
 //! scene contract changed no pixel.
 
-use mandatum_core::{FloatingRect, LayoutNode, PaneId, Session, SplitAxis, Workspace};
+use mandatum_core::{
+    FloatingPane, FloatingRect, LayoutNode, PaneId, Session, SplitAxis, Workspace,
+};
 
 use crate::geometry::{SceneRect, SceneSize};
 
@@ -61,6 +63,27 @@ pub fn timeline_overlay_rect(size: SceneSize) -> SceneRect {
 /// The centered session-map overlay rect.
 pub fn session_map_rect(size: SceneSize) -> SceneRect {
     centered_rect(60, 60, SceneRect::new(0, 0, size.width, size.height))
+}
+
+/// The centered session-search overlay rect: same footprint as the timeline
+/// (result rows carry a source label plus the matched line).
+pub fn search_overlay_rect(size: SceneSize) -> SceneRect {
+    timeline_overlay_rect(size)
+}
+
+/// The centered help overlay rect (tall: it lists the whole keymap).
+pub fn help_overlay_rect(size: SceneSize) -> SceneRect {
+    centered_rect(70, 80, SceneRect::new(0, 0, size.width, size.height))
+}
+
+/// The centered first-run welcome rect, sized to its `line_count` content
+/// rows plus the border.
+pub fn welcome_rect(size: SceneSize, line_count: u16) -> SceneRect {
+    let frame = SceneRect::new(0, 0, size.width, size.height);
+    let horizontal = centered_rect(60, 100, frame);
+    let height = line_count.saturating_add(2).min(size.height);
+    let y = (size.height.saturating_sub(height)) / 2;
+    SceneRect::new(horizontal.x, y, horizontal.width, height)
 }
 
 /// The centered one-line prompt overlay rect (Set agent objective): 60% of
@@ -248,16 +271,26 @@ pub fn layout_panes(workspace: &Workspace, area: SceneRect) -> Vec<PaneLayout> {
     let mut panes = Vec::new();
     collect_layout_panes(session, session.layout().root(), area, false, &mut panes);
 
-    for floating in session.layout().floating() {
-        if session.pane(&floating.pane_id).is_some() {
-            panes.push(PaneLayout {
-                pane_id: floating.pane_id.clone(),
-                area: floating_rect(area, &floating.rect),
-                floating: true,
-                stacked: false,
-                zoomed: false,
-            });
-        }
+    // Floats paint (and hit-test) in list order, so the focused float is
+    // moved last: focusing a buried float — via the attention strip, the
+    // session map, or focus cycling — must raise it, never leave the user
+    // deciding an approval on a pane they cannot see. The stable sort keeps
+    // the durable order among unfocused floats.
+    let mut floats: Vec<&FloatingPane> = session
+        .layout()
+        .floating()
+        .iter()
+        .filter(|floating| session.pane(&floating.pane_id).is_some())
+        .collect();
+    floats.sort_by_key(|floating| &floating.pane_id == session.focused_pane_id());
+    for floating in floats {
+        panes.push(PaneLayout {
+            pane_id: floating.pane_id.clone(),
+            area: floating_rect(area, &floating.rect),
+            floating: true,
+            stacked: false,
+            zoomed: false,
+        });
     }
 
     panes
@@ -528,6 +561,62 @@ mod tests {
         let floating = panes.iter().find(|pane| pane.floating).unwrap();
         assert_eq!(floating.pane_id, PaneId::new("pane-2"));
         assert_eq!(floating.area, SceneRect::new(8, 4, 96, 28));
+    }
+
+    // Focusing a buried float must raise it: the focused float is always
+    // last in paint order (frontends draw panes in list order, and hit
+    // testing scans in reverse), so an approval prompt can never sit hidden
+    // behind another float while its keys are live.
+    #[test]
+    fn focused_floating_pane_is_raised_to_the_top_of_the_float_stack() {
+        let mut workspace = workspace();
+        workspace
+            .apply_action(CoreAction::NewTerminal {
+                title: "first float".to_owned(),
+                cwd: None,
+            })
+            .unwrap();
+        workspace
+            .apply_action(CoreAction::NewTerminal {
+                title: "second float".to_owned(),
+                cwd: None,
+            })
+            .unwrap();
+
+        // Focus the older (durably lower) float; it must paint last.
+        workspace
+            .apply_action(CoreAction::FocusPane {
+                pane_id: PaneId::new("pane-2"),
+            })
+            .unwrap();
+        let panes = layout_panes(&workspace, SceneRect::new(0, 0, 120, 40));
+        assert_eq!(panes.last().unwrap().pane_id, PaneId::new("pane-2"));
+
+        // Focus moving to the other float raises that one instead.
+        workspace
+            .apply_action(CoreAction::FocusPane {
+                pane_id: PaneId::new("pane-3"),
+            })
+            .unwrap();
+        let panes = layout_panes(&workspace, SceneRect::new(0, 0, 120, 40));
+        assert_eq!(panes.last().unwrap().pane_id, PaneId::new("pane-3"));
+
+        // A focused tiled pane leaves the durable float order untouched.
+        workspace
+            .apply_action(CoreAction::FocusPane {
+                pane_id: PaneId::new("pane-1"),
+            })
+            .unwrap();
+        let panes = layout_panes(&workspace, SceneRect::new(0, 0, 120, 40));
+        let float_ids: Vec<_> = panes
+            .iter()
+            .filter(|pane| pane.floating)
+            .map(|pane| pane.pane_id.clone())
+            .collect();
+        assert_eq!(
+            float_ids,
+            vec![PaneId::new("pane-2"), PaneId::new("pane-3")]
+        );
     }
 
     #[test]

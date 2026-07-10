@@ -74,6 +74,15 @@ impl Workspace {
         &self.sessions
     }
 
+    /// The active project's directory: the default working directory for
+    /// panes whose intent does not name one.
+    pub fn active_project_path(&self) -> &Path {
+        self.projects
+            .get(&self.active_project_id)
+            .map(Project::path)
+            .expect("active project should be validated by workspace constructors")
+    }
+
     pub fn active_session(&self) -> &Session {
         self.sessions
             .get(&self.active_session_id)

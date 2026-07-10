@@ -74,6 +74,82 @@ pub enum OverlayScene {
     Timeline(TimelineOverlay),
     SessionMap(SessionMapOverlay),
     Prompt(PromptOverlay),
+    Search(SearchOverlay),
+    Help(HelpOverlay),
+    Welcome(WelcomeOverlay),
+}
+
+/// The help overlay: the live keymap grouped by category, palette fast
+/// paths, mouse gestures, and the glyph legends — generated from the command
+/// table and keymap, filterable with the palette input pattern.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HelpOverlay {
+    pub area: SceneRect,
+    /// The live filter text the user has typed.
+    pub query: String,
+    /// Rows matching the query (section headings plus their entries).
+    pub items: Vec<HelpEntry>,
+    /// Highlighted row (scroll anchor); `None` only when `items` is empty.
+    pub selected: Option<usize>,
+    /// Footer hint line naming the overlay's own keys.
+    pub footer: String,
+}
+
+/// One help row: a section heading, or a "label + keys" line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HelpEntry {
+    /// `true` renders the row emphasized as a section heading.
+    pub heading: bool,
+    pub label: String,
+    /// The current key route(s), from the live keymap; empty when none.
+    pub keys: String,
+}
+
+/// The one-time first-run note: a short orientation card shown only when no
+/// saved workspace exists. Dismissed by any action; not modal (input under
+/// it behaves normally).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WelcomeOverlay {
+    pub area: SceneRect,
+    pub lines: Vec<String>,
+}
+
+/// The marker frontends draw in front of the focused pane's session-map row.
+/// Named here (with the row glyphs it accompanies) so legends and renderers
+/// share one source and cannot drift.
+pub const SESSION_MAP_FOCUS_GLYPH: &str = "●";
+
+/// The session-search overlay: a filter input on top, matched output lines
+/// grouped by source (pane or timeline, most recent first) below it, and a
+/// key-hint footer. Plain text search over a snapshot — never embeddings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchOverlay {
+    pub area: SceneRect,
+    /// The live search text the user has typed.
+    pub query: String,
+    /// Matches for the query, grouped by source, capped by the engine.
+    pub items: Vec<SearchEntry>,
+    /// Highlighted entry; `None` only when `items` is empty.
+    pub selected: Option<usize>,
+    /// Matches beyond the display cap ("+N more" honesty).
+    pub overflow: usize,
+    /// Footer hint line naming the overlay's own keys.
+    pub footer: String,
+}
+
+/// One matched line in the search overlay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchEntry {
+    /// Source label ("shell · pane-1 (terminal)" or "timeline"). Consecutive
+    /// rows share a source; frontends may dim or elide repeats.
+    pub source: String,
+    /// The matched line, trailing whitespace trimmed.
+    pub text: String,
+    /// Char indices into `text` matched by the query, for highlighting.
+    pub match_indices: Vec<usize>,
+    /// The pane Enter jumps to; `None` for timeline hits (Enter opens the
+    /// timeline overlay at the entry instead).
+    pub pane: Option<PaneId>,
 }
 
 /// The execution-timeline overlay: a filter input on top, the filtered
@@ -248,4 +324,6 @@ pub enum HitTargetKind {
     TimelineItem(usize),
     /// One session-map row, by row index.
     SessionMapRow(usize),
+    /// One search-result row, by index into the overlay's items.
+    SearchItem(usize),
 }

@@ -18,6 +18,7 @@ use mandatum_terminal_vt::{CellStyle, Color as VtColor, TerminalGrid};
 use crate::{
     app_state::{AppState, agent_status_label},
     attention::header_scene,
+    terminal_runtime::resolve_pane_cwd,
 };
 
 /// How many changed files an agent pane lists (most recent last).
@@ -61,12 +62,17 @@ pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScen
                 .timeline_overlay_scene(size)
                 .map(OverlayScene::Timeline)
         })
+        .or_else(|| state.search_overlay_scene(size).map(OverlayScene::Search))
         .or_else(|| {
             state
                 .session_map_overlay_scene(size)
                 .map(OverlayScene::SessionMap)
         })
-        .or_else(|| state.prompt_overlay_scene(size).map(OverlayScene::Prompt));
+        .or_else(|| state.prompt_overlay_scene(size).map(OverlayScene::Prompt))
+        .or_else(|| state.help_overlay_scene(size).map(OverlayScene::Help))
+        // The first-run note is last: it is not modal, so any real overlay
+        // outranks it (and the action that opened one dismissed it anyway).
+        .or_else(|| state.welcome_overlay_scene(size).map(OverlayScene::Welcome));
 
     // The attention strip: approvals, failed tasks, stuck agents — or calm
     // session facts. Composed here so `&WorkspaceScene` alone paints a frame.
@@ -110,11 +116,11 @@ fn pane_scene(
                 inner.width,
                 inner.height,
             )),
-            None => PaneContent::Empty(empty_content(pane)),
+            None => PaneContent::Empty(empty_content(state, pane)),
         },
         PaneKind::Task { intent } => PaneContent::Task(task_content(state, pane, intent)),
         PaneKind::Agent { intent } => PaneContent::Agent(agent_content(state, pane.id(), intent)),
-        PaneKind::StatusLog { .. } => PaneContent::Empty(empty_content(pane)),
+        PaneKind::StatusLog { .. } => PaneContent::Empty(empty_content(state, pane)),
     };
 
     let mut scene = PaneScene {
@@ -137,9 +143,8 @@ fn pane_scene(
     if let PaneContent::Task(task) = &mut scene.content
         && let Some((_, Some(grid))) = state.task_view(&scene.id)
     {
-        task.output = Some(terminal_surface(
+        task.output = Some(task_output_surface(
             grid,
-            PaneViewState::default(),
             inner.width,
             inner.height.saturating_sub(detail_rows),
         ));
@@ -148,22 +153,58 @@ fn pane_scene(
     scene
 }
 
+/// Window a task grid into its output surface, anchored to the content tail
+/// rather than the grid bottom. The task PTY is sized to the pane's full
+/// inner rect while the visible window sits below the detail rows, so
+/// bottom-anchoring would permanently hide the first rows of every task's
+/// output — a one-line failure diagnostic would render as an empty "output:"
+/// section. Content shows from the top until it outgrows the window, then
+/// the window follows the tail.
+fn task_output_surface(grid: &TerminalGrid, max_width: u16, max_height: u16) -> TerminalSurface {
+    let view_rows = usize::from(grid.size().rows().min(max_height));
+    let scrollback_len = grid.scrollback_len();
+
+    // Where content ends: the last screen row with visible text, or the
+    // cursor row if it sits lower (a spinner redrawing a blank row).
+    let last_text_row = (0..grid.size().rows())
+        .rev()
+        .find(|row| {
+            grid.row_text(*row)
+                .is_some_and(|text| !text.trim().is_empty())
+        })
+        .map(usize::from)
+        .unwrap_or(0);
+    let content_end = scrollback_len + last_text_row.max(usize::from(grid.cursor().row()));
+
+    let max_top = grid.total_rows().saturating_sub(view_rows);
+    let first_row = (content_end + 1).saturating_sub(view_rows).min(max_top);
+    terminal_surface(
+        grid,
+        PaneViewState {
+            scroll_offset: max_top - first_row,
+            ..PaneViewState::default()
+        },
+        max_width,
+        max_height,
+    )
+}
+
 fn task_content(state: &AppState, pane: &PaneSpec, intent: &TaskPaneIntent) -> TaskContent {
     TaskContent {
         command: intent.command.clone(),
-        cwd_label: intent
-            .cwd
-            .as_ref()
-            .or_else(|| pane.cwd())
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "unset".to_owned()),
-        recipe_label: intent
-            .recipe_id
-            .clone()
-            .unwrap_or_else(|| "ad hoc".to_owned()),
+        // The directory the command actually runs in — the same resolution
+        // the spawn path uses (intent -> pane -> project), never "unset".
+        cwd_label: resolve_pane_cwd(state.workspace(), pane, intent.cwd.as_ref())
+            .display()
+            .to_string(),
+        recipe_label: intent.recipe_id.clone(),
         status_label: state
             .task_view(pane.id())
             .map(|(status, _)| status.to_owned()),
+        // The live keyboard route to Rerun task; the scene shows it on
+        // failed tasks next to the right-click route.
+        rerun_hint: Some(state.command_key_hint(mandatum_commands::CommandId::RerunTask))
+            .filter(|hint| !hint.is_empty()),
         output: None,
     }
 }
@@ -193,6 +234,9 @@ fn agent_content(state: &AppState, pane_id: &PaneId, intent: &AgentPaneIntent) -
         changed_files,
         latest_summary: intent.latest_summary.clone(),
         current_action: live.and_then(|runtime| runtime.current_action.clone()),
+        last_error: live.and_then(|runtime| runtime.last_error.clone()),
+        relaunch_hint: Some(state.command_key_hint(mandatum_commands::CommandId::StartAgent))
+            .filter(|hint| !hint.is_empty()),
         pending_approval: live
             .and_then(|runtime| runtime.pending_approval.as_ref())
             .map(|request| AgentApprovalPrompt {
@@ -206,6 +250,11 @@ fn agent_content(state: &AppState, pane_id: &PaneId, intent: &AgentPaneIntent) -
                 risk_label: risk_label(request.risk.level).to_owned(),
                 risk_basis: request.risk.basis.clone(),
                 key_hint: "y approve / n reject".to_owned(),
+                // The product's single motion: the approval header pulses
+                // at ~1 Hz off the wall clock (steady under reduced
+                // motion). The heartbeat repaint keeps it ticking when the
+                // workspace is otherwise idle.
+                pulse_on: approval_pulse_on(crate::timeline::now_ms(), state.reduced_motion()),
             }),
         output_tail: live
             .map(|runtime| runtime.output_tail.iter().cloned().collect())
@@ -221,14 +270,20 @@ fn risk_label(level: RiskLevel) -> &'static str {
     }
 }
 
-fn empty_content(pane: &PaneSpec) -> EmptyContent {
+/// Whether the approval header draws emphasized at this instant: a ~1 Hz
+/// alternation off the wall clock, held steady (always on) under reduced
+/// motion.
+pub(crate) fn approval_pulse_on(now_ms: u64, reduced_motion: bool) -> bool {
+    reduced_motion || (now_ms / 1_000).is_multiple_of(2)
+}
+
+fn empty_content(state: &AppState, pane: &PaneSpec) -> EmptyContent {
     EmptyContent {
-        // "cwd: unset" (not "unset") preserves the exact fallback line the
-        // pre-scene renderer displayed.
-        cwd_label: pane
-            .cwd()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "cwd: unset".to_owned()),
+        // The directory a spawned shell would run in — the same resolution
+        // the spawn path uses (pane -> project), never "unset".
+        cwd_label: resolve_pane_cwd(state.workspace(), pane, None)
+            .display()
+            .to_string(),
         restart_generation: pane.restart_generation(),
     }
 }
@@ -421,6 +476,18 @@ fn hit_targets(
                 });
             }
         }
+        Some(OverlayScene::Search(search)) => {
+            // Same shape as the palette/timeline: filter input on the top
+            // inner row, footer on the bottom, result rows between.
+            let inner = layout::pane_inner_rect(search.area);
+            let window = layout::palette_item_window(inner, search.items.len(), search.selected);
+            for (row, index) in window.enumerate() {
+                targets.push(HitTarget {
+                    rect: SceneRect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1),
+                    kind: HitTargetKind::SearchItem(index),
+                });
+            }
+        }
         Some(OverlayScene::SessionMap(map)) => {
             let inner = layout::pane_inner_rect(map.area);
             let window = layout::session_map_item_window(inner, map.rows.len(), Some(map.selected));
@@ -431,8 +498,10 @@ fn hit_targets(
                 });
             }
         }
-        // The prompt has no row targets; click-away dismisses it.
-        Some(OverlayScene::Prompt(_)) | None => {}
+        // The prompt and help have no row targets (click-away dismisses
+        // them); the first-run note is not even modal.
+        Some(OverlayScene::Prompt(_) | OverlayScene::Help(_) | OverlayScene::Welcome(_)) | None => {
+        }
     }
 
     targets
@@ -451,12 +520,22 @@ mod tests {
     use crate::app_shell::AppConfig;
 
     fn config(spawn_pty: bool) -> AppConfig {
-        // The system temp dir always exists, so live PTY spawns get a valid cwd
-        // without per-test directory setup (nothing here persists a workspace).
-        let project_path = std::env::temp_dir();
+        // One isolated directory per test-process run: a fixed temp path
+        // would grow a real timeline file across runs and let concurrent
+        // test runs interfere (nothing here persists a workspace).
+        use std::sync::OnceLock;
+        static BASELINE_DIR: OnceLock<PathBuf> = OnceLock::new();
+        let project_path = BASELINE_DIR.get_or_init(|| {
+            let path = std::env::temp_dir().join(format!(
+                "mandatum-scene-builder-test-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("test temp dir should be created");
+            path
+        });
         AppConfig {
-            workspace_file: project_path.join("mandatum-scene-builder-test.json"),
-            project_path,
+            workspace_file: project_path.join("workspace.json"),
+            project_path: project_path.clone(),
             task_command: "printf 'TASK_OK\\n'".to_owned(),
             agent_objective: "test objective".to_owned(),
             spawn_pty,
@@ -740,6 +819,259 @@ mod tests {
         assert!(prompt.title.contains("Set agent objective"));
     }
 
+    /// A unique empty project dir per test, removed on drop.
+    struct FreshDir {
+        path: std::path::PathBuf,
+    }
+
+    impl FreshDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("mandatum-first-run-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("test dir");
+            Self { path }
+        }
+
+        fn config(&self) -> AppConfig {
+            AppConfig {
+                workspace_file: self.path.join(".mandatum").join("workspace.json"),
+                project_path: self.path.clone(),
+                restore_on_startup: true,
+                ..AppConfig::default()
+            }
+        }
+    }
+
+    impl Drop for FreshDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn first_run_note_shows_on_a_fresh_dir_dismisses_on_action_and_never_returns() {
+        let dir = FreshDir::new("gating");
+
+        // Fresh dir, no saved workspace: the note is up and the status line
+        // orients (palette chord + help key from the live keymap).
+        let mut state = AppState::new(dir.config());
+        assert!(
+            state.status().contains("new workspace"),
+            "{}",
+            state.status()
+        );
+        assert!(state.status().contains("ctrl+p"), "{}", state.status());
+        assert!(state.status().contains("f1"), "{}", state.status());
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 30));
+        let Some(OverlayScene::Welcome(welcome)) = &scene.overlay else {
+            panic!("a fresh dir must show the first-run note");
+        };
+        assert!(welcome.lines.len() <= 8, "the note stays under 8 lines");
+        assert!(welcome.lines.join("\n").contains("ctrl+p"));
+
+        // Any action dismisses it, and the action itself still lands.
+        state.handle_key(ctrl('p'));
+        assert!(state.palette_open(), "the dismissing action still runs");
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 30));
+        assert!(
+            !matches!(&scene.overlay, Some(OverlayScene::Welcome(_))),
+            "any action dismisses the note"
+        );
+        state.handle_key(key(KeyCode::Escape));
+
+        // Once a workspace is saved, a fresh launch never shows it again.
+        state.dispatch(CommandId::SaveWorkspace);
+        assert!(state.workspace_file().exists(), "{}", state.status());
+        let state = AppState::new(dir.config());
+        assert!(!state.status().contains("new workspace"));
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 30));
+        assert!(!matches!(&scene.overlay, Some(OverlayScene::Welcome(_))));
+    }
+
+    #[test]
+    fn reduced_motion_kills_the_pulse_and_no_other_motion_exists() {
+        // The [ui] reduced_motion contract, in two halves.
+        //
+        // (1) The approval pulse — the product's single animation — holds
+        // steady (always emphasized) under reduced motion, at every instant
+        // of its 1 Hz cycle.
+        for now_ms in [0u64, 500, 1_000, 1_500, 2_000, 999_999_999] {
+            assert!(
+                approval_pulse_on(now_ms, true),
+                "reduced motion must hold the pulse steady at t={now_ms}"
+            );
+        }
+        assert!(approval_pulse_on(0, false));
+        assert!(
+            !approval_pulse_on(1_000, false),
+            "without reduced motion the pulse alternates"
+        );
+
+        // (2) No other motion exists: outside the pulse (no live approval
+        // here), the built scene is byte-identical with the flag on and
+        // off, attention strip included — this fails the moment someone
+        // adds motion without gating it on the flag.
+        let build = |reduced_motion: bool| {
+            let mut state = AppState::new(AppConfig {
+                reduced_motion,
+                ..config(false)
+            });
+            let mut waiting = AgentPaneIntent::draft("needs approval");
+            waiting.status = AgentStatus::WaitingForApproval;
+            state
+                .workspace_mut()
+                .active_session_mut()
+                .add_floating_pane("agent", PaneKind::Agent { intent: waiting }, None);
+            build_workspace_scene(&state, SceneSize::new(100, 30))
+        };
+        let plain = build(false);
+        let reduced = build(true);
+        assert!(!plain.header.attention.is_empty());
+        assert_eq!(
+            plain, reduced,
+            "outside the gated pulse, reduced_motion must have nothing left to disable"
+        );
+    }
+
+    #[test]
+    fn help_overlay_reaches_the_scene_and_reflects_the_live_keymap() {
+        let mut app_config = config(false);
+        app_config.keymap.bind_chord(
+            mandatum_commands::CommandId::SplitRight,
+            crate::keymap::parse_chord("ctrl+shift+r").unwrap(),
+        );
+        let mut state = AppState::new(app_config);
+
+        // The status strip always names the help route.
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 30));
+        assert!(
+            scene.status.text.contains("f1 help"),
+            "{}",
+            scene.status.text
+        );
+
+        state.dispatch(CommandId::ShowHelp);
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 40));
+        let Some(OverlayScene::Help(help)) = &scene.overlay else {
+            panic!("help overlay must be in the scene");
+        };
+        let split = help
+            .items
+            .iter()
+            .find(|item| item.label == "Split pane right")
+            .expect("every command is listed");
+        assert_eq!(
+            split.keys, "ctrl+shift+r · ctrl+p v",
+            "help shows the REBOUND chord, not the default"
+        );
+
+        // Filterable with the palette input pattern.
+        for character in "split".chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 40));
+        let Some(OverlayScene::Help(help)) = &scene.overlay else {
+            panic!("help overlay stays open while filtering");
+        };
+        assert!(
+            help.items
+                .iter()
+                .any(|item| item.label == "Split pane right")
+        );
+        assert!(
+            !help.items.iter().any(|item| item.label == "Run task"),
+            "non-matching rows drop out"
+        );
+
+        // Esc closes.
+        state.handle_key(key(KeyCode::Escape));
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 40));
+        assert!(!matches!(&scene.overlay, Some(OverlayScene::Help(_))));
+    }
+
+    #[test]
+    fn f1_opens_help_and_toggles_it_closed() {
+        let mut state = AppState::new(config(false));
+        state.handle_key(key(KeyCode::Function(1)));
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 40));
+        assert!(matches!(&scene.overlay, Some(OverlayScene::Help(_))));
+        state.handle_key(key(KeyCode::Function(1)));
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 40));
+        assert!(!matches!(&scene.overlay, Some(OverlayScene::Help(_))));
+    }
+
+    #[test]
+    fn float_moves_by_keyboard_match_the_pointer_drag_intent() {
+        let mut state = AppState::new(config(false));
+        state.handle_terminal_resize(100, 30);
+        // Floating requires another tiled pane to remain.
+        state.dispatch(CommandId::SplitRight);
+        state.dispatch(CommandId::FloatPane);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let rect_of = |state: &AppState| {
+            state
+                .workspace()
+                .active_session()
+                .layout()
+                .floating()
+                .iter()
+                .find(|floating| floating.pane_id == pane_id)
+                .map(|floating| (floating.rect.x, floating.rect.y))
+                .expect("focused pane is floating")
+        };
+        let (x0, y0) = rect_of(&state);
+
+        state.dispatch(CommandId::MoveFloatRight);
+        state.dispatch(CommandId::MoveFloatDown);
+        assert_eq!(rect_of(&state), (x0 + 2, y0 + 1));
+        state.dispatch(CommandId::MoveFloatLeft);
+        state.dispatch(CommandId::MoveFloatUp);
+        assert_eq!(rect_of(&state), (x0, y0));
+
+        // Left/up movement clamps at the workspace-area origin, like a drag.
+        for _ in 0..200 {
+            state.dispatch(CommandId::MoveFloatLeft);
+            state.dispatch(CommandId::MoveFloatUp);
+        }
+        assert_eq!(rect_of(&state), (0, 0));
+
+        // Docked panes report the honest refusal.
+        state.dispatch(CommandId::DockPane);
+        state.dispatch(CommandId::MoveFloatRight);
+        assert!(
+            state.status().contains("not floating"),
+            "{}",
+            state.status()
+        );
+    }
+
+    #[test]
+    fn search_overlay_reaches_the_scene_with_row_hit_targets() {
+        let mut state = AppState::new(config(false));
+        let size = SceneSize::new(100, 30);
+
+        state.dispatch(CommandId::SearchSession);
+        // The dispatch itself is a timeline fact, so this query always has
+        // at least one hit even with no live grids.
+        for character in "kind:timeline search".chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+        let scene = build_workspace_scene(&state, size);
+        let Some(OverlayScene::Search(search)) = &scene.overlay else {
+            panic!("search overlay must be in the scene");
+        };
+        assert!(!search.items.is_empty());
+        assert!(search.footer.contains("esc close"));
+        // Row hit targets align with the drawn window, one row below the
+        // search input (the shared palette window math).
+        let inner = layout::pane_inner_rect(search.area);
+        assert!(scene.hit_targets.iter().any(|target| {
+            target.kind == HitTargetKind::SearchItem(0)
+                && target.rect == SceneRect::new(inner.x, inner.y + 1, inner.width, 1)
+        }));
+    }
+
     #[test]
     fn terminal_pane_without_runtime_renders_empty_fallback() {
         let state = AppState::new(config(false));
@@ -843,11 +1175,56 @@ mod tests {
             panic!("task pane must carry task content");
         };
         assert!(task.command.ends_with("echo TASK_OK"));
-        assert_eq!(task.recipe_label, "configured");
+        assert_eq!(task.recipe_label, None, "an ad-hoc run names no recipe");
+        // The pane states the RESOLVED directory the command runs in.
+        assert_eq!(
+            task.cwd_label,
+            state
+                .workspace()
+                .active_project_path()
+                .display()
+                .to_string()
+        );
         // Output is windowed to the inner rows left under the detail lines.
         let inner = layout::pane_inner_rect(pane.area);
         let expected_rows = usize::from(inner.height) - pane.detail_lines().len();
         assert_eq!(task.output.as_ref().unwrap().rows.len(), expected_rows);
+
+        state.shutdown();
+    }
+
+    // The stranger-test blocker: output shorter than the detail block must
+    // still be visible. A task that prints exactly one line and fails must
+    // show that line in its output surface — the window anchors to the
+    // content, not the bottom of a grid taller than the window.
+    #[test]
+    fn one_line_failed_task_output_is_visible_in_the_scene() {
+        let mut config = config(true);
+        config.task_command = "echo ONLY_DIAGNOSTIC_LINE; exit 3".to_owned();
+        let mut state = AppState::new(config);
+        state.handle_terminal_resize(100, 30);
+        state.dispatch(CommandId::RunTask);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+
+        let size = SceneSize::new(100, 30);
+        let observed = pump_until(&mut state, |state| {
+            let scene = build_workspace_scene(state, size);
+            matches!(
+                &scene_pane(&scene, pane_id.as_str()).content,
+                PaneContent::Task(task) if task.status_label.as_deref() == Some("failed: exit 3")
+            )
+        });
+        assert!(observed, "the task never reported its failure");
+
+        let scene = build_workspace_scene(&state, size);
+        let PaneContent::Task(task) = &scene_pane(&scene, pane_id.as_str()).content else {
+            panic!("task pane must carry task content");
+        };
+        let output = surface_text(task.output.as_ref().expect("output surface"));
+        assert!(
+            output.contains("ONLY_DIAGNOSTIC_LINE"),
+            "the single diagnostic line must be visible, got:\n{output}"
+        );
 
         state.shutdown();
     }
@@ -974,7 +1351,16 @@ mod tests {
             .attention
             .first()
             .expect("waiting approval must produce an attention segment");
-        assert_eq!(segment.label, format!("1 approval waiting · {pane_id}"));
+        // The label names the pane by its title; the segment still jumps to
+        // the pane by id.
+        let title = state
+            .workspace()
+            .active_session()
+            .pane(&pane_id)
+            .expect("agent pane exists")
+            .title()
+            .to_owned();
+        assert_eq!(segment.label, format!("1 approval waiting · {title}"));
         assert_eq!(segment.pane.as_ref(), Some(&pane_id));
         assert!(scene.header.text.contains(&segment.label));
         assert!(
@@ -1024,11 +1410,13 @@ mod tests {
             .iter()
             .map(|segment| segment.label.as_str())
             .collect();
+        // Segments name panes by their user-facing titles, not pane ids: a
+        // glance at the strip says WHICH pane needs eyes.
         assert_eq!(
             labels,
             vec![
-                "1 approval waiting · pane-2",
-                "1 task failed · pane-5",
+                "1 approval waiting · agent",
+                "1 task failed · task",
                 "2 agents blocked/failed",
             ]
         );
@@ -1044,5 +1432,73 @@ mod tests {
         }
         // The count-only agents segment has no single jump pane.
         assert_eq!(scene.header.attention[2].pane, None);
+    }
+
+    // A failed task pane states the failing command, the exit status, and
+    // the rerun route (live keymap + right-click) in its metadata rows.
+    #[test]
+    fn failed_task_pane_states_command_exit_and_rerun_route() {
+        let mut state = AppState::new(config(false));
+        state.dispatch(CommandId::RunTask);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        state.set_task_status_for_test(&pane_id, "failed: exit 3");
+
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 30));
+        let pane = scene_pane(&scene, pane_id.as_str());
+        let lines = pane.detail_lines();
+        assert!(
+            lines.iter().any(|line| line.starts_with("command: ")),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"runtime status: failed: exit 3".to_owned()));
+        assert!(
+            lines.contains(&"rerun: ctrl+p r · right-click menu".to_owned()),
+            "{lines:?}"
+        );
+    }
+
+    // A failed agent pane keeps the failure reason from its Failed event
+    // and the relaunch route on screen, frame after frame.
+    #[test]
+    fn failed_agent_pane_states_the_error_and_relaunch_route_persistently() {
+        use mandatum_agent_runtime::{AgentSessionEvent, FakeConnector, FakeStep};
+
+        let mut state = AppState::new(config(false));
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::Emit(AgentSessionEvent::Failed {
+                error: "model quota exhausted".to_owned(),
+            }),
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+
+        let size = SceneSize::new(100, 30);
+        let observed = pump_until(&mut state, |state| {
+            let scene = build_workspace_scene(state, size);
+            matches!(
+                &scene_pane(&scene, pane_id.as_str()).content,
+                PaneContent::Agent(agent) if agent.status_role == AgentStatus::Failed
+            )
+        });
+        assert!(observed, "the failure never reached the scene");
+
+        // Frame after frame — including after other status churn — the
+        // failure stays legible on the pane itself.
+        state.dispatch(CommandId::ShowSessionMap);
+        state.handle_event(InputEvent::Key(Key::plain(KeyCode::Escape)));
+        let scene = build_workspace_scene(&state, size);
+        let lines = scene_pane(&scene, pane_id.as_str()).detail_lines();
+        assert!(lines.contains(&"status: failed".to_owned()), "{lines:?}");
+        assert!(
+            lines.contains(&"error: model quota exhausted".to_owned()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"relaunch: ctrl+p g · right-click menu".to_owned()),
+            "{lines:?}"
+        );
+
+        state.shutdown();
     }
 }

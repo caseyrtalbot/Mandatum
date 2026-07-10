@@ -7,7 +7,7 @@ use mandatum_scene::{
     layout::{palette_item_window, pane_inner_rect, timeline_overlay_rect},
 };
 
-use crate::timeline::{TimelineEvent, TimelineTail};
+use crate::timeline::{TimelineEvent, TimelineTail, timeline_glyph_meaning};
 
 /// Live overlay state while the timeline is open.
 pub(crate) struct TimelineViewState {
@@ -17,24 +17,53 @@ pub(crate) struct TimelineViewState {
     pub(crate) events: Vec<TimelineEvent>,
     pub(crate) malformed: usize,
     pub(crate) error: Option<String>,
+    /// Indices into `events` matching the live query, newest first. Cached:
+    /// filtering (multi-token fuzzy matching over the whole tail) is too
+    /// expensive to recompute every frame, so it recomputes only when the
+    /// query changes ([`Self::refilter`]). `since:` windows therefore anchor
+    /// to the moment the query was last edited, which is when the user
+    /// asked the question.
+    filtered: Vec<usize>,
 }
 
 impl TimelineViewState {
     pub(crate) fn from_tail(tail: TimelineTail) -> Self {
         let mut events = tail.events;
         events.reverse();
-        Self {
+        let mut view = Self {
             query: String::new(),
             selected: 0,
             events,
             malformed: tail.malformed,
             error: tail.error,
-        }
+            filtered: Vec::new(),
+        };
+        view.refilter(crate::timeline::now_ms());
+        view
     }
 
-    /// Indices into `events` matching the live query, newest first.
-    pub(crate) fn filtered_indices(&self, now_ms: u64) -> Vec<usize> {
-        filter_indices(&self.events, &self.query, now_ms)
+    /// The cached filter result, newest first.
+    pub(crate) fn filtered(&self) -> &[usize] {
+        &self.filtered
+    }
+
+    /// Append text to the query and recompute the filter once.
+    pub(crate) fn push_query(&mut self, text: &str, now_ms: u64) {
+        self.query.push_str(text);
+        self.selected = 0;
+        self.refilter(now_ms);
+    }
+
+    /// Delete the last query character and recompute the filter once.
+    pub(crate) fn pop_query(&mut self, now_ms: u64) {
+        self.query.pop();
+        self.selected = 0;
+        self.refilter(now_ms);
+    }
+
+    /// Recompute the cached filter for the current query.
+    pub(crate) fn refilter(&mut self, now_ms: u64) {
+        self.filtered = filter_indices(&self.events, &self.query, now_ms);
     }
 }
 
@@ -91,8 +120,8 @@ pub(crate) fn timeline_overlay(
     size: SceneSize,
     now_ms: u64,
 ) -> TimelineOverlay {
-    let filtered = view.filtered_indices(now_ms);
-    let items: Vec<TimelineEntry> = filtered
+    let items: Vec<TimelineEntry> = view
+        .filtered()
         .iter()
         .map(|&index| {
             let event = &view.events[index];
@@ -125,6 +154,9 @@ pub(crate) fn timeline_overlay(
     if let Some(error) = &view.error {
         footer.push_str(&format!(" · {error}"));
     }
+    if let Some(legend) = glyph_legend(&items) {
+        footer.push_str(&format!(" · {legend}"));
+    }
 
     TimelineOverlay {
         area,
@@ -136,13 +168,38 @@ pub(crate) fn timeline_overlay(
     }
 }
 
-/// "just now", "42s ago", "5m ago", "3h ago", "2d ago". Future timestamps
-/// (clock skew) read as "just now".
+/// The footer legend for the glyphs actually on screen, in first-seen order
+/// ("» command · ✗ failed"). Generated from the same table `glyph()` is
+/// tested against, so a drawn glyph can never lack a meaning.
+fn glyph_legend(items: &[TimelineEntry]) -> Option<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    for item in items {
+        if !seen.contains(&item.glyph.as_str()) {
+            seen.push(item.glyph.as_str());
+        }
+    }
+    let parts: Vec<String> = seen
+        .iter()
+        .filter_map(|glyph| {
+            timeline_glyph_meaning(glyph).map(|meaning| format!("{glyph} {meaning}"))
+        })
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+/// "just now", "5s ago", "42s ago", "5m ago", "3h ago", "2d ago". Seconds
+/// granularity from the first second, so a burst of recent events reads as
+/// a sequence instead of a wall of "just now". Future timestamps (clock
+/// skew) read as "just now".
 pub(crate) fn format_relative(now_ms: u64, at_ms: u64) -> String {
     let seconds = now_ms.saturating_sub(at_ms) / 1_000;
     match seconds {
-        0..=9 => "just now".to_owned(),
-        10..=59 => format!("{seconds}s ago"),
+        0 => "just now".to_owned(),
+        1..=59 => format!("{seconds}s ago"),
         60..=3_599 => format!("{}m ago", seconds / 60),
         3_600..=86_399 => format!("{}h ago", seconds / 3_600),
         _ => format!("{}d ago", seconds / 86_400),
@@ -162,11 +219,27 @@ mod tests {
         }
     }
 
+    /// Build a view over newest-first events with the filter cache primed,
+    /// the way `from_tail` would.
+    fn view_over(events: Vec<TimelineEvent>, malformed: usize, now: u64) -> TimelineViewState {
+        let mut view = TimelineViewState {
+            query: String::new(),
+            selected: 0,
+            events,
+            malformed,
+            error: None,
+            filtered: Vec::new(),
+        };
+        view.refilter(now);
+        view
+    }
+
     #[test]
     fn relative_timestamps_read_calmly() {
         let now = 1_000_000_000_000;
         assert_eq!(format_relative(now, now), "just now");
-        assert_eq!(format_relative(now, now - 9_000), "just now");
+        assert_eq!(format_relative(now, now - 5_000), "5s ago");
+        assert_eq!(format_relative(now, now - 9_000), "9s ago");
         assert_eq!(format_relative(now, now - 42_000), "42s ago");
         assert_eq!(format_relative(now, now - 5 * 60_000), "5m ago");
         assert_eq!(format_relative(now, now - 3 * 3_600_000), "3h ago");
@@ -219,10 +292,8 @@ mod tests {
     #[test]
     fn overlay_lists_newest_first_with_glyphs_and_relative_times() {
         let now = 1_000_000_000_000;
-        let view = TimelineViewState {
-            query: String::new(),
-            selected: 0,
-            events: vec![
+        let view = view_over(
+            vec![
                 TimelineEvent {
                     at_ms: now - 5_000,
                     kind: task_exit("pane-2", "failed: exit 3"),
@@ -235,14 +306,14 @@ mod tests {
                     },
                 },
             ],
-            malformed: 1,
-            error: None,
-        };
+            1,
+            now,
+        );
 
         let overlay = timeline_overlay(&view, SceneSize::new(100, 30), now);
         assert_eq!(overlay.items.len(), 2);
         assert_eq!(overlay.items[0].glyph, "✗");
-        assert_eq!(overlay.items[0].when, "just now");
+        assert_eq!(overlay.items[0].when, "5s ago");
         assert!(overlay.items[0].text.contains("failed: exit 3"));
         assert_eq!(overlay.items[0].pane, Some(PaneId::new("pane-2")));
         assert_eq!(overlay.items[1].when, "2m ago");
@@ -250,5 +321,111 @@ mod tests {
         assert_eq!(overlay.skipped_malformed, 1);
         assert!(overlay.footer.contains("1 malformed line(s) skipped"));
         assert!(overlay.footer.contains("esc close"));
+    }
+
+    #[test]
+    fn footer_legend_names_every_glyph_on_screen() {
+        let now = 1_000_000_000_000;
+        let mut view = TimelineViewState {
+            query: String::new(),
+            selected: 0,
+            events: vec![
+                TimelineEvent {
+                    at_ms: now - 5_000,
+                    kind: task_exit("pane-2", "failed: exit 3"),
+                },
+                TimelineEvent {
+                    at_ms: now - 60_000,
+                    kind: TimelineEventKind::ApprovalRequested {
+                        pane: "pane-3".to_owned(),
+                        command: "rm -rf target".to_owned(),
+                        scope: "/tmp".to_owned(),
+                        risk: "high".to_owned(),
+                    },
+                },
+                TimelineEvent {
+                    at_ms: now - 120_000,
+                    kind: TimelineEventKind::CommandDispatched {
+                        command: "split-right".to_owned(),
+                        pane: None,
+                    },
+                },
+            ],
+            malformed: 0,
+            error: None,
+            filtered: Vec::new(),
+        };
+        view.refilter(now);
+
+        let overlay = timeline_overlay(&view, SceneSize::new(120, 30), now);
+        // Every glyph drawn in the rows appears in the footer legend with
+        // its meaning, so a stranger can decode the column.
+        for item in &overlay.items {
+            let meaning = crate::timeline::timeline_glyph_meaning(&item.glyph)
+                .expect("drawn glyph must be in the legend table");
+            assert!(
+                overlay
+                    .footer
+                    .contains(&format!("{} {meaning}", item.glyph)),
+                "footer {:?} must explain glyph {:?}",
+                overlay.footer,
+                item.glyph
+            );
+        }
+        assert!(overlay.footer.contains("✗ failed"));
+        assert!(overlay.footer.contains("? approval"));
+        assert!(overlay.footer.contains("» command"));
+    }
+
+    // The filtered view is a cache: building the overlay never recomputes
+    // it (a hostile multi-token query must not tax every frame), and query
+    // edits are exactly what invalidates it.
+    #[test]
+    fn filter_cache_recomputes_on_query_edits_not_on_overlay_builds() {
+        let now = 1_000_000_000_000;
+        let mut view = view_over(
+            vec![
+                TimelineEvent {
+                    at_ms: now - 5_000,
+                    kind: task_exit("pane-2", "failed: exit 3"),
+                },
+                TimelineEvent {
+                    at_ms: now - 10_000,
+                    kind: task_exit("pane-3", "succeeded: exit 0"),
+                },
+            ],
+            0,
+            now,
+        );
+        assert_eq!(view.filtered(), &[0, 1]);
+
+        // Mutate the event set behind the cache's back: overlay builds keep
+        // serving the cached view (proof no per-frame recompute happens).
+        view.events.push(TimelineEvent {
+            at_ms: now - 1_000,
+            kind: task_exit("pane-9", "failed: exit 9"),
+        });
+        let overlay = timeline_overlay(&view, SceneSize::new(100, 30), now);
+        assert_eq!(overlay.items.len(), 2, "cache served without recompute");
+        let overlay = timeline_overlay(&view, SceneSize::new(100, 30), now);
+        assert_eq!(overlay.items.len(), 2);
+
+        // A query edit recomputes once, over the current event set.
+        view.push_query("failed", now);
+        assert_eq!(view.filtered(), &[0, 2]);
+        let overlay = timeline_overlay(&view, SceneSize::new(100, 30), now);
+        assert_eq!(overlay.items.len(), 2);
+        assert!(
+            overlay
+                .items
+                .iter()
+                .all(|item| item.text.contains("failed"))
+        );
+
+        // Deleting recomputes too, widening back out.
+        for _ in 0.."failed".len() {
+            view.pop_query(now);
+        }
+        assert_eq!(view.filtered(), &[0, 1, 2]);
     }
 }

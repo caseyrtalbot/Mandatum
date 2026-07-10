@@ -15,6 +15,17 @@ struct AttentionItem {
     pane: Option<PaneId>,
 }
 
+/// How the strip names a pane: its user-facing title ("checks failed ·
+/// checks" tells the user WHICH check at a glance), falling back to the id
+/// when the pane is gone. Ids stay in the timeline and session map, where
+/// audit needs them.
+fn pane_name(session: &Session, pane_id: &PaneId) -> String {
+    session
+        .pane(pane_id)
+        .map(|pane| pane.title().to_owned())
+        .unwrap_or_else(|| pane_id.to_string())
+}
+
 /// Aggregate the active session's attention conditions, in fixed severity
 /// order: approvals waiting, failed tasks, blocked/failed agents.
 fn attention_items(state: &AppState, session: &Session) -> Vec<AttentionItem> {
@@ -38,7 +49,11 @@ fn attention_items(state: &AppState, session: &Session) -> Vec<AttentionItem> {
             "approvals"
         };
         items.push(AttentionItem {
-            label: format!("{} {noun} waiting · {first}", waiting.len()),
+            label: format!(
+                "{} {noun} waiting · {}",
+                waiting.len(),
+                pane_name(session, first)
+            ),
             pane: Some((*first).clone()),
         });
     }
@@ -61,7 +76,11 @@ fn attention_items(state: &AppState, session: &Session) -> Vec<AttentionItem> {
             "tasks"
         };
         items.push(AttentionItem {
-            label: format!("{} {noun} failed · {first}", failed_tasks.len()),
+            label: format!(
+                "{} {noun} failed · {}",
+                failed_tasks.len(),
+                pane_name(session, first)
+            ),
             pane: Some((*first).clone()),
         });
     }
