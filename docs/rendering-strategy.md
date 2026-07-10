@@ -24,12 +24,15 @@ frontend adapter (mandatum-renderer is the terminal adapter)
 The scene contract is implemented: `mandatum-scene` owns the neutral scene
 types (`WorkspaceScene`, `PaneScene`, `TerminalSurface`, overlays, hit
 targets), all pane-rect layout math (`scene::layout`), and the neutral input
-event types (`scene::input`, types only until the pointer outcome wires
-them). The app builds a `WorkspaceScene` each frame (`scene_builder` converts
-terminal-engine grids into scene surfaces app-side), and `mandatum-renderer`
-is one adapter: it draws a scene with ratatui and computes no layout. A
-test-only plain-text frontend renders the same scenes to prove the contract
-is renderer-neutral.
+event types (`scene::input`, now fully wired: the app consumes them
+exclusively, and the terminal frontend translates crossterm events into
+them in `crates/app/src/frontend.rs`). The app builds a `WorkspaceScene`
+each frame (`scene_builder` converts terminal-engine grids into scene
+surfaces app-side), and `mandatum-renderer` is one adapter: it draws a
+scene with ratatui and computes no layout. A test-only plain-text frontend
+renders the same scenes to prove the contract is renderer-neutral
+(`crates/app/tests/frontend_parity.rs`), and the GPU spike renders from the
+same contract (`spikes/frontend-wgpu`, see docs/frontend-platform.md).
 
 ## Scene Requirements
 
@@ -82,15 +85,22 @@ The renderer should support:
 
 ## Performance Targets
 
-Initial targets:
+Met and held by standing checks:
 
-- responsive typing during moderate output
-- no visible freeze during pane resize
-- bounded memory growth for scrollback
-- stable redraw while tasks stream output
-- recoverable parser or render failures
+- typing latency: key-to-bytes-out p50 13.30 ms on the event-driven loop,
+  regression bar p50 < 25 ms (procedure and numbers:
+  docs/verification.md, "Input Latency Regression Check")
+- bounded memory and responsiveness under a PTY flood: flow-credit
+  backpressure caps in-flight bytes at 256 KiB per pane; the quit chord
+  works during a `yes` flood (test
+  `pty_flood_stays_bounded_responsive_and_quittable`)
+- bounded scrollback memory (2000-row grid limit)
+- low idle CPU: ~0.1% over 30 s idle (docs/verification.md)
 
-Advanced targets:
+Ongoing targets without a standing check: no visible freeze during pane
+resize, recoverable parser or render failures.
+
+Advanced targets (GPU-frontend territory, not yet product goals):
 
 - smooth scrollback
 - frame pacing suitable for native display refresh

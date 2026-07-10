@@ -115,8 +115,12 @@ Owns live state:
 - restore reconciliation
 
 The current app implementation isolates these responsibilities in
-`app_shell`, `input`, `persistence`, `process_events`, `terminal_runtime`, and
-`task_runtime` modules under `crates/app`.
+`app_shell`, `events`, `frontend`, `input`, `persistence`, `process_events`,
+`terminal_runtime`, `task_runtime`, and `agent_runtime` modules under
+`crates/app` (full module map: docs/repo-structure.md). The run loop is
+event-driven: one unified channel (`AppEvent::Input | Pty | Agent`), a
+250 ms heartbeat, and an 8 ms redraw cap; PTY readers are bounded by
+flow-credit backpressure (256 KiB in flight per pane).
 
 Live runtime state is never serialized as durable truth.
 
@@ -133,8 +137,9 @@ Owns renderer-neutral presentation:
 - status strips
 - overlays
 - hit targets
-- neutral input event types (`scene::input`; wiring lands with the pointer
-  outcome)
+- neutral input event types (`scene::input`: keys, pointer, paste, resize,
+  focus; the app consumes these exclusively; the terminal frontend
+  translates crossterm events into them in `crates/app/src/frontend.rs`)
 
 The scene layer is the interface between product state and frontend adapters.
 It is an engine-side crate (deps: `mandatum-core` + serde only) and never
@@ -146,25 +151,22 @@ grids into scene surfaces.
 Own rendering and platform input:
 
 - terminal frontend (`mandatum-renderer`: the ratatui adapter over
-  `mandatum-scene`; computes no layout, no direct terminal-engine dependency)
-- native window frontend
-- GPU-backed frontend
-- platform-specific frontend
+  `mandatum-scene`; computes no layout, no direct terminal-engine
+  dependency; shipped, v1)
+- GPU-backed frontend (proven as the `spikes/frontend-wgpu` adapter, held
+  warm; see docs/frontend-platform.md)
+- native window / platform-specific frontends (options, not built)
 
 Frontend adapters should draw a scene and emit input/hit-test events. They do
 not own product behavior.
 
 ### `workflows`
 
-Owns developer-workflow definitions:
-
-- task recipes
-- build/test/dev-server recipes
-- task history metadata
-- agent launch intent
-- agent result summaries
-- failure classification
-- command history
+Owns developer-workflow definitions. Built today: `TaskRecipe` and
+`AgentThreadSpec`, which shape durable pane intent for `mandatum-core`.
+Not yet built: build/test/dev-server recipe catalogs, task history
+metadata, agent result summaries, failure classification, command history
+(see docs/workflows.md).
 
 Workflow modules request core/runtime actions instead of mutating layout or
 process state directly.

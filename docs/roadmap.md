@@ -1,128 +1,86 @@
 # Roadmap
 
-## Gate 1: Documentation Source Of Truth
+All six execution gates below are complete; each landed behind a green
+`./ci/gate.sh` (commit hashes in PLAN.md, "Shipped"). This file records what
+each gate delivered and where its proof lives, then the forward horizon.
+PLAN.md is the canonical forward plan; on divergence, PLAN.md wins.
 
-Outcome: future agents can read the docs and build toward the workstation
-vision without contradictory instructions.
+## Gate 1: Documentation Source Of Truth: DONE
 
-Deliverables:
+Outcome: agents can read the docs and build toward the workstation vision
+without contradictory instructions.
 
-- current product principles
-- current architecture
-- frontend platform strategy
-- terminal engine strategy
-- rendering strategy
-- agent runtime spec
-- interaction/workflow specs
-- verification plan
-- repo structure
-- decision log
+Delivered: the docs/ spec series (product principles, architecture,
+frontend platform, terminal engine, rendering, agent runtime, interaction,
+workflows, verification, repo structure, decisions) plus the Constitution
+(docs/constitution.md) with executable gates: `ci/doc-trace.sh` fails the
+build if any law loses its documentation or its gate.
 
-Validation:
-
-- no references to missing docs
-- active docs describe only the current target state
-- no contradictory frontend constraints
-- doc trace scan passes
-
-## Gate 2: Runtime Decomposition
-
-Status: implemented as the initial `crates/app` runtime module split.
+## Gate 2: Runtime Decomposition: DONE
 
 Outcome: live runtime responsibilities are isolated behind clear modules.
 
-Deliverables:
+Delivered: terminal runtime registry (`terminal_runtime.rs`), task runtime
+registry (`task_runtime.rs`), agent runtime registry (`agent_runtime.rs`),
+process event router with flow-credit backpressure (`process_events.rs`),
+persistence coordinator (`persistence.rs`), input router (`input.rs`), and
+the app shell orchestrator (`app_shell.rs`), all under `crates/app`.
+`core` remains a runtime-free leaf, enforced by the L2 gate in
+`ci/conformance.sh`.
 
-- terminal runtime registry
-- task runtime registry
-- process event router
-- persistence coordinator
-- input router
-- app shell orchestrator
-
-Validation:
-
-- existing behavior preserved
-- tests still cover task launch/rerun/stop, restore, replaced-runtime event rejection, and
-  terminal pane restart
-- `core` remains free of runtime/frontend types
-
-## Gate 3: Scene Contract
+## Gate 3: Scene Contract: DONE
 
 Outcome: frontends consume a renderer-neutral scene.
 
-Deliverables:
+Delivered: `mandatum-scene` owns `WorkspaceScene` (pane bounds, terminal/
+task/agent surfaces, palette and overlay views, header/status, hit
+targets), all pane-rect layout math, and the neutral input types. The
+ratatui renderer is one adapter; a test-only plain-text frontend renders
+the same scenes (`crates/app/tests/frontend_parity.rs`). The L1 gate bans a
+direct renderer -> terminal-engine dependency.
 
-- scene types
-- pane bounds and hit targets
-- terminal surface view
-- task surface view
-- agent surface view
-- command palette view
-- status strip view
-- scene tests
+## Gate 4: Frontend Platform Spike: DONE
 
-Validation:
+Outcome: decide whether a native/GPU frontend materially improves the
+product.
 
-- current terminal frontend renders through scene types
-- no product action dispatch inside frontend drawing code
-- scene supports terminal, task, and agent surfaces
+Delivered: the winit+wgpu spike (`spikes/frontend-wgpu`) rendered a live
+PTY with typing, paste, resize, scrollback, selection, and a status strip,
+measured latency and frame pacing, and bound to the scene contract.
+Verdict: measurable quality gain proven, terminal frontend stays v1
+(docs/frontend-platform.md carries the decision record and numbers;
+evidence in `spikes/frontend-wgpu/RESULTS.md`).
 
-## Gate 4: Frontend Platform Spike
-
-Outcome: decide whether a native/GPU frontend materially improves the product.
-
-Deliverables:
-
-- one live PTY rendered through candidate frontend
-- text, cursor, selection, scrollback, resize, paste
-- task/agent status strip
-- latency and frame pacing notes
-- smoke verification path
-
-Validation:
-
-- measurable quality gain or clear rejection
-- product logic remains in shared engine
-- build and run instructions are explicit
-
-## Gate 5: Workstation Visibility Slice
+## Gate 5: Workstation Visibility Slice: DONE
 
 Outcome: the product can supervise a real development session.
 
-Deliverables:
+Delivered: multiple terminal panes, task panes with timeline history, a
+dev-server stand-in, agent panes, the session map, the execution timeline,
+and the header attention strip. Validated by the stranger test
+(docs/verification.md, "The Stranger Test") over the driven demo
+`examples/live-slice/run.sh`.
 
-- multiple terminal panes
-- task recipe with history
-- dev-server recipe
-- agent status pane
-- session map
-- execution timeline
-- global attention strip
-
-Validation:
-
-- user can identify running, failed, blocked, and waiting work at a glance
-- user can jump to every attention item
-- restore preserves useful intent
-
-## Gate 6: Brilliance Pass
+## Gate 6: Brilliance Pass: DONE
 
 Outcome: the experience feels exceptional under real load.
 
-Deliverables:
+Delivered: event-driven main loop (key-to-bytes-out p50 42.6 ms -> 13.3 ms,
+docs/verification.md "Input Latency Regression Check"), PTY flood
+backpressure (bounded memory, quittable under `yes`; test
+`pty_flood_stays_bounded_responsive_and_quittable`), session output search,
+generated help/first-run/legend surfaces, calm failure states, and the
+accessibility floor (keyboard-only completeness, reduced motion, visible
+focus) in docs/interaction-model.md.
 
-- smooth resize and scroll
-- crisp text and color
-- precise pointer selection
-- semantic output search
-- polished command palette
-- calm failure states
-- accessible keyboard and native frontend hooks
+## Next Horizon
 
-Validation:
+Matches PLAN.md ("Next horizon"); see it for detail:
 
-- stress output remains responsive
-- UI remains readable with many actors
-- user can recover from failed panes, failed tasks, blocked agents, and restore
-  errors without ambiguity
+- GPU adapter, when the roadmap needs GPU-only capability or a sub-20 ms
+  end-to-end latency goal (known remaining work listed in PLAN.md).
+- Rewrap on resize, in the `mandatum-terminal-vt` grid if adopted.
+- Connector breadth beyond the Claude CLI and Fake connectors.
+- Damage tracking, when profiling says per-frame conversion costs too much.
+- Minors: `approval_history` growth cap, ratatui bump, idle-heartbeat
+  repaint scope.

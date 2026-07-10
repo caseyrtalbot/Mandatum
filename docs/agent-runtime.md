@@ -15,16 +15,16 @@ agent's state inspectable in the same spatial model as terminals and tasks.
 Engine-side (deps: `mandatum-core`, serde, serde_json; enforced by the L1/L2
 conformance gate). Owns:
 
-- `AgentConnector::launch(&AgentLaunchSpec) -> AgentSession` — object-safe
+- `AgentConnector::launch(&AgentLaunchSpec) -> AgentSession`: object-safe
   connector trait; a session is a `std::sync::mpsc::Receiver<AgentSessionEvent>`
   plus a boxed `AgentSessionControl` (decide / interrupt / shutdown / is_alive).
-- `AgentSessionEvent` — Status, Action, Summary, OutputChunk, CommandRun,
+- `AgentSessionEvent`: Status, Action, Summary, OutputChunk, CommandRun,
   FilesChanged, ApprovalRequested, Completed, Failed, Closed.
 - The approval protocol: `ApprovalRequest { approval_id, command, scope,
   risk }` answered by `ApprovalDecision { approval_id, Approved | Rejected }`.
   Risk bands are advisory heuristics (`assess_command_risk`); the gate itself
   is the enforcement point.
-- `FakeConnector` — deterministic scripted connector used by every test.
+- `FakeConnector`: deterministic scripted connector used by every test.
 
 ### App integration (`crates/app`)
 
@@ -44,7 +44,7 @@ conformance gate). Owns:
   { approval_id, command, approved }` to the durable intent, so past
   decisions remain visible after restart.
 - Connector selection: `AppConfig.agent_connector` (`fake | claude`,
-  default `claude`; both kinds are wired — gated by
+  default `claude`; both kinds are wired, gated by
   `every_configured_connector_kind_is_wired`). Tests wire `fake` everywhere.
 - Model hint: `AppConfig.agent_model` flows into `AgentLaunchSpec.model`
   (`--model` for the Claude CLI). `AppConfig::from_current_dir` reads it from
@@ -54,9 +54,9 @@ conformance gate). Owns:
   the previous session live and authoritative under its unchanged generation
   ([L3-GATE] tested by
   `failed_relaunch_keeps_the_previous_session_authoritative`).
-- Detach folding: whenever a live session is discarded without an outcome —
-  Stop Agent, session `Closed`, OpenProject reconciling away a runtime whose
-  pane is no longer in the active session, or loading a workspace from disk —
+- Detach folding: whenever a live session is discarded without an outcome
+  (Stop Agent, session `Closed`, OpenProject reconciling away a runtime whose
+  pane is no longer in the active session, or loading a workspace from disk),
   `AgentPaneIntent::detach_live_session` folds running/waiting to `unknown`
   and clears pending approval count/ids (approval history stays).
 
@@ -64,15 +64,18 @@ conformance gate). Owns:
 
 Built and dispatched through the palette (`crates/commands`):
 
-- New Agent Pane (`a`) — creates a draft agent pane with the configured
+- New Agent Pane (`a`): creates a draft agent pane with the configured
   default objective
-- Start Agent (`g`) — launches the connector for the focused agent pane's
+- Start Agent (`g`): launches the connector for the focused agent pane's
   objective; creates a pane first if none exists
 - Stop Agent (`k`)
-- Approve Agent Action (`y`) / Reject Agent Action (`d`) — also available as
+- Approve Agent Action (`y`) / Reject Agent Action (`d`): also available as
   direct keys `y` / `n` (no palette) while the focused pane has a pending
   approval; the palette detail text documents this
 - Focus Next Waiting Agent (`j`)
+- Set Agent Objective (`p`): one-line prompt writing the durable
+  objective; also in the agent pane's context menu (see
+  docs/interaction-model.md)
 
 ### Agent Pane Surface
 
@@ -80,10 +83,13 @@ The scene (`PaneContent::Agent` in `mandatum-scene`) carries objective,
 status, current action, latest summary, pending approval detail (command,
 scope, risk band + basis, key hints), the last ~10 changed files, and the
 output tail. The ratatui renderer draws the approval block visually distinct
-(yellow, bold header) and flags the pane title with `approval` while waiting.
+(the theme's attention color, bold header) and flags the pane title with
+`approval` while waiting.
 
-A pane waiting for approval also surfaces in the status strip:
-`1 approval waiting — <pane>`.
+A pane waiting for approval also surfaces in the header attention strip
+(`1 approval waiting · <pane title>`, `crates/app/src/attention.rs`); the
+segment is a hit target that jumps to the pane. Agent states also appear
+as state words in the session map.
 
 ## Agent States
 
@@ -106,8 +112,8 @@ The workspace engine persists (durable intent):
 - agent pane intent: objective, thread reference, durable status,
   last summary, changed-file paths
 - pending approval count and ids (informational only once persisted: a
-  loaded workspace has no live session, so these are cleared — and
-  running/waiting statuses fold to unknown — on every restore)
+  loaded workspace has no live session, so these are cleared, and
+  running/waiting statuses fold to unknown, on every restore)
 - decided-approval history
 
 Live handles and transient output streams are not durable truth.
@@ -120,8 +126,6 @@ Live handles and transient output streams are not durable truth.
   results attached to the actor.
 - **Last update time** on the pane.
 - **Jump from an agent pane to a changed-file summary.**
-- **Session map / palette-context visibility** of agent states beyond the
-  pane and status strip.
 
 ## Verification
 

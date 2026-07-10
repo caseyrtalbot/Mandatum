@@ -1,173 +1,51 @@
-# Mandatum Product Plan
+# Plan
 
-## Objective
+PLAN.md points forward. History and rationale live in `docs/decisions.md`;
+verification procedures live in `docs/verification.md`.
 
-Create the most functional, dynamic, and beautiful development workstation for
-terminal-centered builders: a modular workspace that gives full visibility into
-shells, editors, tasks, servers, agents, diffs, approvals, failures, and
-recovery.
+## Shipped
 
-Mandatum should feel like a terminal environment expanded into a complete
-session operating system.
+The seven-outcome charter build is complete. Each outcome landed behind a
+green `./ci/gate.sh`:
 
-## Design Premise
+1. Constitution and executable gates: five laws, conformance + doc-trace
+   scripts, GitHub Actions running the same gate script, Apache-2.0
+   (`cdfe04c`).
+2. GPU frontend spike: winit+wgpu window on a live PTY with measured latency
+   (`4687a7d`), then scene-contract binding and the side-by-side against the
+   ratatui frontend (`94c7cd6`). Verdict: terminal frontend stays v1.
+3. Renderer-neutral scene contract: `mandatum-scene` owns the WorkspaceScene
+   output model and layout math; the renderer became one adapter (`cd457ed`).
+4. Agent runtime: connector contract, session actors, and a real approval
+   gate enforced at the connector boundary, proven against live Claude CLI
+   (`7a3cd29`).
+5. Intuitive UX: pointer support honoring L5, fuzzy palette, config files,
+   remappable keymap, themes (`703d53f`, host-termios fix `10a7043`).
+6. Workstation visibility: execution timeline, session map, attention strip,
+   verified by a stranger test (`e82626e`).
+7. Brilliance pass: event-driven loop (key-to-bytes-out p50 42.6 -> 13.3 ms),
+   PTY flood backpressure, session search, generated help/first-run/legends,
+   calm failure states (`6b5c209`).
 
-The product is not defined by one frontend. It is defined by a workstation
-engine, a terminal engine, a scene model, and frontend adapters.
+## Next horizon
 
-The current Rust workspace provides the initial substrate:
-
-- durable workspace/session/pane/layout/action state
-- command metadata and routing
-- PTY-backed process runtime
-- terminal parser and grid snapshots
-- task pane launch/rerun/stop runtime
-- JSON workspace persistence
-- terminal frontend adapter
-
-Future work should deepen these pieces into a product architecture that can
-support both a terminal frontend and a high-polish native or GPU-backed
-frontend.
-
-## User Experience Target
-
-The user opens Mandatum and sees the real work surface immediately:
-
-- primary terminal/editor pane
-- supporting shell/log panes
-- build/test/dev-server task pane
-- agent pane showing objective, state, approvals, changed files, and checks
-- status strip showing project health
-- command palette for every meaningful action
-- session map and execution history available without visual clutter
-
-The workspace should stay readable during high output, failed tests, multiple
-agents, build logs, server restarts, and long-running shell sessions.
-
-## Architecture Target
-
-```text
-workspace engine
-  durable state, layout, pane identity, commands, persistence intent
-
-runtime engine
-  live PTYs, tasks, agents, reader events, process lifecycle, recovery
-
-terminal engine
-  parser adapters, grid snapshots, scrollback, terminal capabilities
-
-scene layer
-  renderer-neutral panes, terminal surfaces, overlays, hit targets, selections
-
-frontend adapters
-  terminal frontend, native/GPU frontend, platform-specific frontend options
-
-workflow layer
-  task recipes, build/test/dev-server surfaces, agent orchestration
-```
-
-## Workstreams
-
-### 1. Documentation Source Of Truth
-
-Create a coherent spec series that future agents can read without contradictory
-constraints.
-
-Deliverables:
-
-- product principles
-- architecture spec
-- frontend platform strategy
-- rendering strategy
-- terminal engine spec
-- agent runtime spec
-- interaction model
-- workflow spec
-- roadmap
-- verification plan
-- current repo structure
-- current decision log
-
-### 2. Runtime Decomposition
-
-Move live runtime responsibilities behind smaller modules.
-
-Status: initial app runtime decomposition is implemented in `crates/app`.
-
-Targets:
-
-- terminal pane runtime registry
-- task runtime registry
-- process event router
-- persistence coordinator
-- input router
-- app shell orchestrator
-
-### 3. Scene Contract
-
-Define a renderer-neutral scene interface.
-
-The scene must include:
-
-- pane tree and floating surfaces
-- terminal grid surfaces
-- task and agent status surfaces
-- command palette model
-- hit targets
-- selection state
-- scrollback viewport state
-- animation intent
-- diagnostic overlays
-
-### 4. Frontend Platform Spike
-
-Evaluate product frontend options against measurable criteria:
-
-- startup time
-- input latency
-- frame pacing
-- text shaping and glyph quality
-- scrollback smoothness
-- resize smoothness
-- pointer precision
-- accessibility hooks
-- platform integration
-- build/test automation
-
-Candidate adapters:
-
-- current terminal frontend for continuity and remote operation
-- Rust native/GPU frontend using `winit`, `wgpu`, and text-rendering libraries
-- macOS-native frontend when platform fit is decisive
-
-### 5. Workstation Slice
-
-Build one end-to-end session with:
-
-- multiple live terminal panes
-- one task recipe and task history
-- one agent status pane
-- command palette search
-- pane focus/split/stack/float/zoom
-- save/restore
-- failure visibility
-- copy/search/scrollback baseline
-
-### 6. Brilliance Pass
-
-Raise the experience from functional to exceptional:
-
-- buttery pane resize and scroll
-- crisp text rendering
-- precise selection
-- semantic output search
-- timeline of commands, tasks, and agent actions
-- visible approval queue
-- visual state that stays calm under load
-- recovery that explains what was restored and what needs action
-
-## Immediate Implementation Priority
-
-The next implementation target is the scene contract. Runtime decomposition now
-gives the terminal frontend clearer app-shell, input, persistence, process
-event, terminal-runtime, and task-runtime boundaries to build from.
+- **GPU adapter, when the conditions arrive.** The wgpu adapter stays warm
+  behind the scene contract. Revisit when the roadmap needs GPU-only
+  capability (per-frame animation, pixel-precise layout, embedded non-text
+  surfaces) or sets sub-20 ms end-to-end latency as a product goal. Known
+  remaining work: full multi-pane/overlay scene binding, grapheme widths,
+  IME, runtime DPI, surface-loss recovery, damage tracking.
+- **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
+  narrow widths stays wrapped. If adopted, it belongs in the
+  `mandatum-terminal-vt` grid, not the scene or renderer layers.
+- **Connector breadth.** The connector protocol is model-agnostic (anything
+  that can emit `ApprovalRequested` and accept a decision fits the trait);
+  only the Claude CLI and Fake connectors exist today.
+- **Damage tracking.** Per-frame grid-to-surface conversion is an accepted
+  cost until profiling says otherwise.
+- **Minors worth doing.**
+  - Cap `approval_history` growth in `AgentPaneIntent` once long-running
+    agents make workspace files noticeably large.
+  - Bump ratatui to unblock the open Dependabot `lru` update.
+  - Idle heartbeat repaints the clock UI (~4 Hz); repaint only when a
+    time-derived surface is visible if idle output ever matters.

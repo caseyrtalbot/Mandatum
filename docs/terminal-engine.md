@@ -8,25 +8,32 @@ architecture or frontend choice.
 
 ## Engine Interface
 
-The terminal parser interface must support:
+The engine interface is the `TerminalAdapter` trait in
+`crates/terminal-vt/src/lib.rs`. It supports:
 
 - create terminal state with a size
 - feed raw PTY bytes
 - resize
-- read visible grid
-- read scrollback
-- read cursor state
-- read cell style
+- read visible grid and bounded scrollback (default 2000 rows,
+  `DEFAULT_SCROLLBACK_LIMIT`)
+- read cursor state and cell style
 - read terminal capabilities
+- expose the child's mouse-tracking request (`mouse_mode`: DECSET
+  9/1000/1002/1003, with SGR 1006 encoding; this is how the app honors L5)
 - expose parser errors
-- reset
 - provide deterministic snapshots for tests
 
 ## Current Backend
 
-The current backend uses a Rust VT parser path and exposes terminal grid value
-types through `terminal-vt`. That backend is valid as long as it preserves the
-engine interface and passes terminal conformance tests.
+The default backend (`vte_backend.rs`) wraps the `vte` parser crate behind
+`TerminalAdapter`; a deterministic fake backend (`fake.rs`) exists for
+tests. `TerminalParser` owns one boxed adapter per pane so the app and
+renderer never name a concrete backend. The `[L4-GATE]`
+adapter-conformance suite in `crates/terminal-vt/tests/` (fixture streams,
+mouse-mode exposure, DECSTR release) exercises both the fake backend and
+the default parser path; backend swaps land only if fixture parity holds.
+The L1 dependency scan additionally forbids `vte` from reaching any
+engine-side crate, so parser types cannot leak past this interface.
 
 ## Optional Backends
 

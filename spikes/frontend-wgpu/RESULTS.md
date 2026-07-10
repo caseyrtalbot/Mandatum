@@ -328,3 +328,14 @@ adapter can be clean. The gain does not yet clear the bar to displace a working,
 lower-risk terminal frontend as v1. Ship ratatui; keep this adapter warm behind
 the scene contract; revisit when the roadmap needs GPU-only capability or when
 sub-20 ms end-to-end latency becomes a stated product goal.
+
+
+## Correction note (2026-07-10)
+
+The typing-bench headline above (max 23.1 ms over 300 samples) disagrees
+with the raw run JSON recorded later in this file, which reports
+{"p50":21.64,"p95":22.34,"max":41.18} over 302 samples. The p50/p95
+figures agree across both; the max and sample count do not, and no second
+bench JSON exists here to source the 23.1 ms figure. Downstream docs
+therefore cite p50/p95 only. This note corrects the record rather than
+rewriting the original evidence.

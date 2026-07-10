@@ -1,129 +1,100 @@
 # AGENTS.md
 
-## Product Contract
+Mandatum is a development workstation with a terminal soul: shells, tasks,
+servers, agents, approvals, and recovery in one spatial session surface.
+Reason from the code on disk and the current doc set; docs describe current
+state only.
 
-Mandatum is a development workstation with a terminal soul and IDE-grade session
-visibility. It coordinates shells, editors, builds, tests, logs, agents, diffs,
-approvals, and recovery surfaces inside a modular workspace.
+## The gate
 
-The product must feel fast, spatial, commandable, inspectable, recoverable, and
-beautiful under real development load.
+`./ci/gate.sh` is the single merge gate: fmt, clippy `-D warnings`, build,
+test, `ci/conformance.sh`, `ci/doc-trace.sh`. GitHub Actions runs exactly this
+script, so local and remote CI cannot drift. Red means the change does not
+land. Run it before claiming any change complete; commits go directly to main,
+gated by a green run (solo repo, see docs/decisions.md).
 
-Agents should reason from the current spec set and the code on disk. Product
-docs should describe the current target state directly.
+## The Constitution
 
-## Source Of Truth
+Five immutable laws in `docs/constitution.md`, each enforced by an executable
+gate. Violating one is a defect; `ci/doc-trace.sh` fails the build if any law
+loses its documentation or its gate.
 
-Read these before planning product, architecture, or documentation changes:
+- L1 engine/frontend separation: frontend, parser, process, and async-runtime
+  crates (ratatui, crossterm, vte, portable-pty, tokio, async-std, winit,
+  wgpu, smol, mio) never appear in the dependency closure of engine-side
+  crates (`mandatum-core`, `mandatum-commands`, `mandatum-scene`,
+  `mandatum-agent-runtime`). Enforced by `ci/conformance.sh`.
+- L2 `mandatum-core` is a runtime-free leaf: direct deps frozen to exactly
+  `{serde, serde_json}`. If a feature needs more in core, the boundary is
+  wrong, not the law.
+- L3 durable intent is separate from live runtime: persistence stores intent
+  only; events from replaced runtimes are rejected via the
+  (restart generation, runtime token) stamp. `[L3-GATE]` tests.
+- L4 terminal quality lives behind `TerminalAdapter`: no parser type leaks
+  past the terminal engine. `[L4-GATE]` conformance tests plus the L1 scan.
+- L5 terminal soul: bytes reach the focused child unless an explicit
+  workspace control intercepts them (alt+pointer, copy mode, pane chrome).
+  `[L5-GATE]` routing tests.
 
-1. `PLAN.md`
-2. `docs/product-principles.md`
-3. `docs/architecture.md`
-4. `docs/frontend-platform.md`
-5. `docs/rendering-strategy.md`
-6. `docs/terminal-engine.md`
-7. `docs/agent-runtime.md`
-8. `docs/interaction-model.md`
-9. `docs/workflows.md`
-10. `docs/roadmap.md`
-11. `docs/verification.md`
-12. `docs/repo-structure.md`
-13. `docs/decisions.md`
+## Crate boundaries
 
-## Architecture Rules
+- `mandatum-scene` owns the renderer-neutral contract: the `WorkspaceScene`
+  output model, all pane-rect layout math (`scene::layout`), and the neutral
+  input types (`scene::input`). It depends on `mandatum-core` and serde only.
+  `&WorkspaceScene` alone must suffice to paint a frame; frontends never
+  compute layout or derive chrome.
+- `mandatum-renderer` is one frontend adapter: a single
+  `render(frame, &scene, &theme)` entry. It must not depend on
+  `mandatum-terminal-vt` (direct-dep ban in the conformance gate); the
+  app-side `scene_builder` owns the grid-to-surface conversion.
+- Inside `crates/app`, crossterm may appear only in `app_shell.rs` and
+  `frontend.rs` (source-scan gate in `ci/conformance.sh`). Everything else,
+  including `app_state` and all dispatch logic, consumes
+  `mandatum_scene::input` values.
+- No async runtime anywhere in the workspace: OS threads plus
+  `std::sync::mpsc`, mirroring the PTY runtime. All runtime event streams
+  (input, PTY, agent) feed one unified channel (`crates/app/src/events.rs`).
+- Live runtime state (process handles, sessions, tokens, output tails,
+  pending approval detail) lives in the app runtime registries and is never
+  serialized. The durable subset folds into core intent at the moment an
+  event is accepted.
+- Spikes live in `spikes/`, outside the Cargo workspace: they may depend on
+  engine crates, but their dependency trees never join the product build or
+  the gate.
 
-Keep product behavior behind engine and scene interfaces.
+## Test conventions
 
-- `core` owns durable workspace, session, pane, layout, action, and persistence
-  intent. It must not depend on runtime handles, parser objects, renderer
-  resources, frontend frameworks, or platform UI types.
-- `pty` owns process lifecycle, PTY I/O, resize, exit, termination, and byte
-  events. It does not know how output is drawn.
-- `terminal-vt` owns terminal parser adapters, terminal grid state, style
-  snapshots, scrollback, cursor state, and terminal capabilities.
-- `commands` owns command metadata, palette routing, key resolution, and the
-  split between durable core actions and runtime commands.
-- `workflows` owns task recipes, build/test/dev-server intent, agent launch
-  intent, and workflow metadata.
-- Runtime modules own live process handles, reader threads, runtime tokens,
-  parser instances, launch state, and failure state.
-- The scene layer owns renderer-neutral presentation data: panes, bounds,
-  terminal snapshots, overlays, hit targets, selections, status surfaces, and
-  animation intent.
-- Frontend adapters render a scene and report input. They must not own product
-  behavior.
+- Agent behavior is tested with `FakeConnector` (deterministic scripted
+  flows, including pathological ones). No live model in the gate, ever.
+- Tests that enforce a Constitution law carry the `[Lx-GATE]` tag in their
+  name or comment; `ci/doc-trace.sh` requires at least one per law.
+- PTY-harness pattern for runtime truth: liveness, flood, and scrollback
+  behavior are proven against real PTYs (for example
+  `pty_flood_stays_bounded_responsive_and_quittable` runs a live `yes` and
+  asserts bounded memory and a timely quit).
+- Latency regression: after any change to the run loop, input path, PTY event
+  plumbing, or redraw policy, run the `tui_probe` procedure in
+  `docs/verification.md`. Bar: key-to-bytes-out p50 well under 25 ms
+  (reference: 13.3 ms).
+- Generated surfaces (help overlay, first-run note, glyph legends) are
+  derived from live data with drift-failing completeness tests. Never
+  hand-write key or glyph text; extend the source tables.
+- Negative-test new gates: prove a conformance ban actually fails when the
+  banned edge is reintroduced.
 
-## Frontend Rules
+## Doc-sync duty
 
-Mandatum can have more than one frontend adapter. The current terminal frontend
-is useful, but it is not the whole product architecture.
+- Every judgment call lands as an entry in `docs/decisions.md` (status,
+  decision, context, rationale, consequences, verification).
+- `PLAN.md` points forward; `docs/decisions.md` points backward. Update both
+  when an outcome ships or a deferral changes.
+- `docs/verification.md` owns standing procedures (latency check, stranger
+  test); a verification claim in any doc must trace to a run that happened.
+- Update `README.md` and `docs/repo-structure.md` when crates or the doc set
+  change. Remove references to files that no longer exist.
 
-Frontend work must preserve these rules:
+## Done means
 
-- Product logic stays in the engine.
-- Platform code stays behind an adapter.
-- Rendering code receives scene data and emits input/hit-test events.
-- A native or GPU-backed frontend may be introduced when it improves latency,
-  text quality, animation, pointer precision, accessibility, or platform fit.
-- A terminal frontend remains valuable for fast local verification and remote
-  sessions.
-
-## Product Surface Rules
-
-Build the actual workstation surface first:
-
-- live terminal panes
-- build/test/dev-server task panes
-- agent status panes
-- command palette
-- session map
-- searchable execution history
-- failure and approval surfaces
-- restore/recovery state
-
-Avoid landing pages, dashboards that hide raw output, decorative cards,
-chat-first layouts, and product behavior embedded in renderer code.
-
-## Agent Runtime Rules
-
-Agent panes are session actors, not chat sidebars.
-
-Each agent surface should expose:
-
-- objective
-- current state
-- latest action
-- pending approvals
-- changed files
-- commands run
-- verification results
-- blockers
-- handoff summary
-
-## Documentation Rules
-
-Docs are product source of truth. When editing them:
-
-- keep only current direction
-- remove contradictory instructions
-- remove references to missing files
-- avoid background-story paragraphs
-- keep spec files specific enough for future agents to act without guessing
-- update `README.md`, `PLAN.md`, and `docs/repo-structure.md` when the doc set changes
-
-## Verification
-
-Before claiming completion:
-
-- run documentation trace scans relevant to the change
-- run `cargo fmt --check` if Rust files changed
-- run `cargo clippy --all-targets -- -D warnings` if Rust files changed
-- run `cargo test` when behavior or contracts changed
-- run `git diff --check`
-- report any commands not run
-
-## Done Means
-
-A task is done only when the artifact exists on disk, source-of-truth docs match
-the artifact, verification has been run or explicitly scoped out, and remaining
-risks are named.
+The artifact exists on disk, `./ci/gate.sh` is green (or the skipped steps
+are explicitly scoped out), source-of-truth docs match the artifact, and
+remaining risks are named. Never claim a verification that did not happen.

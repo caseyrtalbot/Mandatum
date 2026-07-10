@@ -2,16 +2,21 @@
 
 ## Standard Commands
 
-Run from the repository root:
+The merge gate is one script, run from the repository root:
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-git diff --check
+./ci/gate.sh
 ```
 
-Run `cargo run` when verifying the current terminal frontend manually.
+It runs, in order: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo build --workspace --all-targets`,
+`cargo test --workspace`, `./ci/conformance.sh` (the L1/L2 dependency
+laws), and `./ci/doc-trace.sh` (every Constitution law has docs and an
+executable gate). GitHub Actions runs exactly this script. Red means the
+change does not land.
+
+Run `cargo run` when verifying the current terminal frontend manually, and
+`git diff --check` before committing.
 
 ## Documentation Verification
 
@@ -94,10 +99,11 @@ For scene/frontend work, prove:
 For agent work, prove:
 
 - agent pane can be created from durable intent
-- running, blocked, failed, complete, stopped, and waiting states render
+- running, blocked, failed, complete, unknown, and waiting states render
 - pending approvals become global attention items
 - changed-file summaries are visible
-- verification results attach to the agent actor
+- verification results attach to the agent actor (not yet built: the
+  checks surface is aspirational; see docs/agent-runtime.md "Not Yet Built")
 - restore keeps agent intent without inventing live runtime state
 
 ## Input Latency Regression Check
@@ -117,7 +123,7 @@ The probe spawns the real release binary inside a PTY at 100x30, types 100
 characters into its shell, and times each until the echo appears in the
 app's output bytes (host-terminal paint excluded). It prints one JSON line
 with p50/p95/max. Also sanity-check idle CPU: run the app in a PTY, idle
-30 seconds, and compare `ps -o cputime` deltas — the event-driven loop
+30 seconds, and compare `ps -o cputime` deltas: the event-driven loop
 must idle at ~0% (no busy spin).
 
 Reference numbers (2026-07-09, M-series MacBook, release build):

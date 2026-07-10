@@ -8,7 +8,10 @@ terminal, native, and high-polish use cases.
 
 ## Frontend Roles
 
-### Terminal Frontend
+### Terminal Frontend (shipped, v1)
+
+The ratatui adapter in `crates/renderer`, driven by `crates/app`. This is
+the shipped v1 frontend (see the platform decision below).
 
 Use for:
 
@@ -27,7 +30,11 @@ Requirements:
 - support task and agent panes
 - remain lightweight and testable
 
-### Native/GPU Frontend
+### Native/GPU Frontend (proven option, not shipped)
+
+A working wgpu adapter exists as a spike (`spikes/frontend-wgpu`); it is
+held warm behind the scene contract, not shipped (see the platform decision
+below).
 
 Use for:
 
@@ -84,18 +91,55 @@ Evaluate frontend options against:
 - test automation
 - packaging complexity
 
-## Required Spike
+## The Spike (Done) And The Platform Decision
 
-Before committing to a native/GPU frontend, build one vertical slice:
+The required spike ran and completed (2026-07-09). A winit + wgpu + glyphon
+frontend at `spikes/frontend-wgpu` (outside the Cargo workspace, so its GPU
+dependency tree never joins the product build or CI gate) delivered the full
+vertical slice: a native window rendering a live PTY-backed terminal grid,
+typing and paste, resize, scrollback, mouse selection and copy, a status
+strip, and self-instrumenting latency/frame-time measurement. Full evidence:
+`spikes/frontend-wgpu/RESULTS.md`.
 
-1. open a window
-2. render one live PTY-backed terminal grid
-3. support typing and paste
-4. support resize
-5. support scrollback and selection
-6. render one task/agent status strip
-7. measure latency and frame pacing
-8. run an automated smoke check
+### Measured numbers (from RESULTS.md)
 
-The spike succeeds only if it proves a user-visible quality gain over the
-terminal frontend without duplicating workstation behavior.
+| Path | What is timed | p50 | p95 |
+|------|---------------|----:|----:|
+| GPU spike | key -> GPU present (paint included) | 21.6 ms | 22.2 ms |
+| ratatui frontend, 40 ms poll loop (then-current) | key -> app-emitted bytes (host paint excluded) | 42.9 ms | 45.8 ms |
+
+Max latency is omitted: RESULTS.md's headline max (23.1 ms) disagrees
+with the raw run JSON in the same file (41.2 ms), so only the figures
+consistent across both are cited (see the correction note in RESULTS.md).
+
+The comparison is asymmetric by construction and the asymmetry favors the
+TUI (its number stops before the host terminal paints), so the measured
+~2x gap understates the true end-to-end gap. Under a sustained scroll flood
+the spike held ~40 fps (frame time p50 25.0 ms, p95 25.8 ms over 94 frames),
+a floor set by an intentionally naive per-frame rebuild, not a ceiling. The
+spike renders purely through the `mandatum-scene` contract (its renderer
+module imports zero parser types), so it is a second conforming frontend,
+not a parallel path.
+
+### Verdict: the terminal frontend stays v1
+
+Recorded in docs/decisions.md ("GPU Frontend Spike Verdict"). The spike
+succeeded (a real, measured latency win and a clean adapter), but a large
+share of the measured gap was the product's own 40 ms input poll loop, and
+a production GPU adapter still owes substantial work the spike skipped
+(multi-pane/overlay scene binding, grapheme widths, IME, runtime DPI,
+surface-loss recovery, damage tracking).
+
+The poll-loop prediction was then confirmed: after the run loop became
+event-driven (docs/decisions.md, "Event-Driven Main Loop With Heartbeat And
+Redraw Cap"), the same external probe measured the terminal frontend at
+**p50 13.30 ms / p95 15.04 ms / max 15.27 ms** key-to-bytes-out (procedure
+and before/after table: docs/verification.md, "Input Latency Regression
+Check"; addendum in RESULTS.md).
+
+The wgpu adapter stays warm behind the scene contract, with its probe
+(`spikes/frontend-wgpu/src/bin/tui_probe.rs`) kept as the product's standing
+latency-regression harness. Revisit when the roadmap needs GPU-only
+capability (true GPU visuals, per-frame animation, pixel-precise layout,
+embedded non-text surfaces) or sets sub-20 ms end-to-end latency as a
+product goal.
