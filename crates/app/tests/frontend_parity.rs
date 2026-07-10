@@ -6,9 +6,10 @@
 
 use std::time::Duration;
 
-use crossterm::event::Event;
-use mandatum_app::{AgentConnectorKind, AppConfig, AppState, build_workspace_scene};
-use mandatum_scene::{OverlayScene, PaneContent, SceneSize, TerminalSurface, WorkspaceScene};
+use mandatum_app::{AppConfig, AppState, build_workspace_scene};
+use mandatum_scene::{
+    OverlayScene, PaneContent, SceneSize, TerminalSurface, Theme, WorkspaceScene, input::InputEvent,
+};
 use ratatui::{Terminal, backend::TestBackend};
 
 /// A second frontend: renders a scene to plain text lines using only scene
@@ -62,7 +63,7 @@ fn render_scene_to_ratatui(scene: &WorkspaceScene) -> Vec<String> {
     let mut terminal =
         Terminal::new(TestBackend::new(scene.size.width, scene.size.height)).unwrap();
     terminal
-        .draw(|frame| mandatum_renderer::render(frame, scene))
+        .draw(|frame| mandatum_renderer::render(frame, scene, &Theme::default()))
         .unwrap();
     let buffer = terminal.backend().buffer();
     (0..buffer.area.height)
@@ -78,19 +79,15 @@ fn render_scene_to_ratatui(scene: &WorkspaceScene) -> Vec<String> {
 fn same_scene_renders_equivalent_content_in_both_frontends() {
     let project_path = std::env::temp_dir();
     let mut state = AppState::new(AppConfig {
-        workspace_name: "Mandatum".to_owned(),
         workspace_file: project_path.join("mandatum-frontend-parity-test.json"),
         project_path,
-        shell_program: "/bin/sh".to_owned(),
         task_command: "printf TASK_OK".to_owned(),
-        agent_connector: AgentConnectorKind::Fake,
         agent_objective: "test objective".to_owned(),
-        agent_model: None,
         spawn_pty: true,
-        restore_on_startup: false,
+        ..AppConfig::default()
     });
     state.handle_terminal_resize(100, 30);
-    state.handle_event(Event::Paste("echo PARITY_MARKER\r".to_owned()));
+    state.handle_event(InputEvent::Paste("echo PARITY_MARKER\r".to_owned()));
 
     // Pump the live runtime until the shell's output reaches the scene.
     let size = SceneSize::new(100, 30);

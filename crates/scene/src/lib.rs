@@ -16,11 +16,12 @@ pub mod layout;
 mod pane;
 mod style;
 mod surface;
+mod theme;
 mod workspace;
 
-/// Durable pane identity, shared with `mandatum-core` so frontends need only
-/// this crate.
-pub use mandatum_core::PaneId;
+/// Durable pane identity, agent status, and split-axis orientation, shared
+/// with `mandatum-core` so frontends need only this crate.
+pub use mandatum_core::{AgentStatus, PaneId, SplitAxis};
 
 pub use geometry::{SceneRect, SceneSize};
 pub use pane::{
@@ -29,7 +30,8 @@ pub use pane::{
 };
 pub use style::{SceneCellStyle, SceneColor};
 pub use surface::{SceneCell, SurfacePosition, TerminalSurface};
+pub use theme::Theme;
 pub use workspace::{
-    HeaderScene, HitTarget, HitTargetKind, OverlayScene, PaletteEntry, PaletteOverlay,
-    WorkspaceScene,
+    ContextMenuEntry, ContextMenuOverlay, HeaderScene, HitTarget, HitTargetKind, OverlayScene,
+    PaletteEntry, PaletteOverlay, WorkspaceScene,
 };

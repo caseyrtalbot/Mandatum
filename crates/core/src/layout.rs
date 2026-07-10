@@ -114,7 +114,9 @@ impl Layout {
 
     pub fn float_pane(&mut self, pane_id: &PaneId) -> Result<(), LayoutMutationError> {
         if self.is_floating(pane_id) {
-            return Ok(());
+            // Floating a floating pane is not a success: reporting Ok would
+            // tell the user something happened when nothing did.
+            return Err(LayoutMutationError::PaneAlreadyFloating(pane_id.clone()));
         }
 
         if self.tiled_pane_order().len() <= 1 {
@@ -129,6 +131,87 @@ impl Layout {
         self.root = next_root;
         self.add_floating(pane_id.clone());
         self.clear_zoom_if(pane_id);
+        Ok(())
+    }
+
+    /// Return a floating pane to the tiled tree: it becomes the second side
+    /// of a new 50/50 horizontal split over the whole tiled area. The
+    /// inverse of [`Layout::float_pane`].
+    pub fn dock_pane(&mut self, pane_id: &PaneId) -> Result<(), LayoutMutationError> {
+        let index = self
+            .floating
+            .iter()
+            .position(|floating| &floating.pane_id == pane_id)
+            .ok_or_else(|| LayoutMutationError::PaneNotFloating(pane_id.clone()))?;
+        self.floating.remove(index);
+
+        let existing = std::mem::replace(
+            &mut self.root,
+            LayoutNode::Pane {
+                pane_id: pane_id.clone(),
+            },
+        );
+        self.root = LayoutNode::Split {
+            axis: SplitAxis::Horizontal,
+            first_percent: 50,
+            first: Box::new(existing),
+            second: Box::new(LayoutNode::Pane {
+                pane_id: pane_id.clone(),
+            }),
+        };
+        Ok(())
+    }
+
+    /// Grow (`delta` > 0) or shrink (`delta` < 0) a tiled pane's share of
+    /// its nearest enclosing split by `delta` percentage points, clamped to
+    /// 1..=99 so neither side collapses. The keyboard counterpart of
+    /// dragging the pane's split separator.
+    pub fn resize_pane(&mut self, pane_id: &PaneId, delta: i8) -> Result<(), LayoutMutationError> {
+        if !self.root.contains(pane_id) {
+            return Err(LayoutMutationError::PaneNotTiled(pane_id.clone()));
+        }
+        if self.root.resize_pane(pane_id, i16::from(delta)) {
+            Ok(())
+        } else {
+            Err(LayoutMutationError::NoSplitToResize)
+        }
+    }
+
+    /// Set the first-side percentage of the `split_index`-th split node in
+    /// preorder (the order [`LayoutNode`] children are visited: node, first
+    /// subtree, second subtree). The percentage is clamped to 1..=99 so
+    /// neither side collapses to nothing.
+    pub fn set_split_percent(
+        &mut self,
+        split_index: usize,
+        first_percent: u8,
+    ) -> Result<(), LayoutMutationError> {
+        let mut next_index = 0;
+        if self
+            .root
+            .set_split_percent(split_index, &mut next_index, first_percent.clamp(1, 99))
+        {
+            Ok(())
+        } else {
+            Err(LayoutMutationError::SplitNotFound(split_index))
+        }
+    }
+
+    /// Move a floating pane's top-left corner (coordinates relative to the
+    /// workspace area, like the rest of [`FloatingRect`]).
+    pub fn set_floating_position(
+        &mut self,
+        pane_id: &PaneId,
+        x: u16,
+        y: u16,
+    ) -> Result<(), LayoutMutationError> {
+        let floating = self
+            .floating
+            .iter_mut()
+            .find(|floating| &floating.pane_id == pane_id)
+            .ok_or_else(|| LayoutMutationError::PaneNotFloating(pane_id.clone()))?;
+        floating.rect.x = x;
+        floating.rect.y = y;
         Ok(())
     }
 
@@ -297,6 +380,55 @@ impl LayoutNode {
         }
     }
 
+    fn set_split_percent(&mut self, target: usize, next_index: &mut usize, percent: u8) -> bool {
+        match self {
+            Self::Pane { .. } | Self::Stack { .. } => false,
+            Self::Split {
+                first_percent,
+                first,
+                second,
+                ..
+            } => {
+                let index = *next_index;
+                *next_index += 1;
+                if index == target {
+                    *first_percent = percent;
+                    return true;
+                }
+                first.set_split_percent(target, next_index, percent)
+                    || second.set_split_percent(target, next_index, percent)
+            }
+        }
+    }
+
+    /// Adjust the nearest (deepest) enclosing split of `target` by `delta`
+    /// points toward the side that holds it. Returns whether any split was
+    /// adjusted.
+    fn resize_pane(&mut self, target: &PaneId, delta: i16) -> bool {
+        let Self::Split {
+            first_percent,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        if first.contains(target) {
+            if !first.resize_pane(target, delta) {
+                *first_percent = clamp_split_percent(i16::from(*first_percent) + delta);
+            }
+            true
+        } else if second.contains(target) {
+            if !second.resize_pane(target, delta) {
+                *first_percent = clamp_split_percent(i16::from(*first_percent) - delta);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     fn replace_pane_with_stack(&mut self, target: &PaneId, stack: Self) -> bool {
         match self {
             Self::Pane { pane_id } if pane_id == target => {
@@ -375,9 +507,17 @@ impl Default for FloatingRect {
     }
 }
 
+fn clamp_split_percent(value: i16) -> u8 {
+    value.clamp(1, 99) as u8
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LayoutMutationError {
     PaneNotTiled(PaneId),
+    PaneNotFloating(PaneId),
+    PaneAlreadyFloating(PaneId),
+    SplitNotFound(usize),
+    NoSplitToResize,
     CannotRemoveLastTiledPane,
     CannotFloatLastTiledPane,
     NoAdjacentPaneToStack,
@@ -387,6 +527,17 @@ impl fmt::Display for LayoutMutationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PaneNotTiled(pane_id) => write!(formatter, "pane {pane_id} is not tiled"),
+            Self::PaneNotFloating(pane_id) => write!(formatter, "pane {pane_id} is not floating"),
+            Self::PaneAlreadyFloating(pane_id) => write!(
+                formatter,
+                "pane {pane_id} is already floating (Dock pane tiles it again)"
+            ),
+            Self::NoSplitToResize => {
+                formatter.write_str("no split to resize: split the pane first")
+            }
+            Self::SplitNotFound(split_index) => {
+                write!(formatter, "layout has no split {split_index}")
+            }
             Self::CannotRemoveLastTiledPane => {
                 formatter.write_str("cannot remove the last tiled pane")
             }

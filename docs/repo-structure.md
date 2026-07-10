@@ -95,7 +95,8 @@ Current terminal runtime shell:
 - `task_runtime.rs`: task runtime registry and pending task launch state
 - `process_events.rs`: reader-thread process event routing
 - `persistence.rs`: workspace file persistence coordinator
-- `input.rs`: keyboard and palette input routing
+- `input.rs`: keyboard chord and terminal input routing
+- `palette.rs`: command palette model (fuzzy filter, context ranking, availability)
 - `copy_mode.rs`: terminal copy/selection state
 - `clipboard.rs`: OSC 52 clipboard payloads
 

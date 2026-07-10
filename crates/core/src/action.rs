@@ -35,7 +35,28 @@ pub enum CoreAction {
     },
     ToggleZoomFocused,
     FloatFocused,
+    /// Return the focused floating pane to the tiled tree (the inverse of
+    /// `FloatFocused`).
+    DockFocused,
     StackFocusedWithNext,
+    /// Grow (positive) or shrink (negative) the focused tiled pane's share
+    /// of its nearest enclosing split, in percentage points (the keyboard
+    /// counterpart of `SetSplitRatio` drag-resize).
+    ResizeFocused {
+        delta_percent: i8,
+    },
+    /// Set the first-side percentage of the `split_index`-th layout split in
+    /// preorder (pointer drag-resize lands here as durable layout intent).
+    SetSplitRatio {
+        split_index: usize,
+        first_percent: u8,
+    },
+    /// Move a floating pane's top-left corner, in workspace-area coordinates.
+    MoveFloatingPane {
+        pane_id: PaneId,
+        x: u16,
+        y: u16,
+    },
     SaveWorkspace,
     RestoreWorkspace,
 }

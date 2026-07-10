@@ -1,10 +1,9 @@
 //! Neutral input contract: the events every frontend emits toward the app.
 //!
-//! TYPES ONLY for now. The app still consumes crossterm events directly
-//! (`app_state::handle_event`); rewiring input through these types is
-//! deferred to the pointer outcome, which forces the translation layer
-//! anyway. See docs/decisions.md ("Scene Output Contract Adopted; Neutral
-//! Input Wiring Deferred To The Pointer Outcome").
+//! The app consumes these types exclusively (`app_state::handle_event`);
+//! each frontend owns the translation from its platform event types into
+//! these values at its boundary. See docs/decisions.md ("Neutral Input
+//! Wiring Landed At The Frontend Boundary").
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +25,22 @@ pub enum InputEvent {
 pub struct Key {
     pub code: KeyCode,
     pub mods: Modifiers,
+}
+
+impl Key {
+    pub const fn new(code: KeyCode, mods: Modifiers) -> Self {
+        Self { code, mods }
+    }
+
+    /// A key press with no modifiers held.
+    pub const fn plain(code: KeyCode) -> Self {
+        Self::new(code, Modifiers::NONE)
+    }
+
+    /// A control chord on a character key.
+    pub const fn ctrl(character: char) -> Self {
+        Self::new(KeyCode::Char(character), Modifiers::CTRL)
+    }
 }
 
 /// Neutral key identity.
@@ -67,6 +82,27 @@ impl Modifiers {
         alt: false,
         super_key: false,
     };
+
+    pub const CTRL: Self = Self {
+        control: true,
+        ..Self::NONE
+    };
+
+    pub const ALT: Self = Self {
+        alt: true,
+        ..Self::NONE
+    };
+
+    /// No modifier held at all.
+    pub const fn is_empty(self) -> bool {
+        !self.shift && !self.control && !self.alt && !self.super_key
+    }
+
+    /// At least one explicit workspace-control modifier (control, alt or
+    /// super) is held. Shift alone is ordinary typing, not a chord.
+    pub const fn has_command_modifier(self) -> bool {
+        self.control || self.alt || self.super_key
+    }
 }
 
 /// A pointer event in cell coordinates, ready to hit-test against

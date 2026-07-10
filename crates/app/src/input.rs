@@ -1,37 +1,39 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mandatum_commands::{
-    CommandId, PaletteContext, PaletteInput, PaletteKey, resolve_palette_key_with_context,
-};
+//! Neutral input routing: `mandatum_scene::input` values to runtime intents.
+//!
+//! No platform event type appears here; the terminal frontend translates
+//! crossterm events into neutral values in `crate::frontend` before they
+//! reach this module. Workspace-control chords come from the remappable
+//! [`Keymap`]; everything unbound flows to the focused child terminal (L5).
+//! Palette-mode keys are routed by `app_state` against the live palette
+//! model (see `crate::palette` for the interaction contract).
+
+use mandatum_commands::CommandId;
+use mandatum_scene::input::{Key, KeyCode};
+
+use crate::keymap::{ChordAction, Keymap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeInput {
     Quit,
     TogglePalette,
-    ClosePalette,
     Dispatch(CommandId),
     SendToTerminal(Vec<u8>),
     Noop,
 }
 
-pub fn key_to_input(key: KeyEvent, palette_open: bool) -> RuntimeInput {
-    key_to_input_with_palette_context(key, palette_open, PaletteContext::default())
+pub fn key_to_input(key: Key) -> RuntimeInput {
+    key_to_input_with_keymap(key, &Keymap::default())
 }
 
-pub fn key_to_input_with_palette_context(
-    key: KeyEvent,
-    palette_open: bool,
-    palette_context: PaletteContext,
-) -> RuntimeInput {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
-        return RuntimeInput::Quit;
-    }
-
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
-        return RuntimeInput::TogglePalette;
-    }
-
-    if palette_open {
-        return key_to_palette_input(key, palette_context);
+pub fn key_to_input_with_keymap(key: Key, keymap: &Keymap) -> RuntimeInput {
+    // Chords are explicit workspace control: they are the only keys the
+    // workspace intercepts ahead of the focused child terminal (L5), and the
+    // config boundary rejects chords without a command modifier.
+    match keymap.chord_action(key) {
+        Some(ChordAction::Quit) => return RuntimeInput::Quit,
+        Some(ChordAction::TogglePalette) => return RuntimeInput::TogglePalette,
+        Some(ChordAction::Dispatch(command_id)) => return RuntimeInput::Dispatch(command_id),
+        None => {}
     }
 
     key_to_terminal_input(key)
@@ -39,12 +41,12 @@ pub fn key_to_input_with_palette_context(
         .unwrap_or(RuntimeInput::Noop)
 }
 
-pub fn key_to_terminal_input(key: KeyEvent) -> Option<Vec<u8>> {
+pub fn key_to_terminal_input(key: Key) -> Option<Vec<u8>> {
     match key.code {
-        KeyCode::Char(character) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(character) if key.mods.control => {
             control_byte(character).map(|byte| vec![byte])
         }
-        KeyCode::Char(character) if key.modifiers.contains(KeyModifiers::ALT) => {
+        KeyCode::Char(character) if key.mods.alt => {
             let mut bytes = vec![0x1b];
             bytes.extend(character.to_string().as_bytes());
             Some(bytes)
@@ -53,7 +55,7 @@ pub fn key_to_terminal_input(key: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Enter => Some(b"\r".to_vec()),
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Tab => Some(b"\t".to_vec()),
-        KeyCode::Esc => Some(vec![0x1b]),
+        KeyCode::Escape => Some(vec![0x1b]),
         KeyCode::Up => Some(b"\x1b[A".to_vec()),
         KeyCode::Down => Some(b"\x1b[B".to_vec()),
         KeyCode::Right => Some(b"\x1b[C".to_vec()),
@@ -61,29 +63,6 @@ pub fn key_to_terminal_input(key: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Home => Some(b"\x1b[H".to_vec()),
         KeyCode::End => Some(b"\x1b[F".to_vec()),
         KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
-        _ => None,
-    }
-}
-
-fn key_to_palette_input(key: KeyEvent, palette_context: PaletteContext) -> RuntimeInput {
-    let Some(key) = palette_key_for(key) else {
-        return RuntimeInput::Noop;
-    };
-
-    match resolve_palette_key_with_context(key, palette_context) {
-        PaletteInput::Close => RuntimeInput::ClosePalette,
-        PaletteInput::Quit => RuntimeInput::Quit,
-        PaletteInput::Dispatch(command_id) => RuntimeInput::Dispatch(command_id),
-        PaletteInput::Noop => RuntimeInput::Noop,
-    }
-}
-
-fn palette_key_for(key: KeyEvent) -> Option<PaletteKey> {
-    match key.code {
-        KeyCode::Esc => Some(PaletteKey::Escape),
-        KeyCode::Tab => Some(PaletteKey::Tab),
-        KeyCode::BackTab => Some(PaletteKey::BackTab),
-        KeyCode::Char(character) => Some(PaletteKey::Character(character)),
         _ => None,
     }
 }

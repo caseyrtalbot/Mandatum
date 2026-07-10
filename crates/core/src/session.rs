@@ -211,10 +211,41 @@ impl Session {
         Ok(&self.focused_pane)
     }
 
+    pub fn dock_focused(&mut self) -> Result<&PaneId, SessionError> {
+        self.ensure_pane_exists(&self.focused_pane)?;
+        self.layout.dock_pane(&self.focused_pane)?;
+        Ok(&self.focused_pane)
+    }
+
+    pub fn resize_focused(&mut self, delta_percent: i8) -> Result<&PaneId, SessionError> {
+        self.ensure_pane_exists(&self.focused_pane)?;
+        self.layout.resize_pane(&self.focused_pane, delta_percent)?;
+        Ok(&self.focused_pane)
+    }
+
     pub fn stack_focused_with_next(&mut self) -> Result<&PaneId, SessionError> {
         self.ensure_pane_exists(&self.focused_pane)?;
         self.layout.stack_with_next(&self.focused_pane)?;
         Ok(&self.focused_pane)
+    }
+
+    pub fn set_split_ratio(
+        &mut self,
+        split_index: usize,
+        first_percent: u8,
+    ) -> Result<(), SessionError> {
+        self.layout.set_split_percent(split_index, first_percent)?;
+        Ok(())
+    }
+
+    pub fn move_floating_pane(
+        &mut self,
+        pane_id: &PaneId,
+        x: u16,
+        y: u16,
+    ) -> Result<(), SessionError> {
+        self.layout.set_floating_position(pane_id, x, y)?;
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<(), SessionError> {

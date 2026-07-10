@@ -1,14 +1,17 @@
 //! Terminal surface drawing: neutral scene cells to ratatui spans.
 
-use mandatum_scene::{SceneCellStyle, SceneColor, TerminalSurface};
+use mandatum_scene::{SceneCellStyle, SceneColor, TerminalSurface, Theme};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 
-/// Paint a surface's visible rows, overlaying selection and cursor marks as
-/// reversed cells.
-pub(crate) fn surface_lines(surface: &TerminalSurface) -> Vec<Line<'static>> {
+use crate::theme_color;
+
+/// Paint a surface's visible rows, overlaying selection and cursor marks.
+/// Selected cells take the theme's selection highlight as background when
+/// one is set, reverse video otherwise; the cursor is always reversed.
+pub(crate) fn surface_lines(surface: &TerminalSurface, theme: &Theme) -> Vec<Line<'static>> {
     surface
         .rows
         .iter()
@@ -23,7 +26,10 @@ pub(crate) fn surface_lines(surface: &TerminalSurface) -> Vec<Line<'static>> {
                     let mut style = cell_style(cell.style);
 
                     if surface.selection_contains(absolute_row, column) {
-                        style = style.add_modifier(Modifier::REVERSED);
+                        style = match theme.selection_highlight {
+                            SceneColor::Default => style.add_modifier(Modifier::REVERSED),
+                            highlight => style.bg(theme_color(highlight)),
+                        };
                     }
                     if surface.cursor_at(absolute_row, column) {
                         style = style.add_modifier(Modifier::REVERSED);

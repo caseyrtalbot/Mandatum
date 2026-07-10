@@ -23,19 +23,36 @@ workspace control.
 
 The command palette is the universal control surface.
 
-It must support:
+Ctrl+P opens it with an empty filter input. The interaction contract
+(implemented in `crates/app/src/palette.rs`, which documents it in full):
 
-- fuzzy search
-- recent commands
-- context-aware commands
-- task commands
-- agent commands
-- pane commands
-- project/session commands
-- settings and keymap commands
-- approval commands
+- Typing filters every command by case-insensitive fuzzy subsequence match,
+  with word-boundary, prefix, and contiguous-run bonuses. Best match first.
+- Commands relevant to the focused pane kind rank first: agent commands on
+  agent panes, task commands on task panes, pane commands on terminals.
+- Commands that are currently impossible appear greyed with the reason in
+  the detail text, never hidden.
+- Every entry shows its verb-first label, a detail line, and its current
+  key(s) from the live keymap. The selected entry previews the pane it will
+  affect where that is cheap.
+- Single-letter fast paths are preserved on the first keystroke: while the
+  input is empty, a bare bound key runs its command (with the task-pane
+  and float/dock substitutions), `q` runs the listed Quit command, and
+  Tab/BackTab cycle pane focus. An unbound key — or any Shift+letter —
+  starts the filter instead, so every command stays reachable by typing.
+  The empty input's placeholder states this rule and the Shift escape.
+- Up/Down or Ctrl+N/Ctrl+P move the selection (while open, Ctrl+P
+  navigates rather than toggling), and the wheel scrolls it. Enter runs
+  the selection; on a greyed entry it reports the reason and stays open.
+  Esc closes. The footer names these keys and counts entries hidden
+  outside the visible window.
+- The palette itself is reachable without a chord: clicking the status
+  strip opens it (the strip's permanent hint names the chord), and the
+  pane context menu leads with a "Command palette" row.
 
 Command labels should be short, verb-first, and stable.
+
+Still open for the palette: recent commands, and settings/keymap commands.
 
 ## Pane Interaction
 
@@ -63,6 +80,12 @@ Pointer support should include:
 - double-click or command to zoom
 - select text
 - open context menu
+- click the status strip to open the palette
+
+Split ratios also move from the keyboard: Grow pane / Shrink pane adjust
+the focused pane's nearest enclosing split in 5% steps, the same durable
+intent separator drags write. Dock pane is the inverse of Float pane, and
+the float letter toggles between them.
 
 If a child terminal app requests mouse capture, the workspace must respect that
 until the user invokes workspace-level control.

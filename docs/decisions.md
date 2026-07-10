@@ -368,3 +368,119 @@ sets sub-20 ms end-to-end latency as a goal.
 Consequences: the adapter stays warm behind the scene contract with its
 measurement harness (tui_probe) reusable for latency regressions; evidence
 in spikes/frontend-wgpu/RESULTS.md.
+
+## Accepted: Neutral Input Wiring Landed At The Frontend Boundary
+
+Status: accepted (2026-07-09)
+
+Decision: the app consumes `mandatum_scene::input` values exclusively.
+`AppState::handle_event` takes `InputEvent`; key routing, palette
+resolution, copy mode, and dispatch all operate on the neutral `Key` type.
+The terminal frontend translates crossterm Key/Mouse/Paste/Resize/Focus
+events into neutral values in `crates/app/src/frontend.rs`, at the
+`app_shell` event loop. Pointer events resolve against the last built
+scene's hit targets; children that request mouse reporting (DECSET
+9/1000/1002/1003, tracked behind `TerminalAdapter::mouse_mode`) get pointer
+events forwarded to their PTY instead of workspace handling, with alt+click
+and copy mode as the explicit workspace overrides ([L5-GATE] tests in
+`app_state`).
+
+Enforcement choice: the seam is inside one crate, so the L1 dependency scan
+cannot see it. `ci/conformance.sh` adds an `[L1-GATE]` source scan instead:
+inside `crates/app`, only `app_shell.rs` and `frontend.rs` may use crossterm
+(imports or `crossterm::` paths). Module-level enforcement via a separate
+frontend crate was considered and rejected for now: it would force the
+event-loop/PTY/render coordination apart before a second frontend exists.
+
+Consequences: a native or GPU frontend plugs in by writing its own
+translation to `InputEvent`; the 37+ app-state tests now speak neutral
+input via `Key::plain`/`Key::ctrl` helpers.
+
+## Accepted: Config Files, Remappable Keymap, And Semantic Themes
+
+Status: accepted (2026-07-09)
+
+Decision: `~/.config/mandatum/config.toml` (honoring `XDG_CONFIG_HOME`)
+overlaid by `<project>/.mandatum/config.toml` (project wins), validated at
+the boundary (`crates/app/src/config.rs`): unknown keys, bad chords, and
+bad colors each produce a status-line warning naming the exact problem and
+the affected setting keeps its default — a broken config never blocks
+launch. Sections: `[keymap]` (global chords per command, kebab-case names
+from the `BUILT_IN_COMMANDS` table, modifier required so bare keys never
+steal terminal typing — L5), `[keymap.palette]` (single letters),
+`[theme]` (named built-in — mandatum-dark / mandatum-light /
+mandatum-high-contrast — plus per-role color overrides), `[ui]`
+`reduced_motion`, `[shell] program`, `[task] default_command`,
+`[agent] connector/model`. Conflicts: later binding wins, with a warning.
+"Reload Config" (palette `e`) re-reads config live.
+
+Theme placement: the scene stays color-semantic (`AgentContent` gained
+`status_role`); the `Theme` type (neutral `SceneColor` roles, defined in
+`mandatum-scene`) is resolved to concrete paint colors only in the
+frontend adapter (`mandatum-renderer`). Keymap defaults live as data in
+one place: the `name`/`palette_key` columns of `BUILT_IN_COMMANDS`.
+
+Consequences: every `CommandId` is remappable; palette entries display
+their bound letter and chord; `render()` takes `&Theme`; the default
+theme reproduces the pre-theme output exactly.
+
+## Accepted: Fuzzy Palette With First-Keystroke Fast Paths
+
+Status: accepted (2026-07-09)
+
+Decision: the palette is a real fuzzy command palette. Ctrl+P opens an
+input field; typing filters all commands by a hand-rolled case-insensitive
+subsequence scorer (`mandatum_commands::fuzzy`: DP over query x label with
+word-boundary, prefix, and contiguous-run bonuses and a linear gap
+penalty, returning matched char indices for highlighting). Ranking adds a
+small context bonus so commands matching the focused pane kind lead;
+impossible commands stay listed but greyed with the reason in the detail
+text. The scene's `PaletteOverlay` carries query, entries (label, detail,
+live key hint, match indices, enabled), selection, and a footer;
+`layout::palette_item_window` is the shared scroll-window math so drawn
+rows and `PaletteItem` hit targets can never disagree.
+
+Fast-path resolution: with an empty input, the first keystroke goes
+through `resolve_palette_key` unchanged — bound letters dispatch (task
+substitutions included), `q` quits, Tab/BackTab cycle focus — preserving
+the existing muscle memory exactly. The ambiguity with typed queries is
+resolved by two escape hatches: unbound letters seed the filter, and
+Shift+letter always seeds the filter. While the palette is open Ctrl+N and
+Ctrl+P are fixed selection keys (Ctrl+P therefore navigates rather than
+toggling; Esc closes; a non-default toggle chord still closes).
+
+Consequences: palette key routing moved out of `crates/app/src/input.rs`
+into the palette model (`crates/app/src/palette.rs` + `app_state`);
+`RuntimeInput` lost its palette variants; command labels are verb-first
+sentence case ("Split pane right").
+
+## Accepted: Pointer Support Reuses The Copy-Mode Viewing Model, Not The Mode
+
+Status: accepted (2026-07-09)
+
+Decision: pointer scrollback and selection reuse copy mode's data model —
+absolute buffer coordinates through the same viewport windowing and the
+same `selected_text` extraction — without entering the copy-mode modal
+keymap. A separate `PointerView` (per-pane wheel scroll offset plus an
+anchor/cursor selection) feeds `pane_view_state`; copy mode wins when both
+exist. The alternative, entering full copy mode on wheel or drag, was
+rejected because it silently steals subsequent typing from the child
+terminal (L5): pointer viewing must leave the keyboard path untouched.
+
+Routing: pointer events resolve against the last built scene's hit
+targets, emitted bottom-up (status, tiled panes, split separators,
+floating panes, overlay rows) and scanned in reverse so the topmost
+surface wins. Split separators carry the preorder split index that
+`mandatum_core::Layout::set_split_percent` addresses, making drag-resize
+durable layout intent (`CoreAction::SetSplitRatio`, clamped 5–95%), and
+float moves land as `CoreAction::MoveFloatingPane`.
+
+Terminal soul: `TerminalAdapter::mouse_mode` exposes the child's DECSET
+9/1000/1002/1003(+1006 SGR) request; while tracking is on, pointer events
+over that pane's grid are encoded (SGR or legacy X10) and written to its
+PTY — no focus steal, button gestures stay with the pane that received
+the press. Explicit workspace overrides: alt+pointer, copy mode, and the
+pane chrome (titles, separators, status, overlays), which is never the
+child's surface. The right-click context menu lists pane-relevant
+commands with their keyboard routes and is keyboard-navigable and
+clickable; Esc dismisses.

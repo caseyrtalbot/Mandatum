@@ -34,6 +34,11 @@ impl SceneRect {
     pub fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
     }
+
+    /// Whether a cell coordinate lands inside this rect.
+    pub fn contains(&self, column: u16, row: u16) -> bool {
+        column >= self.x && column < self.right() && row >= self.y && row < self.bottom()
+    }
 }
 
 /// A frontend surface size in cells.

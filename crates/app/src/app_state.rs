@@ -1,25 +1,33 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use mandatum_agent_runtime::{
     AgentConnector, AgentLaunchSpec, AgentSessionEvent, ApprovalDecision, ApprovalVerdict,
 };
 use mandatum_commands::{
-    BUILT_IN_COMMANDS, CommandCategory, CommandContext, CommandId, CommandTarget, PaletteContext,
-    RuntimeAgentCommand, RuntimeCommand, RuntimeTaskCommand, command_target, dispatch_command,
+    BUILT_IN_COMMANDS, CommandContext, CommandId, CommandTarget, PaletteContext, PaletteInput,
+    PaletteKey, RuntimeAgentCommand, RuntimeCommand, RuntimeTaskCommand, command_target,
+    dispatch_command, resolve_palette_key_with_bindings,
 };
 use mandatum_core::{
-    ActionOutcome, AgentApprovalRecord, AgentPaneIntent, AgentStatus, CoreAction, PaneId, PaneKind,
-    PersistenceRequest, TaskPaneIntent, Workspace,
+    ActionOutcome, AgentApprovalRecord, AgentPaneIntent, AgentStatus, CoreAction, LayoutNode,
+    PaneId, PaneKind, PersistenceRequest, SplitAxis, TaskPaneIntent, Workspace,
 };
 use mandatum_pty::{NativePtyError, PtySize};
-use mandatum_scene::{PaletteEntry, SceneSize, layout::pane_content_rect};
+use mandatum_scene::{
+    ContextMenuEntry, ContextMenuOverlay, HitTarget, HitTargetKind, PaletteOverlay, PaneSceneKind,
+    SceneRect, SceneSize, Theme, WorkspaceScene,
+    input::{InputEvent, Key, KeyCode, PointerButton, PointerEvent, PointerKind},
+    layout::{
+        context_menu_rect, layout_separators, palette_overlay_rect, pane_content_rect,
+        workspace_scene_area,
+    },
+};
 use mandatum_terminal_vt::TerminalGrid;
 
 use crate::{
@@ -29,9 +37,13 @@ use crate::{
     },
     app_shell::AppConfig,
     clipboard::osc52_sequence,
+    config::{load_config, project_config_file},
     copy_mode::CopyModeState,
-    input::{RuntimeInput, key_to_input_with_palette_context},
+    input::{RuntimeInput, key_to_input_with_keymap},
+    keymap::{ChordAction, Keymap, format_chord},
+    palette::{PaletteRow, PaletteState, PaletteWorkspaceView, palette_footer, palette_rows},
     persistence::{PersistenceCoordinator, WorkspaceFileError},
+    pointer::{encode_mouse_event, split_percent_for_pointer},
     process_events::PtyRuntimeEvent,
     scene_builder::PaneViewState,
     task_runtime::{
@@ -56,7 +68,7 @@ pub struct AppState {
     shell_program: String,
     task_command: String,
     spawn_pty: bool,
-    palette_open: bool,
+    palette: Option<PaletteState>,
     should_quit: bool,
     terminal_size: Option<(u16, u16)>,
     status: String,
@@ -68,9 +80,29 @@ pub struct AppState {
     agent_connector: Option<Box<dyn AgentConnector>>,
     agent_objective: String,
     agent_model: Option<String>,
+    keymap: Keymap,
+    theme: Theme,
+    reduced_motion: bool,
+    user_config_file: Option<PathBuf>,
     copy_mode: Option<CopyModeState>,
     clipboard_payload: Option<Vec<u8>>,
     last_copied: Option<String>,
+    // --- Pointer state (runtime presentation only, never serialized) ------
+    /// Hit targets of the last built scene; pointer events resolve against
+    /// them in reverse (topmost target wins).
+    hit_targets: Vec<HitTarget>,
+    /// The in-flight workspace drag, armed on a button press over a target.
+    pointer_drag: Option<PointerDrag>,
+    /// While a mouse-capturing child owns the pointer: the pane its button
+    /// press was forwarded to (and its inner rect for coordinates), so drags
+    /// and the release reach the same child ([L5-GATE]).
+    pointer_forward: Option<(PaneId, SceneRect)>,
+    /// Pointer-driven viewport scroll and selection for one pane.
+    pointer_view: Option<PointerView>,
+    /// The open right-click menu, if any (modal, like the palette).
+    context_menu: Option<ContextMenuState>,
+    /// The previous button press, for double-click detection.
+    last_pane_click: Option<PaneClick>,
     runtime_tx: Sender<PtyRuntimeEvent>,
     runtime_rx: Receiver<PtyRuntimeEvent>,
     agent_tx: Sender<AgentRuntimeEvent>,
@@ -86,6 +118,7 @@ impl AppState {
         let (runtime_tx, runtime_rx) = mpsc::channel();
         let (agent_tx, agent_rx) = mpsc::channel();
         let restore_on_startup = config.restore_on_startup;
+        let config_warnings = config.config_warnings;
 
         let mut state = Self {
             workspace,
@@ -94,7 +127,7 @@ impl AppState {
             shell_program: config.shell_program,
             task_command: config.task_command,
             spawn_pty: config.spawn_pty,
-            palette_open: false,
+            palette: None,
             should_quit: false,
             terminal_size: None,
             status: "ready".to_owned(),
@@ -106,9 +139,19 @@ impl AppState {
             agent_connector: connector_for_kind(config.agent_connector),
             agent_objective: config.agent_objective,
             agent_model: config.agent_model,
+            keymap: config.keymap,
+            theme: config.theme,
+            reduced_motion: config.reduced_motion,
+            user_config_file: config.user_config_file,
             copy_mode: None,
             clipboard_payload: None,
             last_copied: None,
+            hit_targets: Vec::new(),
+            pointer_drag: None,
+            pointer_forward: None,
+            pointer_view: None,
+            context_menu: None,
+            last_pane_click: None,
             runtime_tx,
             runtime_rx,
             agent_tx,
@@ -120,6 +163,13 @@ impl AppState {
             state.restore_workspace_at_startup();
         }
 
+        // A broken config never blocks launch; it launches on defaults with
+        // the exact problems named in the status line.
+        if !config_warnings.is_empty() {
+            state.status = format!("config: {}", config_warnings.join("; "));
+            state.preserve_status_on_next_resize = true;
+        }
+
         state
     }
 
@@ -128,7 +178,7 @@ impl AppState {
     }
 
     pub fn palette_open(&self) -> bool {
-        self.palette_open
+        self.palette.is_some()
     }
 
     pub fn should_quit(&self) -> bool {
@@ -174,23 +224,139 @@ impl AppState {
         self.clipboard_payload.take()
     }
 
-    pub fn palette_items(&self) -> Vec<PaletteEntry> {
-        BUILT_IN_COMMANDS
-            .iter()
-            .map(|command| PaletteEntry::new(command.label, palette_detail(command)))
-            .collect()
+    /// The active theme, resolved from config, for the frontend adapter.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
     }
 
-    pub fn handle_event(&mut self, event: Event) {
+    /// The permanent status-strip hint naming the workspace's entry points,
+    /// from the live keymap. A stranger's first breadcrumb: the palette
+    /// chord and the right-click menu are always written on screen.
+    pub(crate) fn control_hint(&self) -> String {
+        format!(
+            "{} commands · right-click menu",
+            format_chord(self.keymap.toggle_palette)
+        )
+    }
+
+    /// Whether the config asked for reduced motion. Nothing animates yet;
+    /// frontends must consult this before they ever do.
+    pub fn reduced_motion(&self) -> bool {
+        self.reduced_motion
+    }
+
+    /// The palette overlay scene for the current frame, `None` while the
+    /// palette is closed: the query, the fuzzy-filtered context-ranked
+    /// entries, the selection, and the key-hint footer.
+    pub(crate) fn palette_overlay(&self, size: SceneSize) -> Option<PaletteOverlay> {
+        let palette = self.palette.as_ref()?;
+        let rows = self.current_palette_rows();
+        let selected = if rows.is_empty() {
+            None
+        } else {
+            Some(palette.selected.min(rows.len() - 1))
+        };
+        let area = palette_overlay_rect(size);
+        // The footer counts the entries scrolled out of the visible window
+        // (the same window math the frontend and hit targets use), so the
+        // list never looks complete when it is not.
+        let window = mandatum_scene::layout::palette_item_window(
+            mandatum_scene::layout::pane_inner_rect(area),
+            rows.len(),
+            selected,
+        );
+        Some(PaletteOverlay {
+            area,
+            query: palette.query.clone(),
+            footer: palette_footer(window.start, rows.len().saturating_sub(window.end)),
+            items: rows.into_iter().map(|row| row.entry).collect(),
+            selected,
+        })
+    }
+
+    /// The palette rows for the live query, ranked and availability-gated.
+    fn current_palette_rows(&self) -> Vec<PaletteRow> {
+        let Some(palette) = self.palette.as_ref() else {
+            return Vec::new();
+        };
+        palette_rows(
+            &palette.query,
+            palette.selected,
+            &self.palette_workspace_view(),
+            &self.keymap,
+        )
+    }
+
+    /// Snapshot the workspace facts the palette ranks and gates on.
+    fn palette_workspace_view(&self) -> PaletteWorkspaceView {
+        let session = self.workspace.active_session();
+        let focused_id = session.focused_pane_id().clone();
+        let focused = session.pane(&focused_id);
+        let focused_kind = focused
+            .map(|pane| match pane.kind() {
+                PaneKind::Terminal { .. } => PaneSceneKind::Terminal,
+                PaneKind::Task { .. } => PaneSceneKind::Task,
+                PaneKind::Agent { .. } => PaneSceneKind::Agent,
+                PaneKind::StatusLog { .. } => PaneSceneKind::StatusLog,
+            })
+            .unwrap_or(PaneSceneKind::Terminal);
+        let focused_pane_label = focused
+            .map(|pane| format!("{} ({focused_id})", pane.title()))
+            .unwrap_or_else(|| focused_id.to_string());
+        let agent_runtime = self.agent_panes.get(&focused_id);
+        let focused_is_floating = session.layout().is_floating(&focused_id);
+
+        PaletteWorkspaceView {
+            focused_kind,
+            focused_pane_label,
+            focused_agent_session_live: agent_runtime.is_some(),
+            focused_agent_pending_approval: agent_runtime
+                .is_some_and(|runtime| runtime.pending_approval.is_some()),
+            agent_connector_configured: self.agent_connector.is_some(),
+            agent_panes_exist: !self.agent_pane_ids().is_empty(),
+            any_agent_waiting: session
+                .panes()
+                .iter()
+                .any(|(pane_id, _)| self.pane_waiting_for_approval(pane_id)),
+            focused_task_running: self
+                .task_panes
+                .get(&focused_id)
+                .is_some_and(|task| task.runtime.exit_status.is_none())
+                || self.task_panes.pending_launches.contains(&focused_id),
+            focused_has_live_terminal: self.terminal_panes.get(&focused_id).is_some(),
+            focused_is_floating,
+            // Any tiled pane sits inside a split exactly when the tiled root
+            // is one.
+            focused_in_tiled_split: !focused_is_floating
+                && matches!(session.layout().root(), LayoutNode::Split { .. }),
+            pane_count: session.panes().len(),
+        }
+    }
+
+    pub fn handle_event(&mut self, event: InputEvent) {
         match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
-            Event::Resize(columns, rows) => self.handle_terminal_resize(columns, rows),
-            // Paste only reaches the shell in normal mode; copy mode owns input.
-            Event::Paste(text) if self.copy_mode.is_none() => {
+            InputEvent::Key(key) => self.handle_key(key),
+            InputEvent::Resize(size) => self.handle_terminal_resize(size.width, size.height),
+            // Paste only reaches the shell in normal mode; copy mode and the
+            // context menu own input while open.
+            InputEvent::Paste(text) if self.copy_mode.is_none() && self.context_menu.is_none() => {
                 self.write_to_focused_terminal(text.as_bytes())
             }
+            // [L5-GATE] Pointer events resolve against the last scene's hit
+            // targets; when the child under the pointer requested mouse
+            // reporting they forward to its PTY instead, unless the user
+            // invokes explicit workspace control (alt, copy mode, menu).
+            InputEvent::Pointer(pointer) => self.handle_pointer(pointer),
             _ => {}
         }
+    }
+
+    /// Build one frame of scene and retain its hit targets, so pointer
+    /// events resolve against exactly what was last drawn.
+    pub fn build_scene(&mut self, size: SceneSize) -> WorkspaceScene {
+        let scene = crate::scene_builder::build_workspace_scene(self, size);
+        self.hit_targets = scene.hit_targets.clone();
+        scene
     }
 
     pub fn handle_terminal_resize(&mut self, columns: u16, rows: u16) {
@@ -200,6 +366,11 @@ impl AppState {
         if self.copy_mode.is_some() {
             self.copy_mode = None;
         }
+        // Pointer state addresses the old geometry too: selections and menu
+        // anchors would point at moved cells, and any drag loses its frame.
+        self.pointer_view = None;
+        self.pointer_drag = None;
+        self.context_menu = None;
         if self.preserve_status_on_next_resize {
             let status = self.status.clone();
             if let Err(error) = self.reconcile_runtimes() {
@@ -217,9 +388,22 @@ impl AppState {
         self.mark_redraw();
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) {
+    pub fn handle_key(&mut self, key: Key) {
+        // The context menu is the topmost modal surface.
+        if self.context_menu.is_some() {
+            self.handle_context_menu_key(key);
+            self.mark_redraw();
+            return;
+        }
+
         if self.copy_mode.is_some() {
             self.handle_copy_mode_key(key);
+            self.mark_redraw();
+            return;
+        }
+
+        if self.palette.is_some() {
+            self.handle_palette_key(key);
             self.mark_redraw();
             return;
         }
@@ -227,10 +411,7 @@ impl AppState {
         // Direct approval keys: while the focused pane is an agent pane with
         // a pending approval, y/n decide it without opening the palette. An
         // agent pane has no terminal input to shadow.
-        if !self.palette_open
-            && key.modifiers.is_empty()
-            && self.focused_agent_has_pending_approval()
-        {
+        if key.mods.is_empty() && self.focused_agent_has_pending_approval() {
             match key.code {
                 KeyCode::Char('y') => {
                     self.dispatch(CommandId::ApproveAgentAction);
@@ -246,35 +427,163 @@ impl AppState {
             }
         }
 
-        match key_to_input_with_palette_context(key, self.palette_open, self.palette_context()) {
+        match key_to_input_with_keymap(key, &self.keymap) {
             RuntimeInput::Quit => {
                 self.should_quit = true;
                 self.status = "quitting".to_owned();
             }
-            RuntimeInput::TogglePalette => {
-                self.palette_open = !self.palette_open;
-                self.status = if self.palette_open {
-                    "command palette open".to_owned()
-                } else {
-                    "command palette closed".to_owned()
-                };
-            }
-            RuntimeInput::ClosePalette => {
-                if self.palette_open {
-                    self.palette_open = false;
-                    self.status = "command palette closed".to_owned();
-                }
-            }
-            RuntimeInput::Dispatch(command_id) => {
-                if self.palette_open {
-                    self.palette_open = false;
-                }
-                self.dispatch(command_id);
-            }
+            RuntimeInput::TogglePalette => self.open_palette(),
+            RuntimeInput::Dispatch(command_id) => self.dispatch(command_id),
             RuntimeInput::SendToTerminal(bytes) => self.write_to_focused_terminal(&bytes),
             RuntimeInput::Noop => {}
         }
         self.mark_redraw();
+    }
+
+    /// Palette-mode key routing. See `crate::palette` for the full
+    /// interaction contract this implements.
+    fn handle_palette_key(&mut self, key: Key) {
+        // Fixed navigation keys win over chords while the palette is open,
+        // so Ctrl+P (the default toggle chord) moves the selection up here;
+        // Esc closes the palette.
+        let ctrl_only = key.mods.control && !key.mods.shift && !key.mods.alt && !key.mods.super_key;
+        if key.code == KeyCode::Up || (ctrl_only && key.code == KeyCode::Char('p')) {
+            self.move_palette_selection(-1);
+            return;
+        }
+        if key.code == KeyCode::Down || (ctrl_only && key.code == KeyCode::Char('n')) {
+            self.move_palette_selection(1);
+            return;
+        }
+
+        // Workspace chords keep working over the open palette: quit quits, a
+        // (non-default) toggle chord closes, command chords dispatch.
+        match self.keymap.chord_action(key) {
+            Some(ChordAction::Quit) => {
+                self.should_quit = true;
+                self.status = "quitting".to_owned();
+                return;
+            }
+            Some(ChordAction::TogglePalette) => {
+                self.close_palette();
+                return;
+            }
+            Some(ChordAction::Dispatch(command_id)) => {
+                self.palette = None;
+                self.dispatch(command_id);
+                return;
+            }
+            None => {}
+        }
+
+        let query_is_empty = self
+            .palette
+            .as_ref()
+            .is_none_or(|palette| palette.query.is_empty());
+        match key.code {
+            KeyCode::Escape => self.close_palette(),
+            KeyCode::Enter => self.execute_palette_selection(),
+            KeyCode::Backspace => {
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.query.pop();
+                    palette.selected = 0;
+                }
+            }
+            // First-keystroke muscle memory: with an empty input, Tab and
+            // BackTab cycle pane focus exactly as the pre-fuzzy palette did.
+            KeyCode::Tab if query_is_empty => {
+                self.palette = None;
+                self.dispatch(CommandId::FocusNext);
+            }
+            KeyCode::BackTab if query_is_empty => {
+                self.palette = None;
+                self.dispatch(CommandId::FocusPrevious);
+            }
+            KeyCode::Tab => self.move_palette_selection(1),
+            KeyCode::BackTab => self.move_palette_selection(-1),
+            KeyCode::Char(character)
+                if !key.mods.control && !key.mods.alt && !key.mods.super_key =>
+            {
+                // First-keystroke muscle memory: with an empty input, a bare
+                // key resolves through the classic single-letter bindings
+                // (bound keys dispatch, `q` quits). An unbound key — or any
+                // Shift+letter — starts the fuzzy filter instead. Shift only
+                // suppresses the fast path for letters: symbol bindings
+                // (like +/-) legitimately arrive with shift held.
+                if query_is_empty && !(key.mods.shift && character.is_ascii_alphabetic()) {
+                    match resolve_palette_key_with_bindings(
+                        PaletteKey::Character(character),
+                        self.palette_context(),
+                        &self.keymap.palette,
+                    ) {
+                        PaletteInput::Dispatch(command_id) => {
+                            self.palette = None;
+                            self.dispatch(command_id);
+                            return;
+                        }
+                        PaletteInput::Quit => {
+                            self.should_quit = true;
+                            self.status = "quitting".to_owned();
+                            return;
+                        }
+                        PaletteInput::Close => {
+                            self.close_palette();
+                            return;
+                        }
+                        PaletteInput::Noop => {}
+                    }
+                }
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.query.push(character);
+                    palette.selected = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_palette(&mut self) {
+        self.palette = Some(PaletteState::default());
+        self.status = "command palette open".to_owned();
+    }
+
+    fn close_palette(&mut self) {
+        self.palette = None;
+        self.status = "command palette closed".to_owned();
+    }
+
+    fn move_palette_selection(&mut self, delta: isize) {
+        let row_count = self.current_palette_rows().len();
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        if row_count == 0 {
+            palette.selected = 0;
+            return;
+        }
+        let current = palette.selected.min(row_count - 1) as isize;
+        palette.selected = (current + delta).clamp(0, row_count as isize - 1) as usize;
+    }
+
+    /// Run the selected palette entry: dispatch it and close, or surface the
+    /// reason a greyed entry cannot run (the palette stays open).
+    fn execute_palette_selection(&mut self) {
+        let rows = self.current_palette_rows();
+        let Some(palette) = self.palette.as_ref() else {
+            return;
+        };
+        if rows.is_empty() {
+            self.status = format!("no command matches '{}'", palette.query.trim());
+            return;
+        }
+        let row = &rows[palette.selected.min(rows.len() - 1)];
+        if !row.enabled {
+            self.status = format!("{} is unavailable: {}", row.entry.label, row.entry.detail);
+            return;
+        }
+        let command_id = row.command_id;
+        self.palette = None;
+        self.dispatch(command_id);
     }
 
     pub fn dispatch(&mut self, command_id: CommandId) {
@@ -316,8 +625,10 @@ impl AppState {
     }
 
     fn palette_context(&self) -> PaletteContext {
+        let session = self.workspace.active_session();
         PaletteContext {
             focused_pane_is_task: self.focused_pane_is_task(),
+            focused_pane_is_floating: session.layout().is_floating(session.focused_pane_id()),
         }
     }
 
@@ -352,7 +663,47 @@ impl AppState {
     fn dispatch_runtime_command(&mut self, runtime_command: RuntimeCommand) {
         match runtime_command {
             RuntimeCommand::EnterCopyMode => self.enter_copy_mode(),
+            RuntimeCommand::ReloadConfig => self.reload_config(),
+            RuntimeCommand::Quit => {
+                self.should_quit = true;
+                self.status = "quitting".to_owned();
+            }
+            RuntimeCommand::CopySelection => {
+                if let Some(pane_id) = self.copy_mode.as_ref().map(|state| state.pane_id.clone()) {
+                    self.copy_selection(&pane_id);
+                } else {
+                    self.copy_pointer_selection();
+                }
+            }
         }
+    }
+
+    /// Re-read the config files live. Keymap, theme and UI settings apply
+    /// immediately; shell/task/agent settings apply to future launches.
+    fn reload_config(&mut self) {
+        let project_file = project_config_file(&self.command_context.project_path);
+        let loaded = load_config(self.user_config_file.as_deref(), &project_file);
+        self.keymap = loaded.keymap;
+        self.theme = loaded.theme;
+        self.reduced_motion = loaded.reduced_motion;
+        if let Some(shell_program) = loaded.shell_program {
+            self.shell_program = shell_program;
+        }
+        if let Some(task_command) = loaded.task_command {
+            self.task_command = task_command;
+        }
+        if let Some(kind) = loaded.agent_connector {
+            self.agent_connector = connector_for_kind(kind);
+        }
+        if let Some(model) = loaded.agent_model {
+            self.agent_model = Some(model);
+        }
+        self.status = if loaded.warnings.is_empty() {
+            "config reloaded".to_owned()
+        } else {
+            format!("config reloaded; {}", loaded.warnings.join("; "))
+        };
+        self.mark_redraw();
     }
 
     fn dispatch_runtime_task_command(&mut self, task_command: RuntimeTaskCommand) {
@@ -522,6 +873,10 @@ impl AppState {
         self.copy_mode = None;
         self.clipboard_payload = None;
         self.last_copied = None;
+        self.pointer_view = None;
+        self.pointer_drag = None;
+        self.pointer_forward = None;
+        self.context_menu = None;
         self.task_panes.pending_launches.clear();
         self.task_panes.statuses.clear();
         self.terminal_panes = runtimes
@@ -1248,6 +1603,14 @@ impl AppState {
         {
             self.copy_mode = None;
         }
+        // Pointer selection/scroll addresses the replaced grid too.
+        if self
+            .pointer_view
+            .as_ref()
+            .is_some_and(|view| view.pane_id == pane_id)
+        {
+            self.pointer_view = None;
+        }
         self.spawn_terminal_pane(pane_id.clone(), size)
             .map_err(|source| ReconcileRuntimeError::Restart {
                 pane_id: pane_id.clone(),
@@ -1545,7 +1908,8 @@ impl AppState {
     }
 
     /// How a pane's grid is being viewed: copy-mode scroll/selection/cursor
-    /// for the copy-mode pane, following live output otherwise.
+    /// for the copy-mode pane, pointer scroll/selection next, following live
+    /// output otherwise.
     pub(crate) fn pane_view_state(&self, pane_id: &PaneId) -> PaneViewState {
         match &self.copy_mode {
             Some(state) if &state.pane_id == pane_id => PaneViewState {
@@ -1553,13 +1917,797 @@ impl AppState {
                 selection: state.selection_span(),
                 copy_cursor: Some((state.cursor_row, state.cursor_col)),
             },
-            _ => PaneViewState::default(),
+            _ => match &self.pointer_view {
+                Some(view) if &view.pane_id == pane_id => PaneViewState {
+                    scroll_offset: view.scroll_offset,
+                    selection: view.ordered_selection(),
+                    // Pointer selection shows no block cursor; the selection
+                    // itself is the feedback.
+                    copy_cursor: None,
+                },
+                _ => PaneViewState::default(),
+            },
         }
     }
 
     #[cfg(test)]
     pub(crate) fn workspace_mut(&mut self) -> &mut Workspace {
         &mut self.workspace
+    }
+
+    // --- Pointer routing ---------------------------------------------------
+
+    /// Route one pointer event. The context menu is modal; otherwise events
+    /// resolve against the last scene's hit targets, with child mouse
+    /// capture honored ahead of workspace behaviors ([L5-GATE]).
+    fn handle_pointer(&mut self, pointer: PointerEvent) {
+        if self.context_menu.is_some() {
+            self.handle_context_menu_pointer(pointer);
+            self.mark_redraw();
+            return;
+        }
+
+        match pointer.kind {
+            PointerKind::Down => self.handle_pointer_down(pointer),
+            PointerKind::Drag => self.handle_pointer_drag(pointer),
+            PointerKind::Up => self.handle_pointer_up(pointer),
+            PointerKind::Wheel { .. } => self.handle_pointer_wheel(pointer),
+            // No hover behavior outside the menu.
+            PointerKind::Move => return,
+        }
+        self.mark_redraw();
+    }
+
+    /// The topmost hit target of the last built scene under a point: the
+    /// builder emits targets bottom-up, so the reverse scan wins overlaps.
+    fn pointer_target(&self, column: u16, row: u16) -> Option<HitTarget> {
+        self.hit_targets
+            .iter()
+            .rev()
+            .find(|target| target.rect.contains(column, row))
+            .cloned()
+    }
+
+    fn handle_pointer_down(&mut self, pointer: PointerEvent) {
+        let target = self.pointer_target(pointer.column, pointer.row);
+
+        // The palette is modal: its rows are clickable, anywhere else closes
+        // it, and the press is consumed either way.
+        if self.palette.is_some() {
+            if let Some(HitTargetKind::PaletteItem(index)) =
+                target.as_ref().map(|target| target.kind.clone())
+            {
+                self.activate_palette_item(index);
+            } else {
+                self.close_palette();
+            }
+            return;
+        }
+
+        let Some(target) = target else {
+            self.pointer_drag = None;
+            return;
+        };
+        match (target.kind.clone(), pointer.button) {
+            // The status strip is the workspace's own front door: clicking
+            // it opens the command palette named in its permanent hint.
+            (HitTargetKind::StatusStrip, Some(PointerButton::Left)) => self.open_palette(),
+            (HitTargetKind::PaneBody(pane_id), Some(button)) => {
+                // [L5-GATE] The child's grid owns clicks while it tracks the
+                // mouse; alt+click stays workspace control.
+                if self.try_forward_pointer(&pane_id, target.rect, &pointer) {
+                    return;
+                }
+                match button {
+                    PointerButton::Left => self.pointer_down_on_body(pane_id, target.rect, pointer),
+                    PointerButton::Right => self.open_context_menu(pane_id, pointer),
+                    PointerButton::Middle => {}
+                }
+            }
+            (HitTargetKind::PaneTitle(pane_id), Some(button)) => match button {
+                // Pane chrome is workspace surface even when the child
+                // captures the mouse inside its own grid.
+                PointerButton::Left => self.pointer_down_on_title(pane_id, target.rect, pointer),
+                PointerButton::Right => self.open_context_menu(pane_id, pointer),
+                PointerButton::Middle => {}
+            },
+            (HitTargetKind::Separator { split_index, .. }, Some(PointerButton::Left)) => {
+                self.begin_split_drag(split_index);
+            }
+            _ => {}
+        }
+    }
+
+    /// [L5-GATE] If the child under the pointer requested mouse reporting
+    /// and the user is not overriding it (alt, copy mode), the event belongs
+    /// to the child: encode it and write it to that pane's PTY. Returns
+    /// whether the child consumed the event.
+    fn try_forward_pointer(
+        &mut self,
+        pane_id: &PaneId,
+        inner: SceneRect,
+        pointer: &PointerEvent,
+    ) -> bool {
+        if pointer.mods.alt || self.copy_mode.is_some() {
+            return false;
+        }
+        let Some(runtime) = self.terminal_panes.get_mut(pane_id) else {
+            return false;
+        };
+        let mode = runtime.parser.mouse_mode();
+        if !mode.wants_mouse() {
+            return false;
+        }
+
+        let column = pointer
+            .column
+            .saturating_sub(inner.x)
+            .min(inner.width.saturating_sub(1));
+        let row = pointer
+            .row
+            .saturating_sub(inner.y)
+            .min(inner.height.saturating_sub(1));
+        if let Some(bytes) = encode_mouse_event(mode, pointer, column, row)
+            && let Err(error) = runtime.write_input(&bytes)
+        {
+            runtime.error = Some(error.to_string());
+            self.status = format!("PTY mouse input failed for {pane_id}: {error}");
+        }
+        // The child that received the press owns the rest of the gesture.
+        if pointer.kind == PointerKind::Down {
+            self.pointer_forward = Some((pane_id.clone(), inner));
+        }
+        true
+    }
+
+    /// Forward a drag/release to the pane whose press was forwarded, even if
+    /// the pointer has left its rect (button-capture semantics).
+    fn forward_captured_pointer(
+        &mut self,
+        pane_id: &PaneId,
+        inner: SceneRect,
+        pointer: &PointerEvent,
+    ) {
+        if let Some(runtime) = self.terminal_panes.get_mut(pane_id) {
+            let mode = runtime.parser.mouse_mode();
+            let column = pointer
+                .column
+                .saturating_sub(inner.x)
+                .min(inner.width.saturating_sub(1));
+            let row = pointer
+                .row
+                .saturating_sub(inner.y)
+                .min(inner.height.saturating_sub(1));
+            if let Some(bytes) = encode_mouse_event(mode, pointer, column, row)
+                && let Err(error) = runtime.write_input(&bytes)
+            {
+                runtime.error = Some(error.to_string());
+            }
+        }
+        if pointer.kind == PointerKind::Up {
+            self.pointer_forward = None;
+        }
+    }
+
+    fn pointer_down_on_body(&mut self, pane_id: PaneId, inner: SceneRect, pointer: PointerEvent) {
+        self.focus_pane_for_pointer(&pane_id);
+
+        // Double-click with a command modifier toggles zoom without needing
+        // the title row.
+        if pointer.mods.has_command_modifier()
+            && self.take_double_click(&pane_id, PaneClickTarget::Body)
+        {
+            self.dispatch(CommandId::ZoomPane);
+            return;
+        }
+
+        // Begin a cell selection on a live terminal grid (the copy-mode
+        // selection model, driven by the pointer). Copy mode owns its own
+        // pane's viewport.
+        if self
+            .copy_mode
+            .as_ref()
+            .is_some_and(|state| state.pane_id == pane_id)
+        {
+            return;
+        }
+        let scroll_offset = match &self.pointer_view {
+            Some(view) if view.pane_id == pane_id => view.scroll_offset,
+            _ => 0,
+        };
+        let Some(cell) =
+            self.cell_under_pointer(&pane_id, inner, scroll_offset, pointer.column, pointer.row)
+        else {
+            return;
+        };
+        self.pointer_view = Some(PointerView {
+            pane_id: pane_id.clone(),
+            scroll_offset,
+            selection: Some((cell, cell)),
+        });
+        self.pointer_drag = Some(PointerDrag::Select { pane_id, inner });
+    }
+
+    fn pointer_down_on_title(&mut self, pane_id: PaneId, title: SceneRect, pointer: PointerEvent) {
+        self.focus_pane_for_pointer(&pane_id);
+
+        if self.take_double_click(&pane_id, PaneClickTarget::Title) {
+            self.pointer_drag = None;
+            self.dispatch(CommandId::ZoomPane);
+            return;
+        }
+
+        // Grab a floating pane by its title to move it.
+        let layout = self.workspace.active_session().layout();
+        if layout.is_floating(&pane_id) && layout.zoomed().is_none() {
+            self.pointer_drag = Some(PointerDrag::MoveFloat {
+                pane_id,
+                grab_dx: pointer.column.saturating_sub(title.x),
+                grab_dy: pointer.row.saturating_sub(title.y),
+            });
+        }
+    }
+
+    fn begin_split_drag(&mut self, split_index: usize) {
+        let Some((columns, rows)) = self.terminal_size else {
+            return;
+        };
+        let area = workspace_scene_area(SceneSize::new(columns, rows));
+        let Some(separator) = layout_separators(&self.workspace, area)
+            .into_iter()
+            .find(|separator| separator.split_index == split_index)
+        else {
+            return;
+        };
+        self.pointer_drag = Some(PointerDrag::ResizeSplit {
+            split_index,
+            axis: separator.axis,
+            split_area: separator.split_area,
+        });
+    }
+
+    fn handle_pointer_drag(&mut self, pointer: PointerEvent) {
+        // [L5-GATE] A child that captured the press keeps the whole gesture.
+        if let Some((pane_id, inner)) = self.pointer_forward.clone() {
+            self.forward_captured_pointer(&pane_id, inner, &pointer);
+            return;
+        }
+
+        match self.pointer_drag.clone() {
+            Some(PointerDrag::ResizeSplit {
+                split_index,
+                axis,
+                split_area,
+            }) => self.drag_split(split_index, axis, split_area, pointer),
+            Some(PointerDrag::MoveFloat {
+                pane_id,
+                grab_dx,
+                grab_dy,
+            }) => self.drag_float(pane_id, grab_dx, grab_dy, pointer),
+            Some(PointerDrag::Select { pane_id, inner }) => {
+                self.drag_selection(pane_id, inner, pointer)
+            }
+            None => {}
+        }
+    }
+
+    /// Live drag-resize: every drag event lands as durable layout intent, so
+    /// the next frame draws the moved boundary and PTYs re-fit immediately.
+    fn drag_split(
+        &mut self,
+        split_index: usize,
+        axis: SplitAxis,
+        split_area: SceneRect,
+        pointer: PointerEvent,
+    ) {
+        let Some(percent) =
+            split_percent_for_pointer(axis, split_area, pointer.column, pointer.row)
+        else {
+            return;
+        };
+        match self.workspace.apply_action(CoreAction::SetSplitRatio {
+            split_index,
+            first_percent: percent,
+        }) {
+            Ok(_) => {
+                self.status = format!("split resized to {percent}%");
+                if let Err(error) = self.reconcile_runtimes() {
+                    self.status = error.to_string();
+                }
+            }
+            Err(error) => self.status = format!("split resize failed: {error}"),
+        }
+    }
+
+    fn drag_float(&mut self, pane_id: PaneId, grab_dx: u16, grab_dy: u16, pointer: PointerEvent) {
+        let Some((columns, rows)) = self.terminal_size else {
+            return;
+        };
+        let area = workspace_scene_area(SceneSize::new(columns, rows));
+        if area.is_empty() {
+            return;
+        }
+        let screen_x = pointer.column.saturating_sub(grab_dx).max(area.x);
+        let screen_y = pointer.row.saturating_sub(grab_dy).max(area.y);
+        let x = (screen_x - area.x).min(area.width.saturating_sub(2));
+        let y = (screen_y - area.y).min(area.height.saturating_sub(2));
+        match self.workspace.apply_action(CoreAction::MoveFloatingPane {
+            pane_id: pane_id.clone(),
+            x,
+            y,
+        }) {
+            Ok(_) => {
+                self.status = format!("moved {pane_id}");
+                if let Err(error) = self.reconcile_runtimes() {
+                    self.status = error.to_string();
+                }
+            }
+            Err(error) => self.status = format!("move failed: {error}"),
+        }
+    }
+
+    fn drag_selection(&mut self, pane_id: PaneId, inner: SceneRect, pointer: PointerEvent) {
+        let scroll_offset = match &self.pointer_view {
+            Some(view) if view.pane_id == pane_id => view.scroll_offset,
+            _ => 0,
+        };
+        let Some(cell) =
+            self.cell_under_pointer(&pane_id, inner, scroll_offset, pointer.column, pointer.row)
+        else {
+            return;
+        };
+        if let Some(view) = self.pointer_view.as_mut()
+            && view.pane_id == pane_id
+            && let Some(selection) = view.selection.as_mut()
+        {
+            selection.1 = cell;
+        }
+    }
+
+    fn handle_pointer_up(&mut self, pointer: PointerEvent) {
+        // [L5-GATE] Deliver the release to the child that got the press.
+        if let Some((pane_id, inner)) = self.pointer_forward.clone() {
+            self.forward_captured_pointer(&pane_id, inner, &pointer);
+            return;
+        }
+
+        match self.pointer_drag.take() {
+            Some(PointerDrag::Select { pane_id, .. }) => {
+                let mut drop_view = false;
+                let mut kept_selection = false;
+                if let Some(view) = self.pointer_view.as_mut()
+                    && view.pane_id == pane_id
+                {
+                    match view.selection {
+                        // A press without movement is a plain click.
+                        Some((anchor, cursor)) if anchor == cursor => view.selection = None,
+                        Some(_) => kept_selection = true,
+                        None => {}
+                    }
+                    drop_view = view.scroll_offset == 0 && view.selection.is_none();
+                }
+                if drop_view {
+                    self.pointer_view = None;
+                }
+                if kept_selection {
+                    self.status = "selection ready: Copy Selection copies it".to_owned();
+                }
+            }
+            Some(PointerDrag::ResizeSplit { .. } | PointerDrag::MoveFloat { .. }) | None => {}
+        }
+    }
+
+    fn handle_pointer_wheel(&mut self, pointer: PointerEvent) {
+        let PointerKind::Wheel { dy, .. } = pointer.kind else {
+            return;
+        };
+        // The palette is modal: the wheel moves its selection (the item
+        // window follows), so every entry is reachable by mouse.
+        if self.palette.is_some() {
+            if dy != 0 {
+                self.move_palette_selection(isize::from(dy));
+            }
+            return;
+        }
+        let Some(target) = self.pointer_target(pointer.column, pointer.row) else {
+            return;
+        };
+        let HitTargetKind::PaneBody(pane_id) = target.kind.clone() else {
+            return;
+        };
+
+        // [L5-GATE] The wheel belongs to a mouse-capturing child.
+        if self.try_forward_pointer(&pane_id, target.rect, &pointer) {
+            return;
+        }
+
+        // Only vertical wheel scrolls the workspace viewport.
+        if dy == 0 {
+            return;
+        }
+
+        // In copy mode the wheel moves the copy cursor, which scrolls.
+        if self
+            .copy_mode
+            .as_ref()
+            .is_some_and(|state| state.pane_id == pane_id)
+        {
+            if !self.terminal_panes.contains_key(&pane_id) {
+                return;
+            }
+            let state = self.copy_mode.as_mut().expect("copy mode present");
+            let grid = self
+                .terminal_panes
+                .get(&pane_id)
+                .expect("runtime present")
+                .parser
+                .grid();
+            let step = WHEEL_SCROLL_ROWS * usize::from(dy.unsigned_abs());
+            if dy < 0 {
+                state.move_up(step, grid);
+            } else {
+                state.move_down(step, grid);
+            }
+            return;
+        }
+
+        // Plain wheel: viewport scrollback without entering copy mode. The
+        // pointer view already renders through the copy-mode windowing math,
+        // so this is the same viewing mechanism minus the modal keymap.
+        let Some(grid) = self.terminal_grid(&pane_id) else {
+            return;
+        };
+        let view_rows = usize::from(grid.size().rows().min(target.rect.height));
+        let max_top = grid.total_rows().saturating_sub(view_rows);
+        let step = WHEEL_SCROLL_ROWS * usize::from(dy.unsigned_abs());
+        let (current, selection) = match &self.pointer_view {
+            Some(view) if view.pane_id == pane_id => (view.scroll_offset, view.selection),
+            _ => (0, None),
+        };
+        let scroll_offset = if dy < 0 {
+            (current + step).min(max_top)
+        } else {
+            current.saturating_sub(step)
+        };
+
+        if scroll_offset == 0 && selection.is_none() {
+            self.pointer_view = None;
+            self.status = "following live output".to_owned();
+        } else {
+            self.pointer_view = Some(PointerView {
+                pane_id,
+                scroll_offset,
+                selection,
+            });
+            self.status = format!("scrollback: {scroll_offset} row(s) up");
+        }
+    }
+
+    fn focus_pane_for_pointer(&mut self, pane_id: &PaneId) {
+        if self.workspace.active_session().focused_pane_id() == pane_id {
+            return;
+        }
+        match self.workspace.apply_action(CoreAction::FocusPane {
+            pane_id: pane_id.clone(),
+        }) {
+            Ok(_) => {
+                self.status = format!("focused {pane_id}");
+                if let Err(error) = self.reconcile_runtimes() {
+                    self.status = error.to_string();
+                }
+            }
+            Err(error) => self.status = format!("focus failed: {error}"),
+        }
+    }
+
+    /// Record a press and report whether it completed a double-click on the
+    /// same pane and target within the window.
+    fn take_double_click(&mut self, pane_id: &PaneId, target: PaneClickTarget) -> bool {
+        let now = Instant::now();
+        let double = self.last_pane_click.as_ref().is_some_and(|click| {
+            &click.pane_id == pane_id
+                && click.target == target
+                && now.duration_since(click.at) <= DOUBLE_CLICK_WINDOW
+        });
+        self.last_pane_click = if double {
+            None
+        } else {
+            Some(PaneClick {
+                pane_id: pane_id.clone(),
+                target,
+                at: now,
+            })
+        };
+        double
+    }
+
+    /// The absolute buffer cell under a pointer position inside a pane's
+    /// inner rect, mirroring the scene builder's viewport windowing.
+    fn cell_under_pointer(
+        &self,
+        pane_id: &PaneId,
+        inner: SceneRect,
+        scroll_offset: usize,
+        column: u16,
+        row: u16,
+    ) -> Option<(usize, u16)> {
+        let grid = self.terminal_grid(pane_id)?;
+        let view_rows = usize::from(grid.size().rows().min(inner.height));
+        if view_rows == 0 {
+            return None;
+        }
+        let max_top = grid.total_rows().saturating_sub(view_rows);
+        let first_row = max_top.saturating_sub(scroll_offset);
+        let relative_row = usize::from(row.saturating_sub(inner.y)).min(view_rows - 1);
+        let absolute_row = (first_row + relative_row).min(grid.total_rows().saturating_sub(1));
+        let cell_column = column
+            .saturating_sub(inner.x)
+            .min(grid.size().columns().saturating_sub(1));
+        Some((absolute_row, cell_column))
+    }
+
+    /// Copy the pointer selection through the copy-mode extraction model and
+    /// the OSC 52 clipboard path.
+    fn copy_pointer_selection(&mut self) {
+        let Some((pane_id, (anchor, cursor))) = self
+            .pointer_view
+            .as_ref()
+            .and_then(|view| Some((view.pane_id.clone(), view.selection?)))
+        else {
+            self.status = "nothing is selected to copy".to_owned();
+            return;
+        };
+        let Some(runtime) = self.terminal_panes.get(&pane_id) else {
+            self.status = format!("pane {pane_id} has no live terminal to copy from");
+            return;
+        };
+
+        let extractor = CopyModeState {
+            pane_id: pane_id.clone(),
+            scroll_offset: 0,
+            cursor_row: cursor.0,
+            cursor_col: cursor.1,
+            anchor: Some(anchor),
+        };
+        let text = extractor.selected_text(runtime.parser.grid());
+        self.clipboard_payload = Some(osc52_sequence(&text));
+        let count = text.chars().count();
+        self.last_copied = Some(text);
+        let mut drop_view = false;
+        if let Some(view) = self.pointer_view.as_mut() {
+            view.selection = None;
+            drop_view = view.scroll_offset == 0;
+        }
+        if drop_view {
+            self.pointer_view = None;
+        }
+        self.status = format!("copied {count} char(s) to clipboard");
+    }
+
+    /// Click-dispatch for palette rows: same semantics as pressing Enter on
+    /// the row (greyed rows surface their reason and keep the palette open).
+    fn activate_palette_item(&mut self, index: usize) {
+        let rows = self.current_palette_rows();
+        let Some(row) = rows.get(index) else {
+            return;
+        };
+        if !row.enabled {
+            self.status = format!("{} is unavailable: {}", row.entry.label, row.entry.detail);
+            return;
+        }
+        let command_id = row.command_id;
+        self.palette = None;
+        self.dispatch(command_id);
+    }
+
+    // --- Context menu ------------------------------------------------------
+
+    /// Open the right-click menu for a pane: focus it, then list the
+    /// commands relevant to its kind and runtime state. Every row carries
+    /// the key chord that runs the same command from the keyboard.
+    fn open_context_menu(&mut self, pane_id: PaneId, pointer: PointerEvent) {
+        self.focus_pane_for_pointer(&pane_id);
+        self.palette = None;
+        let items = self.context_menu_items(&pane_id);
+        if items.is_empty() {
+            return;
+        }
+        self.context_menu = Some(ContextMenuState {
+            items,
+            selected: 0,
+            anchor: (pointer.column, pointer.row),
+        });
+        self.status = "menu: up/down choose, Enter run, Esc close".to_owned();
+    }
+
+    fn context_menu_items(&self, pane_id: &PaneId) -> Vec<ContextMenuItem> {
+        let Some(pane) = self.workspace.active_session().pane(pane_id) else {
+            return Vec::new();
+        };
+        let floating = self
+            .workspace
+            .active_session()
+            .layout()
+            .is_floating(pane_id);
+
+        let mut commands: Vec<CommandId> = Vec::new();
+        match pane.kind() {
+            PaneKind::Terminal { .. } => {
+                commands.extend([
+                    CommandId::EnterCopyMode,
+                    CommandId::CopySelection,
+                    CommandId::RestartPane,
+                ]);
+            }
+            PaneKind::Task { .. } => {
+                commands.extend([CommandId::RerunTask, CommandId::StopTask]);
+            }
+            PaneKind::Agent { .. } => {
+                let live = self.agent_panes.get(pane_id);
+                if live.is_some_and(|runtime| runtime.pending_approval.is_some()) {
+                    commands.extend([CommandId::ApproveAgentAction, CommandId::RejectAgentAction]);
+                }
+                if live.is_some() {
+                    commands.push(CommandId::StopAgent);
+                } else {
+                    commands.push(CommandId::StartAgent);
+                }
+            }
+            PaneKind::StatusLog { .. } => {}
+        }
+        commands.push(CommandId::NewTerminal);
+        // Splits address the tiled tree; a floating pane cannot be split.
+        if !floating {
+            commands.extend([CommandId::SplitRight, CommandId::SplitDown]);
+        }
+        commands.push(CommandId::ZoomPane);
+        // Float/dock is one toggle: offer the half that can actually run.
+        commands.push(if floating {
+            CommandId::DockPane
+        } else {
+            CommandId::FloatPane
+        });
+        commands.push(CommandId::ClosePane);
+
+        // "Command palette" leads: the menu is one of the two mouse doors
+        // into the palette (the other is the status strip).
+        let mut items = vec![ContextMenuItem {
+            action: ContextMenuAction::OpenPalette,
+            label: "Command palette".to_owned(),
+            hint: format_chord(self.keymap.toggle_palette),
+        }];
+        items.extend(commands.into_iter().filter_map(|command_id| {
+            let command = mandatum_commands::command_for_id(command_id)?;
+            Some(ContextMenuItem {
+                action: ContextMenuAction::Command(command_id),
+                label: command.label.to_owned(),
+                hint: self.command_key_hint(command_id),
+            })
+        }));
+        items
+    }
+
+    /// The keyboard route to a command, for menu hints: a direct key where
+    /// one exists, else its global chord, else its palette letter spelled as
+    /// "<palette chord> <letter>".
+    fn command_key_hint(&self, command_id: CommandId) -> String {
+        if self.focused_agent_has_pending_approval() {
+            if command_id == CommandId::ApproveAgentAction {
+                return "y".to_owned();
+            }
+            if command_id == CommandId::RejectAgentAction {
+                return "n".to_owned();
+            }
+        }
+        if let Some(chord) = self.keymap.chord_for(command_id) {
+            return format_chord(chord);
+        }
+        // Dock rides the float letter (one toggle key for the pair).
+        let letter_owner = if command_id == CommandId::DockPane {
+            CommandId::FloatPane
+        } else {
+            command_id
+        };
+        if let Some(letter) = self.keymap.palette.key_for(letter_owner) {
+            return format!("{} {letter}", format_chord(self.keymap.toggle_palette));
+        }
+        String::new()
+    }
+
+    /// The context-menu overlay for the current frame, sized to its rows and
+    /// clamped inside the frame.
+    pub(crate) fn context_menu_overlay(&self, size: SceneSize) -> Option<ContextMenuOverlay> {
+        let menu = self.context_menu.as_ref()?;
+        let items: Vec<ContextMenuEntry> = menu
+            .items
+            .iter()
+            .map(|item| ContextMenuEntry::new(item.label.clone(), item.hint.clone()))
+            .collect();
+        let widest = items
+            .iter()
+            .map(|entry| entry.label.chars().count() + 2 + entry.chord_hint.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let width = widest.saturating_add(4);
+        let height = (items.len() as u16).saturating_add(2);
+        let area = context_menu_rect(menu.anchor.0, menu.anchor.1, width, height, size);
+        Some(ContextMenuOverlay {
+            area,
+            items,
+            selected: menu.selected,
+        })
+    }
+
+    fn handle_context_menu_key(&mut self, key: Key) {
+        if matches!(self.keymap.chord_action(key), Some(ChordAction::Quit)) {
+            self.should_quit = true;
+            self.status = "quitting".to_owned();
+            return;
+        }
+        match key.code {
+            KeyCode::Escape => self.close_context_menu(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.selected = menu.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(menu) = self.context_menu.as_mut() {
+                    let last = menu.items.len().saturating_sub(1);
+                    menu.selected = (menu.selected + 1).min(last);
+                }
+            }
+            KeyCode::Enter => self.run_context_menu_item(None),
+            _ => {}
+        }
+    }
+
+    fn handle_context_menu_pointer(&mut self, pointer: PointerEvent) {
+        match pointer.kind {
+            // Hover follows the pointer over menu rows.
+            PointerKind::Move | PointerKind::Drag => {
+                if let Some(HitTargetKind::ContextMenuItem(index)) = self
+                    .pointer_target(pointer.column, pointer.row)
+                    .map(|target| target.kind)
+                    && let Some(menu) = self.context_menu.as_mut()
+                {
+                    menu.selected = index;
+                }
+            }
+            PointerKind::Down => {
+                match self
+                    .pointer_target(pointer.column, pointer.row)
+                    .map(|target| target.kind)
+                {
+                    Some(HitTargetKind::ContextMenuItem(index)) => {
+                        self.run_context_menu_item(Some(index));
+                    }
+                    // Click-away dismisses; the press is consumed.
+                    _ => self.close_context_menu(),
+                }
+            }
+            PointerKind::Up | PointerKind::Wheel { .. } => {}
+        }
+    }
+
+    fn run_context_menu_item(&mut self, index: Option<usize>) {
+        let Some(menu) = self.context_menu.take() else {
+            return;
+        };
+        let index = index.unwrap_or(menu.selected);
+        let Some(item) = menu.items.get(index) else {
+            self.status = "menu closed".to_owned();
+            return;
+        };
+        match item.action {
+            ContextMenuAction::Command(command_id) => self.dispatch(command_id),
+            ContextMenuAction::OpenPalette => self.open_palette(),
+        }
+    }
+
+    fn close_context_menu(&mut self) {
+        self.context_menu = None;
+        self.status = "menu closed".to_owned();
     }
 
     // --- Copy mode -------------------------------------------------------------
@@ -1571,7 +2719,10 @@ impl AppState {
             return;
         };
         self.copy_mode = Some(CopyModeState::enter(focused, runtime.parser.grid()));
-        self.palette_open = false;
+        self.palette = None;
+        // Copy mode owns the pane's viewport; a stale pointer selection
+        // underneath it would reappear on exit, addressing moved rows.
+        self.pointer_view = None;
         self.status = "copy mode: hjkl/arrows move, v select, y/Enter copy, Esc exit".to_owned();
     }
 
@@ -1580,7 +2731,7 @@ impl AppState {
         self.status = "copy mode closed".to_owned();
     }
 
-    fn handle_copy_mode_key(&mut self, key: KeyEvent) {
+    fn handle_copy_mode_key(&mut self, key: Key) {
         let Some(pane_id) = self.copy_mode.as_ref().map(|state| state.pane_id.clone()) else {
             return;
         };
@@ -1590,7 +2741,10 @@ impl AppState {
             return;
         }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+        if matches!(
+            self.keymap.chord_action(key),
+            Some(crate::keymap::ChordAction::Quit)
+        ) {
             self.should_quit = true;
             self.status = "quitting".to_owned();
             return;
@@ -1635,19 +2789,97 @@ impl AppState {
     }
 }
 
+/// Double-click window for pane titles/bodies.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
+
+/// Rows scrolled per wheel tick over a terminal pane.
+const WHEEL_SCROLL_ROWS: usize = 3;
+
+/// One armed pointer drag gesture, set on a button press over a target.
+#[derive(Clone)]
+enum PointerDrag {
+    ResizeSplit {
+        split_index: usize,
+        axis: SplitAxis,
+        split_area: SceneRect,
+    },
+    MoveFloat {
+        pane_id: PaneId,
+        grab_dx: u16,
+        grab_dy: u16,
+    },
+    Select {
+        pane_id: PaneId,
+        inner: SceneRect,
+    },
+}
+
+/// Pointer-driven viewport state for one pane: wheel scrollback plus a
+/// click-drag selection. This reuses the copy-mode viewing/selection model
+/// (absolute buffer coordinates through the same windowing math) without the
+/// modal copy-mode keymap, so plain typing keeps flowing to the shell.
+struct PointerView {
+    pane_id: PaneId,
+    /// Rows scrolled up from the live bottom; `0` follows live output.
+    scroll_offset: usize,
+    /// `(anchor, cursor)` in absolute buffer coordinates, unordered.
+    selection: Option<((usize, u16), (usize, u16))>,
+}
+
+impl PointerView {
+    fn ordered_selection(&self) -> Option<((usize, u16), (usize, u16))> {
+        let (anchor, cursor) = self.selection?;
+        Some(if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaneClickTarget {
+    Title,
+    Body,
+}
+
+/// The previous button press, for double-click detection.
+struct PaneClick {
+    pane_id: PaneId,
+    target: PaneClickTarget,
+    at: Instant,
+}
+
+/// The open right-click menu: rows plus the pointer anchor it opened at.
+struct ContextMenuState {
+    items: Vec<ContextMenuItem>,
+    selected: usize,
+    anchor: (u16, u16),
+}
+
+struct ContextMenuItem {
+    action: ContextMenuAction,
+    label: String,
+    hint: String,
+}
+
+/// What a context-menu row does when run: dispatch a command, or open the
+/// workspace's own palette (the menu's gateway row, not a command).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContextMenuAction {
+    Command(CommandId),
+    OpenPalette,
+}
+
 enum CopyModeAction {
     Continue,
     Exit,
     Copy,
 }
 
-fn copy_mode_action(
-    state: &mut CopyModeState,
-    grid: &TerminalGrid,
-    key: KeyEvent,
-) -> CopyModeAction {
+fn copy_mode_action(state: &mut CopyModeState, grid: &TerminalGrid, key: Key) -> CopyModeAction {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => return CopyModeAction::Exit,
+        KeyCode::Escape | KeyCode::Char('q') => return CopyModeAction::Exit,
         KeyCode::Char('y') | KeyCode::Enter => return CopyModeAction::Copy,
         KeyCode::Char('k') | KeyCode::Up => state.move_up(1, grid),
         KeyCode::Char('j') | KeyCode::Down => state.move_down(1, grid),
@@ -1762,29 +2994,6 @@ fn command_context_for_workspace(workspace: &Workspace) -> CommandContext {
     }
 }
 
-fn category_label(category: CommandCategory) -> &'static str {
-    match category {
-        CommandCategory::Project => "project",
-        CommandCategory::Pane => "pane",
-        CommandCategory::Task => "task",
-        CommandCategory::Agent => "agent",
-        CommandCategory::Layout => "layout",
-        CommandCategory::Persistence => "persistence",
-    }
-}
-
-fn palette_detail(command: &mandatum_commands::Command) -> String {
-    match command.id {
-        CommandId::ApproveAgentAction => {
-            "agent (direct key: y while the focused pane awaits approval)".to_owned()
-        }
-        CommandId::RejectAgentAction => {
-            "agent (direct key: n while the focused pane awaits approval)".to_owned()
-        }
-        _ => category_label(command.category).to_owned(),
-    }
-}
-
 pub(crate) fn agent_status_label(status: &AgentStatus) -> &'static str {
     match status {
         AgentStatus::Draft => "draft",
@@ -1805,32 +3014,36 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::app_shell::AgentConnectorKind;
+    use crate::keymap::parse_chord;
     use mandatum_core::CoreAction;
+    use mandatum_scene::input::{Modifiers, PointerButton, PointerEvent, PointerKind};
 
     static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(1);
 
     fn state() -> AppState {
-        AppState::new(AppConfig {
-            workspace_name: "Mandatum".to_owned(),
+        AppState::new(test_config())
+    }
+
+    /// The shared test baseline: fake connector, no PTY spawning, no
+    /// restore, default keymap and theme (see `AppConfig::default`).
+    fn test_config() -> AppConfig {
+        AppConfig {
             project_path: PathBuf::from("/tmp/mandatum"),
             workspace_file: PathBuf::from("/tmp/mandatum/.mandatum/workspace.json"),
-            shell_program: "/bin/sh".to_owned(),
             task_command: "printf TASK_OK".to_owned(),
-            agent_connector: AgentConnectorKind::Fake,
             agent_objective: "test objective".to_owned(),
-            agent_model: None,
-            spawn_pty: false,
-            restore_on_startup: false,
-        })
+            ..AppConfig::default()
+        }
     }
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+    /// Neutral key-event helpers: every input test speaks the scene input
+    /// contract, never a platform event type.
+    fn key(code: KeyCode) -> Key {
+        Key::plain(code)
     }
 
-    fn ctrl(code: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)
+    fn ctrl(code: char) -> Key {
+        Key::ctrl(code)
     }
 
     struct TestWorkspaceDir {
@@ -1864,16 +3077,13 @@ mod tests {
             let project_path = self.project_path();
             fs::create_dir_all(&project_path).expect("test project dir should be created");
             AppConfig {
-                workspace_name: "Mandatum".to_owned(),
                 project_path,
                 workspace_file: self.workspace_file(),
-                shell_program: "/bin/sh".to_owned(),
                 task_command: "printf TASK_OK".to_owned(),
-                agent_connector: AgentConnectorKind::Fake,
                 agent_objective: "test objective".to_owned(),
-                agent_model: None,
                 spawn_pty,
                 restore_on_startup,
+                ..AppConfig::default()
             }
         }
     }
@@ -1886,51 +3096,647 @@ mod tests {
 
     #[test]
     fn keymap_keeps_workspace_controls_in_palette_mode() {
-        assert_eq!(key_to_input(ctrl('q'), false), RuntimeInput::Quit);
-        assert_eq!(key_to_input(ctrl('p'), false), RuntimeInput::TogglePalette);
+        assert_eq!(key_to_input(ctrl('q')), RuntimeInput::Quit);
+        assert_eq!(key_to_input(ctrl('p')), RuntimeInput::TogglePalette);
+
+        // Single-letter fast paths on an empty palette input: bound letters
+        // dispatch exactly as the pre-fuzzy palette did.
+        let mut state = state();
+        state.handle_key(ctrl('p'));
+        state.handle_key(key(KeyCode::Char('v')));
+        assert!(!state.palette_open());
+        assert_eq!(state.workspace().active_session().panes().len(), 2);
+        assert!(state.status().contains("Split pane right"));
+
+        // Ctrl+Q still quits over an open palette.
+        state.handle_key(ctrl('p'));
+        state.handle_key(ctrl('q'));
+        assert!(state.should_quit());
+    }
+
+    #[test]
+    fn palette_fast_paths_keep_task_context_substitution() {
+        let mut state = state();
+        state.dispatch(CommandId::RunTask);
+        assert!(state.focused_pane_is_task());
+
+        // 'r' on a focused task pane means Rerun Task (spawning is disabled
+        // in the test baseline, so the rerun path reports that).
+        state.handle_key(ctrl('p'));
+        state.handle_key(key(KeyCode::Char('r')));
+        assert!(!state.palette_open());
+        assert!(
+            state.status().contains("rerun unavailable"),
+            "{}",
+            state.status()
+        );
+
+        // 'c' on a focused task pane means Stop Task.
+        state.handle_key(ctrl('p'));
+        state.handle_key(key(KeyCode::Char('c')));
+        assert!(!state.palette_open());
+        assert!(
+            state.status().contains("stopped before launch")
+                || state.status().contains("not running"),
+            "{}",
+            state.status()
+        );
+    }
+
+    #[test]
+    fn keymap_chord_override_changes_dispatch() {
+        let mut config = test_config();
+        config
+            .keymap
+            .bind_chord(CommandId::SplitRight, parse_chord("ctrl+shift+r").unwrap());
+        let mut state = AppState::new(config);
+
+        state.handle_key(Key::new(
+            KeyCode::Char('r'),
+            Modifiers {
+                control: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+
+        assert_eq!(state.workspace().active_session().panes().len(), 2);
+        assert!(state.status().contains("Split pane right"));
+    }
+
+    #[test]
+    fn keymap_palette_override_changes_palette_dispatch() {
+        let mut config = test_config();
+        config.keymap.palette.rebind(CommandId::SplitRight, 'e');
+        let mut state = AppState::new(config);
+
+        state.handle_key(ctrl('p'));
+        state.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(state.workspace().active_session().panes().len(), 2);
+
+        // The displaced default letter no longer splits.
+        state.handle_key(ctrl('p'));
+        state.handle_key(key(KeyCode::Char('v')));
+        assert_eq!(state.workspace().active_session().panes().len(), 2);
+    }
+
+    #[test]
+    fn reload_config_applies_project_config_live() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = AppState::new(temp.app_config(false, false));
+        let config_file = temp.project_path().join(".mandatum").join("config.toml");
+        fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+        fs::write(
+            &config_file,
+            "[keymap]\nsplit-right = \"ctrl+alt+s\"\n\n[theme]\nname = \"mandatum-light\"\n",
+        )
+        .unwrap();
+
+        state.dispatch(CommandId::ReloadConfig);
+
+        assert_eq!(state.status(), "config reloaded");
+        assert_eq!(state.theme().name, "mandatum-light");
+        state.handle_key(Key::new(
+            KeyCode::Char('s'),
+            Modifiers {
+                control: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(state.workspace().active_session().panes().len(), 2);
+
+        // A now-broken config reloads onto defaults with the problem named.
+        fs::write(&config_file, "{{ not toml").unwrap();
+        state.dispatch(CommandId::ReloadConfig);
+        assert!(state.status().starts_with("config reloaded;"));
+        assert!(state.status().contains("not valid TOML"));
+        assert_eq!(state.theme().name, "mandatum-dark");
+    }
+
+    #[test]
+    fn config_warnings_surface_as_startup_status_and_survive_first_resize() {
+        let mut config = test_config();
+        config.config_warnings = vec!["user config: unknown config section [wat]".to_owned()];
+        let mut state = AppState::new(config);
+
+        assert!(state.status().contains("unknown config section [wat]"));
+        state.handle_terminal_resize(80, 24);
+        assert!(state.status().contains("unknown config section [wat]"));
+    }
+
+    #[test]
+    fn palette_entries_show_their_bound_keys() {
+        let mut config = test_config();
+        config
+            .keymap
+            .bind_chord(CommandId::SplitRight, parse_chord("ctrl+shift+r").unwrap());
+        let mut state = AppState::new(config);
+        state.handle_key(ctrl('p'));
+
+        let overlay = state.palette_overlay(SceneSize::new(100, 30)).unwrap();
+        let split = overlay
+            .items
+            .iter()
+            .find(|item| item.label == "Split pane right")
+            .unwrap();
+        assert_eq!(split.key_hint.as_deref(), Some("v · ctrl+shift+r"));
+        // The footer names the palette's own keys.
+        assert!(overlay.footer.contains("esc close"), "{}", overlay.footer);
+    }
+
+    // --- Pointer routing ---------------------------------------------------
+
+    /// A 100x30 frame: workspace area rows 1..=28, status row 29.
+    const POINTER_FRAME: SceneSize = SceneSize {
+        width: 100,
+        height: 30,
+    };
+
+    fn pointer_event(
+        kind: PointerKind,
+        button: Option<PointerButton>,
+        column: u16,
+        row: u16,
+    ) -> PointerEvent {
+        PointerEvent {
+            kind,
+            button,
+            column,
+            row,
+            mods: Modifiers::NONE,
+        }
+    }
+
+    fn send_pointer(state: &mut AppState, event: PointerEvent) {
+        state.handle_event(InputEvent::Pointer(event));
+    }
+
+    fn left(kind: PointerKind, column: u16, row: u16) -> PointerEvent {
+        pointer_event(kind, Some(PointerButton::Left), column, row)
+    }
+
+    fn right_down(column: u16, row: u16) -> PointerEvent {
+        pointer_event(PointerKind::Down, Some(PointerButton::Right), column, row)
+    }
+
+    /// Resize and build one frame so hit targets exist, like the run loop.
+    fn frame(state: &mut AppState) {
+        state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+        state.build_scene(POINTER_FRAME);
+    }
+
+    fn focused(state: &AppState) -> String {
+        state
+            .workspace()
+            .active_session()
+            .focused_pane_id()
+            .as_str()
+            .to_owned()
+    }
+
+    // Pointer events with no scene built yet (no hit targets) do nothing.
+    #[test]
+    fn pointer_without_hit_targets_is_inert() {
+        let mut state = state();
+        let before_status = state.status().to_owned();
+
+        for kind in [
+            PointerKind::Down,
+            PointerKind::Up,
+            PointerKind::Move,
+            PointerKind::Drag,
+            PointerKind::Wheel { dx: 0, dy: 1 },
+        ] {
+            send_pointer(&mut state, left(kind, 2, 2));
+        }
+
+        assert_eq!(state.workspace().active_session().panes().len(), 1);
+        assert!(!state.palette_open());
+        assert!(!state.should_quit());
+        assert_eq!(state.status(), before_status);
+    }
+
+    #[test]
+    fn click_on_pane_body_focuses_that_pane() {
+        let mut state = state();
+        state.dispatch(CommandId::SplitRight);
+        assert_eq!(focused(&state), "pane-2");
+        frame(&mut state);
+
+        // pane-1 tiles the left half; its body starts at (1, 2).
+        send_pointer(&mut state, left(PointerKind::Down, 5, 5));
+
+        assert_eq!(focused(&state), "pane-1");
+        assert!(state.status().contains("focused pane-1"));
+
+        // Clicking the title focuses too.
+        state.build_scene(POINTER_FRAME);
+        send_pointer(&mut state, left(PointerKind::Down, 55, 1));
+        assert_eq!(focused(&state), "pane-2");
+    }
+
+    #[test]
+    fn double_click_on_pane_title_toggles_zoom() {
+        let mut state = state();
+        state.dispatch(CommandId::SplitRight);
+        frame(&mut state);
+
+        send_pointer(&mut state, left(PointerKind::Down, 5, 1));
+        send_pointer(&mut state, left(PointerKind::Up, 5, 1));
+        send_pointer(&mut state, left(PointerKind::Down, 5, 1));
+        send_pointer(&mut state, left(PointerKind::Up, 5, 1));
+
+        let session = state.workspace().active_session();
         assert_eq!(
-            key_to_input(key(KeyCode::Char('v')), true),
-            RuntimeInput::Dispatch(CommandId::SplitRight)
+            session.layout().zoomed(),
+            Some(&PaneId::new("pane-1")),
+            "double-click on the title must zoom the pane"
+        );
+    }
+
+    #[test]
+    fn separator_drag_resizes_the_split_live() {
+        let mut state = state();
+        state.dispatch(CommandId::SplitRight);
+        frame(&mut state);
+
+        // The 50% boundary of the 100-wide area sits at column 50; the
+        // separator strip covers columns 49-50.
+        send_pointer(&mut state, left(PointerKind::Down, 49, 10));
+        send_pointer(&mut state, left(PointerKind::Drag, 30, 10));
+
+        let mandatum_core::LayoutNode::Split { first_percent, .. } =
+            state.workspace().active_session().layout().root()
+        else {
+            panic!("root must be a split");
+        };
+        assert_eq!(*first_percent, 30);
+        assert!(state.status().contains("split resized to 30%"));
+
+        // The next frame draws the moved boundary and its separator.
+        let scene = state.build_scene(POINTER_FRAME);
+        let pane_1 = scene
+            .panes
+            .iter()
+            .find(|pane| pane.id == PaneId::new("pane-1"))
+            .unwrap();
+        assert_eq!(pane_1.area.width, 30);
+
+        // Dragging further keeps resizing until release; percentages clamp.
+        send_pointer(&mut state, left(PointerKind::Drag, 1, 10));
+        send_pointer(&mut state, left(PointerKind::Up, 1, 10));
+        let mandatum_core::LayoutNode::Split { first_percent, .. } =
+            state.workspace().active_session().layout().root()
+        else {
+            panic!("root must be a split");
+        };
+        assert_eq!(*first_percent, 5);
+    }
+
+    #[test]
+    fn floating_title_drag_moves_the_float() {
+        let mut state = state();
+        state.dispatch(CommandId::NewTerminal); // floating pane-2 at (8, 4)
+        frame(&mut state);
+
+        // The float's title row is at screen y = 1 (area top) + 4 = 5.
+        send_pointer(&mut state, left(PointerKind::Down, 10, 5));
+        send_pointer(&mut state, left(PointerKind::Drag, 15, 8));
+        send_pointer(&mut state, left(PointerKind::Up, 15, 8));
+
+        let layout = state.workspace().active_session().layout();
+        let rect = &layout.floating()[0].rect;
+        assert_eq!((rect.x, rect.y), (13, 7));
+        assert!(state.status().contains("moved pane-2"));
+    }
+
+    #[test]
+    fn right_click_opens_context_menu_and_escape_dismisses() {
+        let mut state = state();
+        frame(&mut state);
+
+        send_pointer(&mut state, right_down(5, 5));
+
+        let scene = state.build_scene(POINTER_FRAME);
+        let Some(mandatum_scene::OverlayScene::ContextMenu(menu)) = &scene.overlay else {
+            panic!("right-click must open the context menu overlay");
+        };
+        let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Command palette",
+                "Enter copy mode",
+                "Copy selection",
+                "Restart pane",
+                "New terminal",
+                "Split pane right",
+                "Split pane down",
+                "Zoom pane",
+                "Float pane",
+                "Close pane",
+            ]
+        );
+        // Every row names its keyboard route; the palette gateway row leads
+        // so the mouse always has a door into the full command surface.
+        assert_eq!(menu.items[0].chord_hint, "ctrl+p");
+        let zoom = menu.items.iter().find(|i| i.label == "Zoom pane").unwrap();
+        assert_eq!(zoom.chord_hint, "ctrl+p z");
+
+        // While the menu is open, typing does not reach the shell and Esc
+        // closes.
+        state.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(state.workspace().active_session().panes().len(), 1);
+        state.handle_key(key(KeyCode::Escape));
+        let scene = state.build_scene(POINTER_FRAME);
+        assert!(scene.overlay.is_none());
+    }
+
+    #[test]
+    fn context_menu_keyboard_navigates_and_dispatches() {
+        let mut state = state();
+        frame(&mut state);
+        send_pointer(&mut state, right_down(5, 5));
+
+        // Down to "Zoom pane" (index 7), then Enter runs it.
+        for _ in 0..7 {
+            state.handle_key(key(KeyCode::Down));
+        }
+        state.handle_key(key(KeyCode::Enter));
+
+        let session = state.workspace().active_session();
+        assert_eq!(session.layout().zoomed(), Some(&PaneId::new("pane-1")));
+        let scene = state.build_scene(POINTER_FRAME);
+        assert!(scene.overlay.is_none(), "menu closes after dispatch");
+    }
+
+    #[test]
+    fn context_menu_rows_are_clickable() {
+        let mut state = state();
+        frame(&mut state);
+        send_pointer(&mut state, right_down(5, 5));
+        let scene = state.build_scene(POINTER_FRAME);
+
+        // Click the "Zoom pane" row (index 7) through its hit target.
+        let zoom_row = scene
+            .hit_targets
+            .iter()
+            .find(|target| target.kind == HitTargetKind::ContextMenuItem(7))
+            .expect("menu rows must be hit targets");
+        send_pointer(
+            &mut state,
+            left(PointerKind::Down, zoom_row.rect.x + 1, zoom_row.rect.y),
+        );
+
+        let session = state.workspace().active_session();
+        assert_eq!(session.layout().zoomed(), Some(&PaneId::new("pane-1")));
+
+        // Click-away dismisses without running anything.
+        send_pointer(&mut state, right_down(5, 5));
+        state.build_scene(POINTER_FRAME);
+        send_pointer(&mut state, left(PointerKind::Down, 90, 28));
+        let scene = state.build_scene(POINTER_FRAME);
+        assert!(scene.overlay.is_none());
+        assert_eq!(
+            state.workspace().active_session().layout().zoomed(),
+            Some(&PaneId::new("pane-1")),
+            "click-away must not dispatch a row"
+        );
+    }
+
+    // The status strip is a clickable front door: left-click opens the
+    // palette the permanent hint names.
+    #[test]
+    fn status_strip_click_opens_the_palette() {
+        let mut state = state();
+        frame(&mut state);
+
+        // Status row is the bottom row of the 100x30 frame.
+        send_pointer(&mut state, left(PointerKind::Down, 50, 29));
+
+        assert!(state.palette_open());
+    }
+
+    // The menu's gateway row gives the mouse a path into the full command
+    // surface (new terminal, splits, save/restore) without any chord.
+    #[test]
+    fn context_menu_gateway_row_opens_the_palette() {
+        let mut state = state();
+        frame(&mut state);
+        send_pointer(&mut state, right_down(5, 5));
+
+        // "Command palette" is the selected first row.
+        state.handle_key(key(KeyCode::Enter));
+
+        assert!(state.palette_open());
+        assert!(state.context_menu.is_none());
+    }
+
+    #[test]
+    fn quit_quits_from_the_palette_by_letter_and_by_row() {
+        // The classic fast path: bare 'q' on the empty input.
+        let mut fast = state();
+        fast.handle_key(ctrl('p'));
+        fast.handle_key(key(KeyCode::Char('q')));
+        assert!(fast.should_quit());
+
+        // The discoverable path: type its name, Enter runs the listed row.
+        let mut typed = state();
+        typed.handle_key(ctrl('p'));
+        typed.handle_key(Key::new(
+            KeyCode::Char('Q'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        for character in "uit".chars() {
+            typed.handle_key(key(KeyCode::Char(character)));
+        }
+        let overlay = typed.palette_overlay(SceneSize::new(100, 30)).unwrap();
+        assert_eq!(overlay.items[0].label, "Quit Mandatum");
+        typed.handle_key(key(KeyCode::Enter));
+        assert!(typed.should_quit());
+    }
+
+    // The wheel moves the palette selection (the item window follows), so
+    // entries below the fold are reachable by mouse; the footer counts them.
+    #[test]
+    fn wheel_scrolls_the_open_palette_and_the_footer_counts_the_overflow() {
+        let mut state = state();
+        frame(&mut state);
+        state.handle_key(ctrl('p'));
+        state.build_scene(POINTER_FRAME);
+
+        let overlay = state.palette_overlay(POINTER_FRAME).unwrap();
+        assert!(
+            overlay.footer.contains("more"),
+            "overflow must be marked, got {:?}",
+            overlay.footer
+        );
+
+        send_pointer(
+            &mut state,
+            pointer_event(PointerKind::Wheel { dx: 0, dy: 2 }, None, 50, 15),
         );
         assert_eq!(
-            key_to_input(key(KeyCode::Tab), true),
-            RuntimeInput::Dispatch(CommandId::FocusNext)
+            state.palette_overlay(POINTER_FRAME).unwrap().selected,
+            Some(2)
+        );
+        send_pointer(
+            &mut state,
+            pointer_event(PointerKind::Wheel { dx: 0, dy: -1 }, None, 50, 15),
         );
         assert_eq!(
-            key_to_input(key(KeyCode::Char('r')), true),
-            RuntimeInput::Dispatch(CommandId::RestartPane)
+            state.palette_overlay(POINTER_FRAME).unwrap().selected,
+            Some(1)
         );
-        assert_eq!(
-            key_to_input_with_palette_context(
-                key(KeyCode::Char('r')),
-                true,
-                PaletteContext::focused_task(),
-            ),
-            RuntimeInput::Dispatch(CommandId::RerunTask)
+        assert!(state.palette_open(), "wheel must not close the palette");
+    }
+
+    // Keyboard resize: Grow/Shrink move the focused pane's nearest split
+    // boundary, the same durable intent separator drags write.
+    #[test]
+    fn grow_and_shrink_resize_the_focused_split_from_the_keyboard() {
+        let mut state = state();
+        state.dispatch(CommandId::SplitRight);
+
+        // Focused pane-2 is the second split side: growing it shrinks the
+        // first side's share.
+        state.dispatch(CommandId::GrowPane);
+        let LayoutNode::Split { first_percent, .. } =
+            state.workspace().active_session().layout().root()
+        else {
+            panic!("root must be a split");
+        };
+        assert_eq!(*first_percent, 45);
+
+        // The '+' fast key dispatches even when the terminal reports shift
+        // (symbols are not the Shift+letter search escape).
+        state.handle_key(ctrl('p'));
+        state.handle_key(Key::new(
+            KeyCode::Char('+'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        let LayoutNode::Split { first_percent, .. } =
+            state.workspace().active_session().layout().root()
+        else {
+            panic!("root must be a split");
+        };
+        assert_eq!(*first_percent, 40);
+
+        state.dispatch(CommandId::ShrinkPane);
+        let LayoutNode::Split { first_percent, .. } =
+            state.workspace().active_session().layout().root()
+        else {
+            panic!("root must be a split");
+        };
+        assert_eq!(*first_percent, 45);
+    }
+
+    // Float is no longer a one-way door: Dock returns a floating pane to
+    // the tiled tree, the float letter toggles, and floating an
+    // already-floating pane reports the problem instead of a false success.
+    #[test]
+    fn dock_undoes_float_and_float_never_reports_a_false_success() {
+        let mut state = state();
+        let pane_2 = PaneId::new("pane-2");
+        state.dispatch(CommandId::NewTerminal); // floating, focused
+
+        state.dispatch(CommandId::FloatPane);
+        assert!(
+            state.status().contains("already floating"),
+            "{}",
+            state.status()
         );
-        assert_eq!(
-            key_to_input_with_palette_context(
-                key(KeyCode::Char('c')),
-                true,
-                PaletteContext::focused_task(),
-            ),
-            RuntimeInput::Dispatch(CommandId::StopTask)
+
+        state.dispatch(CommandId::DockPane);
+        assert!(
+            !state
+                .workspace()
+                .active_session()
+                .layout()
+                .is_floating(&pane_2)
         );
+
+        // The palette letter is a float/dock toggle.
+        state.handle_key(ctrl('p'));
+        state.handle_key(key(KeyCode::Char('f')));
+        assert!(
+            state
+                .workspace()
+                .active_session()
+                .layout()
+                .is_floating(&pane_2)
+        );
+        state.handle_key(ctrl('p'));
+        state.handle_key(key(KeyCode::Char('f')));
+        assert!(
+            !state
+                .workspace()
+                .active_session()
+                .layout()
+                .is_floating(&pane_2)
+        );
+    }
+
+    #[test]
+    fn task_pane_context_menu_offers_rerun_and_stop() {
+        let mut state = state();
+        state.dispatch(CommandId::RunTask); // floating task pane, focused
+        frame(&mut state);
+        let scene = state.build_scene(POINTER_FRAME);
+        let task_pane = scene.panes.iter().find(|pane| pane.floating).unwrap();
+        let inner = mandatum_scene::layout::pane_inner_rect(task_pane.area);
+
+        send_pointer(&mut state, right_down(inner.x + 1, inner.y + 1));
+
+        let scene = state.build_scene(POINTER_FRAME);
+        let Some(mandatum_scene::OverlayScene::ContextMenu(menu)) = &scene.overlay else {
+            panic!("right-click on a task pane must open the menu");
+        };
+        let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
+        assert!(labels.contains(&"Rerun task"));
+        assert!(labels.contains(&"Stop task"));
+        assert!(!labels.contains(&"Restart pane"));
+        // A floating pane's menu offers Dock (the runnable half of the
+        // float/dock toggle) and no splits (floats cannot be split).
+        assert!(labels.contains(&"Dock pane"));
+        assert!(!labels.contains(&"Float pane"));
+        assert!(!labels.contains(&"Split pane right"));
+    }
+
+    #[test]
+    fn resize_clears_pointer_selection_drag_and_menu() {
+        let mut state = state();
+        frame(&mut state);
+        send_pointer(&mut state, right_down(5, 5));
+        assert!(state.context_menu.is_some());
+
+        state.handle_terminal_resize(120, 40);
+
+        assert!(state.context_menu.is_none());
+        assert!(state.pointer_view.is_none());
+        assert!(state.pointer_drag.is_none());
     }
 
     // [L5-GATE] Input reaches the child unless explicit workspace control intercepts.
     #[test]
     fn normal_keys_are_terminal_input_when_palette_is_closed() {
         assert_eq!(
-            key_to_input(key(KeyCode::Char('q')), false),
+            key_to_input(key(KeyCode::Char('q'))),
             RuntimeInput::SendToTerminal(b"q".to_vec())
         );
         assert_eq!(
-            key_to_input(key(KeyCode::Enter), false),
+            key_to_input(key(KeyCode::Enter)),
             RuntimeInput::SendToTerminal(b"\r".to_vec())
         );
         assert_eq!(
-            key_to_input(ctrl('c'), false),
+            key_to_input(ctrl('c')),
             RuntimeInput::SendToTerminal(vec![0x03])
         );
     }
@@ -1949,7 +3755,7 @@ mod tests {
         let session = state.workspace().active_session();
         assert_eq!(session.panes().len(), 3);
         assert_eq!(session.focused_pane_id().as_str(), "pane-2");
-        assert!(state.status().contains("Focus Previous"));
+        assert!(state.status().contains("Focus previous pane"));
     }
 
     #[test]
@@ -1960,8 +3766,187 @@ mod tests {
         assert!(state.palette_open());
         assert_eq!(state.workspace().active_session().panes().len(), 1);
 
-        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Escape));
         assert!(!state.palette_open());
+    }
+
+    /// The full open-type-execute flow, driven with neutral keys: Shift+R
+    /// starts the fuzzy filter (bypassing the fast path), a plain letter
+    /// extends it, and Enter runs the best match.
+    #[test]
+    fn palette_open_type_execute_flow_runs_the_best_fuzzy_match() {
+        let mut state = state();
+
+        state.handle_key(ctrl('p'));
+        state.handle_key(Key::new(
+            KeyCode::Char('R'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        // The filter is non-empty now, so the bound letters 'u' and 'n' type
+        // instead of dispatching their fast-path commands.
+        state.handle_key(key(KeyCode::Char('u')));
+        state.handle_key(key(KeyCode::Char('n')));
+        assert!(state.palette_open());
+        let overlay = state.palette_overlay(SceneSize::new(100, 30)).unwrap();
+        assert_eq!(overlay.query, "Run");
+        assert_eq!(overlay.items[0].label, "Run task");
+        assert_eq!(overlay.selected, Some(0));
+
+        state.handle_key(key(KeyCode::Enter));
+        assert!(!state.palette_open());
+        assert_eq!(state.workspace().active_session().panes().len(), 2);
+        assert!(state.focused_pane_is_task());
+    }
+
+    /// Shift+letter always starts the filter, so commands whose first letter
+    /// is a fast path stay reachable by typing.
+    #[test]
+    fn shift_letter_bypasses_the_fast_path_and_types_into_the_filter() {
+        let mut state = state();
+
+        state.handle_key(ctrl('p'));
+        state.handle_key(Key::new(
+            KeyCode::Char('S'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert!(
+            state.palette_open(),
+            "shifted letter must type, not dispatch"
+        );
+        assert_eq!(state.workspace().active_session().panes().len(), 1);
+
+        let overlay = state.palette_overlay(SceneSize::new(100, 30)).unwrap();
+        assert_eq!(overlay.query, "S");
+        assert_eq!(overlay.items[0].label, "Split pane right");
+
+        state.handle_key(key(KeyCode::Enter));
+        assert!(!state.palette_open());
+        assert_eq!(state.workspace().active_session().panes().len(), 2);
+        assert!(state.status().contains("Split pane right"));
+    }
+
+    /// Ctrl+N/Ctrl+P move the selection while the palette is open (Ctrl+P
+    /// navigates instead of toggling; Esc closes), and arrows match.
+    #[test]
+    fn palette_selection_navigates_with_arrows_and_ctrl_n_p() {
+        let mut state = state();
+        let size = SceneSize::new(100, 30);
+
+        state.handle_key(ctrl('p'));
+        assert_eq!(state.palette_overlay(size).unwrap().selected, Some(0));
+
+        state.handle_key(ctrl('n'));
+        assert_eq!(state.palette_overlay(size).unwrap().selected, Some(1));
+        state.handle_key(key(KeyCode::Down));
+        assert_eq!(state.palette_overlay(size).unwrap().selected, Some(2));
+        state.handle_key(ctrl('p'));
+        assert!(state.palette_open(), "ctrl+p must navigate, not close");
+        assert_eq!(state.palette_overlay(size).unwrap().selected, Some(1));
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.palette_overlay(size).unwrap().selected, Some(0));
+        // Selection clamps at the top instead of wrapping.
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.palette_overlay(size).unwrap().selected, Some(0));
+
+        // Executing the selected entry works end to end: on a terminal pane
+        // the first entry is "New terminal" (pane commands rank first).
+        let overlay = state.palette_overlay(size).unwrap();
+        assert_eq!(overlay.items[0].label, "New terminal");
+        state.handle_key(key(KeyCode::Enter));
+        assert!(!state.palette_open());
+        assert_eq!(state.workspace().active_session().panes().len(), 2);
+    }
+
+    /// Enter on a greyed entry reports the reason and keeps the palette
+    /// open; the entry stays visible rather than hidden.
+    #[test]
+    fn palette_enter_on_greyed_entry_reports_the_reason_and_stays_open() {
+        let mut state = state();
+        let size = SceneSize::new(100, 30);
+
+        state.handle_key(ctrl('p'));
+        // "Approve" begins with the fast-path letter 'a', so start the
+        // filter with Shift+A and type the rest plain.
+        state.handle_key(Key::new(
+            KeyCode::Char('A'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        for character in "pprove".chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+
+        let overlay = state.palette_overlay(size).unwrap();
+        assert_eq!(overlay.items[0].label, "Approve agent action");
+        assert!(!overlay.items[0].enabled);
+        assert_eq!(overlay.items[0].detail, "focused pane is not an agent pane");
+
+        state.handle_key(key(KeyCode::Enter));
+        assert!(
+            state.palette_open(),
+            "greyed entries must not close the palette"
+        );
+        assert!(
+            state.status().contains("focused pane is not an agent pane"),
+            "{}",
+            state.status()
+        );
+        assert_eq!(state.workspace().active_session().panes().len(), 1);
+    }
+
+    /// Context ranking end to end: on a focused agent pane, agent commands
+    /// lead the empty-query list.
+    #[test]
+    fn palette_ranks_agent_commands_first_on_agent_panes() {
+        let mut state = state();
+        state.dispatch(CommandId::NewAgentPane);
+        let size = SceneSize::new(100, 30);
+
+        state.handle_key(ctrl('p'));
+        let overlay = state.palette_overlay(size).unwrap();
+        assert_eq!(overlay.items[0].label, "New agent pane");
+        assert_eq!(overlay.items[1].label, "Start agent");
+        // Approve is greyed with its reason, but present and ranked with its
+        // agent siblings — discoverability over minimalism.
+        let approve = overlay
+            .items
+            .iter()
+            .position(|item| item.label == "Approve agent action")
+            .unwrap();
+        assert!(approve < 6, "agent commands must lead, got index {approve}");
+        assert!(!overlay.items[approve].enabled);
+        assert_eq!(
+            overlay.items[approve].detail,
+            "no approval is pending in this pane"
+        );
+    }
+
+    /// Backspace edits the filter; clearing it restores the fast-path row.
+    #[test]
+    fn palette_backspace_edits_the_query() {
+        let mut state = state();
+        let size = SceneSize::new(100, 30);
+
+        state.handle_key(ctrl('p'));
+        state.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(state.palette_overlay(size).unwrap().query, "i");
+        state.handle_key(key(KeyCode::Backspace));
+        let overlay = state.palette_overlay(size).unwrap();
+        assert_eq!(overlay.query, "");
+        assert_eq!(overlay.items.len(), BUILT_IN_COMMANDS.len());
+
+        // With the query empty again, the fast path is live once more.
+        state.handle_key(key(KeyCode::Char('v')));
+        assert!(!state.palette_open());
+        assert_eq!(state.workspace().active_session().panes().len(), 2);
     }
 
     #[test]
@@ -1979,7 +3964,7 @@ mod tests {
     fn resize_event_updates_runtime_size_without_core_mutation() {
         let mut state = state();
 
-        state.handle_event(Event::Resize(100, 35));
+        state.handle_event(InputEvent::Resize(SceneSize::new(100, 35)));
 
         assert_eq!(state.terminal_size(), Some((100, 35)));
         assert_eq!(state.workspace().active_session().panes().len(), 1);
@@ -2111,13 +4096,9 @@ mod tests {
             workspace_name: "Original".to_owned(),
             project_path: temp.path.join("other-project"),
             workspace_file: temp.workspace_file(),
-            shell_program: "/bin/sh".to_owned(),
             task_command: "printf TASK_OK".to_owned(),
-            agent_connector: AgentConnectorKind::Fake,
             agent_objective: "test objective".to_owned(),
-            agent_model: None,
-            spawn_pty: false,
-            restore_on_startup: false,
+            ..AppConfig::default()
         });
 
         state.dispatch(CommandId::RestoreWorkspace);
@@ -2217,7 +4198,7 @@ mod tests {
     fn zoom_hides_panes_without_removing_their_runtime_identity() {
         let mut state = state();
 
-        state.handle_event(Event::Resize(100, 35));
+        state.handle_event(InputEvent::Resize(SceneSize::new(100, 35)));
         state.handle_key(ctrl('p'));
         state.handle_key(key(KeyCode::Char('v')));
         state.handle_key(ctrl('p'));
@@ -2234,16 +4215,8 @@ mod tests {
 
     fn live_state() -> AppState {
         AppState::new(AppConfig {
-            workspace_name: "Mandatum".to_owned(),
-            project_path: PathBuf::from("/tmp/mandatum"),
-            workspace_file: PathBuf::from("/tmp/mandatum/.mandatum/workspace.json"),
-            shell_program: "/bin/sh".to_owned(),
-            task_command: "printf TASK_OK".to_owned(),
-            agent_connector: AgentConnectorKind::Fake,
-            agent_objective: "test objective".to_owned(),
-            agent_model: None,
             spawn_pty: true,
-            restore_on_startup: false,
+            ..test_config()
         })
     }
 
@@ -2259,6 +4232,348 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    // --- Pointer routing against live children ------------------------------
+
+    /// The rendered grid text of a live terminal pane.
+    fn grid_text(state: &AppState, pane_id: &PaneId) -> String {
+        state
+            .terminal_panes
+            .get(pane_id)
+            .map(|runtime| runtime.parser.grid().snapshot().join("\n"))
+            .unwrap_or_default()
+    }
+
+    /// Two live panes, pane-1's child tracking the mouse (SGR), pane-2
+    /// focused. The tty echoes forwarded mouse bytes as visible `^[[<...`
+    /// text, so forwarding is observable in pane-1's grid.
+    fn live_state_with_capturing_child() -> AppState {
+        let mut state = live_state();
+        state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+        state.dispatch(CommandId::SplitRight);
+
+        state
+            .workspace_mut()
+            .apply_action(CoreAction::FocusPane {
+                pane_id: PaneId::new("pane-1"),
+            })
+            .unwrap();
+        state.write_to_focused_terminal(b"printf '\\033[?1000h\\033[?1006h'\r");
+        let tracking = pump_runtime_until(&mut state, |state| {
+            state
+                .terminal_panes
+                .get(&PaneId::new("pane-1"))
+                .is_some_and(|runtime| runtime.parser.mouse_mode().wants_mouse())
+        });
+        assert!(tracking, "child never enabled mouse tracking");
+
+        state
+            .workspace_mut()
+            .apply_action(CoreAction::FocusPane {
+                pane_id: PaneId::new("pane-2"),
+            })
+            .unwrap();
+        state.build_scene(POINTER_FRAME);
+        state
+    }
+
+    // [L5-GATE] Child mouse capture on: a click over the child's grid is
+    // forwarded to its PTY as mouse bytes and steals no focus.
+    #[test]
+    fn child_capture_forwards_clicks_to_pty_without_focus_steal() {
+        let mut state = live_state_with_capturing_child();
+        let pane_1 = PaneId::new("pane-1");
+        assert_eq!(focused(&state), "pane-2");
+
+        // Click inside pane-1's body: inner rect starts at (1, 2), so the
+        // click at (2, 3) is grid cell (1, 1) -> SGR "\x1b[<0;2;2M".
+        send_pointer(&mut state, left(PointerKind::Down, 2, 3));
+        send_pointer(&mut state, left(PointerKind::Up, 2, 3));
+
+        assert_eq!(focused(&state), "pane-2", "click must not steal focus");
+        // The shell's line editor echoes the forwarded SGR press/release
+        // back as visible text (minus the escape prefix it consumed), so
+        // the bytes reaching the PTY are observable in the child's grid.
+        let echoed = pump_runtime_until(&mut state, |state| {
+            grid_text(state, &pane_1).contains("0;2;2M")
+        });
+        assert!(
+            echoed,
+            "forwarded mouse press never reached the child's PTY; grid: {}",
+            grid_text(&state, &pane_1)
+        );
+
+        state.shutdown();
+    }
+
+    // [L5-GATE] alt+click is always explicit workspace control, even over a
+    // mouse-capturing child.
+    #[test]
+    fn alt_click_is_workspace_control_despite_child_capture() {
+        let mut state = live_state_with_capturing_child();
+
+        send_pointer(
+            &mut state,
+            PointerEvent {
+                mods: Modifiers::ALT,
+                ..left(PointerKind::Down, 2, 3)
+            },
+        );
+
+        assert_eq!(focused(&state), "pane-1", "alt+click must focus the pane");
+
+        state.shutdown();
+    }
+
+    // [L5-GATE] Child capture off: the workspace handles clicks (focus).
+    #[test]
+    fn clicks_are_workspace_control_when_child_does_not_capture() {
+        let mut state = live_state();
+        state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+        state.dispatch(CommandId::SplitRight);
+        assert_eq!(focused(&state), "pane-2");
+        state.build_scene(POINTER_FRAME);
+        let pane_1 = PaneId::new("pane-1");
+        assert!(
+            !state
+                .terminal_panes
+                .get(&pane_1)
+                .unwrap()
+                .parser
+                .mouse_mode()
+                .wants_mouse()
+        );
+
+        send_pointer(&mut state, left(PointerKind::Down, 2, 3));
+
+        assert_eq!(focused(&state), "pane-1");
+        assert!(!grid_text(&state, &pane_1).contains("0;2;2M"));
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn wheel_scrolls_terminal_scrollback_and_returns_to_live() {
+        let mut state = live_state();
+        state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+        let pane_id = PaneId::new("pane-1");
+        state.write_to_focused_terminal(
+            b"i=1; while [ $i -le 60 ]; do echo LINE_$i; i=$((i+1)); done\r",
+        );
+        let scrolled = pump_runtime_until(&mut state, |state| {
+            state
+                .terminal_panes
+                .get(&pane_id)
+                .is_some_and(|runtime| runtime.parser.grid().scrollback_len() > 10)
+        });
+        assert!(scrolled, "shell output never reached scrollback");
+        state.build_scene(POINTER_FRAME);
+
+        // Wheel up over the pane body scrolls into history without copy mode.
+        send_pointer(
+            &mut state,
+            pointer_event(PointerKind::Wheel { dx: 0, dy: -1 }, None, 5, 5),
+        );
+        send_pointer(
+            &mut state,
+            pointer_event(PointerKind::Wheel { dx: 0, dy: -1 }, None, 5, 5),
+        );
+        assert!(!state.copy_mode_active());
+        assert_eq!(state.pane_view_state(&pane_id).scroll_offset, 6);
+        assert!(state.status().contains("scrollback"));
+
+        // Wheel down returns to following live output.
+        send_pointer(
+            &mut state,
+            pointer_event(PointerKind::Wheel { dx: 0, dy: 2 }, None, 5, 5),
+        );
+        assert_eq!(state.pane_view_state(&pane_id).scroll_offset, 0);
+        assert!(state.pointer_view.is_none());
+        assert!(state.status().contains("following live output"));
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn pointer_drag_selects_cells_and_copy_selection_copies_them() {
+        let mut state = live_state();
+        state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+        let pane_id = PaneId::new("pane-1");
+        state.handle_event(InputEvent::Paste("echo SELECT_ME\r".to_owned()));
+        // Wait for the output line (exactly the marker), not the echoed
+        // command line (which contains it).
+        let printed = pump_runtime_until(&mut state, |state| {
+            state.terminal_panes.get(&pane_id).is_some_and(|runtime| {
+                runtime
+                    .parser
+                    .grid()
+                    .snapshot()
+                    .iter()
+                    .any(|line| line.trim_end() == "SELECT_ME")
+            })
+        });
+        assert!(printed, "marker output never reached the grid");
+        state.build_scene(POINTER_FRAME);
+
+        // Locate the echoed marker in the visible grid: pane-1 inner rect
+        // starts at (1, 2), and with no scrollback the visible row N is
+        // screen row 2 + N.
+        let snapshot = state
+            .terminal_panes
+            .get(&pane_id)
+            .unwrap()
+            .parser
+            .grid()
+            .snapshot();
+        let (grid_row, line) = snapshot
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.trim_end() == "SELECT_ME")
+            .expect("marker row visible");
+        assert_eq!(
+            state
+                .terminal_panes
+                .get(&pane_id)
+                .unwrap()
+                .parser
+                .grid()
+                .scrollback_len(),
+            0
+        );
+        let start_column = line.find("SELECT_ME").unwrap() as u16;
+        let screen_row = 2 + grid_row as u16;
+        let screen_start = 1 + start_column;
+
+        // Drag across the marker; releasing keeps the selection visible.
+        send_pointer(
+            &mut state,
+            left(PointerKind::Down, screen_start, screen_row),
+        );
+        send_pointer(
+            &mut state,
+            left(PointerKind::Drag, screen_start + 8, screen_row),
+        );
+        send_pointer(
+            &mut state,
+            left(PointerKind::Up, screen_start + 8, screen_row),
+        );
+        let view = state.pane_view_state(&pane_id);
+        assert!(view.selection.is_some(), "selection survives release");
+        assert!(
+            view.copy_cursor.is_none(),
+            "pointer selection has no cursor"
+        );
+        assert!(!state.copy_mode_active());
+
+        // Copy Selection stages the OSC 52 payload with the selected text.
+        state.dispatch(CommandId::CopySelection);
+        assert_eq!(state.last_copied(), Some("SELECT_ME"));
+        let payload = state.take_clipboard_payload().expect("payload staged");
+        assert!(payload.starts_with(b"\x1b]52;c;"));
+        assert!(state.pane_view_state(&pane_id).selection.is_none());
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn plain_click_clears_selection_and_typing_still_reaches_the_shell() {
+        let mut state = live_state();
+        state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+        let pane_id = PaneId::new("pane-1");
+        state.build_scene(POINTER_FRAME);
+
+        // Drag a selection, then plain-click: the selection clears.
+        send_pointer(&mut state, left(PointerKind::Down, 5, 5));
+        send_pointer(&mut state, left(PointerKind::Drag, 12, 5));
+        send_pointer(&mut state, left(PointerKind::Up, 12, 5));
+        assert!(state.pane_view_state(&pane_id).selection.is_some());
+        send_pointer(&mut state, left(PointerKind::Down, 5, 6));
+        send_pointer(&mut state, left(PointerKind::Up, 5, 6));
+        assert!(state.pane_view_state(&pane_id).selection.is_none());
+
+        // Selection is not a mode: keys still flow to the child (L5).
+        send_pointer(&mut state, left(PointerKind::Down, 5, 5));
+        send_pointer(&mut state, left(PointerKind::Drag, 12, 5));
+        send_pointer(&mut state, left(PointerKind::Up, 12, 5));
+        state.handle_key(key(KeyCode::Char('w')));
+        assert!(state.status().contains("sent 1 byte(s)"));
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn agent_pane_context_menu_offers_approval_decisions() {
+        let mut state = state();
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::Emit(AgentSessionEvent::ApprovalRequested(approval_request(
+                "appr-1",
+                "rm -rf target",
+            ))),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-1".to_owned(),
+                then_on_approve: vec![AgentSessionEvent::Completed {
+                    summary: "cleaned".to_owned(),
+                }],
+                then_on_reject: vec![],
+            },
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let observed = pump_runtime_until(&mut state, |state| {
+            state
+                .agent_runtime_view(&pane_id)
+                .is_some_and(|runtime| runtime.pending_approval.is_some())
+        });
+        assert!(observed, "approval request was not observed");
+
+        state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+        let scene = state.build_scene(POINTER_FRAME);
+        let agent_pane = scene.panes.iter().find(|pane| pane.floating).unwrap();
+        let inner = mandatum_scene::layout::pane_inner_rect(agent_pane.area);
+
+        send_pointer(&mut state, right_down(inner.x + 1, inner.y + 1));
+
+        let scene = state.build_scene(POINTER_FRAME);
+        let Some(mandatum_scene::OverlayScene::ContextMenu(menu)) = &scene.overlay else {
+            panic!("right-click on a waiting agent pane must open the menu");
+        };
+        let items: Vec<(&str, &str)> = menu
+            .items
+            .iter()
+            .map(|item| (item.label.as_str(), item.chord_hint.as_str()))
+            .collect();
+        assert!(items.contains(&("Approve agent action", "y")));
+        assert!(items.contains(&("Reject agent action", "n")));
+        assert!(
+            menu.items.iter().any(|item| item.label == "Stop agent"),
+            "a live session offers Stop agent"
+        );
+
+        // Down past the "Command palette" gateway row to Approve, then
+        // Enter decides the approval.
+        let mut approved = false;
+        for _ in 0..300 {
+            state.handle_key(key(KeyCode::Down));
+            state.handle_key(key(KeyCode::Enter));
+            if state.status().starts_with("approved") {
+                approved = true;
+                break;
+            }
+            // The fake connector's worker may not have parked on the
+            // approval yet; reopen the menu and retry.
+            state.tick_runtime();
+            state.build_scene(POINTER_FRAME);
+            if state.context_menu.is_none() {
+                send_pointer(&mut state, right_down(inner.x + 1, inner.y + 1));
+                state.build_scene(POINTER_FRAME);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(approved, "menu approval never applied: {}", state.status());
+
+        state.shutdown();
     }
 
     #[test]

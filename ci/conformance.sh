@@ -99,3 +99,20 @@ if failures:
 
 print("conformance: L1/L2 dependency laws hold")
 PY
+
+# ---- [L1-GATE] module-level input seam inside the app crate --------------
+# crossterm is a frontend concern. Cargo can only express dependency bans at
+# crate granularity, and the app crate legitimately hosts the terminal
+# frontend, so this seam is enforced as a source scan: inside crates/app
+# only the frontend modules (app_shell.rs, frontend.rs) may use crossterm
+# (imports or paths; prose in comments is fine). app_state and all dispatch
+# logic consume mandatum_scene::input values only.
+seam_violations=$(grep -rlE 'use crossterm|crossterm::' crates/app/src crates/app/tests \
+  | grep -Ev '^crates/app/src/(app_shell|frontend)\.rs$' || true)
+if [ -n "$seam_violations" ]; then
+  echo "CONFORMANCE FAILURES:"
+  echo "  - [L1] crossterm named outside the frontend modules:"
+  echo "$seam_violations" | sed 's/^/      /'
+  exit 1
+fi
+echo "conformance: app-crate input seam holds (crossterm only in frontend modules)"

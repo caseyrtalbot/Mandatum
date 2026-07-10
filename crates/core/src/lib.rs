@@ -162,6 +162,203 @@ mod tests {
     }
 
     #[test]
+    fn set_split_ratio_addresses_splits_in_preorder_and_persists() {
+        let mut workspace = workspace();
+        workspace.apply_action(CoreAction::SplitRight).unwrap();
+        workspace.apply_action(CoreAction::SplitDown).unwrap();
+
+        // Preorder: split 0 is the root horizontal split, split 1 the nested
+        // vertical split on its second side.
+        workspace
+            .apply_action(CoreAction::SetSplitRatio {
+                split_index: 1,
+                first_percent: 30,
+            })
+            .unwrap();
+
+        let LayoutNode::Split { first, second, .. } = workspace.active_session().layout().root()
+        else {
+            panic!("root must be a split");
+        };
+        assert!(matches!(first.as_ref(), LayoutNode::Pane { .. }));
+        let LayoutNode::Split { first_percent, .. } = second.as_ref() else {
+            panic!("second side must be the nested split");
+        };
+        assert_eq!(*first_percent, 30);
+
+        // Ratios are durable layout intent: they survive a round-trip.
+        let restored = Workspace::from_json(&workspace.to_json().unwrap()).unwrap();
+        assert_eq!(
+            restored.active_session().layout().root(),
+            workspace.active_session().layout().root()
+        );
+
+        // Percentages clamp so neither side collapses; unknown splits error.
+        workspace
+            .apply_action(CoreAction::SetSplitRatio {
+                split_index: 0,
+                first_percent: 0,
+            })
+            .unwrap();
+        let LayoutNode::Split { first_percent, .. } = workspace.active_session().layout().root()
+        else {
+            panic!("root must be a split");
+        };
+        assert_eq!(*first_percent, 1);
+        assert!(
+            workspace
+                .apply_action(CoreAction::SetSplitRatio {
+                    split_index: 9,
+                    first_percent: 50,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn move_floating_pane_updates_the_durable_rect() {
+        let mut workspace = workspace();
+        workspace
+            .apply_action(CoreAction::NewTerminal {
+                title: "scratch".to_owned(),
+                cwd: None,
+            })
+            .unwrap();
+        let floating = workspace.active_session().focused_pane_id().clone();
+
+        workspace
+            .apply_action(CoreAction::MoveFloatingPane {
+                pane_id: floating.clone(),
+                x: 13,
+                y: 7,
+            })
+            .unwrap();
+
+        let layout = workspace.active_session().layout();
+        let rect = &layout.floating()[0].rect;
+        assert_eq!((rect.x, rect.y), (13, 7));
+        // Width and height are untouched by a move.
+        assert_eq!((rect.width, rect.height), (96, 28));
+
+        // Tiled panes cannot be moved as floats.
+        assert!(
+            workspace
+                .apply_action(CoreAction::MoveFloatingPane {
+                    pane_id: PaneId::new("pane-1"),
+                    x: 0,
+                    y: 0,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn dock_returns_a_floating_pane_to_the_tiled_tree() {
+        let mut workspace = workspace();
+        workspace
+            .apply_action(CoreAction::NewTerminal {
+                title: "scratch".to_owned(),
+                cwd: None,
+            })
+            .unwrap();
+        let floating = workspace.active_session().focused_pane_id().clone();
+        assert!(workspace.active_session().layout().is_floating(&floating));
+
+        // Floating an already-floating pane is an error, never a silent Ok.
+        let already = workspace.apply_action(CoreAction::FloatFocused);
+        assert!(already.is_err());
+        assert!(
+            already
+                .unwrap_err()
+                .to_string()
+                .contains("already floating")
+        );
+
+        workspace.apply_action(CoreAction::DockFocused).unwrap();
+        let layout = workspace.active_session().layout();
+        assert!(!layout.is_floating(&floating));
+        assert_eq!(
+            layout.root(),
+            &LayoutNode::Split {
+                axis: SplitAxis::Horizontal,
+                first_percent: 50,
+                first: Box::new(LayoutNode::Pane {
+                    pane_id: PaneId::new("pane-1"),
+                }),
+                second: Box::new(LayoutNode::Pane {
+                    pane_id: floating.clone(),
+                }),
+            }
+        );
+
+        // Docking a tiled pane is an error too.
+        assert!(workspace.apply_action(CoreAction::DockFocused).is_err());
+
+        // Dock round-trips with float.
+        workspace.apply_action(CoreAction::FloatFocused).unwrap();
+        assert!(workspace.active_session().layout().is_floating(&floating));
+    }
+
+    #[test]
+    fn resize_focused_adjusts_the_nearest_enclosing_split() {
+        let mut workspace = workspace();
+        workspace.apply_action(CoreAction::SplitRight).unwrap();
+        workspace.apply_action(CoreAction::SplitDown).unwrap();
+
+        // Focused pane-3 sits on the second side of the nested vertical
+        // split: growing it shrinks that split's first side.
+        workspace
+            .apply_action(CoreAction::ResizeFocused { delta_percent: 5 })
+            .unwrap();
+        let LayoutNode::Split {
+            first_percent: root_percent,
+            second,
+            ..
+        } = workspace.active_session().layout().root()
+        else {
+            panic!("root must be a split");
+        };
+        assert_eq!(*root_percent, 50, "outer split is untouched");
+        let LayoutNode::Split { first_percent, .. } = second.as_ref() else {
+            panic!("second side must be the nested split");
+        };
+        assert_eq!(*first_percent, 45);
+
+        // Shrinking moves the same boundary back, and clamps at the edges.
+        workspace
+            .apply_action(CoreAction::ResizeFocused { delta_percent: -5 })
+            .unwrap();
+        workspace
+            .apply_action(CoreAction::ResizeFocused {
+                delta_percent: -128,
+            })
+            .unwrap();
+        let LayoutNode::Split { second, .. } = workspace.active_session().layout().root() else {
+            panic!("root must be a split");
+        };
+        let LayoutNode::Split { first_percent, .. } = second.as_ref() else {
+            panic!("second side must be the nested split");
+        };
+        assert_eq!(*first_percent, 99);
+
+        // A floating pane, and a layout with no split, both error.
+        workspace
+            .apply_action(CoreAction::NewTerminal {
+                title: "scratch".to_owned(),
+                cwd: None,
+            })
+            .unwrap();
+        assert!(
+            workspace
+                .apply_action(CoreAction::ResizeFocused { delta_percent: 5 })
+                .is_err()
+        );
+        let mut single = Workspace::new("single", PathBuf::from("/tmp/project"));
+        let no_split = single.apply_action(CoreAction::ResizeFocused { delta_percent: 5 });
+        assert!(no_split.unwrap_err().to_string().contains("no split"));
+    }
+
+    #[test]
     fn restart_and_rename_are_pane_intent_only() {
         let mut workspace = workspace();
 

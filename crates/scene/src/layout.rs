@@ -52,6 +52,130 @@ pub fn palette_overlay_rect(size: SceneSize) -> SceneRect {
     centered_rect(70, 60, SceneRect::new(0, 0, size.width, size.height))
 }
 
+/// The palette items visible inside the overlay's inner rect: the top inner
+/// row holds the filter input and the bottom inner row holds the footer, so
+/// items get `height - 2` rows, scrolled just far enough to keep the
+/// selected item in view. Frontends and hit-target builders share this math
+/// so pointer rows and drawn rows can never disagree.
+pub fn palette_item_window(
+    inner: SceneRect,
+    item_count: usize,
+    selected: Option<usize>,
+) -> core::ops::Range<usize> {
+    let rows = usize::from(inner.height.saturating_sub(2));
+    if rows == 0 || item_count == 0 {
+        return 0..0;
+    }
+    let selected = selected.unwrap_or(0).min(item_count - 1);
+    let start = (selected + 1).saturating_sub(rows);
+    start..(start + rows).min(item_count)
+}
+
+/// One draggable split boundary, resolved to cell geometry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeparatorLayout {
+    /// Preorder index of the split in the layout tree, matching
+    /// `mandatum_core::Layout::set_split_percent`.
+    pub split_index: usize,
+    pub axis: SplitAxis,
+    /// The grabbable strip: the two adjacent pane-border columns (horizontal
+    /// splits) or rows (vertical splits) along the boundary.
+    pub area: SceneRect,
+    /// The full area the split divides, for turning a pointer position into
+    /// a ratio while dragging.
+    pub split_area: SceneRect,
+}
+
+/// Resolve the active session's split boundaries into draggable separator
+/// strips within `area`. Empty while a pane is zoomed (there is nothing to
+/// resize on screen).
+pub fn layout_separators(workspace: &Workspace, area: SceneRect) -> Vec<SeparatorLayout> {
+    let session = workspace.active_session();
+    if area.is_empty() {
+        return Vec::new();
+    }
+    if let Some(zoomed) = session.layout().zoomed()
+        && session.pane(zoomed).is_some()
+    {
+        return Vec::new();
+    }
+
+    let mut separators = Vec::new();
+    let mut next_index = 0;
+    collect_separators(
+        session.layout().root(),
+        area,
+        &mut next_index,
+        &mut separators,
+    );
+    separators
+}
+
+fn collect_separators(
+    node: &LayoutNode,
+    area: SceneRect,
+    next_index: &mut usize,
+    separators: &mut Vec<SeparatorLayout>,
+) {
+    let LayoutNode::Split {
+        axis,
+        first_percent,
+        first,
+        second,
+    } = node
+    else {
+        return;
+    };
+
+    // Preorder split indices count every split, even degenerate ones, so the
+    // numbering always matches core's `set_split_percent` traversal.
+    let split_index = *next_index;
+    *next_index += 1;
+
+    let (first_area, second_area) = split_rect(area, *axis, u16::from((*first_percent).min(100)));
+    if !first_area.is_empty() && !second_area.is_empty() {
+        let strip = match axis {
+            SplitAxis::Horizontal => SceneRect::new(
+                second_area.x.saturating_sub(1),
+                area.y,
+                2.min(area.width),
+                area.height,
+            ),
+            SplitAxis::Vertical => SceneRect::new(
+                area.x,
+                second_area.y.saturating_sub(1),
+                area.width,
+                2.min(area.height),
+            ),
+        };
+        separators.push(SeparatorLayout {
+            split_index,
+            axis: *axis,
+            area: strip,
+            split_area: area,
+        });
+    }
+
+    collect_separators(first, first_area, next_index, separators);
+    collect_separators(second, second_area, next_index, separators);
+}
+
+/// The context-menu overlay rect: anchored at the pointer, sized to its
+/// content, and clamped inside the frame.
+pub fn context_menu_rect(
+    anchor_column: u16,
+    anchor_row: u16,
+    width: u16,
+    height: u16,
+    size: SceneSize,
+) -> SceneRect {
+    let width = width.min(size.width);
+    let height = height.min(size.height);
+    let x = anchor_column.min(size.width.saturating_sub(width));
+    let y = anchor_row.min(size.height.saturating_sub(height));
+    SceneRect::new(x, y, width, height)
+}
+
 /// Resolve the active session's layout tree into pane rects within `area`,
 /// tiled panes first, floating panes on top. A zoomed pane takes the whole
 /// area without rewriting layout intent.
@@ -261,6 +385,70 @@ mod tests {
     }
 
     #[test]
+    fn separators_carry_preorder_split_identity_and_boundary_strips() {
+        let mut workspace = workspace();
+        workspace.apply_action(CoreAction::SplitRight).unwrap();
+        workspace.apply_action(CoreAction::SplitDown).unwrap();
+
+        let area = SceneRect::new(0, 0, 120, 40);
+        let separators = layout_separators(&workspace, area);
+
+        assert_eq!(separators.len(), 2);
+        // Split 0: the root horizontal split at column 60 — the strip covers
+        // the two adjacent border columns.
+        assert_eq!(separators[0].split_index, 0);
+        assert_eq!(separators[0].axis, SplitAxis::Horizontal);
+        assert_eq!(separators[0].area, SceneRect::new(59, 0, 2, 40));
+        assert_eq!(separators[0].split_area, area);
+        // Split 1: the nested vertical split of the right half at row 20.
+        assert_eq!(separators[1].split_index, 1);
+        assert_eq!(separators[1].axis, SplitAxis::Vertical);
+        assert_eq!(separators[1].area, SceneRect::new(60, 19, 60, 2));
+        assert_eq!(separators[1].split_area, SceneRect::new(60, 0, 60, 40));
+
+        // The identity matches core's preorder addressing: adjusting split 1
+        // moves the nested boundary the separator described.
+        workspace
+            .apply_action(CoreAction::SetSplitRatio {
+                split_index: 1,
+                first_percent: 25,
+            })
+            .unwrap();
+        let moved = layout_separators(&workspace, area);
+        assert_eq!(moved[1].area, SceneRect::new(60, 9, 60, 2));
+    }
+
+    #[test]
+    fn zoom_suppresses_separators() {
+        let mut workspace = workspace();
+        workspace.apply_action(CoreAction::SplitRight).unwrap();
+        workspace
+            .apply_action(CoreAction::ToggleZoomFocused)
+            .unwrap();
+
+        assert!(layout_separators(&workspace, SceneRect::new(0, 0, 120, 40)).is_empty());
+    }
+
+    #[test]
+    fn context_menu_rect_clamps_inside_the_frame() {
+        let size = SceneSize::new(100, 30);
+        assert_eq!(
+            context_menu_rect(10, 5, 24, 8, size),
+            SceneRect::new(10, 5, 24, 8)
+        );
+        // Near the bottom-right corner the menu shifts up and left.
+        assert_eq!(
+            context_menu_rect(95, 28, 24, 8, size),
+            SceneRect::new(76, 22, 24, 8)
+        );
+        // A menu larger than the frame is clipped to it.
+        assert_eq!(
+            context_menu_rect(0, 0, 200, 60, size),
+            SceneRect::new(0, 0, 100, 30)
+        );
+    }
+
+    #[test]
     fn zoomed_pane_uses_full_area_without_rewriting_layout() {
         let mut workspace = workspace();
         workspace.apply_action(CoreAction::SplitRight).unwrap();
@@ -412,5 +600,25 @@ mod tests {
             palette_overlay_rect(SceneSize::new(9, 5)),
             SceneRect::new(1, 1, 7, 3)
         );
+    }
+
+    #[test]
+    fn palette_item_window_reserves_input_and_footer_rows_and_tracks_selection() {
+        let inner = SceneRect::new(1, 1, 40, 10); // 8 item rows
+        assert_eq!(palette_item_window(inner, 24, Some(0)), 0..8);
+        assert_eq!(palette_item_window(inner, 24, None), 0..8);
+        // The selected item is always inside the window.
+        assert_eq!(palette_item_window(inner, 24, Some(7)), 0..8);
+        assert_eq!(palette_item_window(inner, 24, Some(8)), 1..9);
+        assert_eq!(palette_item_window(inner, 24, Some(23)), 16..24);
+        // Out-of-range selection clamps to the last item.
+        assert_eq!(palette_item_window(inner, 24, Some(99)), 16..24);
+        // Fewer items than rows and degenerate heights.
+        assert_eq!(palette_item_window(inner, 3, Some(2)), 0..3);
+        assert_eq!(
+            palette_item_window(SceneRect::new(1, 1, 40, 2), 24, Some(0)),
+            0..0
+        );
+        assert_eq!(palette_item_window(inner, 0, None), 0..0);
     }
 }

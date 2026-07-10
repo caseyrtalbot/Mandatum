@@ -1,6 +1,6 @@
 //! Pane scenes: identity, chrome flags, and renderable content.
 
-use mandatum_core::PaneId;
+use mandatum_core::{AgentStatus, PaneId};
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::SceneRect;
@@ -155,6 +155,9 @@ pub struct TaskContent {
 pub struct AgentContent {
     pub objective: String,
     pub status_label: String,
+    /// Semantic status role, so frontends can theme the status line without
+    /// parsing the label text.
+    pub status_role: AgentStatus,
     pub pending_approvals: u32,
     /// Total changed files reported so far.
     pub changed_file_count: usize,
@@ -299,6 +302,7 @@ mod tests {
             PaneContent::Agent(AgentContent {
                 objective: "review failing tests".to_owned(),
                 status_label: "blocked".to_owned(),
+                status_role: AgentStatus::Blocked,
                 pending_approvals: 1,
                 changed_file_count: 0,
                 changed_files: Vec::new(),
@@ -325,6 +329,7 @@ mod tests {
             PaneContent::Agent(AgentContent {
                 objective: "fix the failing test".to_owned(),
                 status_label: "waiting for approval".to_owned(),
+                status_role: AgentStatus::WaitingForApproval,
                 pending_approvals: 1,
                 changed_file_count: 12,
                 changed_files: vec!["src/lib.rs".to_owned(), "src/x.rs".to_owned()],

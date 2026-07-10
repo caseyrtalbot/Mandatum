@@ -166,8 +166,29 @@ impl Workspace {
                 self.active_session_mut().float_focused()?;
                 Ok(self.mutated_outcome())
             }
+            CoreAction::DockFocused => {
+                self.active_session_mut().dock_focused()?;
+                Ok(self.mutated_outcome())
+            }
+            CoreAction::ResizeFocused { delta_percent } => {
+                self.active_session_mut().resize_focused(delta_percent)?;
+                Ok(self.mutated_outcome())
+            }
             CoreAction::StackFocusedWithNext => {
                 self.active_session_mut().stack_focused_with_next()?;
+                Ok(self.mutated_outcome())
+            }
+            CoreAction::SetSplitRatio {
+                split_index,
+                first_percent,
+            } => {
+                self.active_session_mut()
+                    .set_split_ratio(split_index, first_percent)?;
+                Ok(self.mutated_outcome())
+            }
+            CoreAction::MoveFloatingPane { pane_id, x, y } => {
+                self.active_session_mut()
+                    .move_floating_pane(&pane_id, x, y)?;
                 Ok(self.mutated_outcome())
             }
             CoreAction::SaveWorkspace => Ok(ActionOutcome::PersistenceRequested(

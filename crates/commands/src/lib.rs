@@ -1,5 +1,7 @@
 //! Command metadata and dispatch boundary.
 
+pub mod fuzzy;
+
 use std::fmt;
 use std::path::PathBuf;
 
@@ -16,6 +18,7 @@ pub enum CommandId {
     ClosePane,
     RestartPane,
     EnterCopyMode,
+    CopySelection,
     RunTask,
     RerunTask,
     StopTask,
@@ -27,9 +30,14 @@ pub enum CommandId {
     FocusNextWaitingAgent,
     ZoomPane,
     FloatPane,
+    DockPane,
     StackPanes,
+    GrowPane,
+    ShrinkPane,
     SaveWorkspace,
     RestoreWorkspace,
+    ReloadConfig,
+    Quit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,132 +48,242 @@ pub enum CommandCategory {
     Agent,
     Layout,
     Persistence,
+    Config,
+    App,
 }
 
+/// How many percentage points one Grow/Shrink step moves the focused pane's
+/// nearest enclosing split boundary.
+pub const RESIZE_STEP_PERCENT: i8 = 5;
+
+/// One built-in command. This table is the single source of keymap defaults:
+/// `name` is the stable kebab-case key a config file uses to rebind the
+/// command, and `palette_key` is its default single-letter palette binding
+/// (`None` for commands with no default letter).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Command {
     pub id: CommandId,
     pub label: &'static str,
+    pub name: &'static str,
     pub category: CommandCategory,
+    pub palette_key: Option<char>,
 }
 
 pub const BUILT_IN_COMMANDS: &[Command] = &[
     Command {
         id: CommandId::OpenProject,
-        label: "Open Project",
+        label: "Open project",
+        name: "open-project",
         category: CommandCategory::Project,
+        palette_key: None,
     },
     Command {
         id: CommandId::NewTerminal,
-        label: "New Terminal",
+        label: "New terminal",
+        name: "new-terminal",
         category: CommandCategory::Pane,
+        palette_key: Some('n'),
     },
     Command {
         id: CommandId::SplitRight,
-        label: "Split Right",
+        label: "Split pane right",
+        name: "split-right",
         category: CommandCategory::Layout,
+        palette_key: Some('v'),
     },
     Command {
         id: CommandId::SplitDown,
-        label: "Split Down",
+        label: "Split pane down",
+        name: "split-down",
         category: CommandCategory::Layout,
+        palette_key: Some('s'),
     },
     Command {
         id: CommandId::FocusNext,
-        label: "Focus Next",
+        label: "Focus next pane",
+        name: "focus-next",
         category: CommandCategory::Pane,
+        palette_key: Some('l'),
     },
     Command {
         id: CommandId::FocusPrevious,
-        label: "Focus Previous",
+        label: "Focus previous pane",
+        name: "focus-previous",
         category: CommandCategory::Pane,
+        palette_key: Some('h'),
     },
     Command {
         id: CommandId::ClosePane,
-        label: "Close Pane",
+        label: "Close pane",
+        name: "close-pane",
         category: CommandCategory::Pane,
+        palette_key: Some('x'),
     },
     Command {
         id: CommandId::RestartPane,
-        label: "Restart Pane",
+        label: "Restart pane",
+        name: "restart-pane",
         category: CommandCategory::Pane,
+        palette_key: Some('r'),
     },
     Command {
         id: CommandId::EnterCopyMode,
-        label: "Copy Mode",
+        label: "Enter copy mode",
+        name: "copy-mode",
         category: CommandCategory::Pane,
+        palette_key: Some('['),
+    },
+    Command {
+        id: CommandId::CopySelection,
+        label: "Copy selection",
+        name: "copy-selection",
+        category: CommandCategory::Pane,
+        palette_key: Some('u'),
     },
     Command {
         id: CommandId::RunTask,
-        label: "Run Task",
+        label: "Run task",
+        name: "run-task",
         category: CommandCategory::Task,
+        palette_key: Some('b'),
     },
     Command {
         id: CommandId::RerunTask,
-        label: "Rerun Task",
+        label: "Rerun task",
+        name: "rerun-task",
         category: CommandCategory::Task,
+        // Rides the restart-pane letter when a task pane is focused.
+        palette_key: None,
     },
     Command {
         id: CommandId::StopTask,
-        label: "Stop Task",
+        label: "Stop task",
+        name: "stop-task",
         category: CommandCategory::Task,
+        palette_key: Some('c'),
     },
     Command {
         id: CommandId::NewAgentPane,
-        label: "New Agent Pane",
+        label: "New agent pane",
+        name: "new-agent-pane",
         category: CommandCategory::Agent,
+        palette_key: Some('a'),
     },
     Command {
         id: CommandId::StartAgent,
-        label: "Start Agent",
+        label: "Start agent",
+        name: "start-agent",
         category: CommandCategory::Agent,
+        palette_key: Some('g'),
     },
     Command {
         id: CommandId::StopAgent,
-        label: "Stop Agent",
+        label: "Stop agent",
+        name: "stop-agent",
         category: CommandCategory::Agent,
+        palette_key: Some('k'),
     },
     Command {
         id: CommandId::ApproveAgentAction,
-        label: "Approve Agent Action",
+        label: "Approve agent action",
+        name: "approve-agent-action",
         category: CommandCategory::Agent,
+        palette_key: Some('y'),
     },
     Command {
         id: CommandId::RejectAgentAction,
-        label: "Reject Agent Action",
+        label: "Reject agent action",
+        name: "reject-agent-action",
         category: CommandCategory::Agent,
+        palette_key: Some('d'),
     },
     Command {
         id: CommandId::FocusNextWaitingAgent,
-        label: "Focus Next Waiting Agent",
+        label: "Focus next waiting agent",
+        name: "focus-next-waiting-agent",
         category: CommandCategory::Agent,
+        palette_key: Some('j'),
     },
     Command {
         id: CommandId::ZoomPane,
-        label: "Zoom Pane",
+        label: "Zoom pane",
+        name: "zoom-pane",
         category: CommandCategory::Layout,
+        palette_key: Some('z'),
     },
     Command {
         id: CommandId::FloatPane,
-        label: "Float Pane",
+        label: "Float pane",
+        name: "float-pane",
         category: CommandCategory::Layout,
+        palette_key: Some('f'),
+    },
+    Command {
+        id: CommandId::DockPane,
+        label: "Dock pane",
+        name: "dock-pane",
+        category: CommandCategory::Layout,
+        // Rides the float-pane letter when the focused pane is floating.
+        palette_key: None,
     },
     Command {
         id: CommandId::StackPanes,
-        label: "Stack Panes",
+        label: "Stack panes",
+        name: "stack-panes",
         category: CommandCategory::Layout,
+        palette_key: Some('t'),
+    },
+    Command {
+        id: CommandId::GrowPane,
+        label: "Grow pane",
+        name: "grow-pane",
+        category: CommandCategory::Layout,
+        palette_key: Some('+'),
+    },
+    Command {
+        id: CommandId::ShrinkPane,
+        label: "Shrink pane",
+        name: "shrink-pane",
+        category: CommandCategory::Layout,
+        palette_key: Some('-'),
     },
     Command {
         id: CommandId::SaveWorkspace,
-        label: "Save Workspace",
+        label: "Save workspace",
+        name: "save-workspace",
         category: CommandCategory::Persistence,
+        palette_key: Some('w'),
     },
     Command {
         id: CommandId::RestoreWorkspace,
-        label: "Restore Workspace",
+        label: "Restore workspace",
+        name: "restore-workspace",
         category: CommandCategory::Persistence,
+        palette_key: Some('o'),
+    },
+    Command {
+        id: CommandId::ReloadConfig,
+        label: "Reload config",
+        name: "reload-config",
+        category: CommandCategory::Config,
+        palette_key: Some('e'),
+    },
+    Command {
+        id: CommandId::Quit,
+        label: "Quit Mandatum",
+        name: "quit",
+        category: CommandCategory::App,
+        palette_key: Some('q'),
     },
 ];
+
+/// The command a config file names with this stable kebab-case key, if any.
+pub fn command_id_for_name(name: &str) -> Option<CommandId> {
+    BUILT_IN_COMMANDS
+        .iter()
+        .find(|command| command.name == name)
+        .map(|command| command.id)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandContext {
@@ -204,6 +322,9 @@ pub enum CommandTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeCommand {
     EnterCopyMode,
+    CopySelection,
+    ReloadConfig,
+    Quit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,12 +369,14 @@ pub enum PaletteInput {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaletteContext {
     pub focused_pane_is_task: bool,
+    pub focused_pane_is_floating: bool,
 }
 
 impl PaletteContext {
     pub const fn focused_task() -> Self {
         Self {
             focused_pane_is_task: true,
+            focused_pane_is_floating: false,
         }
     }
 }
@@ -261,6 +384,9 @@ impl PaletteContext {
 pub fn command_target(command_id: CommandId) -> CommandTarget {
     match command_id {
         CommandId::EnterCopyMode => CommandTarget::Runtime(RuntimeCommand::EnterCopyMode),
+        CommandId::CopySelection => CommandTarget::Runtime(RuntimeCommand::CopySelection),
+        CommandId::ReloadConfig => CommandTarget::Runtime(RuntimeCommand::ReloadConfig),
+        CommandId::Quit => CommandTarget::Runtime(RuntimeCommand::Quit),
         CommandId::RunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RunConfiguredTask),
         CommandId::RerunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RerunFocusedTask),
         CommandId::StopTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::StopFocusedTask),
@@ -282,45 +408,93 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
     }
 }
 
+/// Remappable single-letter palette bindings.
+///
+/// Defaults come from the `palette_key` column of [`BUILT_IN_COMMANDS`], so
+/// the default keymap is defined in exactly one place, as data — including
+/// `q`, which is simply the [`CommandId::Quit`] binding. The structural
+/// palette keys (Escape closes, Tab/BackTab cycle focus) are not letter
+/// bindings and stay fixed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteBindings {
+    bindings: Vec<(char, CommandId)>,
+}
+
+impl Default for PaletteBindings {
+    fn default() -> Self {
+        Self {
+            bindings: BUILT_IN_COMMANDS
+                .iter()
+                .filter_map(|command| command.palette_key.map(|key| (key, command.id)))
+                .collect(),
+        }
+    }
+}
+
+impl PaletteBindings {
+    /// The command bound to a palette letter, if any.
+    pub fn resolve_char(&self, key: char) -> Option<CommandId> {
+        self.bindings
+            .iter()
+            .find(|(bound, _)| *bound == key)
+            .map(|(_, command_id)| *command_id)
+    }
+
+    /// The palette letter bound to a command, if any.
+    pub fn key_for(&self, command_id: CommandId) -> Option<char> {
+        self.bindings
+            .iter()
+            .find(|(_, bound)| *bound == command_id)
+            .map(|(key, _)| *key)
+    }
+
+    /// Move a command onto a letter. The command's previous letter is
+    /// released; if another command held the letter it is displaced (the
+    /// later binding wins) and returned so callers can surface a warning.
+    pub fn rebind(&mut self, command_id: CommandId, key: char) -> Option<CommandId> {
+        self.bindings.retain(|(_, bound)| *bound != command_id);
+        let displaced = self.resolve_char(key);
+        self.bindings.retain(|(bound, _)| *bound != key);
+        self.bindings.push((key, command_id));
+        displaced
+    }
+}
+
 pub fn resolve_palette_key(key: PaletteKey) -> PaletteInput {
     resolve_palette_key_with_context(key, PaletteContext::default())
 }
 
 pub fn resolve_palette_key_with_context(key: PaletteKey, context: PaletteContext) -> PaletteInput {
-    match key {
-        PaletteKey::Escape => PaletteInput::Close,
-        PaletteKey::Character('q') => PaletteInput::Quit,
-        PaletteKey::Character('n') => PaletteInput::Dispatch(CommandId::NewTerminal),
-        PaletteKey::Character('v') => PaletteInput::Dispatch(CommandId::SplitRight),
-        PaletteKey::Character('s') => PaletteInput::Dispatch(CommandId::SplitDown),
-        PaletteKey::Character('h') | PaletteKey::BackTab => {
-            PaletteInput::Dispatch(CommandId::FocusPrevious)
-        }
-        PaletteKey::Character('l') | PaletteKey::Tab => {
-            PaletteInput::Dispatch(CommandId::FocusNext)
-        }
-        PaletteKey::Character('x') => PaletteInput::Dispatch(CommandId::ClosePane),
-        PaletteKey::Character('z') => PaletteInput::Dispatch(CommandId::ZoomPane),
-        PaletteKey::Character('f') => PaletteInput::Dispatch(CommandId::FloatPane),
-        PaletteKey::Character('t') => PaletteInput::Dispatch(CommandId::StackPanes),
-        PaletteKey::Character('r') if context.focused_pane_is_task => {
+    resolve_palette_key_with_bindings(key, context, &PaletteBindings::default())
+}
+
+pub fn resolve_palette_key_with_bindings(
+    key: PaletteKey,
+    context: PaletteContext,
+    bindings: &PaletteBindings,
+) -> PaletteInput {
+    let character = match key {
+        PaletteKey::Escape => return PaletteInput::Close,
+        PaletteKey::Tab => return PaletteInput::Dispatch(CommandId::FocusNext),
+        PaletteKey::BackTab => return PaletteInput::Dispatch(CommandId::FocusPrevious),
+        PaletteKey::Character(character) => character,
+    };
+
+    match bindings.resolve_char(character) {
+        // Context substitution: on a focused task pane the restart letter
+        // means "rerun this task", and the stop-task letter is only
+        // meaningful there. On a floating pane the float letter means
+        // "dock this pane" (float/dock is one toggle key).
+        Some(CommandId::RestartPane) if context.focused_pane_is_task => {
             PaletteInput::Dispatch(CommandId::RerunTask)
         }
-        PaletteKey::Character('r') => PaletteInput::Dispatch(CommandId::RestartPane),
-        PaletteKey::Character('c') if context.focused_pane_is_task => {
-            PaletteInput::Dispatch(CommandId::StopTask)
+        Some(CommandId::StopTask) if !context.focused_pane_is_task => PaletteInput::Noop,
+        Some(CommandId::FloatPane) if context.focused_pane_is_floating => {
+            PaletteInput::Dispatch(CommandId::DockPane)
         }
-        PaletteKey::Character('b') => PaletteInput::Dispatch(CommandId::RunTask),
-        PaletteKey::Character('a') => PaletteInput::Dispatch(CommandId::NewAgentPane),
-        PaletteKey::Character('g') => PaletteInput::Dispatch(CommandId::StartAgent),
-        PaletteKey::Character('k') => PaletteInput::Dispatch(CommandId::StopAgent),
-        PaletteKey::Character('y') => PaletteInput::Dispatch(CommandId::ApproveAgentAction),
-        PaletteKey::Character('d') => PaletteInput::Dispatch(CommandId::RejectAgentAction),
-        PaletteKey::Character('j') => PaletteInput::Dispatch(CommandId::FocusNextWaitingAgent),
-        PaletteKey::Character('w') => PaletteInput::Dispatch(CommandId::SaveWorkspace),
-        PaletteKey::Character('o') => PaletteInput::Dispatch(CommandId::RestoreWorkspace),
-        PaletteKey::Character('[') => PaletteInput::Dispatch(CommandId::EnterCopyMode),
-        _ => PaletteInput::Noop,
+        Some(CommandId::Quit) => PaletteInput::Quit,
+        Some(command_id) => PaletteInput::Dispatch(command_id),
+        None => PaletteInput::Noop,
     }
 }
 
@@ -361,10 +535,20 @@ pub fn core_action_for_command(
         CommandId::RestartPane => CoreAction::RestartFocused,
         CommandId::ZoomPane => CoreAction::ToggleZoomFocused,
         CommandId::FloatPane => CoreAction::FloatFocused,
+        CommandId::DockPane => CoreAction::DockFocused,
         CommandId::StackPanes => CoreAction::StackFocusedWithNext,
+        CommandId::GrowPane => CoreAction::ResizeFocused {
+            delta_percent: RESIZE_STEP_PERCENT,
+        },
+        CommandId::ShrinkPane => CoreAction::ResizeFocused {
+            delta_percent: -RESIZE_STEP_PERCENT,
+        },
         CommandId::SaveWorkspace => CoreAction::SaveWorkspace,
         CommandId::RestoreWorkspace => CoreAction::RestoreWorkspace,
         CommandId::EnterCopyMode
+        | CommandId::CopySelection
+        | CommandId::ReloadConfig
+        | CommandId::Quit
         | CommandId::RunTask
         | CommandId::RerunTask
         | CommandId::StopTask
@@ -606,6 +790,118 @@ mod tests {
             Err(CommandError::NotACoreCommand(CommandId::EnterCopyMode))
         ));
         assert_eq!(workspace.active_session().panes().len(), 1);
+    }
+
+    #[test]
+    fn command_names_and_default_palette_keys_are_unique() {
+        let mut names = std::collections::BTreeSet::new();
+        let mut keys = std::collections::BTreeSet::new();
+        for command in BUILT_IN_COMMANDS {
+            assert!(
+                names.insert(command.name),
+                "duplicate name {}",
+                command.name
+            );
+            assert_eq!(command_id_for_name(command.name), Some(command.id));
+            if let Some(key) = command.palette_key {
+                assert!(keys.insert(key), "duplicate palette key {key}");
+                // The quit letter is owned by the Quit command itself, so it
+                // is searchable, rebindable, and shown like every other key.
+                assert!(
+                    key != 'q' || command.id == CommandId::Quit,
+                    "q belongs to the quit command"
+                );
+            }
+        }
+        assert_eq!(command_id_for_name("not-a-command"), None);
+    }
+
+    #[test]
+    fn quit_is_a_listed_runtime_command_and_q_still_quits_the_palette() {
+        let quit = command_for_id(CommandId::Quit).unwrap();
+        assert_eq!(quit.label, "Quit Mandatum");
+        assert_eq!(quit.palette_key, Some('q'));
+        assert_eq!(
+            command_target(CommandId::Quit),
+            CommandTarget::Runtime(RuntimeCommand::Quit)
+        );
+        assert_eq!(
+            resolve_palette_key(PaletteKey::Character('q')),
+            PaletteInput::Quit
+        );
+    }
+
+    #[test]
+    fn dock_grow_and_shrink_map_to_core_layout_actions() {
+        let context = CommandContext::for_project("w", "/tmp/p");
+        assert_eq!(
+            core_action_for_command(CommandId::DockPane, &context).unwrap(),
+            CoreAction::DockFocused
+        );
+        assert_eq!(
+            core_action_for_command(CommandId::GrowPane, &context).unwrap(),
+            CoreAction::ResizeFocused {
+                delta_percent: RESIZE_STEP_PERCENT,
+            }
+        );
+        assert_eq!(
+            core_action_for_command(CommandId::ShrinkPane, &context).unwrap(),
+            CoreAction::ResizeFocused {
+                delta_percent: -RESIZE_STEP_PERCENT,
+            }
+        );
+    }
+
+    #[test]
+    fn float_letter_docks_when_the_focused_pane_is_floating() {
+        let floating = PaletteContext {
+            focused_pane_is_floating: true,
+            ..PaletteContext::default()
+        };
+        assert_eq!(
+            resolve_palette_key_with_context(PaletteKey::Character('f'), floating),
+            PaletteInput::Dispatch(CommandId::DockPane)
+        );
+        assert_eq!(
+            resolve_palette_key(PaletteKey::Character('f')),
+            PaletteInput::Dispatch(CommandId::FloatPane)
+        );
+    }
+
+    #[test]
+    fn palette_rebind_moves_the_command_and_displaces_the_previous_owner() {
+        let mut bindings = PaletteBindings::default();
+
+        // Move SplitRight onto NewTerminal's letter: later binding wins.
+        let displaced = bindings.rebind(CommandId::SplitRight, 'n');
+        assert_eq!(displaced, Some(CommandId::NewTerminal));
+        assert_eq!(bindings.resolve_char('n'), Some(CommandId::SplitRight));
+        // SplitRight's old letter is released, not left dangling.
+        assert_eq!(bindings.resolve_char('v'), None);
+        assert_eq!(bindings.key_for(CommandId::NewTerminal), None);
+
+        // An overridden 'q' dispatches instead of quitting.
+        bindings.rebind(CommandId::ZoomPane, 'q');
+        assert_eq!(
+            resolve_palette_key_with_bindings(
+                PaletteKey::Character('q'),
+                PaletteContext::default(),
+                &bindings,
+            ),
+            PaletteInput::Dispatch(CommandId::ZoomPane)
+        );
+    }
+
+    #[test]
+    fn reload_config_is_a_runtime_command() {
+        assert_eq!(
+            command_target(CommandId::ReloadConfig),
+            CommandTarget::Runtime(RuntimeCommand::ReloadConfig)
+        );
+        assert_eq!(
+            command_id_for_name("reload-config"),
+            Some(CommandId::ReloadConfig)
+        );
     }
 
     #[test]

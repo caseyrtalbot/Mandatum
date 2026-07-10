@@ -202,6 +202,39 @@ pub struct TerminalCapabilities {
     pub alternate_screen: bool,
 }
 
+/// How much mouse tracking the child application requested (DECSET 9/1000/
+/// 1002/1003). Ordered by granularity so the highest requested mode wins.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MouseTracking {
+    /// The child did not ask for the mouse; the workspace owns pointer input.
+    #[default]
+    Off,
+    /// Press/release reporting (DECSET 9 or 1000).
+    Normal,
+    /// Press/release plus motion while a button is held (DECSET 1002).
+    ButtonEvent,
+    /// All motion (DECSET 1003).
+    AnyEvent,
+}
+
+/// The child's live mouse-reporting request: tracking granularity plus the
+/// wire encoding it expects. [L5-GATE] While `tracking` is not `Off`, the
+/// workspace must forward pointer events to the child instead of acting on
+/// them, unless the user invokes explicit workspace-level control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MouseMode {
+    pub tracking: MouseTracking,
+    /// `true` once the child enabled SGR encoding (DECSET 1006).
+    pub sgr: bool,
+}
+
+impl MouseMode {
+    /// Whether the child asked for pointer events at all.
+    pub fn wants_mouse(&self) -> bool {
+        self.tracking != MouseTracking::Off
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalUpdate {
     pub screen_changed: bool,
@@ -214,6 +247,13 @@ pub trait TerminalAdapter {
     fn grid(&self) -> &TerminalGrid;
     fn feed(&mut self, bytes: &[u8]) -> Result<TerminalUpdate, TerminalAdapterError>;
     fn resize(&mut self, size: TerminalSize);
+
+    /// The child's current mouse-reporting request. Backends that do not
+    /// interpret DECSET mode changes must report the default (`Off`), which
+    /// keeps pointer input with the workspace (L5).
+    fn mouse_mode(&self) -> MouseMode {
+        MouseMode::default()
+    }
 }
 
 /// Owns one terminal parser backend per pane and hides the concrete choice.
@@ -254,6 +294,11 @@ impl TerminalParser {
     pub fn resize(&mut self, size: TerminalSize) {
         self.adapter.resize(size);
     }
+
+    /// The child's current mouse-reporting request (L5 pointer routing).
+    pub fn mouse_mode(&self) -> MouseMode {
+        self.adapter.mouse_mode()
+    }
 }
 
 impl TerminalAdapter for TerminalParser {
@@ -275,6 +320,10 @@ impl TerminalAdapter for TerminalParser {
 
     fn resize(&mut self, size: TerminalSize) {
         self.resize(size);
+    }
+
+    fn mouse_mode(&self) -> MouseMode {
+        self.mouse_mode()
     }
 }
 

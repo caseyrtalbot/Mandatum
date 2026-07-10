@@ -11,8 +11,8 @@
 use vte::{Params, Parser, Perform};
 
 use crate::{
-    CellStyle, Color, TerminalAdapter, TerminalAdapterError, TerminalCapabilities, TerminalGrid,
-    TerminalSize, TerminalUpdate,
+    CellStyle, Color, MouseMode, MouseTracking, TerminalAdapter, TerminalAdapterError,
+    TerminalCapabilities, TerminalGrid, TerminalSize, TerminalUpdate,
 };
 
 pub struct VteTerminalAdapter {
@@ -35,7 +35,14 @@ impl VteTerminalAdapter {
 
 impl TerminalAdapter for VteTerminalAdapter {
     fn capabilities(&self) -> TerminalCapabilities {
-        self.state.capabilities
+        TerminalCapabilities {
+            mouse_reporting: self.state.mouse_mode().wants_mouse(),
+            ..self.state.capabilities
+        }
+    }
+
+    fn mouse_mode(&self) -> MouseMode {
+        self.state.mouse_mode()
     }
 
     fn size(&self) -> TerminalSize {
@@ -82,6 +89,12 @@ struct TerminalState {
     wrap_pending: bool,
     dirty: bool,
     capabilities: TerminalCapabilities,
+    // Mouse-reporting requests from the child (DECSET 9/1000/1002/1003 +
+    // 1006). Tracked per mode so disabling one falls back to the others.
+    mouse_normal: bool,
+    mouse_button_event: bool,
+    mouse_any_event: bool,
+    mouse_sgr: bool,
 }
 
 impl TerminalState {
@@ -102,6 +115,28 @@ impl TerminalState {
                 mouse_reporting: false,
                 alternate_screen: true,
             },
+            mouse_normal: false,
+            mouse_button_event: false,
+            mouse_any_event: false,
+            mouse_sgr: false,
+        }
+    }
+
+    /// The child's live mouse-reporting request; the highest-granularity
+    /// enabled tracking mode wins.
+    fn mouse_mode(&self) -> MouseMode {
+        let tracking = if self.mouse_any_event {
+            MouseTracking::AnyEvent
+        } else if self.mouse_button_event {
+            MouseTracking::ButtonEvent
+        } else if self.mouse_normal {
+            MouseTracking::Normal
+        } else {
+            MouseTracking::Off
+        };
+        MouseMode {
+            tracking,
+            sgr: self.mouse_sgr,
         }
     }
 
@@ -229,6 +264,10 @@ impl TerminalState {
         self.scroll_top = 0;
         self.scroll_bottom = self.primary.size().rows() - 1;
         self.wrap_pending = false;
+        self.mouse_normal = false;
+        self.mouse_button_event = false;
+        self.mouse_any_event = false;
+        self.mouse_sgr = false;
         self.dirty = true;
         self.primary.erase_in_display(2, CellStyle::default());
         self.primary.erase_in_display(3, CellStyle::default());
@@ -290,6 +329,11 @@ impl TerminalState {
                         self.leave_alternate();
                     }
                 }
+                // Mouse tracking requests (X10 press-only maps to Normal).
+                9 | 1000 => self.mouse_normal = enabled,
+                1002 => self.mouse_button_event = enabled,
+                1003 => self.mouse_any_event = enabled,
+                1006 => self.mouse_sgr = enabled,
                 _ => {}
             }
         }

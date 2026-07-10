@@ -6,16 +6,23 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use mandatum_commands::CommandError;
 use mandatum_renderer::render;
-use mandatum_scene::SceneSize;
+use mandatum_scene::{SceneSize, Theme};
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
-use crate::{app_state::AppState, scene_builder::build_workspace_scene};
+use crate::{
+    app_state::AppState,
+    config::{load_config, project_config_file, user_config_file},
+    frontend::translate_event,
+    keymap::Keymap,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(40);
 
@@ -31,19 +38,28 @@ pub fn run_with_config(config: AppConfig) -> Result<(), AppError> {
 
     while !app.should_quit() {
         app.tick_runtime();
-        draw(&mut terminal, &app)?;
+        draw(&mut terminal, &mut app)?;
 
         if let Some(payload) = app.take_clipboard_payload() {
             write_clipboard_payload(&payload)?;
         }
 
+        // Drain every buffered event each frame: pointer drags arrive far
+        // faster than the poll interval, and resizing must track the hand.
         if event::poll(POLL_INTERVAL)? {
-            app.handle_event(event::read()?);
+            loop {
+                if let Some(input) = translate_event(event::read()?) {
+                    app.handle_event(input);
+                }
+                if app.should_quit() || !event::poll(Duration::ZERO)? {
+                    break;
+                }
+            }
         }
     }
 
     app.shutdown();
-    draw(&mut terminal, &app)?;
+    draw(&mut terminal, &mut app)?;
     terminal.restore()?;
     Ok(())
 }
@@ -62,6 +78,39 @@ pub struct AppConfig {
     pub agent_model: Option<String>,
     pub spawn_pty: bool,
     pub restore_on_startup: bool,
+    pub keymap: Keymap,
+    pub theme: Theme,
+    pub reduced_motion: bool,
+    /// Validation problems from config loading, surfaced as a startup
+    /// status line. A broken config never prevents launch.
+    pub config_warnings: Vec<String>,
+    /// The user-level config file consulted by Reload Config; `None` skips
+    /// the user layer (tests).
+    pub user_config_file: Option<PathBuf>,
+}
+
+impl Default for AppConfig {
+    /// Test-friendly baseline: fake connector, no PTY spawning, no restore,
+    /// default keymap and theme. The product path is `from_current_dir`.
+    fn default() -> Self {
+        Self {
+            workspace_name: "Mandatum".to_owned(),
+            project_path: PathBuf::new(),
+            workspace_file: PathBuf::new(),
+            shell_program: "/bin/sh".to_owned(),
+            task_command: default_task_command(),
+            agent_connector: AgentConnectorKind::Fake,
+            agent_objective: default_agent_objective(),
+            agent_model: None,
+            spawn_pty: false,
+            restore_on_startup: false,
+            keymap: Keymap::default(),
+            theme: Theme::default(),
+            reduced_motion: false,
+            config_warnings: Vec::new(),
+            user_config_file: None,
+        }
+    }
 }
 
 /// Which agent connector backend the app launches sessions through.
@@ -77,17 +126,27 @@ pub enum AgentConnectorKind {
 impl AppConfig {
     pub fn from_current_dir() -> io::Result<Self> {
         let project_path = std::env::current_dir()?;
+        let user_config_file = user_config_file();
+        let loaded = load_config(
+            user_config_file.as_deref(),
+            &project_config_file(&project_path),
+        );
         Ok(Self {
             workspace_name: "Mandatum".to_owned(),
             workspace_file: default_workspace_file(&project_path),
             project_path,
-            shell_program: default_shell_program(),
-            task_command: default_task_command(),
-            agent_connector: AgentConnectorKind::Claude,
+            shell_program: loaded.shell_program.unwrap_or_else(default_shell_program),
+            task_command: loaded.task_command.unwrap_or_else(default_task_command),
+            agent_connector: loaded.agent_connector.unwrap_or(AgentConnectorKind::Claude),
             agent_objective: default_agent_objective(),
-            agent_model: default_agent_model(),
+            agent_model: loaded.agent_model.or_else(default_agent_model),
             spawn_pty: true,
             restore_on_startup: true,
+            keymap: loaded.keymap,
+            theme: loaded.theme,
+            reduced_motion: loaded.reduced_motion,
+            config_warnings: loaded.warnings,
+            user_config_file,
         })
     }
 }
@@ -106,7 +165,15 @@ impl TerminalGuard {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
 
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
+        // Host-level mouse capture only makes pointer events visible to the
+        // workspace; children that request the mouse get them forwarded as
+        // PTY bytes instead of workspace handling (L5, `app_state` routing).
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        ) {
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -117,6 +184,7 @@ impl TerminalGuard {
                     let _ = disable_raw_mode();
                     let _ = execute!(
                         terminal.backend_mut(),
+                        DisableMouseCapture,
                         DisableBracketedPaste,
                         LeaveAlternateScreen
                     );
@@ -130,7 +198,12 @@ impl TerminalGuard {
             Err(error) => {
                 let _ = disable_raw_mode();
                 let mut stdout = io::stdout();
-                let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
+                let _ = execute!(
+                    stdout,
+                    DisableMouseCapture,
+                    DisableBracketedPaste,
+                    LeaveAlternateScreen
+                );
                 Err(error)
             }
         }
@@ -149,6 +222,7 @@ impl TerminalGuard {
         let raw_mode_result = disable_raw_mode();
         let screen_result = execute!(
             self.terminal.backend_mut(),
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen
         );
@@ -196,11 +270,13 @@ impl From<CommandError> for AppError {
     }
 }
 
-fn draw(terminal: &mut TerminalGuard, app: &AppState) -> io::Result<()> {
+fn draw(terminal: &mut TerminalGuard, app: &mut AppState) -> io::Result<()> {
     terminal.terminal.draw(|frame| {
         let area = frame.area();
-        let scene = build_workspace_scene(app, SceneSize::new(area.width, area.height));
-        render(frame, &scene);
+        // `build_scene` retains the frame's hit targets, so pointer events
+        // resolve against exactly what is on screen.
+        let scene = app.build_scene(SceneSize::new(area.width, area.height));
+        render(frame, &scene, app.theme());
     })?;
     Ok(())
 }

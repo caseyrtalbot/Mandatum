@@ -1,7 +1,7 @@
 //! The top-level workspace scene: everything a frontend needs to draw one
 //! frame and hit-test pointer input against it.
 
-use mandatum_core::PaneId;
+use mandatum_core::{PaneId, SplitAxis};
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{SceneRect, SceneSize};
@@ -38,22 +38,65 @@ pub struct HeaderScene {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayScene {
     Palette(PaletteOverlay),
+    ContextMenu(ContextMenuOverlay),
 }
 
-/// The command palette overlay.
+/// The right-click context menu overlay: a bordered list of the commands
+/// relevant to the pane under the pointer, keyboard-navigable and clickable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextMenuOverlay {
+    pub area: SceneRect,
+    pub items: Vec<ContextMenuEntry>,
+    /// Highlighted row.
+    pub selected: usize,
+}
+
+/// One context-menu row: a command label plus the key chord that runs the
+/// same command from the keyboard (rendered right-aligned).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextMenuEntry {
+    pub label: String,
+    pub chord_hint: String,
+}
+
+impl ContextMenuEntry {
+    pub fn new(label: impl Into<String>, chord_hint: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            chord_hint: chord_hint.into(),
+        }
+    }
+}
+
+/// The command palette overlay: a fuzzy-filter input line on top, the
+/// filtered entries below it, and a key-hint footer on the bottom row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaletteOverlay {
     pub area: SceneRect,
+    /// The live filter text the user has typed.
+    pub query: String,
+    /// Entries matching the query, best match first.
     pub items: Vec<PaletteEntry>,
-    /// Highlighted item; `None` until palette selection navigation exists.
+    /// Highlighted item; `None` only when `items` is empty.
     pub selected: Option<usize>,
+    /// Footer hint line naming the palette's own keys.
+    pub footer: String,
 }
 
 /// One palette row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaletteEntry {
+    /// Verb-first human label ("Split pane right").
     pub label: String,
+    /// Context detail; for a disabled entry, the reason it is unavailable.
     pub detail: String,
+    /// The entry's current key(s) from the live keymap: its palette letter
+    /// and/or global chord, `None` when unbound.
+    pub key_hint: Option<String>,
+    /// Char indices into `label` matched by the query, for highlighting.
+    pub match_indices: Vec<usize>,
+    /// `false` renders the entry greyed; `detail` carries the reason.
+    pub enabled: bool,
 }
 
 impl PaletteEntry {
@@ -61,6 +104,9 @@ impl PaletteEntry {
         Self {
             label: label.into(),
             detail: detail.into(),
+            key_hint: None,
+            match_indices: Vec::new(),
+            enabled: true,
         }
     }
 }
@@ -73,18 +119,20 @@ pub struct HitTarget {
 }
 
 /// What a hit target resolves to.
-///
-/// Split-separator targets are deliberately absent: the percentage-split
-/// layout leaves no dedicated separator cells (pane borders butt together),
-/// so drag-to-resize targets land with the pointer outcome (Outcome 5).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HitTargetKind {
     /// The pane's inner content area.
     PaneBody(PaneId),
     /// The pane's top border row, where the title is drawn.
     PaneTitle(PaneId),
+    /// A draggable split boundary (the two adjacent border columns/rows).
+    /// `split_index` is the preorder index of the split in the layout tree,
+    /// matching `mandatum_core::Layout::set_split_percent`.
+    Separator { split_index: usize, axis: SplitAxis },
     /// The status strip at the bottom of the frame.
     StatusStrip,
     /// One palette row, by item index.
     PaletteItem(usize),
+    /// One context-menu row, by item index.
+    ContextMenuItem(usize),
 }

@@ -8,9 +8,8 @@ use mandatum_agent_runtime::RiskLevel;
 use mandatum_core::{AgentPaneIntent, PaneId, PaneKind, PaneSpec, Session, TaskPaneIntent};
 use mandatum_scene::{
     AgentApprovalPrompt, AgentContent, EmptyContent, HeaderScene, HitTarget, HitTargetKind,
-    OverlayScene, PaletteOverlay, PaneContent, PaneScene, PaneSceneKind, SceneCell, SceneCellStyle,
-    SceneColor, SceneRect, SceneSize, SurfacePosition, TaskContent, TerminalSurface,
-    WorkspaceScene,
+    OverlayScene, PaneContent, PaneScene, PaneSceneKind, SceneCell, SceneCellStyle, SceneColor,
+    SceneRect, SceneSize, SurfacePosition, TaskContent, TerminalSurface, WorkspaceScene,
     layout::{self, PaneLayout},
 };
 use mandatum_terminal_vt::{CellStyle, Color as VtColor, TerminalGrid};
@@ -47,15 +46,14 @@ pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScen
         })
         .collect::<Vec<_>>();
 
-    let overlay = state.palette_open().then(|| {
-        OverlayScene::Palette(PaletteOverlay {
-            area: layout::palette_overlay_rect(size),
-            items: state.palette_items(),
-            selected: None,
-        })
-    });
+    // The context menu and the palette are both modal; opening one closes
+    // the other, so at most one overlay exists per frame.
+    let overlay = state
+        .context_menu_overlay(size)
+        .map(OverlayScene::ContextMenu)
+        .or_else(|| state.palette_overlay(size).map(OverlayScene::Palette));
 
-    let hit_targets = hit_targets(&panes, size, overlay.as_ref());
+    let hit_targets = hit_targets(workspace, &panes, size, overlay.as_ref());
 
     WorkspaceScene {
         size,
@@ -75,8 +73,18 @@ pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScen
 }
 
 /// The status strip text: agent approval attention first, then the app
-/// status. A pane waiting for approval must be visible globally.
+/// status, then the permanent workspace-control hint. A pane waiting for
+/// approval must be visible globally; the hint means a stranger always has
+/// the palette chord and the right-click menu written on screen.
 fn status_with_agent_attention(state: &AppState, session: &Session) -> String {
+    format!(
+        "{} — {}",
+        status_attention_prefix(state, session),
+        state.control_hint()
+    )
+}
+
+fn status_attention_prefix(state: &AppState, session: &Session) -> String {
     let waiting = session
         .panes()
         .iter()
@@ -193,6 +201,7 @@ fn agent_content(state: &AppState, pane_id: &PaneId, intent: &AgentPaneIntent) -
     AgentContent {
         objective: intent.objective.clone(),
         status_label: agent_status_label(&intent.status).to_owned(),
+        status_role: intent.status.clone(),
         pending_approvals: intent.pending_approvals,
         changed_file_count: intent.changed_files.len(),
         changed_files,
@@ -323,26 +332,17 @@ fn scene_color(color: VtColor) -> SceneColor {
     }
 }
 
+/// Hit targets in stacking order, bottom first: status strip, tiled panes,
+/// split separators, floating panes, then overlay rows. Pointer resolution
+/// scans this list in reverse, so later targets win where rects overlap
+/// (floats over separators, overlays over everything).
 fn hit_targets(
+    workspace: &mandatum_core::Workspace,
     panes: &[PaneScene],
     size: SceneSize,
     overlay: Option<&OverlayScene>,
 ) -> Vec<HitTarget> {
     let mut targets = Vec::new();
-
-    for pane in panes {
-        if pane.area.is_empty() {
-            continue;
-        }
-        targets.push(HitTarget {
-            rect: SceneRect::new(pane.area.x, pane.area.y, pane.area.width, 1),
-            kind: HitTargetKind::PaneTitle(pane.id.clone()),
-        });
-        targets.push(HitTarget {
-            rect: layout::pane_inner_rect(pane.area),
-            kind: HitTargetKind::PaneBody(pane.id.clone()),
-        });
-    }
 
     let status = layout::status_rect(size);
     if !status.is_empty() {
@@ -352,14 +352,61 @@ fn hit_targets(
         });
     }
 
-    if let Some(OverlayScene::Palette(palette)) = overlay {
-        let inner = layout::pane_inner_rect(palette.area);
-        for index in 0..palette.items.len().min(usize::from(inner.height)) {
-            targets.push(HitTarget {
-                rect: SceneRect::new(inner.x, inner.y + index as u16, inner.width, 1),
-                kind: HitTargetKind::PaletteItem(index),
-            });
+    let pane_targets = |targets: &mut Vec<HitTarget>, pane: &PaneScene| {
+        if pane.area.is_empty() {
+            return;
         }
+        targets.push(HitTarget {
+            rect: SceneRect::new(pane.area.x, pane.area.y, pane.area.width, 1),
+            kind: HitTargetKind::PaneTitle(pane.id.clone()),
+        });
+        targets.push(HitTarget {
+            rect: layout::pane_inner_rect(pane.area),
+            kind: HitTargetKind::PaneBody(pane.id.clone()),
+        });
+    };
+
+    for pane in panes.iter().filter(|pane| !pane.floating) {
+        pane_targets(&mut targets, pane);
+    }
+
+    for separator in layout::layout_separators(workspace, layout::workspace_scene_area(size)) {
+        targets.push(HitTarget {
+            rect: separator.area,
+            kind: HitTargetKind::Separator {
+                split_index: separator.split_index,
+                axis: separator.axis,
+            },
+        });
+    }
+
+    for pane in panes.iter().filter(|pane| pane.floating) {
+        pane_targets(&mut targets, pane);
+    }
+
+    match overlay {
+        Some(OverlayScene::Palette(palette)) => {
+            // Item rows start one row below the filter input; the shared window
+            // math keeps these rects aligned with what the frontend draws.
+            let inner = layout::pane_inner_rect(palette.area);
+            let window = layout::palette_item_window(inner, palette.items.len(), palette.selected);
+            for (row, index) in window.enumerate() {
+                targets.push(HitTarget {
+                    rect: SceneRect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1),
+                    kind: HitTargetKind::PaletteItem(index),
+                });
+            }
+        }
+        Some(OverlayScene::ContextMenu(menu)) => {
+            let inner = layout::pane_inner_rect(menu.area);
+            for index in 0..menu.items.len().min(usize::from(inner.height)) {
+                targets.push(HitTarget {
+                    rect: SceneRect::new(inner.x, inner.y + index as u16, inner.width, 1),
+                    kind: HitTargetKind::ContextMenuItem(index),
+                });
+            }
+        }
+        None => {}
     }
 
     targets
@@ -370,37 +417,33 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use mandatum_commands::CommandId;
     use mandatum_core::AgentStatus;
+    use mandatum_scene::input::{InputEvent, Key, KeyCode};
 
     use super::*;
-    use crate::app_shell::{AgentConnectorKind, AppConfig};
+    use crate::app_shell::AppConfig;
 
     fn config(spawn_pty: bool) -> AppConfig {
         // The system temp dir always exists, so live PTY spawns get a valid cwd
         // without per-test directory setup (nothing here persists a workspace).
         let project_path = std::env::temp_dir();
         AppConfig {
-            workspace_name: "Mandatum".to_owned(),
             workspace_file: project_path.join("mandatum-scene-builder-test.json"),
             project_path,
-            shell_program: "/bin/sh".to_owned(),
             task_command: "printf 'TASK_OK\\n'".to_owned(),
-            agent_connector: AgentConnectorKind::Fake,
             agent_objective: "test objective".to_owned(),
-            agent_model: None,
             spawn_pty,
-            restore_on_startup: false,
+            ..AppConfig::default()
         }
     }
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+    fn key(code: KeyCode) -> Key {
+        Key::plain(code)
     }
 
-    fn ctrl(code: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)
+    fn ctrl(code: char) -> Key {
+        Key::ctrl(code)
     }
 
     fn pump_until(state: &mut AppState, mut predicate: impl FnMut(&AppState) -> bool) -> bool {
@@ -453,7 +496,12 @@ mod tests {
         assert_eq!(scene.header.focused_pane, PaneId::new("pane-2"));
         assert!(!scene.header.zoomed);
         assert_eq!(scene.focused_pane, PaneId::new("pane-2"));
-        assert_eq!(scene.status.as_deref(), Some(state.status()));
+        // The status strip carries the app status plus the permanent
+        // workspace-control hint (palette chord + right-click menu).
+        let status = scene.status.as_deref().unwrap();
+        assert!(status.starts_with(state.status()), "{status:?}");
+        assert!(status.contains("ctrl+p commands"), "{status:?}");
+        assert!(status.contains("right-click menu"), "{status:?}");
         assert!(!scene.copy_mode);
         assert!(scene_pane(&scene, "pane-2").focused);
         assert!(!scene_pane(&scene, "pane-1").focused);
@@ -495,6 +543,74 @@ mod tests {
     }
 
     #[test]
+    fn split_boundaries_yield_separator_hit_targets_with_identity() {
+        let mut state = AppState::new(config(false));
+        state.dispatch(CommandId::SplitRight);
+
+        let scene = build_workspace_scene(&state, SceneSize::new(120, 40));
+
+        let separator = scene
+            .hit_targets
+            .iter()
+            .find(|target| matches!(target.kind, HitTargetKind::Separator { .. }))
+            .expect("a split must yield a separator target");
+        assert_eq!(
+            separator.kind,
+            HitTargetKind::Separator {
+                split_index: 0,
+                axis: mandatum_core::SplitAxis::Horizontal,
+            }
+        );
+        // The strip covers the two adjacent border columns at the boundary.
+        assert_eq!(separator.rect, SceneRect::new(59, 1, 2, 38));
+    }
+
+    #[test]
+    fn hit_target_order_stacks_floats_over_separators_over_tiled_panes() {
+        let mut state = AppState::new(config(false));
+        state.dispatch(CommandId::SplitRight);
+        state.dispatch(CommandId::NewTerminal); // floating pane on top
+
+        let scene = build_workspace_scene(&state, SceneSize::new(120, 40));
+
+        let position = |predicate: &dyn Fn(&HitTargetKind) -> bool| {
+            scene
+                .hit_targets
+                .iter()
+                .position(|target| predicate(&target.kind))
+                .expect("target present")
+        };
+        let tiled_body = position(
+            &|kind| matches!(kind, HitTargetKind::PaneBody(id) if id.as_str() == "pane-1"),
+        );
+        let separator = position(&|kind| matches!(kind, HitTargetKind::Separator { .. }));
+        let float_body = position(
+            &|kind| matches!(kind, HitTargetKind::PaneBody(id) if id.as_str() == "pane-3"),
+        );
+
+        // Reverse-scan hit testing means later targets win overlaps: floats
+        // beat separators beat tiled panes.
+        assert!(tiled_body < separator);
+        assert!(separator < float_body);
+    }
+
+    #[test]
+    fn zoomed_layout_emits_no_separator_targets() {
+        let mut state = AppState::new(config(false));
+        state.dispatch(CommandId::SplitRight);
+        state.dispatch(CommandId::ZoomPane);
+
+        let scene = build_workspace_scene(&state, SceneSize::new(120, 40));
+
+        assert!(
+            !scene
+                .hit_targets
+                .iter()
+                .any(|target| matches!(target.kind, HitTargetKind::Separator { .. }))
+        );
+    }
+
+    #[test]
     fn palette_overlay_carries_items_and_item_targets() {
         let mut state = AppState::new(config(false));
         state.handle_key(ctrl('p'));
@@ -506,15 +622,30 @@ mod tests {
             panic!("palette must be open in the scene");
         };
         assert_eq!(palette.area, layout::palette_overlay_rect(size));
-        assert_eq!(palette.items.len(), state.palette_items().len());
-        assert!(palette.selected.is_none());
-        let item_targets = scene
+        // An empty query lists every built-in command with the first selected.
+        assert_eq!(palette.query, "");
+        assert_eq!(
+            palette.items.len(),
+            mandatum_commands::BUILT_IN_COMMANDS.len()
+        );
+        assert_eq!(palette.selected, Some(0));
+        assert!(!palette.footer.is_empty());
+
+        // Item hit targets cover exactly the visible window, one row below
+        // the filter input, aligned with the shared window math.
+        let inner = layout::pane_inner_rect(palette.area);
+        let window = layout::palette_item_window(inner, palette.items.len(), palette.selected);
+        let item_targets: Vec<_> = scene
             .hit_targets
             .iter()
             .filter(|target| matches!(target.kind, HitTargetKind::PaletteItem(_)))
-            .count();
-        assert!(item_targets > 0);
-        assert!(item_targets <= palette.items.len());
+            .collect();
+        assert_eq!(item_targets.len(), window.len());
+        assert!(!item_targets.is_empty());
+        assert_eq!(
+            item_targets[0].rect,
+            SceneRect::new(inner.x, inner.y + 1, inner.width, 1)
+        );
     }
 
     #[test]
@@ -536,7 +667,7 @@ mod tests {
     fn live_terminal_pane_carries_windowed_grid_content() {
         let mut state = AppState::new(config(true));
         state.handle_terminal_resize(100, 30);
-        state.handle_event(Event::Paste("echo SCENE_LIVE_OK\r".to_owned()));
+        state.handle_event(InputEvent::Paste("echo SCENE_LIVE_OK\r".to_owned()));
 
         let size = SceneSize::new(100, 30);
         let observed = pump_until(&mut state, |state| {
@@ -665,6 +796,7 @@ mod tests {
         };
         assert_eq!(agent.objective, "review failing tests");
         assert_eq!(agent.status_label, "waiting for approval");
+        assert_eq!(agent.status_role, AgentStatus::WaitingForApproval);
         assert_eq!(agent.pending_approvals, 2);
         assert_eq!(agent.changed_file_count, 2);
         assert_eq!(agent.changed_files, vec!["src/lib.rs", "src/x.rs"]);
@@ -729,6 +861,7 @@ mod tests {
             panic!("agent pane must carry agent content");
         };
         assert_eq!(agent.status_label, "waiting for approval");
+        assert_eq!(agent.status_role, AgentStatus::WaitingForApproval);
         assert_eq!(
             agent.current_action.as_deref(),
             Some("asking to clean the target dir")
