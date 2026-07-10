@@ -5733,6 +5733,24 @@ mod tests {
         false
     }
 
+    /// Wait for a freshly spawned shell's first prompt before interacting.
+    /// Input sent during shell startup races its termios init (echo can be
+    /// off mid-init, eating pure-echo assertions) and dash prints its first
+    /// prompt after the kernel echo, merging output into the prompt row.
+    fn wait_for_shell_prompt(state: &mut AppState, pane_id: &PaneId) {
+        let prompted = pump_runtime_until(state, |state| {
+            state.terminal_panes.get(pane_id).is_some_and(|runtime| {
+                runtime
+                    .parser
+                    .grid()
+                    .snapshot()
+                    .iter()
+                    .any(|line| line.trim_end().ends_with('$'))
+            })
+        });
+        assert!(prompted, "shell prompt never appeared");
+    }
+
     // A PTY output flood must not overwrite meaningful status with
     // byte-count diagnostics: a failure status persists until something
     // meaningful supersedes it, not until the next read.
@@ -6148,21 +6166,7 @@ mod tests {
         let mut state = live_state();
         state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
         let pane_id = PaneId::new("pane-1");
-        // Wait for the shell prompt before pasting: pasting earlier races
-        // shell startup, and dash (Linux /bin/sh) then prints its prompt
-        // between the kernel echo and the command output, merging the marker
-        // into the prompt row ("$ SELECT_ME").
-        let prompted = pump_runtime_until(&mut state, |state| {
-            state.terminal_panes.get(&pane_id).is_some_and(|runtime| {
-                runtime
-                    .parser
-                    .grid()
-                    .snapshot()
-                    .iter()
-                    .any(|line| line.trim_end().ends_with('$'))
-            })
-        });
-        assert!(prompted, "shell prompt never appeared");
+        wait_for_shell_prompt(&mut state, &pane_id);
         state.handle_event(InputEvent::Paste("echo SELECT_ME\r".to_owned()));
         // Wait for the output line: ends with the marker but is not the
         // echoed command line (which contains "echo").
@@ -6246,6 +6250,9 @@ mod tests {
         let mut state = live_state();
         state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
         let pane_id = PaneId::new("pane-1");
+        // The typed-marker proof below relies on pure kernel echo (no \r is
+        // sent), which a mid-init shell can have disabled.
+        wait_for_shell_prompt(&mut state, &pane_id);
         state.build_scene(POINTER_FRAME);
 
         // Drag a selection, then plain-click: the selection clears.
