@@ -1,0 +1,7 @@
+# The gate toolchain. Local runs and CI must execute the same checks on the
+# same compiler: a floating "stable" lets new clippy lints redden CI while
+# the local gate stays green. Bump this pin deliberately, fixing new lints
+# in the same change.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

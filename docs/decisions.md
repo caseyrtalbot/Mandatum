@@ -738,3 +738,18 @@ dismisses; a saved workspace suppresses on relaunch), glyph-legend
 completeness tests in `timeline.rs`/`session_map.rs`, focus-border
 distinctness tests, keyboard float-move tests, and the scene-equality
 reduced-motion test.
+
+## Accepted: The Gate Toolchain Is Pinned
+
+Status: accepted (2026-07-10)
+
+Decision: rust-toolchain.toml pins the exact compiler (1.96.0) for local
+gates and CI alike.
+
+Context: CI on floating "stable" advanced to 1.97 and a new clippy lint
+(byte_char_slices) reddened CI while the identical local gate stayed green
+on 1.96.
+
+Rationale: the gate's guarantee is that local and CI run the same checks;
+that includes the toolchain. Bumps are deliberate: update the pin and fix
+any new lints in the same change.

@@ -596,7 +596,7 @@ impl Perform for TerminalState {
         // DECSTR (`CSI ! p`) carries the `!` intermediate; nothing else with
         // intermediates is interpreted below.
         if action == 'p' {
-            if intermediates == [b'!'] {
+            if intermediates == *b"!" {
                 self.soft_reset();
             }
             return;
