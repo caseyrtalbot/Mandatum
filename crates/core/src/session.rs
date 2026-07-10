@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Layout, PaneId, PaneKind, PaneSpec, ProjectId, SessionId, SplitDirection, TaskPaneIntent,
-    layout::LayoutMutationError,
+    AgentPaneIntent, Layout, PaneId, PaneKind, PaneSpec, ProjectId, SessionId, SplitDirection,
+    TaskPaneIntent, layout::LayoutMutationError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +100,30 @@ impl Session {
     pub fn add_task_pane(&mut self, title: impl Into<String>, intent: TaskPaneIntent) -> PaneId {
         let cwd = intent.cwd.clone();
         self.add_floating_pane(title, PaneKind::Task { intent }, cwd)
+    }
+
+    pub fn add_agent_pane(
+        &mut self,
+        title: impl Into<String>,
+        intent: AgentPaneIntent,
+        cwd: Option<PathBuf>,
+    ) -> PaneId {
+        self.add_floating_pane(title, PaneKind::Agent { intent }, cwd)
+    }
+
+    /// Mutable access to a pane's durable agent intent, when the pane exists
+    /// and is an agent pane.
+    pub fn agent_intent_mut(&mut self, pane_id: &PaneId) -> Option<&mut AgentPaneIntent> {
+        self.panes
+            .get_mut(pane_id)
+            .and_then(PaneSpec::agent_intent_mut)
+    }
+
+    /// Mutable access to every agent intent in this session.
+    pub fn agent_intents_mut(&mut self) -> impl Iterator<Item = &mut AgentPaneIntent> {
+        self.panes
+            .values_mut()
+            .filter_map(PaneSpec::agent_intent_mut)
     }
 
     pub fn add_floating_pane(

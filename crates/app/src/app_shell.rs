@@ -55,8 +55,23 @@ pub struct AppConfig {
     pub workspace_file: PathBuf,
     pub shell_program: String,
     pub task_command: String,
+    pub agent_connector: AgentConnectorKind,
+    pub agent_objective: String,
+    /// Optional model hint passed through to agent launches (`None` lets the
+    /// connector use its account default).
+    pub agent_model: Option<String>,
     pub spawn_pty: bool,
     pub restore_on_startup: bool,
+}
+
+/// Which agent connector backend the app launches sessions through.
+///
+/// `Claude` is the product default; tests wire `Fake` everywhere so no test
+/// touches a network or a live agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentConnectorKind {
+    Fake,
+    Claude,
 }
 
 impl AppConfig {
@@ -68,6 +83,9 @@ impl AppConfig {
             project_path,
             shell_program: default_shell_program(),
             task_command: default_task_command(),
+            agent_connector: AgentConnectorKind::Claude,
+            agent_objective: default_agent_objective(),
+            agent_model: default_agent_model(),
             spawn_pty: true,
             restore_on_startup: true,
         })
@@ -201,4 +219,17 @@ fn default_shell_program() -> String {
 
 fn default_task_command() -> String {
     "cargo test".to_owned()
+}
+
+fn default_agent_objective() -> String {
+    "summarize the state of this project and propose the next step".to_owned()
+}
+
+/// Model hint from `MANDATUM_AGENT_MODEL`, read once here so env access
+/// stays at the config boundary (mirrors `SHELL` for `shell_program`).
+fn default_agent_model() -> Option<String> {
+    std::env::var("MANDATUM_AGENT_MODEL")
+        .ok()
+        .map(|model| model.trim().to_owned())
+        .filter(|model| !model.is_empty())
 }

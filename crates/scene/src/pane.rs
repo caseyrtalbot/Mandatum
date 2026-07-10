@@ -56,12 +56,47 @@ impl PaneScene {
             PaneContent::Agent(agent) => {
                 lines.push(format!("objective: {}", agent.objective));
                 lines.push(format!("status: {}", agent.status_label));
-                lines.push(format!("pending approvals: {}", agent.pending_approvals));
-                lines.push(format!("changed files: {}", agent.changed_files));
+                lines.push(format!(
+                    "action: {}",
+                    agent.current_action.as_deref().unwrap_or("idle")
+                ));
                 lines.push(format!(
                     "summary: {}",
                     agent.latest_summary.as_deref().unwrap_or("none")
                 ));
+                match &agent.pending_approval {
+                    Some(prompt) => {
+                        lines.push(format!("approval required: {}", prompt.command));
+                        match &prompt.affected_path {
+                            Some(path) => {
+                                lines.push(format!("scope: {} -> {}", prompt.cwd, path));
+                            }
+                            None => lines.push(format!("scope: {}", prompt.cwd)),
+                        }
+                        lines.push(format!(
+                            "risk: {} ({})",
+                            prompt.risk_label, prompt.risk_basis
+                        ));
+                        lines.push(format!("keys: {}", prompt.key_hint));
+                    }
+                    None => {
+                        lines.push(format!("pending approvals: {}", agent.pending_approvals));
+                    }
+                }
+                if agent.changed_files.is_empty() {
+                    lines.push("changed files: none".to_owned());
+                } else {
+                    lines.push(format!("changed files ({}):", agent.changed_file_count));
+                    for path in &agent.changed_files {
+                        lines.push(format!("  {path}"));
+                    }
+                }
+                if !agent.output_tail.is_empty() {
+                    lines.push("output:".to_owned());
+                    for line in &agent.output_tail {
+                        lines.push(format!("  {line}"));
+                    }
+                }
             }
             PaneContent::Empty(empty) => {
                 lines.push(format!("cwd: {}", empty.cwd_label));
@@ -113,14 +148,42 @@ pub struct TaskContent {
     pub output: Option<TerminalSurface>,
 }
 
-/// Agent pane content, summarized from the durable agent intent.
+/// Agent pane content: the durable intent summary plus the live session
+/// surface (current action, pending approval detail, output tail). Live
+/// fields are empty/`None` when no runtime is attached.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentContent {
     pub objective: String,
     pub status_label: String,
     pub pending_approvals: u32,
-    pub changed_files: usize,
+    /// Total changed files reported so far.
+    pub changed_file_count: usize,
+    /// The most recent changed files (the builder caps this list, ~10).
+    pub changed_files: Vec<String>,
     pub latest_summary: Option<String>,
+    /// What the agent is doing right now (live only).
+    pub current_action: Option<String>,
+    /// Full detail of the approval awaiting a decision (live only).
+    pub pending_approval: Option<AgentApprovalPrompt>,
+    /// Trailing raw output lines (live only; the builder caps the tail).
+    pub output_tail: Vec<String>,
+}
+
+/// A gated action awaiting a user verdict, re-expressed for frontends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentApprovalPrompt {
+    /// The verbatim command the agent wants to run.
+    pub command: String,
+    /// Working directory the command would run in.
+    pub cwd: String,
+    /// Path the action is expected to affect, when known.
+    pub affected_path: Option<String>,
+    /// Risk band label ("low" / "medium" / "high").
+    pub risk_label: String,
+    /// Which pattern produced the band.
+    pub risk_basis: String,
+    /// The decision keys frontends should surface ("y approve / n reject").
+    pub key_hint: String,
 }
 
 /// A pane with no live content surface attached (a terminal pane before its
@@ -237,17 +300,61 @@ mod tests {
                 objective: "review failing tests".to_owned(),
                 status_label: "blocked".to_owned(),
                 pending_approvals: 1,
-                changed_files: 3,
+                changed_file_count: 0,
+                changed_files: Vec::new(),
                 latest_summary: None,
+                current_action: None,
+                pending_approval: None,
+                output_tail: Vec::new(),
             }),
             PaneSceneKind::Agent,
         );
         let lines = agent.detail_lines();
         assert_eq!(lines[0], "pane-1 agent");
         assert!(lines.contains(&"objective: review failing tests".to_owned()));
+        assert!(lines.contains(&"status: blocked".to_owned()));
+        assert!(lines.contains(&"action: idle".to_owned()));
         assert!(lines.contains(&"pending approvals: 1".to_owned()));
-        assert!(lines.contains(&"changed files: 3".to_owned()));
+        assert!(lines.contains(&"changed files: none".to_owned()));
         assert!(lines.contains(&"summary: none".to_owned()));
+    }
+
+    #[test]
+    fn waiting_agent_detail_lines_carry_the_approval_block_and_live_surface() {
+        let agent = pane(
+            PaneContent::Agent(AgentContent {
+                objective: "fix the failing test".to_owned(),
+                status_label: "waiting for approval".to_owned(),
+                pending_approvals: 1,
+                changed_file_count: 12,
+                changed_files: vec!["src/lib.rs".to_owned(), "src/x.rs".to_owned()],
+                latest_summary: Some("patched the test".to_owned()),
+                current_action: Some("running cargo test".to_owned()),
+                pending_approval: Some(AgentApprovalPrompt {
+                    command: "rm -rf target".to_owned(),
+                    cwd: "/tmp/project".to_owned(),
+                    affected_path: Some("target".to_owned()),
+                    risk_label: "high".to_owned(),
+                    risk_basis: "removes files (rm)".to_owned(),
+                    key_hint: "y approve / n reject".to_owned(),
+                }),
+                output_tail: vec!["$ cargo test".to_owned(), "1 test failed".to_owned()],
+            }),
+            PaneSceneKind::Agent,
+        );
+        let lines = agent.detail_lines();
+        assert!(lines.contains(&"status: waiting for approval".to_owned()));
+        assert!(lines.contains(&"action: running cargo test".to_owned()));
+        assert!(lines.contains(&"approval required: rm -rf target".to_owned()));
+        assert!(lines.contains(&"scope: /tmp/project -> target".to_owned()));
+        assert!(lines.contains(&"risk: high (removes files (rm))".to_owned()));
+        assert!(lines.contains(&"keys: y approve / n reject".to_owned()));
+        assert!(lines.contains(&"changed files (12):".to_owned()));
+        assert!(lines.contains(&"  src/lib.rs".to_owned()));
+        assert!(lines.contains(&"output:".to_owned()));
+        assert!(lines.contains(&"  1 test failed".to_owned()));
+        // No stale "pending approvals" counter next to the full block.
+        assert!(!lines.contains(&"pending approvals: 1".to_owned()));
     }
 
     #[test]

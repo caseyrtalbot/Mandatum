@@ -1,0 +1,21 @@
+[package]
+name = "mandatum-agent-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+# Engine-side agent runtime contract: connector trait, session events,
+# approval protocol, and a deterministic FakeConnector for tests. Enforced
+# by [L1-GATE] in ci/conformance.sh — this crate's dependency closure must
+# never contain frontend, parser, process, or async runtime crates. Threads
+# and std channels only, mirroring the PTY runtime.
+[dependencies]
+mandatum-core = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+
+# PreToolUse hook shim for the Claude CLI connector: forwards gated tool
+# calls to the per-session approval socket and fails closed.
+[[bin]]
+name = "mandatum-approval-bridge"
+path = "src/bin/mandatum-approval-bridge.rs"

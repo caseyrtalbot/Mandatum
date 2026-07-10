@@ -39,7 +39,12 @@ FORBIDDEN = {
 }
 # Engine-side crates that must stay frontend/runtime-free. Grows as the
 # workspace grows; scene crates belong here the day they exist.
-ENGINE_SIDE = ["mandatum-core", "mandatum-commands", "mandatum-scene"]
+ENGINE_SIDE = [
+    "mandatum-core",
+    "mandatum-commands",
+    "mandatum-scene",
+    "mandatum-agent-runtime",
+]
 
 def transitive_normal_deps(pkg_id):
     seen, stack = set(), [pkg_id]

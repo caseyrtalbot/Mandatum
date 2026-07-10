@@ -7,18 +7,26 @@ use std::{
 };
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use mandatum_agent_runtime::{
+    AgentConnector, AgentLaunchSpec, AgentSessionEvent, ApprovalDecision, ApprovalVerdict,
+};
 use mandatum_commands::{
     BUILT_IN_COMMANDS, CommandCategory, CommandContext, CommandId, CommandTarget, PaletteContext,
-    RuntimeCommand, RuntimeTaskCommand, command_target, dispatch_command,
+    RuntimeAgentCommand, RuntimeCommand, RuntimeTaskCommand, command_target, dispatch_command,
 };
 use mandatum_core::{
-    ActionOutcome, CoreAction, PaneId, PaneKind, PersistenceRequest, TaskPaneIntent, Workspace,
+    ActionOutcome, AgentApprovalRecord, AgentPaneIntent, AgentStatus, CoreAction, PaneId, PaneKind,
+    PersistenceRequest, TaskPaneIntent, Workspace,
 };
 use mandatum_pty::{NativePtyError, PtySize};
 use mandatum_scene::{PaletteEntry, SceneSize, layout::pane_content_rect};
 use mandatum_terminal_vt::TerminalGrid;
 
 use crate::{
+    agent_runtime::{
+        AgentPaneRuntime, AgentRuntimeEvent, AgentRuntimeRegistry, activate_agent_session,
+        connector_for_kind,
+    },
     app_shell::AppConfig,
     clipboard::osc52_sequence,
     copy_mode::CopyModeState,
@@ -56,11 +64,17 @@ pub struct AppState {
     last_redraw: Instant,
     terminal_panes: TerminalRuntimeRegistry,
     task_panes: TaskRuntimeRegistry,
+    agent_panes: AgentRuntimeRegistry,
+    agent_connector: Option<Box<dyn AgentConnector>>,
+    agent_objective: String,
+    agent_model: Option<String>,
     copy_mode: Option<CopyModeState>,
     clipboard_payload: Option<Vec<u8>>,
     last_copied: Option<String>,
     runtime_tx: Sender<PtyRuntimeEvent>,
     runtime_rx: Receiver<PtyRuntimeEvent>,
+    agent_tx: Sender<AgentRuntimeEvent>,
+    agent_rx: Receiver<AgentRuntimeEvent>,
     next_runtime_token: u64,
 }
 
@@ -70,6 +84,7 @@ impl AppState {
             CommandContext::for_project(config.workspace_name.clone(), config.project_path.clone());
         let workspace = Workspace::new(config.workspace_name, config.project_path);
         let (runtime_tx, runtime_rx) = mpsc::channel();
+        let (agent_tx, agent_rx) = mpsc::channel();
         let restore_on_startup = config.restore_on_startup;
 
         let mut state = Self {
@@ -87,11 +102,17 @@ impl AppState {
             last_redraw: Instant::now(),
             terminal_panes: TerminalRuntimeRegistry::new(),
             task_panes: TaskRuntimeRegistry::new(),
+            agent_panes: AgentRuntimeRegistry::new(),
+            agent_connector: connector_for_kind(config.agent_connector),
+            agent_objective: config.agent_objective,
+            agent_model: config.agent_model,
             copy_mode: None,
             clipboard_payload: None,
             last_copied: None,
             runtime_tx,
             runtime_rx,
+            agent_tx,
+            agent_rx,
             next_runtime_token: 1,
         };
 
@@ -134,6 +155,10 @@ impl AppState {
         self.task_panes.len()
     }
 
+    pub fn live_agent_count(&self) -> usize {
+        self.agent_panes.len()
+    }
+
     pub fn copy_mode_active(&self) -> bool {
         self.copy_mode.is_some()
     }
@@ -152,7 +177,7 @@ impl AppState {
     pub fn palette_items(&self) -> Vec<PaletteEntry> {
         BUILT_IN_COMMANDS
             .iter()
-            .map(|command| PaletteEntry::new(command.label, category_label(command.category)))
+            .map(|command| PaletteEntry::new(command.label, palette_detail(command)))
             .collect()
     }
 
@@ -197,6 +222,28 @@ impl AppState {
             self.handle_copy_mode_key(key);
             self.mark_redraw();
             return;
+        }
+
+        // Direct approval keys: while the focused pane is an agent pane with
+        // a pending approval, y/n decide it without opening the palette. An
+        // agent pane has no terminal input to shadow.
+        if !self.palette_open
+            && key.modifiers.is_empty()
+            && self.focused_agent_has_pending_approval()
+        {
+            match key.code {
+                KeyCode::Char('y') => {
+                    self.dispatch(CommandId::ApproveAgentAction);
+                    self.mark_redraw();
+                    return;
+                }
+                KeyCode::Char('n') => {
+                    self.dispatch(CommandId::RejectAgentAction);
+                    self.mark_redraw();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match key_to_input_with_palette_context(key, self.palette_open, self.palette_context()) {
@@ -245,6 +292,10 @@ impl AppState {
             }
             CommandTarget::RuntimeTask(task_command) => {
                 self.dispatch_runtime_task_command(task_command);
+                return;
+            }
+            CommandTarget::RuntimeAgent(agent_command) => {
+                self.dispatch_runtime_agent_command(agent_command);
                 return;
             }
             CommandTarget::Core => {}
@@ -312,15 +363,37 @@ impl AppState {
         }
     }
 
+    fn dispatch_runtime_agent_command(&mut self, agent_command: RuntimeAgentCommand) {
+        match agent_command {
+            RuntimeAgentCommand::NewAgentPane => self.new_agent_pane(),
+            RuntimeAgentCommand::StartFocusedAgent => self.start_focused_agent(),
+            RuntimeAgentCommand::StopFocusedAgent => self.stop_focused_agent(),
+            RuntimeAgentCommand::ApproveFocusedAgentAction => {
+                self.decide_focused_agent_approval(true)
+            }
+            RuntimeAgentCommand::RejectFocusedAgentAction => {
+                self.decide_focused_agent_approval(false)
+            }
+            RuntimeAgentCommand::FocusNextWaitingAgent => self.focus_next_waiting_agent(),
+        }
+        self.mark_redraw();
+    }
+
     pub fn tick_runtime(&mut self) {
         self.drain_runtime_events();
+        self.drain_agent_events();
         self.poll_child_exits();
     }
 
     pub fn shutdown(&mut self) {
+        self.shutdown_agent_panes();
         self.shutdown_task_panes();
         self.shutdown_terminal_panes();
         self.status = "terminal sessions stopped".to_owned();
+    }
+
+    fn shutdown_agent_panes(&mut self) {
+        self.agent_panes.shutdown_all();
     }
 
     fn shutdown_terminal_panes(&mut self) {
@@ -433,8 +506,18 @@ impl AppState {
     ) {
         self.shutdown_terminal_panes();
         self.shutdown_task_panes();
+        self.shutdown_agent_panes();
         self.discard_pending_runtime_events();
         self.workspace = workspace;
+        // [L3-GATE] A loaded workspace has no live agent sessions, so durable
+        // intents must not keep session-scoped claims from the run that saved
+        // them: running/waiting statuses and pending approval ids name a live
+        // session (and connector-scoped approval ids) that no longer exists.
+        for session in self.workspace.sessions_mut() {
+            for intent in session.agent_intents_mut() {
+                intent.detach_live_session();
+            }
+        }
         self.command_context = command_context_for_workspace(&self.workspace);
         self.copy_mode = None;
         self.clipboard_payload = None;
@@ -452,6 +535,7 @@ impl AppState {
 
     fn discard_pending_runtime_events(&mut self) {
         while self.runtime_rx.try_recv().is_ok() {}
+        while self.agent_rx.try_recv().is_ok() {}
     }
 
     fn write_to_focused_terminal(&mut self, bytes: &[u8]) {
@@ -591,6 +675,400 @@ impl AppState {
         self.mark_redraw();
     }
 
+    // --- Agent runtime ---------------------------------------------------------
+
+    fn focused_agent_pane_id(&self) -> Option<PaneId> {
+        let pane_id = self.workspace.active_session().focused_pane_id().clone();
+        self.workspace
+            .active_session()
+            .pane(&pane_id)
+            .and_then(|pane| match pane.kind() {
+                PaneKind::Agent { .. } => Some(pane_id.clone()),
+                _ => None,
+            })
+    }
+
+    fn focused_agent_has_pending_approval(&self) -> bool {
+        let focused = self.workspace.active_session().focused_pane_id();
+        self.agent_panes
+            .get(focused)
+            .is_some_and(|runtime| runtime.pending_approval.is_some())
+    }
+
+    fn new_agent_pane(&mut self) {
+        let intent = AgentPaneIntent::draft(self.agent_objective.clone());
+        let objective = intent.objective.clone();
+        let cwd = Some(self.command_context.project_path.clone());
+        match self.workspace.apply_action(CoreAction::CreateAgentPane {
+            title: "agent".to_owned(),
+            intent,
+            cwd,
+        }) {
+            Ok(ActionOutcome::Mutated { focused_pane }) => {
+                self.status = format!("agent pane {focused_pane} created: {objective}");
+            }
+            Ok(ActionOutcome::PersistenceRequested(_)) => {
+                self.status = "agent pane creation unexpectedly requested persistence".to_owned();
+            }
+            Err(error) => {
+                self.status = format!("agent pane creation failed: {error}");
+            }
+        }
+    }
+
+    fn start_focused_agent(&mut self) {
+        let pane_id = match self.focused_agent_pane_id() {
+            Some(pane_id) => pane_id,
+            None if self.agent_pane_ids().is_empty() => {
+                // No agent pane anywhere: create one with the configured
+                // default objective, then start it.
+                self.new_agent_pane();
+                match self.focused_agent_pane_id() {
+                    Some(pane_id) => pane_id,
+                    None => return,
+                }
+            }
+            None => {
+                self.status = "focused pane is not an agent pane".to_owned();
+                return;
+            }
+        };
+
+        let Some((objective, cwd)) =
+            self.workspace
+                .active_session()
+                .pane(&pane_id)
+                .and_then(|pane| match pane.kind() {
+                    PaneKind::Agent { intent } => {
+                        Some((intent.objective.clone(), pane.cwd().cloned()))
+                    }
+                    _ => None,
+                })
+        else {
+            self.status = format!("agent pane {pane_id} was not found");
+            return;
+        };
+
+        let Some(connector) = self.agent_connector.as_deref() else {
+            self.status = "no agent connector is configured; set agent_connector to fake or claude"
+                .to_owned();
+            return;
+        };
+
+        let cwd = cwd.unwrap_or_else(|| self.command_context.project_path.clone());
+        let mut spec = AgentLaunchSpec::new(objective.clone(), cwd);
+        spec.model = self.agent_model.clone();
+        let launched = connector.launch(&spec);
+        match launched {
+            Ok(session) => {
+                // Replace the previous runtime only now that the new session
+                // exists: shut it down and bump the pane's restart generation
+                // (the pane is focused in every path here) so its buffered
+                // events can never match again. Bumping before a launch that
+                // then fails would leave the old runtime live under a retired
+                // generation, making its events overwrite durable truth
+                // ([L3-GATE]).
+                if let Some(mut old) = self.agent_panes.remove(&pane_id) {
+                    old.shutdown();
+                    let _ = self.workspace.apply_action(CoreAction::RestartFocused);
+                }
+                let restart_generation = self.pane_restart_generation(&pane_id);
+                let runtime_token = self.next_runtime_token();
+                let runtime = activate_agent_session(
+                    pane_id.clone(),
+                    restart_generation,
+                    runtime_token,
+                    session,
+                    self.agent_tx.clone(),
+                );
+                self.agent_panes.insert(pane_id.clone(), runtime);
+                self.update_agent_intent(&pane_id, |intent| {
+                    intent.status = AgentStatus::Running;
+                    intent.pending_approvals = 0;
+                    intent.pending_approval_ids.clear();
+                });
+                self.status = format!("agent {pane_id} started: {objective}");
+            }
+            Err(error) if self.agent_panes.get(&pane_id).is_some() => {
+                // A failed relaunch never touches the previous session: it
+                // stays live and authoritative under its unchanged
+                // generation, and durable intent keeps reflecting it.
+                self.status = format!(
+                    "agent relaunch failed for {pane_id}: {error}; previous session still running"
+                );
+            }
+            Err(error) => {
+                self.update_agent_intent(&pane_id, |intent| {
+                    intent.status = AgentStatus::Failed;
+                });
+                self.status = format!("agent launch failed for {pane_id}: {error}");
+            }
+        }
+    }
+
+    fn stop_focused_agent(&mut self) {
+        let Some(pane_id) = self.focused_agent_pane_id() else {
+            self.status = "focused pane is not an agent pane".to_owned();
+            return;
+        };
+        let Some(mut runtime) = self.agent_panes.remove(&pane_id) else {
+            self.status = format!("agent {pane_id} is not running");
+            return;
+        };
+        runtime.shutdown();
+        // An interrupted session has no known outcome; terminal states the
+        // session already reported stay as they are.
+        self.update_agent_intent(&pane_id, AgentPaneIntent::detach_live_session);
+        self.status = format!("agent {pane_id} stopped");
+    }
+
+    fn decide_focused_agent_approval(&mut self, approved: bool) {
+        let Some(pane_id) = self.focused_agent_pane_id() else {
+            self.status = "focused pane is not an agent pane".to_owned();
+            return;
+        };
+        let Some(runtime) = self.agent_panes.get_mut(&pane_id) else {
+            self.status = format!("agent {pane_id} is not running");
+            return;
+        };
+        let Some(request) = runtime.pending_approval.clone() else {
+            self.status = format!("agent {pane_id} has no pending approval");
+            return;
+        };
+
+        let verdict = if approved {
+            ApprovalVerdict::Approved
+        } else {
+            ApprovalVerdict::Rejected {
+                reason: Some("rejected from the workstation".to_owned()),
+            }
+        };
+        match runtime.control.decide(ApprovalDecision {
+            approval_id: request.approval_id.clone(),
+            verdict,
+        }) {
+            Ok(()) => {
+                runtime.pending_approval = None;
+                self.update_agent_intent(&pane_id, |intent| {
+                    intent.pending_approvals = 0;
+                    intent.pending_approval_ids.clear();
+                    intent.status = AgentStatus::Running;
+                    intent.approval_history.push(AgentApprovalRecord {
+                        approval_id: request.approval_id.clone(),
+                        command: request.command.clone(),
+                        approved,
+                    });
+                });
+                let verdict_label = if approved { "approved" } else { "rejected" };
+                self.status = format!("{verdict_label} '{}' for {pane_id}", request.command);
+            }
+            Err(error) => {
+                self.status = format!("approval decision failed for {pane_id}: {error}");
+            }
+        }
+    }
+
+    fn focus_next_waiting_agent(&mut self) {
+        let waiting = {
+            let session = self.workspace.active_session();
+            let order = session.focus_order();
+            let focused_index = order
+                .iter()
+                .position(|pane_id| pane_id == session.focused_pane_id())
+                .unwrap_or(0);
+            (1..=order.len())
+                .map(|offset| &order[(focused_index + offset) % order.len()])
+                .find(|pane_id| self.pane_waiting_for_approval(pane_id))
+                .cloned()
+        };
+        match waiting {
+            Some(pane_id) => match self.workspace.apply_action(CoreAction::FocusPane {
+                pane_id: pane_id.clone(),
+            }) {
+                Ok(_) => self.status = format!("focused waiting agent {pane_id}"),
+                Err(error) => self.status = format!("focus failed: {error}"),
+            },
+            None => self.status = "no agent is waiting for approval".to_owned(),
+        }
+    }
+
+    fn pane_waiting_for_approval(&self, pane_id: &PaneId) -> bool {
+        self.workspace
+            .active_session()
+            .pane(pane_id)
+            .is_some_and(|pane| {
+                matches!(
+                    pane.kind(),
+                    PaneKind::Agent { intent } if intent.status == AgentStatus::WaitingForApproval
+                )
+            })
+    }
+
+    fn drain_agent_events(&mut self) {
+        while let Ok(runtime_event) = self.agent_rx.try_recv() {
+            let AgentRuntimeEvent {
+                pane_id,
+                restart_generation,
+                runtime_token,
+                event,
+            } = runtime_event;
+            // [L3-GATE] Events from a replaced agent runtime are rejected:
+            // apply an event only if the pane's current generation and token
+            // match the stamp the forwarder recorded at launch.
+            let current = self.agent_panes.get(&pane_id).is_some_and(|runtime| {
+                runtime.restart_generation == restart_generation
+                    && runtime.runtime_token == runtime_token
+            });
+            if !current {
+                continue;
+            }
+            self.apply_agent_event(pane_id, event);
+        }
+    }
+
+    /// Fold one accepted agent session event into state: the durable subset
+    /// (status, summary, changed files, approval count/ids) into the pane's
+    /// `AgentPaneIntent`; live-only detail (current action, output tail, full
+    /// approval request) into the runtime registry.
+    fn apply_agent_event(&mut self, pane_id: PaneId, event: AgentSessionEvent) {
+        match event {
+            AgentSessionEvent::Status(status) => {
+                let label = agent_status_label(&status);
+                self.update_agent_intent(&pane_id, |intent| intent.status = status);
+                self.status = format!("agent {pane_id} is {label}");
+            }
+            AgentSessionEvent::Action { description } => {
+                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
+                    runtime.current_action = Some(description);
+                }
+            }
+            AgentSessionEvent::Summary(summary) => {
+                self.update_agent_intent(&pane_id, |intent| {
+                    intent.latest_summary = Some(summary);
+                });
+            }
+            AgentSessionEvent::OutputChunk(chunk) => {
+                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
+                    runtime.push_output(&chunk);
+                }
+            }
+            AgentSessionEvent::CommandRun { command } => {
+                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
+                    runtime.push_output(&format!("$ {command}"));
+                    runtime.current_action = Some(format!("ran {command}"));
+                }
+            }
+            AgentSessionEvent::FilesChanged(changes) => {
+                self.update_agent_intent(&pane_id, |intent| {
+                    for change in changes {
+                        if !intent.changed_files.contains(&change.path) {
+                            intent.changed_files.push(change.path);
+                        }
+                    }
+                });
+            }
+            AgentSessionEvent::ApprovalRequested(request) => {
+                self.status = format!("agent {pane_id} requests approval: {}", request.command);
+                let approval_id = request.approval_id.clone();
+                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
+                    runtime.pending_approval = Some(request);
+                }
+                self.update_agent_intent(&pane_id, |intent| {
+                    intent.status = AgentStatus::WaitingForApproval;
+                    intent.pending_approvals = 1;
+                    intent.pending_approval_ids = vec![approval_id];
+                });
+            }
+            AgentSessionEvent::Completed { summary } => {
+                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
+                    runtime.current_action = None;
+                }
+                self.update_agent_intent(&pane_id, |intent| {
+                    intent.status = AgentStatus::Complete;
+                    intent.latest_summary = Some(summary);
+                });
+                self.status = format!("agent {pane_id} completed");
+            }
+            AgentSessionEvent::Failed { error } => {
+                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
+                    runtime.current_action = None;
+                }
+                self.update_agent_intent(&pane_id, |intent| {
+                    intent.status = AgentStatus::Failed;
+                });
+                self.status = format!("agent {pane_id} failed: {error}");
+            }
+            AgentSessionEvent::Closed => {
+                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
+                    runtime.closed = true;
+                    runtime.pending_approval = None;
+                }
+                // A session that closed without reporting an outcome has an
+                // unknown durable state.
+                self.update_agent_intent(&pane_id, AgentPaneIntent::detach_live_session);
+            }
+        }
+    }
+
+    fn update_agent_intent(&mut self, pane_id: &PaneId, update: impl FnOnce(&mut AgentPaneIntent)) {
+        if let Some(intent) = self
+            .workspace
+            .active_session_mut()
+            .agent_intent_mut(pane_id)
+        {
+            update(intent);
+        }
+    }
+
+    fn agent_pane_ids(&self) -> BTreeSet<PaneId> {
+        self.workspace
+            .active_session()
+            .panes()
+            .iter()
+            .filter(|(_, pane)| matches!(pane.kind(), PaneKind::Agent { .. }))
+            .map(|(pane_id, _)| pane_id.clone())
+            .collect()
+    }
+
+    /// Shut down live agent sessions whose pane is no longer in the active
+    /// session, and fold the stop semantics into the pane's durable intent
+    /// wherever it still lives. OpenProject switches sessions without
+    /// closing panes, so the killed session's pane may survive in an
+    /// inactive session; leaving it claiming running/waiting would persist a
+    /// live-session claim with no live session behind it ([L3-GATE]).
+    fn reconcile_agent_runtimes(&mut self) {
+        let agent_pane_ids = self.agent_pane_ids();
+        let removed_runtime_ids = self
+            .agent_panes
+            .keys()
+            .filter(|pane_id| !agent_pane_ids.contains(*pane_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for pane_id in removed_runtime_ids {
+            if let Some(mut runtime) = self.agent_panes.remove(&pane_id) {
+                runtime.shutdown();
+            }
+            // The registry is keyed by pane id alone, so the removed runtime
+            // was the only live session any same-id pane could point at:
+            // detaching every match is safe.
+            for session in self.workspace.sessions_mut() {
+                if let Some(intent) = session.agent_intent_mut(&pane_id) {
+                    intent.detach_live_session();
+                }
+            }
+        }
+    }
+
+    /// The live agent runtime view for a pane, if a session is attached.
+    pub(crate) fn agent_runtime_view(&self, pane_id: &PaneId) -> Option<&AgentPaneRuntime> {
+        self.agent_panes.get(pane_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_agent_connector(&mut self, connector: Box<dyn AgentConnector>) {
+        self.agent_connector = Some(connector);
+    }
+
     fn launch_task_pane(
         &mut self,
         pane_id: PaneId,
@@ -639,6 +1117,7 @@ impl AppState {
 
     fn reconcile_runtimes(&mut self) -> Result<(), ReconcileRuntimeError> {
         self.reconcile_terminal_runtimes()?;
+        self.reconcile_agent_runtimes();
         self.reconcile_task_runtimes()
     }
 
@@ -1288,8 +1767,33 @@ fn category_label(category: CommandCategory) -> &'static str {
         CommandCategory::Project => "project",
         CommandCategory::Pane => "pane",
         CommandCategory::Task => "task",
+        CommandCategory::Agent => "agent",
         CommandCategory::Layout => "layout",
         CommandCategory::Persistence => "persistence",
+    }
+}
+
+fn palette_detail(command: &mandatum_commands::Command) -> String {
+    match command.id {
+        CommandId::ApproveAgentAction => {
+            "agent (direct key: y while the focused pane awaits approval)".to_owned()
+        }
+        CommandId::RejectAgentAction => {
+            "agent (direct key: n while the focused pane awaits approval)".to_owned()
+        }
+        _ => category_label(command.category).to_owned(),
+    }
+}
+
+pub(crate) fn agent_status_label(status: &AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Draft => "draft",
+        AgentStatus::Running => "running",
+        AgentStatus::WaitingForApproval => "waiting for approval",
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Failed => "failed",
+        AgentStatus::Complete => "complete",
+        AgentStatus::Unknown => "unknown",
     }
 }
 
@@ -1301,6 +1805,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::app_shell::AgentConnectorKind;
     use mandatum_core::CoreAction;
 
     static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1312,6 +1817,9 @@ mod tests {
             workspace_file: PathBuf::from("/tmp/mandatum/.mandatum/workspace.json"),
             shell_program: "/bin/sh".to_owned(),
             task_command: "printf TASK_OK".to_owned(),
+            agent_connector: AgentConnectorKind::Fake,
+            agent_objective: "test objective".to_owned(),
+            agent_model: None,
             spawn_pty: false,
             restore_on_startup: false,
         })
@@ -1361,6 +1869,9 @@ mod tests {
                 workspace_file: self.workspace_file(),
                 shell_program: "/bin/sh".to_owned(),
                 task_command: "printf TASK_OK".to_owned(),
+                agent_connector: AgentConnectorKind::Fake,
+                agent_objective: "test objective".to_owned(),
+                agent_model: None,
                 spawn_pty,
                 restore_on_startup,
             }
@@ -1602,6 +2113,9 @@ mod tests {
             workspace_file: temp.workspace_file(),
             shell_program: "/bin/sh".to_owned(),
             task_command: "printf TASK_OK".to_owned(),
+            agent_connector: AgentConnectorKind::Fake,
+            agent_objective: "test objective".to_owned(),
+            agent_model: None,
             spawn_pty: false,
             restore_on_startup: false,
         });
@@ -1725,6 +2239,9 @@ mod tests {
             workspace_file: PathBuf::from("/tmp/mandatum/.mandatum/workspace.json"),
             shell_program: "/bin/sh".to_owned(),
             task_command: "printf TASK_OK".to_owned(),
+            agent_connector: AgentConnectorKind::Fake,
+            agent_objective: "test objective".to_owned(),
+            agent_model: None,
             spawn_pty: true,
             restore_on_startup: false,
         })
@@ -2522,6 +3039,612 @@ mod tests {
                 "saved workspace leaked task runtime field {forbidden}"
             );
         }
+
+        state.shutdown();
+    }
+
+    // --- Agent runtime -----------------------------------------------------
+
+    use mandatum_agent_runtime::{
+        AgentConnectorError, AgentSession, ApprovalRequest, ApprovalScope, FakeConnector, FakeStep,
+        FileChange, FileChangeKind, RiskAssessment, RiskLevel,
+    };
+
+    fn approval_request(id: &str, command: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            approval_id: id.to_owned(),
+            command: command.to_owned(),
+            scope: ApprovalScope {
+                cwd: PathBuf::from("/tmp/project"),
+                affected_path: Some(PathBuf::from("target")),
+            },
+            risk: RiskAssessment {
+                level: RiskLevel::High,
+                basis: "removes files (rm)".to_owned(),
+            },
+        }
+    }
+
+    fn agent_intent(state: &AppState, pane_id: &PaneId) -> mandatum_core::AgentPaneIntent {
+        let PaneKind::Agent { intent } = state
+            .workspace()
+            .active_session()
+            .pane(pane_id)
+            .expect("agent pane exists")
+            .kind()
+        else {
+            panic!("pane {pane_id} is not an agent pane");
+        };
+        intent.clone()
+    }
+
+    /// Dispatch an approve/reject command until the decision lands. The fake
+    /// connector's worker may not have parked on its approval yet when the
+    /// requesting event arrives, so a decision can race it once.
+    fn dispatch_decision_until_applied(state: &mut AppState, command_id: CommandId) {
+        for _ in 0..300 {
+            state.dispatch(command_id);
+            if state.status().starts_with("approved") || state.status().starts_with("rejected") {
+                return;
+            }
+            state.tick_runtime();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "approval decision was never applied, last status: {}",
+            state.status()
+        );
+    }
+
+    #[test]
+    fn start_agent_creates_pane_with_default_objective_and_updates_status_through_events() {
+        let mut state = state();
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::Emit(AgentSessionEvent::Summary("exploring the repo".to_owned())),
+            FakeStep::Emit(AgentSessionEvent::FilesChanged(vec![FileChange {
+                path: PathBuf::from("src/lib.rs"),
+                change_kind: FileChangeKind::Modified,
+            }])),
+            FakeStep::Emit(AgentSessionEvent::Completed {
+                summary: "agent run done".to_owned(),
+            }),
+        ])));
+
+        // No agent pane exists: StartAgent creates one with the configured
+        // default objective, then launches it.
+        state.dispatch(CommandId::StartAgent);
+
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let intent = agent_intent(&state, &pane_id);
+        assert_eq!(intent.objective, "test objective");
+        assert_eq!(intent.status, AgentStatus::Running);
+        assert_eq!(state.live_agent_count(), 1);
+
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::Complete
+        });
+        assert!(observed, "agent completion was not observed");
+        let intent = agent_intent(&state, &pane_id);
+        assert_eq!(intent.latest_summary.as_deref(), Some("agent run done"));
+        assert_eq!(intent.changed_files, vec![PathBuf::from("src/lib.rs")]);
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn approve_agent_action_resolves_and_the_script_continues() {
+        let mut state = state();
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::Emit(AgentSessionEvent::ApprovalRequested(approval_request(
+                "appr-1",
+                "rm -rf target",
+            ))),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-1".to_owned(),
+                then_on_approve: vec![
+                    AgentSessionEvent::CommandRun {
+                        command: "rm -rf target".to_owned(),
+                    },
+                    AgentSessionEvent::Completed {
+                        summary: "cleaned".to_owned(),
+                    },
+                ],
+                then_on_reject: vec![AgentSessionEvent::Failed {
+                    error: "user rejected".to_owned(),
+                }],
+            },
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::WaitingForApproval
+        });
+        assert!(observed, "approval request was not observed");
+        let intent = agent_intent(&state, &pane_id);
+        assert_eq!(intent.pending_approvals, 1);
+        assert_eq!(intent.pending_approval_ids, vec!["appr-1".to_owned()]);
+
+        dispatch_decision_until_applied(&mut state, CommandId::ApproveAgentAction);
+
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::Complete
+        });
+        assert!(observed, "script did not continue after approval");
+        let intent = agent_intent(&state, &pane_id);
+        assert_eq!(intent.pending_approvals, 0);
+        assert!(intent.pending_approval_ids.is_empty());
+        assert_eq!(
+            intent.approval_history,
+            vec![AgentApprovalRecord {
+                approval_id: "appr-1".to_owned(),
+                command: "rm -rf target".to_owned(),
+                approved: true,
+            }]
+        );
+        assert_eq!(intent.latest_summary.as_deref(), Some("cleaned"));
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn reject_agent_action_via_direct_key_records_the_rejection() {
+        let mut state = state();
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::Emit(AgentSessionEvent::ApprovalRequested(approval_request(
+                "appr-1",
+                "rm -rf target",
+            ))),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-1".to_owned(),
+                then_on_approve: vec![AgentSessionEvent::Completed {
+                    summary: "cleaned".to_owned(),
+                }],
+                then_on_reject: vec![AgentSessionEvent::Failed {
+                    error: "user rejected".to_owned(),
+                }],
+            },
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::WaitingForApproval
+        });
+        assert!(observed, "approval request was not observed");
+
+        // The focused pane awaits an approval: a bare 'n' key is the direct
+        // reject path, no palette involved.
+        let mut rejected = false;
+        for _ in 0..300 {
+            state.handle_key(key(KeyCode::Char('n')));
+            if state.status().starts_with("rejected") {
+                rejected = true;
+                break;
+            }
+            state.tick_runtime();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(rejected, "direct reject key never applied");
+
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::Failed
+        });
+        assert!(observed, "reject branch was not observed");
+        let intent = agent_intent(&state, &pane_id);
+        assert_eq!(
+            intent.approval_history,
+            vec![AgentApprovalRecord {
+                approval_id: "appr-1".to_owned(),
+                command: "rm -rf target".to_owned(),
+                approved: false,
+            }]
+        );
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn stop_agent_shuts_down_the_live_session() {
+        let mut state = state();
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-never".to_owned(),
+                then_on_approve: vec![],
+                then_on_reject: vec![],
+            },
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::Running
+        });
+        assert!(observed);
+        assert_eq!(state.live_agent_count(), 1);
+
+        state.dispatch(CommandId::StopAgent);
+
+        assert_eq!(state.live_agent_count(), 0);
+        assert_eq!(agent_intent(&state, &pane_id).status, AgentStatus::Unknown);
+        assert!(state.status().contains("stopped"));
+
+        // The buffered Closed event from the killed session is dropped.
+        state.tick_runtime();
+        assert_eq!(state.live_agent_count(), 0);
+    }
+
+    // [L3-GATE] Events from a replaced agent runtime are rejected.
+    #[test]
+    fn stale_agent_events_after_restart_are_ignored() {
+        let mut state = state();
+        let script = vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-never".to_owned(),
+                then_on_approve: vec![],
+                then_on_reject: vec![],
+            },
+        ];
+        state.set_agent_connector(Box::new(FakeConnector::new(script)));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let before = state.agent_runtime_view(&pane_id).unwrap();
+        let before_generation = before.restart_generation;
+        let before_token = before.runtime_token;
+
+        // Kill the runtime, then restart: the replacement runs under a new
+        // generation and token.
+        state.dispatch(CommandId::StartAgent);
+        let after = state.agent_runtime_view(&pane_id).unwrap();
+        assert_ne!(before_token, after.runtime_token);
+        assert!(after.restart_generation > before_generation);
+
+        // A stale buffered event from the killed session must be dropped.
+        state
+            .agent_tx
+            .send(crate::agent_runtime::AgentRuntimeEvent {
+                pane_id: pane_id.clone(),
+                restart_generation: before_generation,
+                runtime_token: before_token,
+                event: AgentSessionEvent::Summary("STALE_AGENT_SUMMARY".to_owned()),
+            })
+            .unwrap();
+        state.tick_runtime();
+
+        assert_ne!(
+            agent_intent(&state, &pane_id).latest_summary.as_deref(),
+            Some("STALE_AGENT_SUMMARY"),
+            "a stale pre-restart agent event was applied to durable intent"
+        );
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn agent_intent_with_approval_history_survives_save_restore_round_trip() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = AppState::new(temp.app_config(false, false));
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::Emit(AgentSessionEvent::FilesChanged(vec![FileChange {
+                path: PathBuf::from("src/lib.rs"),
+                change_kind: FileChangeKind::Modified,
+            }])),
+            FakeStep::Emit(AgentSessionEvent::ApprovalRequested(approval_request(
+                "appr-1",
+                "rm -rf target",
+            ))),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-1".to_owned(),
+                then_on_approve: vec![AgentSessionEvent::Completed {
+                    summary: "cleaned".to_owned(),
+                }],
+                then_on_reject: vec![],
+            },
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::WaitingForApproval
+        });
+        assert!(observed);
+        dispatch_decision_until_applied(&mut state, CommandId::ApproveAgentAction);
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::Complete
+        });
+        assert!(observed);
+
+        state.dispatch(CommandId::SaveWorkspace);
+        state.shutdown();
+        drop(state);
+
+        let restored = AppState::new(temp.app_config(false, true));
+        assert!(restored.status().contains("workspace restored"));
+        let intent = agent_intent(&restored, &pane_id);
+        assert_eq!(intent.objective, "test objective");
+        assert_eq!(intent.status, AgentStatus::Complete);
+        assert_eq!(intent.latest_summary.as_deref(), Some("cleaned"));
+        assert_eq!(intent.changed_files, vec![PathBuf::from("src/lib.rs")]);
+        // Past decisions remain visible after restart.
+        assert_eq!(
+            intent.approval_history,
+            vec![AgentApprovalRecord {
+                approval_id: "appr-1".to_owned(),
+                command: "rm -rf target".to_owned(),
+                approved: true,
+            }]
+        );
+        // Restore invents no live runtime.
+        assert_eq!(restored.live_agent_count(), 0);
+    }
+
+    // [L3-GATE] Live agent runtime state never becomes durable truth.
+    #[test]
+    fn agent_runtime_state_is_not_serialized_with_workspace_intent() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = AppState::new(temp.app_config(false, false));
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::Emit(AgentSessionEvent::Action {
+                description: "LIVE_ACTION_MARKER".to_owned(),
+            }),
+            FakeStep::Emit(AgentSessionEvent::OutputChunk(
+                "LIVE_TAIL_MARKER".to_owned(),
+            )),
+            FakeStep::Emit(AgentSessionEvent::ApprovalRequested(approval_request(
+                "appr-live",
+                "rm -rf LIVE_ONLY_COMMAND",
+            ))),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-live".to_owned(),
+                then_on_approve: vec![],
+                then_on_reject: vec![],
+            },
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::WaitingForApproval
+        });
+        assert!(observed);
+
+        state.dispatch(CommandId::SaveWorkspace);
+
+        let saved = fs::read_to_string(state.workspace_file()).expect("workspace file saved");
+        assert!(saved.contains(r#""type": "agent""#));
+        assert!(saved.contains("test objective"));
+        // The pending approval id is durable; its live detail is not.
+        assert!(saved.contains("appr-live"));
+        for forbidden in [
+            "LIVE_ACTION_MARKER",
+            "LIVE_TAIL_MARKER",
+            "LIVE_ONLY_COMMAND",
+            "output_tail",
+            "current_action",
+            "runtime_token",
+            "forwarder",
+            "removes files (rm)",
+        ] {
+            assert!(
+                !saved.contains(forbidden),
+                "saved workspace leaked agent runtime field {forbidden}"
+            );
+        }
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn focus_next_waiting_agent_jumps_to_the_waiting_pane() {
+        let mut state = state();
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::ApprovalRequested(approval_request(
+                "appr-1",
+                "rm -rf target",
+            ))),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-1".to_owned(),
+                then_on_approve: vec![],
+                then_on_reject: vec![],
+            },
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let waiting_pane = state.workspace().active_session().focused_pane_id().clone();
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &waiting_pane).status == AgentStatus::WaitingForApproval
+        });
+        assert!(observed);
+
+        // Move focus away, then jump back to the waiting agent.
+        state
+            .workspace_mut()
+            .apply_action(CoreAction::FocusPane {
+                pane_id: PaneId::new("pane-1"),
+            })
+            .unwrap();
+        state.dispatch(CommandId::FocusNextWaitingAgent);
+
+        assert_eq!(
+            state.workspace().active_session().focused_pane_id(),
+            &waiting_pane
+        );
+        assert!(state.status().contains("focused waiting agent"));
+
+        state.shutdown();
+    }
+
+    #[test]
+    fn new_agent_pane_creates_a_draft_pane_without_launching_a_runtime() {
+        let mut state = state();
+
+        state.dispatch(CommandId::NewAgentPane);
+
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let intent = agent_intent(&state, &pane_id);
+        assert_eq!(intent.objective, "test objective");
+        assert_eq!(intent.status, AgentStatus::Draft);
+        assert_eq!(state.live_agent_count(), 0);
+        assert!(state.status().contains("agent pane"));
+    }
+
+    /// Succeeds on the first launch (delegating to a fake script), fails
+    /// every launch after it — models a relaunch attempt that cannot spawn.
+    struct FailsSecondLaunch {
+        inner: FakeConnector,
+        launches: AtomicU64,
+    }
+
+    impl AgentConnector for FailsSecondLaunch {
+        fn launch(&self, spec: &AgentLaunchSpec) -> Result<AgentSession, AgentConnectorError> {
+            if self.launches.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.inner.launch(spec)
+            } else {
+                Err(AgentConnectorError::LaunchFailed {
+                    message: "relaunch refused".to_owned(),
+                })
+            }
+        }
+
+        fn name(&self) -> &str {
+            "fails-second-launch"
+        }
+    }
+
+    // [L3-GATE] A failed relaunch must not retire the live session's
+    // generation: the previous session stays authoritative, and the pane's
+    // core generation keeps matching the generation of accepted events.
+    #[test]
+    fn failed_relaunch_keeps_the_previous_session_authoritative() {
+        let mut state = state();
+        state.set_agent_connector(Box::new(FailsSecondLaunch {
+            inner: FakeConnector::new(vec![
+                FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+                FakeStep::AwaitApproval {
+                    approval_id: "appr-never".to_owned(),
+                    then_on_approve: vec![],
+                    then_on_reject: vec![],
+                },
+            ]),
+            launches: AtomicU64::new(0),
+        }));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::Running
+        });
+        assert!(observed);
+        let generation_before = state
+            .agent_runtime_view(&pane_id)
+            .unwrap()
+            .restart_generation;
+
+        state.dispatch(CommandId::StartAgent);
+
+        assert!(
+            state.status().contains("relaunch failed"),
+            "unexpected status: {}",
+            state.status()
+        );
+        assert_eq!(state.live_agent_count(), 1);
+        let runtime = state.agent_runtime_view(&pane_id).unwrap();
+        assert_eq!(runtime.restart_generation, generation_before);
+        assert_eq!(
+            state.pane_restart_generation(&pane_id),
+            runtime.restart_generation,
+            "pane generation diverged from the live runtime's generation"
+        );
+        // Durable truth keeps reflecting the still-live previous session.
+        assert_eq!(agent_intent(&state, &pane_id).status, AgentStatus::Running);
+
+        state.shutdown();
+    }
+
+    // [L3-GATE] Pending-approval claims are live-session state: a workspace
+    // loaded from disk has no live session behind it, so a restore must not
+    // resurrect them as actionable durable truth.
+    #[test]
+    fn restore_detaches_live_session_claims_from_agent_intents() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = AppState::new(temp.app_config(false, false));
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::Emit(AgentSessionEvent::ApprovalRequested(approval_request(
+                "appr-live",
+                "rm -rf target",
+            ))),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-live".to_owned(),
+                then_on_approve: vec![],
+                then_on_reject: vec![],
+            },
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::WaitingForApproval
+        });
+        assert!(observed);
+
+        state.dispatch(CommandId::SaveWorkspace);
+        state.shutdown();
+        drop(state);
+
+        let restored = AppState::new(temp.app_config(false, true));
+        assert!(restored.status().contains("workspace restored"));
+        assert_eq!(restored.live_agent_count(), 0);
+        let intent = agent_intent(&restored, &pane_id);
+        // A surviving claim would drive real behavior (FocusNextWaitingAgent,
+        // y/n keys) toward an approval no runtime can ever satisfy.
+        assert_eq!(intent.status, AgentStatus::Unknown);
+        assert_eq!(intent.pending_approvals, 0);
+        assert!(intent.pending_approval_ids.is_empty());
+    }
+
+    // [L3-GATE] OpenProject discards the live agent session; the pane left
+    // behind in the now-inactive session must not keep claiming "running".
+    #[test]
+    fn open_project_shuts_down_the_agent_and_detaches_its_durable_claim() {
+        let mut state = state();
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-never".to_owned(),
+                then_on_approve: vec![],
+                then_on_reject: vec![],
+            },
+        ])));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        let observed = pump_runtime_until(&mut state, |state| {
+            agent_intent(state, &pane_id).status == AgentStatus::Running
+        });
+        assert!(observed);
+        assert_eq!(state.live_agent_count(), 1);
+        let old_session_id = state.workspace().active_session().id().clone();
+
+        state.dispatch(CommandId::OpenProject);
+
+        assert_ne!(state.workspace().active_session().id(), &old_session_id);
+        assert_eq!(state.live_agent_count(), 0);
+        let old_session = state
+            .workspace()
+            .sessions()
+            .get(&old_session_id)
+            .expect("the replaced session stays in the workspace");
+        let PaneKind::Agent { intent } = old_session
+            .pane(&pane_id)
+            .expect("agent pane persists in the old session")
+            .kind()
+        else {
+            panic!("pane {pane_id} is not an agent pane");
+        };
+        assert_eq!(intent.status, AgentStatus::Unknown);
+        assert_eq!(intent.pending_approvals, 0);
+        assert!(intent.pending_approval_ids.is_empty());
 
         state.shutdown();
     }

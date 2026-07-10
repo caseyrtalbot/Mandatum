@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 crossterm.workspace = true
+mandatum-agent-runtime.workspace = true
 mandatum-commands.workspace = true
 mandatum-core.workspace = true
 mandatum-pty.workspace = true

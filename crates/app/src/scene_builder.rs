@@ -4,16 +4,21 @@
 //! the app side: the scene crate never depends on the terminal engine, so no
 //! parser type crosses the frontend seam (L1/L4).
 
-use mandatum_core::{AgentStatus, PaneKind, PaneSpec, Session, TaskPaneIntent};
+use mandatum_agent_runtime::RiskLevel;
+use mandatum_core::{AgentPaneIntent, PaneId, PaneKind, PaneSpec, Session, TaskPaneIntent};
 use mandatum_scene::{
-    AgentContent, EmptyContent, HeaderScene, HitTarget, HitTargetKind, OverlayScene,
-    PaletteOverlay, PaneContent, PaneScene, PaneSceneKind, SceneCell, SceneCellStyle, SceneColor,
-    SceneRect, SceneSize, SurfacePosition, TaskContent, TerminalSurface, WorkspaceScene,
+    AgentApprovalPrompt, AgentContent, EmptyContent, HeaderScene, HitTarget, HitTargetKind,
+    OverlayScene, PaletteOverlay, PaneContent, PaneScene, PaneSceneKind, SceneCell, SceneCellStyle,
+    SceneColor, SceneRect, SceneSize, SurfacePosition, TaskContent, TerminalSurface,
+    WorkspaceScene,
     layout::{self, PaneLayout},
 };
 use mandatum_terminal_vt::{CellStyle, Color as VtColor, TerminalGrid};
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, agent_status_label};
+
+/// How many changed files an agent pane lists (most recent last).
+const AGENT_CHANGED_FILES_SHOWN: usize = 10;
 
 /// Read-only copy-mode view state for one pane, in absolute buffer
 /// coordinates. The default follows live output.
@@ -62,10 +67,37 @@ pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScen
         },
         panes,
         overlay,
-        status: Some(state.status().to_owned()),
+        status: Some(status_with_agent_attention(state, session)),
         focused_pane: session.focused_pane_id().clone(),
         hit_targets,
         copy_mode: state.copy_mode_active(),
+    }
+}
+
+/// The status strip text: agent approval attention first, then the app
+/// status. A pane waiting for approval must be visible globally.
+fn status_with_agent_attention(state: &AppState, session: &Session) -> String {
+    let waiting = session
+        .panes()
+        .iter()
+        .filter(|(pane_id, pane)| {
+            matches!(pane.kind(), PaneKind::Agent { .. })
+                && state
+                    .agent_runtime_view(pane_id)
+                    .is_some_and(|runtime| runtime.pending_approval.is_some())
+        })
+        .map(|(pane_id, _)| pane_id.clone())
+        .collect::<Vec<_>>();
+
+    match waiting.as_slice() {
+        [] => state.status().to_owned(),
+        [pane_id] => format!("1 approval waiting — {pane_id} | {}", state.status()),
+        panes => format!(
+            "{} approvals waiting — {} | {}",
+            panes.len(),
+            panes[0],
+            state.status()
+        ),
     }
 }
 
@@ -87,13 +119,7 @@ fn pane_scene(
             None => PaneContent::Empty(empty_content(pane)),
         },
         PaneKind::Task { intent } => PaneContent::Task(task_content(state, pane, intent)),
-        PaneKind::Agent { intent } => PaneContent::Agent(AgentContent {
-            objective: intent.objective.clone(),
-            status_label: agent_status_label(&intent.status).to_owned(),
-            pending_approvals: intent.pending_approvals,
-            changed_files: intent.changed_files.len(),
-            latest_summary: intent.latest_summary.clone(),
-        }),
+        PaneKind::Agent { intent } => PaneContent::Agent(agent_content(state, pane.id(), intent)),
         PaneKind::StatusLog { .. } => PaneContent::Empty(empty_content(pane)),
     };
 
@@ -148,6 +174,58 @@ fn task_content(state: &AppState, pane: &PaneSpec, intent: &TaskPaneIntent) -> T
     }
 }
 
+/// Agent pane content: the durable intent summary plus whatever live session
+/// surface (action, approval detail, output tail) the runtime registry holds.
+fn agent_content(state: &AppState, pane_id: &PaneId, intent: &AgentPaneIntent) -> AgentContent {
+    let live = state.agent_runtime_view(pane_id);
+    // The most recent files, oldest first.
+    let skip = intent
+        .changed_files
+        .len()
+        .saturating_sub(AGENT_CHANGED_FILES_SHOWN);
+    let changed_files = intent
+        .changed_files
+        .iter()
+        .skip(skip)
+        .map(|path| path.display().to_string())
+        .collect();
+
+    AgentContent {
+        objective: intent.objective.clone(),
+        status_label: agent_status_label(&intent.status).to_owned(),
+        pending_approvals: intent.pending_approvals,
+        changed_file_count: intent.changed_files.len(),
+        changed_files,
+        latest_summary: intent.latest_summary.clone(),
+        current_action: live.and_then(|runtime| runtime.current_action.clone()),
+        pending_approval: live
+            .and_then(|runtime| runtime.pending_approval.as_ref())
+            .map(|request| AgentApprovalPrompt {
+                command: request.command.clone(),
+                cwd: request.scope.cwd.display().to_string(),
+                affected_path: request
+                    .scope
+                    .affected_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                risk_label: risk_label(request.risk.level).to_owned(),
+                risk_basis: request.risk.basis.clone(),
+                key_hint: "y approve / n reject".to_owned(),
+            }),
+        output_tail: live
+            .map(|runtime| runtime.output_tail.iter().cloned().collect())
+            .unwrap_or_default(),
+    }
+}
+
+fn risk_label(level: RiskLevel) -> &'static str {
+    match level {
+        RiskLevel::Low => "low",
+        RiskLevel::Medium => "medium",
+        RiskLevel::High => "high",
+    }
+}
+
 fn empty_content(pane: &PaneSpec) -> EmptyContent {
     EmptyContent {
         // "cwd: unset" (not "unset") preserves the exact fallback line the
@@ -166,18 +244,6 @@ fn pane_scene_kind(kind: &PaneKind) -> PaneSceneKind {
         PaneKind::Task { .. } => PaneSceneKind::Task,
         PaneKind::Agent { .. } => PaneSceneKind::Agent,
         PaneKind::StatusLog { .. } => PaneSceneKind::StatusLog,
-    }
-}
-
-fn agent_status_label(status: &AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Draft => "draft",
-        AgentStatus::Running => "running",
-        AgentStatus::WaitingForApproval => "waiting for approval",
-        AgentStatus::Blocked => "blocked",
-        AgentStatus::Failed => "failed",
-        AgentStatus::Complete => "complete",
-        AgentStatus::Unknown => "unknown",
     }
 }
 
@@ -306,10 +372,10 @@ mod tests {
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use mandatum_commands::CommandId;
-    use mandatum_core::{AgentPaneIntent, PaneId};
+    use mandatum_core::AgentStatus;
 
     use super::*;
-    use crate::app_shell::AppConfig;
+    use crate::app_shell::{AgentConnectorKind, AppConfig};
 
     fn config(spawn_pty: bool) -> AppConfig {
         // The system temp dir always exists, so live PTY spawns get a valid cwd
@@ -321,6 +387,9 @@ mod tests {
             project_path,
             shell_program: "/bin/sh".to_owned(),
             task_command: "printf 'TASK_OK\\n'".to_owned(),
+            agent_connector: AgentConnectorKind::Fake,
+            agent_objective: "test objective".to_owned(),
+            agent_model: None,
             spawn_pty,
             restore_on_startup: false,
         }
@@ -577,23 +646,16 @@ mod tests {
     #[test]
     fn agent_pane_summarizes_durable_intent() {
         let mut state = AppState::new(config(false));
+        let mut intent = AgentPaneIntent::draft("review failing tests");
+        intent.thread_id = Some("thread-1".to_owned());
+        intent.status = AgentStatus::WaitingForApproval;
+        intent.pending_approvals = 2;
+        intent.changed_files = vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/x.rs")];
+        intent.latest_summary = Some("waiting for approval".to_owned());
         state
             .workspace_mut()
             .active_session_mut()
-            .add_floating_pane(
-                "agent",
-                PaneKind::Agent {
-                    intent: AgentPaneIntent {
-                        thread_id: Some("thread-1".to_owned()),
-                        objective: "review failing tests".to_owned(),
-                        status: AgentStatus::WaitingForApproval,
-                        pending_approvals: 2,
-                        changed_files: vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/x.rs")],
-                        latest_summary: Some("waiting for approval".to_owned()),
-                    },
-                },
-                None,
-            );
+            .add_floating_pane("agent", PaneKind::Agent { intent }, None);
 
         let scene = build_workspace_scene(&state, SceneSize::new(100, 30));
         let pane = scene_pane(&scene, "pane-2");
@@ -604,10 +666,89 @@ mod tests {
         assert_eq!(agent.objective, "review failing tests");
         assert_eq!(agent.status_label, "waiting for approval");
         assert_eq!(agent.pending_approvals, 2);
-        assert_eq!(agent.changed_files, 2);
+        assert_eq!(agent.changed_file_count, 2);
+        assert_eq!(agent.changed_files, vec!["src/lib.rs", "src/x.rs"]);
         assert_eq!(
             agent.latest_summary.as_deref(),
             Some("waiting for approval")
         );
+        // No live runtime is attached: live-only fields stay empty.
+        assert!(agent.current_action.is_none());
+        assert!(agent.pending_approval.is_none());
+        assert!(agent.output_tail.is_empty());
+    }
+
+    #[test]
+    fn waiting_agent_surfaces_approval_detail_in_scene_and_status_strip() {
+        use mandatum_agent_runtime::{
+            AgentSessionEvent, ApprovalRequest, ApprovalScope, FakeConnector, FakeStep,
+            RiskAssessment,
+        };
+
+        let request = ApprovalRequest {
+            approval_id: "appr-1".to_owned(),
+            command: "rm -rf target".to_owned(),
+            scope: ApprovalScope {
+                cwd: PathBuf::from("/tmp/project"),
+                affected_path: Some(PathBuf::from("target")),
+            },
+            risk: RiskAssessment {
+                level: RiskLevel::High,
+                basis: "removes files (rm)".to_owned(),
+            },
+        };
+        let mut state = AppState::new(config(false));
+        state.set_agent_connector(Box::new(FakeConnector::new(vec![
+            FakeStep::Emit(AgentSessionEvent::Action {
+                description: "asking to clean the target dir".to_owned(),
+            }),
+            FakeStep::Emit(AgentSessionEvent::OutputChunk("probing target".to_owned())),
+            FakeStep::Emit(AgentSessionEvent::ApprovalRequested(request)),
+            FakeStep::AwaitApproval {
+                approval_id: "appr-1".to_owned(),
+                then_on_approve: vec![],
+                then_on_reject: vec![],
+            },
+        ])));
+
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+
+        let size = SceneSize::new(100, 30);
+        let observed = pump_until(&mut state, |state| {
+            let scene = build_workspace_scene(state, size);
+            matches!(
+                &scene_pane(&scene, pane_id.as_str()).content,
+                PaneContent::Agent(agent) if agent.pending_approval.is_some()
+            )
+        });
+        assert!(observed, "approval request did not reach the scene");
+
+        let scene = build_workspace_scene(&state, size);
+        let PaneContent::Agent(agent) = &scene_pane(&scene, pane_id.as_str()).content else {
+            panic!("agent pane must carry agent content");
+        };
+        assert_eq!(agent.status_label, "waiting for approval");
+        assert_eq!(
+            agent.current_action.as_deref(),
+            Some("asking to clean the target dir")
+        );
+        assert_eq!(agent.output_tail, vec!["probing target"]);
+        let prompt = agent.pending_approval.as_ref().unwrap();
+        assert_eq!(prompt.command, "rm -rf target");
+        assert_eq!(prompt.cwd, "/tmp/project");
+        assert_eq!(prompt.affected_path.as_deref(), Some("target"));
+        assert_eq!(prompt.risk_label, "high");
+        assert_eq!(prompt.risk_basis, "removes files (rm)");
+        assert_eq!(prompt.key_hint, "y approve / n reject");
+
+        // The waiting pane surfaces globally in the status strip.
+        let status = scene.status.as_deref().unwrap();
+        assert!(
+            status.starts_with(&format!("1 approval waiting — {pane_id}")),
+            "status strip must lead with the waiting approval, got {status:?}"
+        );
+
+        state.shutdown();
     }
 }

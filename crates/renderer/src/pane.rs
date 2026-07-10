@@ -1,6 +1,6 @@
 //! Pane chrome and content drawing.
 
-use mandatum_scene::{PaneContent, PaneScene};
+use mandatum_scene::{AgentContent, PaneContent, PaneScene};
 use ratatui::{
     Frame,
     style::{Color, Modifier, Style},
@@ -39,7 +39,14 @@ pub(crate) fn render_pane(frame: &mut Frame<'_>, pane: &PaneScene) {
             }
             frame.render_widget(Paragraph::new(lines).block(block), area);
         }
-        PaneContent::Agent(_) | PaneContent::Empty(_) => {
+        PaneContent::Agent(agent) => {
+            let lines = agent_lines(pane, agent);
+            frame.render_widget(
+                Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+                area,
+            );
+        }
+        PaneContent::Empty(_) => {
             let lines = pane
                 .detail_lines()
                 .into_iter()
@@ -51,6 +58,32 @@ pub(crate) fn render_pane(frame: &mut Frame<'_>, pane: &PaneScene) {
             );
         }
     }
+}
+
+/// Agent pane lines: the scene's detail lines with the approval block set
+/// apart when the agent is waiting. Calm emphasis only — the status line is
+/// bold, the approval block is yellow with a bold header, everything else is
+/// plain text.
+fn agent_lines<'a>(pane: &PaneScene, agent: &AgentContent) -> Vec<Line<'a>> {
+    let approval_style = Style::default().fg(Color::Yellow);
+    pane.detail_lines()
+        .into_iter()
+        .map(|text| {
+            if text.starts_with("status: ") {
+                Line::styled(text, Style::default().add_modifier(Modifier::BOLD))
+            } else if agent.pending_approval.is_some() && text.starts_with("approval required: ") {
+                Line::styled(text, approval_style.add_modifier(Modifier::BOLD))
+            } else if agent.pending_approval.is_some()
+                && (text.starts_with("scope: ")
+                    || text.starts_with("risk: ")
+                    || text.starts_with("keys: "))
+            {
+                Line::styled(text, approval_style)
+            } else {
+                Line::from(text)
+            }
+        })
+        .collect()
 }
 
 fn pane_title(pane: &PaneScene) -> String {
@@ -71,6 +104,11 @@ fn pane_title(pane: &PaneScene) -> String {
         && terminal.in_copy_mode()
     {
         parts.push("copy".to_owned());
+    }
+    if let PaneContent::Agent(agent) = &pane.content
+        && agent.pending_approval.is_some()
+    {
+        parts.push("approval".to_owned());
     }
     format!(" {} ", parts.join(" | "))
 }

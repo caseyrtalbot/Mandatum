@@ -280,10 +280,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mandatum-agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "mandatum-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mandatum-app"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "mandatum-agent-runtime",
  "mandatum-commands",
  "mandatum-core",
  "mandatum-pty",

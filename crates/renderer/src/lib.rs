@@ -88,8 +88,9 @@ fn render_palette(frame: &mut Frame<'_>, palette: &PaletteOverlay) {
 #[cfg(test)]
 mod tests {
     use mandatum_scene::{
-        EmptyContent, PaletteEntry, PaneContent, PaneId, PaneScene, PaneSceneKind, SceneCell,
-        SceneCellStyle, SceneSize, SurfacePosition, TaskContent, TerminalSurface,
+        AgentApprovalPrompt, AgentContent, EmptyContent, PaletteEntry, PaneContent, PaneId,
+        PaneScene, PaneSceneKind, SceneCell, SceneCellStyle, SceneSize, SurfacePosition,
+        TaskContent, TerminalSurface,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -258,6 +259,54 @@ mod tests {
         assert!(all.contains("recipe: test"));
         assert!(all.contains("runtime status: failed: exit 101"));
         assert!(all.contains("FAIL"));
+    }
+
+    #[test]
+    fn waiting_agent_pane_renders_a_distinct_approval_block() {
+        let mut agent_pane = pane(PaneContent::Agent(AgentContent {
+            objective: "fix the failing test".to_owned(),
+            status_label: "waiting for approval".to_owned(),
+            pending_approvals: 1,
+            changed_file_count: 1,
+            changed_files: vec!["src/lib.rs".to_owned()],
+            latest_summary: Some("patched".to_owned()),
+            current_action: Some("cleaning target".to_owned()),
+            pending_approval: Some(AgentApprovalPrompt {
+                command: "rm -rf target".to_owned(),
+                cwd: "/tmp/project".to_owned(),
+                affected_path: Some("target".to_owned()),
+                risk_label: "high".to_owned(),
+                risk_basis: "removes files (rm)".to_owned(),
+                key_hint: "y approve / n reject".to_owned(),
+            }),
+            output_tail: vec!["$ cargo test".to_owned()],
+        }));
+        agent_pane.kind = PaneSceneKind::Agent;
+        agent_pane.area = mandatum_scene::SceneRect::new(0, 1, 60, 18);
+        let mut with_agent = scene(vec![agent_pane]);
+        with_agent.size = SceneSize::new(60, 22);
+        let terminal = draw(&with_agent);
+        let rows = buffer_rows(&terminal);
+        let all = rows.join("\n");
+
+        assert!(all.contains("objective: fix the failing test"));
+        assert!(all.contains("status: waiting for approval"));
+        assert!(all.contains("action: cleaning target"));
+        assert!(all.contains("approval required: rm -rf target"));
+        assert!(all.contains("risk: high (removes files (rm))"));
+        assert!(all.contains("keys: y approve / n reject"));
+        // The waiting state is flagged in the pane title.
+        assert!(rows[1].contains("approval"));
+
+        // The approval block is visually distinct: its header row is yellow
+        // and bold while ordinary detail lines are unstyled.
+        let buffer = terminal.backend().buffer();
+        let approval_row = (0..buffer.area.height)
+            .find(|y| rows[usize::from(*y)].contains("approval required"))
+            .expect("approval line rendered");
+        let cell = buffer.cell((2u16, approval_row)).unwrap();
+        assert_eq!(cell.fg, Color::Yellow);
+        assert!(cell.modifier.contains(Modifier::BOLD));
     }
 
     #[test]

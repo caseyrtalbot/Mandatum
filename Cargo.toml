@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/agent-runtime",
   "crates/app",
   "crates/commands",
   "crates/core",
@@ -10,6 +11,7 @@ members = [
   "crates/workflows",
 ]
 default-members = [
+  "crates/agent-runtime",
   "crates/app",
   "crates/commands",
   "crates/core",
@@ -31,6 +33,7 @@ rust-version = "1.96"
 
 [workspace.dependencies]
 crossterm = "0.28"
+mandatum-agent-runtime = { path = "crates/agent-runtime" }
 mandatum-core = { path = "crates/core" }
 mandatum-commands = { path = "crates/commands" }
 mandatum-pty = { path = "crates/pty" }

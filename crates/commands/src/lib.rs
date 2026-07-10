@@ -19,6 +19,12 @@ pub enum CommandId {
     RunTask,
     RerunTask,
     StopTask,
+    NewAgentPane,
+    StartAgent,
+    StopAgent,
+    ApproveAgentAction,
+    RejectAgentAction,
+    FocusNextWaitingAgent,
     ZoomPane,
     FloatPane,
     StackPanes,
@@ -31,6 +37,7 @@ pub enum CommandCategory {
     Project,
     Pane,
     Task,
+    Agent,
     Layout,
     Persistence,
 }
@@ -104,6 +111,36 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         category: CommandCategory::Task,
     },
     Command {
+        id: CommandId::NewAgentPane,
+        label: "New Agent Pane",
+        category: CommandCategory::Agent,
+    },
+    Command {
+        id: CommandId::StartAgent,
+        label: "Start Agent",
+        category: CommandCategory::Agent,
+    },
+    Command {
+        id: CommandId::StopAgent,
+        label: "Stop Agent",
+        category: CommandCategory::Agent,
+    },
+    Command {
+        id: CommandId::ApproveAgentAction,
+        label: "Approve Agent Action",
+        category: CommandCategory::Agent,
+    },
+    Command {
+        id: CommandId::RejectAgentAction,
+        label: "Reject Agent Action",
+        category: CommandCategory::Agent,
+    },
+    Command {
+        id: CommandId::FocusNextWaitingAgent,
+        label: "Focus Next Waiting Agent",
+        category: CommandCategory::Agent,
+    },
+    Command {
         id: CommandId::ZoomPane,
         label: "Zoom Pane",
         category: CommandCategory::Layout,
@@ -161,6 +198,7 @@ pub enum CommandTarget {
     Core,
     Runtime(RuntimeCommand),
     RuntimeTask(RuntimeTaskCommand),
+    RuntimeAgent(RuntimeAgentCommand),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +211,16 @@ pub enum RuntimeTaskCommand {
     RunConfiguredTask,
     RerunFocusedTask,
     StopFocusedTask,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeAgentCommand {
+    NewAgentPane,
+    StartFocusedAgent,
+    StopFocusedAgent,
+    ApproveFocusedAgentAction,
+    RejectFocusedAgentAction,
+    FocusNextWaitingAgent,
 }
 
 impl CommandTarget {
@@ -216,6 +264,20 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
         CommandId::RunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RunConfiguredTask),
         CommandId::RerunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RerunFocusedTask),
         CommandId::StopTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::StopFocusedTask),
+        CommandId::NewAgentPane => CommandTarget::RuntimeAgent(RuntimeAgentCommand::NewAgentPane),
+        CommandId::StartAgent => {
+            CommandTarget::RuntimeAgent(RuntimeAgentCommand::StartFocusedAgent)
+        }
+        CommandId::StopAgent => CommandTarget::RuntimeAgent(RuntimeAgentCommand::StopFocusedAgent),
+        CommandId::ApproveAgentAction => {
+            CommandTarget::RuntimeAgent(RuntimeAgentCommand::ApproveFocusedAgentAction)
+        }
+        CommandId::RejectAgentAction => {
+            CommandTarget::RuntimeAgent(RuntimeAgentCommand::RejectFocusedAgentAction)
+        }
+        CommandId::FocusNextWaitingAgent => {
+            CommandTarget::RuntimeAgent(RuntimeAgentCommand::FocusNextWaitingAgent)
+        }
         _ => CommandTarget::Core,
     }
 }
@@ -249,6 +311,12 @@ pub fn resolve_palette_key_with_context(key: PaletteKey, context: PaletteContext
             PaletteInput::Dispatch(CommandId::StopTask)
         }
         PaletteKey::Character('b') => PaletteInput::Dispatch(CommandId::RunTask),
+        PaletteKey::Character('a') => PaletteInput::Dispatch(CommandId::NewAgentPane),
+        PaletteKey::Character('g') => PaletteInput::Dispatch(CommandId::StartAgent),
+        PaletteKey::Character('k') => PaletteInput::Dispatch(CommandId::StopAgent),
+        PaletteKey::Character('y') => PaletteInput::Dispatch(CommandId::ApproveAgentAction),
+        PaletteKey::Character('d') => PaletteInput::Dispatch(CommandId::RejectAgentAction),
+        PaletteKey::Character('j') => PaletteInput::Dispatch(CommandId::FocusNextWaitingAgent),
         PaletteKey::Character('w') => PaletteInput::Dispatch(CommandId::SaveWorkspace),
         PaletteKey::Character('o') => PaletteInput::Dispatch(CommandId::RestoreWorkspace),
         PaletteKey::Character('[') => PaletteInput::Dispatch(CommandId::EnterCopyMode),
@@ -299,7 +367,13 @@ pub fn core_action_for_command(
         CommandId::EnterCopyMode
         | CommandId::RunTask
         | CommandId::RerunTask
-        | CommandId::StopTask => {
+        | CommandId::StopTask
+        | CommandId::NewAgentPane
+        | CommandId::StartAgent
+        | CommandId::StopAgent
+        | CommandId::ApproveAgentAction
+        | CommandId::RejectAgentAction
+        | CommandId::FocusNextWaitingAgent => {
             return Err(CommandError::NotACoreCommand(command_id));
         }
     })
@@ -462,6 +536,62 @@ mod tests {
             resolve_palette_key(PaletteKey::Character('c')),
             PaletteInput::Noop
         );
+    }
+
+    #[test]
+    fn agent_palette_keys_resolve_to_agent_commands() {
+        for (key, command_id) in [
+            ('a', CommandId::NewAgentPane),
+            ('g', CommandId::StartAgent),
+            ('k', CommandId::StopAgent),
+            ('y', CommandId::ApproveAgentAction),
+            ('d', CommandId::RejectAgentAction),
+            ('j', CommandId::FocusNextWaitingAgent),
+        ] {
+            assert_eq!(
+                resolve_palette_key(PaletteKey::Character(key)),
+                PaletteInput::Dispatch(command_id)
+            );
+        }
+    }
+
+    #[test]
+    fn built_in_agent_commands_are_agent_category_and_runtime_targets() {
+        for (command_id, expected_target) in [
+            (CommandId::NewAgentPane, RuntimeAgentCommand::NewAgentPane),
+            (
+                CommandId::StartAgent,
+                RuntimeAgentCommand::StartFocusedAgent,
+            ),
+            (CommandId::StopAgent, RuntimeAgentCommand::StopFocusedAgent),
+            (
+                CommandId::ApproveAgentAction,
+                RuntimeAgentCommand::ApproveFocusedAgentAction,
+            ),
+            (
+                CommandId::RejectAgentAction,
+                RuntimeAgentCommand::RejectFocusedAgentAction,
+            ),
+            (
+                CommandId::FocusNextWaitingAgent,
+                RuntimeAgentCommand::FocusNextWaitingAgent,
+            ),
+        ] {
+            let command = command_for_id(command_id).unwrap();
+
+            assert_eq!(command.category, CommandCategory::Agent);
+            assert_eq!(
+                command_target(command_id),
+                CommandTarget::RuntimeAgent(expected_target)
+            );
+
+            let mut workspace = Workspace::new("w", PathBuf::from("/tmp/p"));
+            let context = CommandContext::for_project("w", "/tmp/p");
+            let result = dispatch_command(&mut workspace, &context, command_id);
+
+            assert!(matches!(result, Err(CommandError::NotACoreCommand(id)) if id == command_id));
+            assert_eq!(workspace.active_session().panes().len(), 1);
+        }
     }
 
     #[test]

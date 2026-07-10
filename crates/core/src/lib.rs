@@ -11,7 +11,10 @@ mod workspace;
 pub use action::{ActionOutcome, CoreAction, PersistenceRequest};
 pub use ids::{PaneId, ProjectId, SessionId, WorkspaceId};
 pub use layout::{FloatingPane, FloatingRect, Layout, LayoutNode, SplitAxis, SplitDirection};
-pub use pane::{AgentPaneIntent, AgentStatus, PaneKind, PaneSpec, StatusLogSource, TaskPaneIntent};
+pub use pane::{
+    AgentApprovalRecord, AgentPaneIntent, AgentStatus, PaneKind, PaneSpec, StatusLogSource,
+    TaskPaneIntent,
+};
 pub use persistence::{
     PersistedWorkspace, PersistenceError, SESSION_SCHEMA_VERSION, deserialize_workspace,
     serialize_workspace,
@@ -220,8 +223,14 @@ mod tests {
                     objective: "review failing tests".to_owned(),
                     status: AgentStatus::Blocked,
                     pending_approvals: 1,
+                    pending_approval_ids: vec!["appr-1".to_owned()],
                     changed_files: vec![PathBuf::from("src/lib.rs")],
                     latest_summary: Some("waiting for approval".to_owned()),
+                    approval_history: vec![AgentApprovalRecord {
+                        approval_id: "appr-0".to_owned(),
+                        command: "cargo test".to_owned(),
+                        approved: true,
+                    }],
                 },
             },
             Some(PathBuf::from("/tmp/project")),
@@ -239,5 +248,33 @@ mod tests {
         assert!(!serialized.contains("renderer"));
         assert!(!serialized.contains("scrollback"));
         assert!(!serialized.contains(r#""status": "running""#));
+    }
+
+    #[test]
+    fn detach_live_session_clears_in_flight_claims_but_keeps_outcomes() {
+        let mut in_flight = AgentPaneIntent::draft("review failing tests");
+        in_flight.status = AgentStatus::WaitingForApproval;
+        in_flight.pending_approvals = 1;
+        in_flight.pending_approval_ids = vec!["appr-1".to_owned()];
+        in_flight.approval_history = vec![AgentApprovalRecord {
+            approval_id: "appr-0".to_owned(),
+            command: "cargo test".to_owned(),
+            approved: true,
+        }];
+
+        in_flight.detach_live_session();
+
+        assert_eq!(in_flight.status, AgentStatus::Unknown);
+        assert_eq!(in_flight.pending_approvals, 0);
+        assert!(in_flight.pending_approval_ids.is_empty());
+        assert_eq!(in_flight.approval_history.len(), 1);
+
+        // Terminal states the session already reported stay as they are.
+        for terminal in [AgentStatus::Complete, AgentStatus::Failed] {
+            let mut done = AgentPaneIntent::draft("done");
+            done.status = terminal.clone();
+            done.detach_live_session();
+            assert_eq!(done.status, terminal);
+        }
     }
 }

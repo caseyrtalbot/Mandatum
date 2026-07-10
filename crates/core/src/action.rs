@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{PaneId, TaskPaneIntent};
+use crate::{AgentPaneIntent, PaneId, TaskPaneIntent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreAction {
@@ -15,6 +15,11 @@ pub enum CoreAction {
     CreateTaskPane {
         title: String,
         intent: TaskPaneIntent,
+    },
+    CreateAgentPane {
+        title: String,
+        intent: AgentPaneIntent,
+        cwd: Option<PathBuf>,
     },
     SplitRight,
     SplitDown,

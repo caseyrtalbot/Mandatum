@@ -23,7 +23,10 @@ mod workspace;
 pub use mandatum_core::PaneId;
 
 pub use geometry::{SceneRect, SceneSize};
-pub use pane::{AgentContent, EmptyContent, PaneContent, PaneScene, PaneSceneKind, TaskContent};
+pub use pane::{
+    AgentApprovalPrompt, AgentContent, EmptyContent, PaneContent, PaneScene, PaneSceneKind,
+    TaskContent,
+};
 pub use style::{SceneCellStyle, SceneColor};
 pub use surface::{SceneCell, SurfacePosition, TerminalSurface};
 pub use workspace::{

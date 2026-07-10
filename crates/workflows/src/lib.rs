@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use mandatum_core::{AgentPaneIntent, AgentStatus, PaneKind, TaskPaneIntent};
+use mandatum_core::{AgentPaneIntent, PaneKind, TaskPaneIntent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskRecipe {
@@ -34,16 +34,9 @@ pub struct AgentThreadSpec {
 
 impl AgentThreadSpec {
     pub fn pane_kind(&self) -> PaneKind {
-        PaneKind::Agent {
-            intent: AgentPaneIntent {
-                thread_id: self.thread_id.clone(),
-                objective: self.objective.clone(),
-                status: AgentStatus::Draft,
-                pending_approvals: 0,
-                changed_files: Vec::new(),
-                latest_summary: None,
-            },
-        }
+        let mut intent = AgentPaneIntent::draft(self.objective.clone());
+        intent.thread_id = self.thread_id.clone();
+        PaneKind::Agent { intent }
     }
 }
 

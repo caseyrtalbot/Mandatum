@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use crossterm::event::Event;
-use mandatum_app::{AppConfig, AppState, build_workspace_scene};
+use mandatum_app::{AgentConnectorKind, AppConfig, AppState, build_workspace_scene};
 use mandatum_scene::{OverlayScene, PaneContent, SceneSize, TerminalSurface, WorkspaceScene};
 use ratatui::{Terminal, backend::TestBackend};
 
@@ -83,6 +83,9 @@ fn same_scene_renders_equivalent_content_in_both_frontends() {
         project_path,
         shell_program: "/bin/sh".to_owned(),
         task_command: "printf TASK_OK".to_owned(),
+        agent_connector: AgentConnectorKind::Fake,
+        agent_objective: "test objective".to_owned(),
+        agent_model: None,
         spawn_pty: true,
         restore_on_startup: false,
     });

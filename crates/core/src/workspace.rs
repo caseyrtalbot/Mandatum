@@ -86,6 +86,13 @@ impl Workspace {
             .expect("active session should be validated by workspace constructors")
     }
 
+    /// Mutable access to every session, active or not. Panes outside the
+    /// active session keep durable state (agent intents) that the runtime
+    /// layer must be able to reconcile.
+    pub fn sessions_mut(&mut self) -> impl Iterator<Item = &mut Session> {
+        self.sessions.values_mut()
+    }
+
     pub fn open_project(&mut self, name: String, path: PathBuf) -> SessionId {
         let project_id = self.next_project_id();
         let session_id = self.next_session_id();
@@ -111,6 +118,10 @@ impl Workspace {
             }
             CoreAction::CreateTaskPane { title, intent } => {
                 self.active_session_mut().add_task_pane(title, intent);
+                Ok(self.mutated_outcome())
+            }
+            CoreAction::CreateAgentPane { title, intent, cwd } => {
+                self.active_session_mut().add_agent_pane(title, intent, cwd);
                 Ok(self.mutated_outcome())
             }
             CoreAction::SplitRight => {

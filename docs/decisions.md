@@ -234,3 +234,137 @@ Verification: scene layout parity tests (geometry captured from the
 previous ratatui math), scene-builder content tests, renderer TestBackend
 tests, and the cross-frontend parity test in
 `crates/app/tests/frontend_parity.rs`.
+
+## Accepted: Agent Runtime Contract
+
+Status: accepted (2026-07-09)
+
+Decision: `mandatum-agent-runtime` (engine-side; deps: `mandatum-core`,
+serde, serde_json) owns the connector contract. `AgentConnector::launch`
+takes an `AgentLaunchSpec` (objective, cwd, model hint, approval policy —
+default gates shell commands, auto-allows reads) and returns an
+`AgentSession`: a `std::sync::mpsc::Receiver<AgentSessionEvent>` plus a
+boxed `AgentSessionControl` (decide / interrupt / shutdown / is_alive).
+Approvals are first-class events: `ApprovalRequested` carries an approval
+id, the verbatim command, its scope (cwd + affected path), and a
+connector-side heuristic `RiskAssessment` (Low/Medium/High + basis); the
+workstation answers through the control handle with an `ApprovalDecision
+{ approval_id, Approved | Rejected { reason } }`.
+
+Context: durable agent intent (`mandatum_core::AgentPaneIntent`) already
+exists. Connectors need a runtime shape that never leaks into persistence
+(the durable-intent law) and never drags a frontend or async runtime into
+engine crates (L1).
+
+Rationale: threads plus std channels mirror the PTY runtime
+(`crates/app/src/process_events.rs`) — one worker thread per agent
+stream, events drained into the app loop; no tokio/async-std anywhere in
+the workspace (see "Agent Runtime Uses Threads And Channels, Not An Async
+Runtime"). Both traits are object-safe so the app can hold heterogeneous
+connectors behind trait objects, and `FakeConnector` scripts
+deterministic happy and pathological flows (double-decide,
+decide-after-shutdown, event floods) for tests without a live agent.
+
+Consequences:
+
+- `AgentSession` is runtime state: never serialized; the durable subset
+  of events folds into `AgentPaneIntent` app-side
+- risk levels are advisory heuristics only; the approval gate itself is
+  the enforcement point, and Low never means auto-approve
+- `mandatum-agent-runtime` joins the ENGINE_SIDE list in the L1
+  conformance gate
+
+Verification: FakeConnector unit tests (happy path, approve and reject
+branches, wrong-id decide, double-decide, decide-after-shutdown, shutdown
+mid-script closes the receiver, is_alive semantics, 10k-event flood),
+risk-heuristic banding tests, event JSON round-trip, and the L1/L2
+dependency scan in `ci/conformance.sh`.
+
+## Accepted: Agent Runtime Registry Mirrors The PTY Runtime Discipline
+
+Status: accepted (2026-07-09)
+
+Decision: Live agent sessions are integrated through an
+`AgentRuntimeRegistry` in `crates/app/src/agent_runtime.rs` that mirrors
+`task_runtime.rs` / `process_events.rs` exactly: one forwarder thread per
+live session pumps `AgentSessionEvent`s into the app event loop wrapped as
+`AgentRuntimeEvent { pane_id, restart_generation, runtime_token, event }`,
+and `app_state` applies an event only if the pane's current generation and
+token match — anything else is dropped. Agent events travel on their own
+`std::sync::mpsc` channel drained by the same `tick_runtime` pass that
+drains PTY events, keeping the existing `PtyRuntimeEvent` type untouched.
+
+Rationale: the (generation, token) stamp is the workspace's proven L3
+mechanism for rejecting events from replaced runtimes; reusing it verbatim
+means one discipline to audit instead of two. A relaunch of a live agent
+bumps the pane's restart generation (like Restart Pane) and always takes a
+fresh runtime token, so a killed session's buffered events can never match
+again.
+
+Consequences:
+
+- registry state (control handle, forwarder join handle, current action,
+  ~200-line output tail, full pending `ApprovalRequest`) is live-only and
+  never serialized
+- the durable subset of events folds into `AgentPaneIntent` at the moment
+  an event is accepted; a stale event therefore cannot touch durable intent
+- `[L3-GATE]` tags: `stale_agent_events_after_restart_are_ignored` and
+  `agent_runtime_state_is_not_serialized_with_workspace_intent` in
+  `crates/app/src/app_state.rs`
+
+Verification: FakeConnector-driven app tests (start / approve / reject /
+stop / restart / save-restore round trip), scene-builder assertions for the
+approval surface and status strip, no network anywhere.
+
+## Accepted: Approval History Persists In Durable Agent Intent
+
+Status: accepted (2026-07-09)
+
+Decision: decided approvals are appended to
+`AgentPaneIntent.approval_history` as `AgentApprovalRecord { approval_id,
+command, approved }` (oldest first), and the currently-pending approval is
+durable only as a count plus id list (`pending_approvals`,
+`pending_approval_ids`). The full `ApprovalRequest` detail — scope, risk
+band, risk basis — stays in the live registry and dies with the session.
+
+Rationale: past decisions are execution history the user must be able to
+audit after a restart ("what did I let this agent run?"), so they are
+durable facts: the id, the verbatim command, and the verdict. Scope and
+risk are advisory context computed for the moment of decision; persisting
+them would freeze a heuristic as durable truth. The pending id list lets a
+restored workspace say *which* approval was interrupted without pretending
+the gated action is still decidable — restore invents no live runtime, so
+a pending approval at save time restores as an unresolved id with `unknown`
+status once the session is gone.
+
+Consequences:
+
+- `AgentPaneIntent` gained `pending_approval_ids` and `approval_history`
+  (both `#[serde(default)]`, so pre-existing workspace files still load)
+- history grows without bound for now; a cap becomes a real decision when
+  long-running agents make files noticeably large
+- the save/restore round-trip test asserts decided approvals remain
+  visible after restart
+
+
+## Accepted: GPU Frontend Spike Verdict — Terminal Frontend Stays v1
+
+Status: accepted (2026-07-09)
+
+Decision: The winit+wgpu frontend spike (spikes/frontend-wgpu) proved
+feasibility and a measured latency win (key-to-GPU-present p50 21.6 ms vs
+the TUI's key-to-bytes-out p50 42.9 ms, an understated >2x gap), rendering
+purely from the mandatum-scene contract as a second conforming frontend.
+The terminal frontend nevertheless remains v1.
+
+Rationale: A large share of the measured gap is the product's own 40 ms
+input poll loop, which the terminal frontend can cut without any GPU work
+(queued for the brilliance pass); and a production GPU adapter still owes
+substantial work the spike skipped (full multi-pane/overlay scene binding,
+grapheme widths, IME, DPI, surface-loss recovery, damage tracking). The
+gains become decisive only when the roadmap needs GPU-only capability or
+sets sub-20 ms end-to-end latency as a goal.
+
+Consequences: the adapter stays warm behind the scene contract with its
+measurement harness (tui_probe) reusable for latency regressions; evidence
+in spikes/frontend-wgpu/RESULTS.md.
