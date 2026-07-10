@@ -93,6 +93,19 @@ impl Workspace {
         self.sessions.values_mut()
     }
 
+    /// Make an existing session (and its project) active. Unknown sessions
+    /// error; nothing is created.
+    pub fn activate_session(&mut self, session_id: &SessionId) -> Result<(), WorkspaceError> {
+        let Some(session) = self.sessions.get(session_id) else {
+            return Err(WorkspaceError::InvalidWorkspace(format!(
+                "session {session_id} was not found"
+            )));
+        };
+        self.active_project_id = session.project_id().clone();
+        self.active_session_id = session_id.clone();
+        Ok(())
+    }
+
     pub fn open_project(&mut self, name: String, path: PathBuf) -> SessionId {
         let project_id = self.next_project_id();
         let session_id = self.next_session_id();
@@ -110,6 +123,10 @@ impl Workspace {
         match action {
             CoreAction::OpenProject { name, path } => {
                 self.open_project(name, path);
+                Ok(self.mutated_outcome())
+            }
+            CoreAction::ActivateSession { session_id } => {
+                self.activate_session(&session_id)?;
                 Ok(self.mutated_outcome())
             }
             CoreAction::NewTerminal { title, cwd } => {

@@ -28,6 +28,9 @@ pub enum CommandId {
     ApproveAgentAction,
     RejectAgentAction,
     FocusNextWaitingAgent,
+    SetAgentObjective,
+    ShowTimeline,
+    ShowSessionMap,
     ZoomPane,
     FloatPane,
     DockPane,
@@ -205,6 +208,28 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         palette_key: Some('j'),
     },
     Command {
+        id: CommandId::SetAgentObjective,
+        label: "Set agent objective",
+        name: "set-agent-objective",
+        category: CommandCategory::Agent,
+        palette_key: Some('p'),
+    },
+    Command {
+        id: CommandId::ShowTimeline,
+        label: "Show timeline",
+        name: "show-timeline",
+        category: CommandCategory::App,
+        // '/' — the timeline is the searchable history surface.
+        palette_key: Some('/'),
+    },
+    Command {
+        id: CommandId::ShowSessionMap,
+        label: "Show session map",
+        name: "show-session-map",
+        category: CommandCategory::App,
+        palette_key: Some('m'),
+    },
+    Command {
         id: CommandId::ZoomPane,
         label: "Zoom pane",
         name: "zoom-pane",
@@ -324,6 +349,8 @@ pub enum RuntimeCommand {
     EnterCopyMode,
     CopySelection,
     ReloadConfig,
+    ShowTimeline,
+    ShowSessionMap,
     Quit,
 }
 
@@ -342,6 +369,7 @@ pub enum RuntimeAgentCommand {
     ApproveFocusedAgentAction,
     RejectFocusedAgentAction,
     FocusNextWaitingAgent,
+    SetFocusedAgentObjective,
 }
 
 impl CommandTarget {
@@ -386,6 +414,8 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
         CommandId::EnterCopyMode => CommandTarget::Runtime(RuntimeCommand::EnterCopyMode),
         CommandId::CopySelection => CommandTarget::Runtime(RuntimeCommand::CopySelection),
         CommandId::ReloadConfig => CommandTarget::Runtime(RuntimeCommand::ReloadConfig),
+        CommandId::ShowTimeline => CommandTarget::Runtime(RuntimeCommand::ShowTimeline),
+        CommandId::ShowSessionMap => CommandTarget::Runtime(RuntimeCommand::ShowSessionMap),
         CommandId::Quit => CommandTarget::Runtime(RuntimeCommand::Quit),
         CommandId::RunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RunConfiguredTask),
         CommandId::RerunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RerunFocusedTask),
@@ -403,6 +433,9 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
         }
         CommandId::FocusNextWaitingAgent => {
             CommandTarget::RuntimeAgent(RuntimeAgentCommand::FocusNextWaitingAgent)
+        }
+        CommandId::SetAgentObjective => {
+            CommandTarget::RuntimeAgent(RuntimeAgentCommand::SetFocusedAgentObjective)
         }
         _ => CommandTarget::Core,
     }
@@ -548,6 +581,8 @@ pub fn core_action_for_command(
         CommandId::EnterCopyMode
         | CommandId::CopySelection
         | CommandId::ReloadConfig
+        | CommandId::ShowTimeline
+        | CommandId::ShowSessionMap
         | CommandId::Quit
         | CommandId::RunTask
         | CommandId::RerunTask
@@ -557,7 +592,8 @@ pub fn core_action_for_command(
         | CommandId::StopAgent
         | CommandId::ApproveAgentAction
         | CommandId::RejectAgentAction
-        | CommandId::FocusNextWaitingAgent => {
+        | CommandId::FocusNextWaitingAgent
+        | CommandId::SetAgentObjective => {
             return Err(CommandError::NotACoreCommand(command_id));
         }
     })

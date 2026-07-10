@@ -7,36 +7,35 @@
 //! and frontend (L1). The scene stays color-semantic; the [`Theme`] resolves
 //! each semantic role to a concrete color here in the adapter.
 
+mod overlay;
 mod pane;
 mod surface;
 
 use mandatum_scene::{
-    ContextMenuOverlay, HeaderScene, OverlayScene, PaletteOverlay, SceneColor, SceneRect, Theme,
-    WorkspaceScene, layout,
+    HeaderScene, OverlayScene, SceneColor, SceneRect, StatusScene, Theme, WorkspaceScene,
 };
 use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::Paragraph,
 };
 
-/// Draw one frame of workspace scene state with the active theme.
+/// Draw one frame of workspace scene state with the active theme. The scene
+/// carries every strip's area and composed text (`&WorkspaceScene` alone
+/// suffices to paint a frame); this adapter only translates to widgets.
 pub fn render(frame: &mut Frame<'_>, scene: &WorkspaceScene, theme: &Theme) {
-    render_header(frame, layout::header_rect(scene.size), &scene.header, theme);
+    render_header(frame, &scene.header, theme);
     for pane_scene in &scene.panes {
         pane::render_pane(frame, pane_scene, theme);
     }
-    render_status(
-        frame,
-        layout::status_rect(scene.size),
-        scene.status.as_deref(),
-        theme,
-    );
+    render_status(frame, &scene.status, theme);
     match &scene.overlay {
-        Some(OverlayScene::Palette(palette)) => render_palette(frame, palette, theme),
-        Some(OverlayScene::ContextMenu(menu)) => render_context_menu(frame, menu, theme),
+        Some(OverlayScene::Palette(palette)) => overlay::render_palette(frame, palette, theme),
+        Some(OverlayScene::ContextMenu(menu)) => overlay::render_context_menu(frame, menu, theme),
+        Some(OverlayScene::Timeline(timeline)) => overlay::render_timeline(frame, timeline, theme),
+        Some(OverlayScene::SessionMap(map)) => overlay::render_session_map(frame, map, theme),
+        Some(OverlayScene::Prompt(prompt)) => overlay::render_prompt(frame, prompt, theme),
         None => {}
     }
 }
@@ -80,197 +79,89 @@ pub(crate) fn theme_fg(color: SceneColor) -> Style {
     }
 }
 
-fn render_header(frame: &mut Frame<'_>, area: SceneRect, header: &HeaderScene, theme: &Theme) {
-    let zoom = if header.zoomed { " | zoom" } else { "" };
-    let title = format!(
-        " Mandatum | {} | panes {} | focused {}{} ",
-        header.session_name, header.pane_count, header.focused_pane, zoom
-    );
-    frame.render_widget(
-        Paragraph::new(title).style(
-            Style::default()
-                .fg(theme_color(theme.header))
-                .bg(theme_color(theme.header_background)),
-        ),
-        to_rect(area),
-    );
-}
-
-fn render_status(frame: &mut Frame<'_>, area: SceneRect, status: Option<&str>, theme: &Theme) {
-    let status = status.unwrap_or("ready");
-    frame.render_widget(
-        Paragraph::new(format!(" {status}")).style(theme_fg(theme.status)),
-        to_rect(area),
-    );
-}
-
-/// Draw the palette overlay: the filter input on the top inner row, the
-/// visible slice of entries (matched label chars bold+underlined, greyed
-/// entries dimmed, the selection reversed), and the key-hint footer pinned
-/// to the bottom inner row. Calm styling: modifiers plus the theme's
-/// palette roles, no extra color.
-fn render_palette(frame: &mut Frame<'_>, palette: &PaletteOverlay, theme: &Theme) {
-    let overlay = to_rect(palette.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .title(" Command Palette ")
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
-    let inner = layout::pane_inner_rect(palette.area);
-    let inner_rect = to_rect(inner);
-    if inner_rect.height == 0 || inner_rect.width == 0 {
+/// Paint the attention strip: the scene's composed text, then each
+/// attention segment restyled in the theme's attention color at the rect
+/// the scene resolved for it.
+fn render_header(frame: &mut Frame<'_>, header: &HeaderScene, theme: &Theme) {
+    if header.area.is_empty() {
         return;
     }
-
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    let mut lines = Vec::with_capacity(usize::from(inner_rect.height));
-
-    // Filter input line, with a block cursor after the typed text. The
-    // empty-input placeholder states the fast-path rule and its escape
-    // hatch, because an unlabeled input that runs commands on bare letters
-    // would read as a text field and trap the first word typed into it.
-    let mut input = vec![Span::raw("> ")];
-    if palette.query.is_empty() {
-        input.push(Span::styled(
-            "letters run their key · shift+letter to search",
-            dim,
-        ));
-    } else {
-        input.push(Span::raw(palette.query.clone()));
-        input.push(Span::styled(
-            " ",
-            Style::default().add_modifier(Modifier::REVERSED),
-        ));
-    }
-    lines.push(Line::from(input));
-
-    if palette.items.is_empty() {
-        lines.push(Line::from(Span::styled(" no matching commands", dim)));
-    }
-    for index in layout::palette_item_window(inner, palette.items.len(), palette.selected) {
-        let item = &palette.items[index];
-        let mut spans = vec![Span::raw(" ")];
-        for (position, character) in item.label.chars().enumerate() {
-            let style = if item.match_indices.contains(&position) {
-                Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            } else {
+    let base = Style::default()
+        .fg(theme_color(theme.header))
+        .bg(theme_color(theme.header_background));
+    frame.render_widget(
+        Paragraph::new(header.text.clone()).style(base),
+        to_rect(header.area),
+    );
+    for segment in &header.attention {
+        if segment.rect.is_empty() {
+            continue;
+        }
+        frame.render_widget(
+            Paragraph::new(segment.label.clone()).style(
                 Style::default()
-            };
-            spans.push(Span::styled(character.to_string(), style));
-        }
-        if let Some(hint) = &item.key_hint {
-            spans.push(Span::styled(format!("  {hint}"), dim));
-        }
-        spans.push(Span::styled(format!("  {}", item.detail), dim));
-
-        let mut line_style = Style::default();
-        if !item.enabled {
-            line_style = line_style.add_modifier(Modifier::DIM);
-        }
-        if palette.selected == Some(index) {
-            line_style = line_style
-                .patch(theme_fg(theme.palette_selection))
-                .add_modifier(Modifier::REVERSED);
-        }
-        lines.push(Line::from(spans).style(line_style));
+                    .fg(theme_color(theme.attention))
+                    .bg(theme_color(theme.header_background))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            to_rect(segment.rect),
+        );
     }
-
-    // Footer pinned to the bottom inner row.
-    let footer_row = usize::from(inner_rect.height).saturating_sub(1);
-    lines.truncate(footer_row.max(1));
-    while lines.len() < footer_row {
-        lines.push(Line::default());
-    }
-    if footer_row > 0 {
-        lines.push(Line::from(Span::styled(
-            format!(" {}", palette.footer),
-            dim,
-        )));
-    }
-
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner_rect);
 }
 
-/// Draw the right-click context menu: a calm bordered list, the selected
-/// row reversed, each row's key-chord hint right-aligned and dimmed.
-fn render_context_menu(frame: &mut Frame<'_>, menu: &ContextMenuOverlay, theme: &Theme) {
-    let overlay = to_rect(menu.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
-    let inner = layout::pane_inner_rect(menu.area);
-    let inner_rect = to_rect(inner);
-    if inner_rect.height == 0 || inner_rect.width == 0 {
+fn render_status(frame: &mut Frame<'_>, status: &StatusScene, theme: &Theme) {
+    if status.area.is_empty() {
         return;
     }
-
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    let width = usize::from(inner_rect.width);
-    let mut lines = Vec::with_capacity(usize::from(inner_rect.height));
-    for (index, item) in menu
-        .items
-        .iter()
-        .take(usize::from(inner_rect.height))
-        .enumerate()
-    {
-        // " label", padding, then the chord hint ending one cell short of
-        // the right edge.
-        let label_width = item.label.chars().count() + 1;
-        let hint_width = item.chord_hint.chars().count() + 1;
-        let padding = width.saturating_sub(label_width + hint_width).max(1);
-        let mut spans = vec![Span::raw(format!(" {}", item.label))];
-        spans.push(Span::raw(" ".repeat(padding)));
-        if !item.chord_hint.is_empty() {
-            spans.push(Span::styled(item.chord_hint.clone(), dim));
-        }
-
-        let mut line_style = Style::default();
-        if menu.selected == index {
-            line_style = line_style
-                .patch(theme_fg(theme.palette_selection))
-                .add_modifier(Modifier::REVERSED);
-        }
-        lines.push(Line::from(spans).style(line_style));
-    }
-
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner_rect);
+    frame.render_widget(
+        Paragraph::new(format!(" {}", status.text)).style(theme_fg(theme.status)),
+        to_rect(status.area),
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use mandatum_scene::{
-        AgentApprovalPrompt, AgentContent, AgentStatus, ContextMenuEntry, EmptyContent,
-        PaletteEntry, PaneContent, PaneId, PaneScene, PaneSceneKind, SceneCell, SceneCellStyle,
-        SceneSize, SurfacePosition, TaskContent, TerminalSurface,
+        AgentApprovalPrompt, AgentContent, AgentStatus, AttentionSegment, ContextMenuEntry,
+        ContextMenuOverlay, EmptyContent, PaletteEntry, PaletteOverlay, PaneContent, PaneId,
+        PaneScene, PaneSceneKind, PromptOverlay, SceneCell, SceneCellStyle, SceneSize,
+        SessionMapOverlay, SessionMapRow, SurfacePosition, TaskContent, TerminalSurface,
+        TimelineEntry, TimelineOverlay, layout,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
 
     fn scene(panes: Vec<PaneScene>) -> WorkspaceScene {
+        let pane_count = panes.len();
         WorkspaceScene {
             size: SceneSize::new(60, 12),
-            header: HeaderScene {
-                session_name: "main".to_owned(),
-                pane_count: panes.len(),
-                focused_pane: PaneId::new("pane-1"),
-                zoomed: false,
-            },
+            header: header(&format!(
+                " Mandatum | main · {pane_count} pane(s) · agent: fake"
+            )),
             panes,
             overlay: None,
-            status: Some("all good".to_owned()),
+            status: StatusScene {
+                area: SceneRect::new(0, 11, 60, 1),
+                text: "all good".to_owned(),
+            },
             focused_pane: PaneId::new("pane-1"),
             hit_targets: Vec::new(),
             copy_mode: false,
+        }
+    }
+
+    fn header(text: &str) -> HeaderScene {
+        HeaderScene {
+            area: SceneRect::new(0, 0, 60, 1),
+            workspace_name: "Mandatum".to_owned(),
+            session_name: "main".to_owned(),
+            pane_count: 1,
+            focused_pane: PaneId::new("pane-1"),
+            zoomed: false,
+            connector_label: "fake".to_owned(),
+            text: text.to_owned(),
+            attention: Vec::new(),
         }
     }
 
@@ -340,20 +231,37 @@ mod tests {
         ])))]));
         let rows = buffer_rows(&terminal);
 
-        assert!(rows[0].contains("Mandatum | main | panes 1 | focused pane-1"));
+        // The strips paint the scene's composed text verbatim at the
+        // scene's areas: nothing is derived in the frontend.
+        assert!(rows[0].contains("Mandatum | main · 1 pane(s) · agent: fake"));
         assert!(rows[1].contains("shell | focused"));
         assert!(rows[11].contains("all good"));
     }
 
     #[test]
-    fn zoomed_header_and_default_status_render_fallbacks() {
-        let mut zoomed = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
-        zoomed.header.zoomed = true;
-        zoomed.status = None;
-        let rows = buffer_rows(&draw(&zoomed));
+    fn attention_segments_restyle_the_header_at_their_scene_rects() {
+        let mut with_attention = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
+        let text = " Mandatum | 1 approval waiting · pane-2";
+        let label = "1 approval waiting · pane-2";
+        let start = (text.chars().count() - label.chars().count()) as u16;
+        with_attention.header.text = text.to_owned();
+        with_attention.header.attention = vec![AttentionSegment {
+            rect: SceneRect::new(start, 0, label.chars().count() as u16, 1),
+            label: label.to_owned(),
+            pane: Some(PaneId::new("pane-2")),
+        }];
+        let terminal = draw(&with_attention);
+        let rows = buffer_rows(&terminal);
+        let buffer = terminal.backend().buffer();
 
-        assert!(rows[0].contains("| zoom"));
-        assert!(rows[11].contains("ready"));
+        assert!(rows[0].contains(label));
+        // The segment takes the theme's attention color (yellow in
+        // mandatum-dark) and bold; the base text keeps the header color.
+        let segment_cell = buffer.cell((start, 0u16)).unwrap();
+        assert_eq!(segment_cell.fg, Color::Yellow);
+        assert!(segment_cell.modifier.contains(Modifier::BOLD));
+        let base_cell = buffer.cell((1u16, 0u16)).unwrap();
+        assert_eq!(base_cell.fg, Color::White);
     }
 
     #[test]
@@ -450,6 +358,9 @@ mod tests {
         agent_pane.area = mandatum_scene::SceneRect::new(0, 1, 60, 18);
         let mut with_agent = scene(vec![agent_pane]);
         with_agent.size = SceneSize::new(60, 22);
+        // The scene carries the status area; keep it on the bottom row of
+        // the resized frame.
+        with_agent.status.area = SceneRect::new(0, 21, 60, 1);
         let terminal = draw(&with_agent);
         let rows = buffer_rows(&terminal);
         let all = rows.join("\n");
@@ -557,6 +468,98 @@ mod tests {
             footer: "type to search · enter run · esc close".to_owned(),
         }));
         with_palette
+    }
+
+    #[test]
+    fn timeline_overlay_renders_entries_times_filter_and_footer() {
+        let mut with_timeline = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
+        with_timeline.size = SceneSize::new(90, 24);
+        with_timeline.overlay = Some(OverlayScene::Timeline(TimelineOverlay {
+            area: layout::timeline_overlay_rect(with_timeline.size),
+            query: "task".to_owned(),
+            items: vec![
+                TimelineEntry {
+                    glyph: "✗".to_owned(),
+                    when: "2m ago".to_owned(),
+                    text: "task pane-2 failed: exit 3: sh ./flaky-check.sh".to_owned(),
+                    pane: Some(PaneId::new("pane-2")),
+                },
+                TimelineEntry {
+                    glyph: "▶".to_owned(),
+                    when: "3m ago".to_owned(),
+                    text: "task pane-2 started: sh ./flaky-check.sh".to_owned(),
+                    pane: Some(PaneId::new("pane-2")),
+                },
+            ],
+            selected: Some(0),
+            skipped_malformed: 1,
+            footer: "enter jump · esc close · 1 malformed line(s) skipped".to_owned(),
+        }));
+        let terminal = draw(&with_timeline);
+        let all = buffer_rows(&terminal).join("\n");
+
+        assert!(all.contains("Timeline"));
+        assert!(all.contains("> task"));
+        assert!(all.contains("✗"));
+        assert!(all.contains("2m ago"));
+        assert!(all.contains("failed: exit 3"));
+        assert!(all.contains("1 malformed line(s) skipped"));
+    }
+
+    #[test]
+    fn session_map_overlay_renders_the_tree_with_states_and_badges() {
+        let mut with_map = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
+        with_map.size = SceneSize::new(90, 24);
+        with_map.overlay = Some(OverlayScene::SessionMap(SessionMapOverlay {
+            area: layout::session_map_rect(with_map.size),
+            rows: vec![
+                SessionMapRow {
+                    depth: 0,
+                    glyph: "▸".to_owned(),
+                    label: "session-1 · main · 2 pane(s) (active)".to_owned(),
+                    state: String::new(),
+                    focused: false,
+                    badges: String::new(),
+                },
+                SessionMapRow {
+                    depth: 1,
+                    glyph: "❯".to_owned(),
+                    label: "pane-1 shell".to_owned(),
+                    state: "running".to_owned(),
+                    focused: true,
+                    badges: "zoom".to_owned(),
+                },
+            ],
+            selected: 1,
+            footer: "↑/↓ move · enter focus · esc close".to_owned(),
+        }));
+        let terminal = draw(&with_map);
+        let all = buffer_rows(&terminal).join("\n");
+
+        assert!(all.contains("Sessions"));
+        assert!(all.contains("session-1 · main · 2 pane(s) (active)"));
+        assert!(all.contains("●  ❯ pane-1 shell"));
+        assert!(all.contains("running"));
+        assert!(all.contains("[zoom]"));
+        assert!(all.contains("enter focus"));
+    }
+
+    #[test]
+    fn prompt_overlay_renders_title_input_and_footer() {
+        let mut with_prompt = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
+        with_prompt.size = SceneSize::new(90, 24);
+        with_prompt.overlay = Some(OverlayScene::Prompt(PromptOverlay {
+            area: layout::prompt_rect(with_prompt.size),
+            title: " Set agent objective — pane-3 ".to_owned(),
+            input: "review the failing tests".to_owned(),
+            footer: "enter save · esc cancel".to_owned(),
+        }));
+        let terminal = draw(&with_prompt);
+        let all = buffer_rows(&terminal).join("\n");
+
+        assert!(all.contains("Set agent objective — pane-3"));
+        assert!(all.contains("> review the failing tests"));
+        assert!(all.contains("enter save"));
     }
 
     #[test]

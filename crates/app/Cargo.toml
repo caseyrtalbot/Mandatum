@@ -14,4 +14,6 @@ mandatum-renderer.workspace = true
 mandatum-scene.workspace = true
 mandatum-terminal-vt.workspace = true
 ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true

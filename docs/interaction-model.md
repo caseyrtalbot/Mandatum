@@ -92,33 +92,38 @@ until the user invokes workspace-level control.
 
 ## Session Map
 
-The session map shows:
+"Show session map" (palette `m`) opens a modal tree of every session and
+its panes. Each pane row carries a kind glyph (terminal/task/agent/status),
+its title, a one-word live state (`running`, `exited:N`,
+`waiting-approval`, `blocked`, `failed`, `complete`, `idle`), a focus
+marker on the active session's focused pane, and `zoom`/`float` badges.
+Panes outside the active session show their durable-intent state (only the
+active session has live runtimes).
 
-- panes
-- tasks
-- agents
-- running servers
-- failed actors
-- waiting approvals
-- hidden/stacked/floating surfaces
-
-It should support jump-to-pane, focus waiting approval, focus failed task, and
-restore layout actions.
+Up/Down (or Ctrl+N/P, or the wheel) move the selection; Enter — or a click
+on any row — focuses the selected pane, switching the active session when
+needed (a session row switches without changing that session's focus).
+Esc closes. The footer names these keys.
 
 ## Execution Timeline
 
-The timeline records:
+Durable facts append to `<project>/.mandatum/timeline.jsonl` as they
+happen: command dispatches (with the focused pane), task starts and exits
+(with the command string and exit status), agent status transitions,
+approval requests (command, scope, risk) and decisions (verdict, decided
+by user), agent objective edits, refused agent launches (with the
+reason), workspace saves/restores, pane creation/closure, and config
+reloads. See docs/decisions.md ("Execution Timeline") for the format and
+rotation rules.
 
-- shell commands
-- task launches
-- task exits
-- agent state changes
-- approvals
-- file-change summaries
-- verification results
-- restore events
-
-The timeline should be searchable and scoped by project, pane, task, or agent.
+"Show timeline" (palette `/`) reads the last ~500 events and lists them
+newest first with kind glyphs and relative timestamps ("2m ago");
+malformed lines are skipped and counted in the footer, never a crash. The
+filter input is the palette input pattern: plain text fuzzy-matches the
+event description, and the prefixes `pane:<id>`, `kind:<family>`
+(command/task/agent/approval/workspace/pane/config), and `since:<30s|5m|2h|1d>`
+filter structurally; tokens AND together. Enter (or a click) on an entry
+that names a pane jumps focus to it and closes the overlay. Esc closes.
 
 ## Copy, Search, And Scrollback
 
@@ -137,18 +142,34 @@ Copy and search are presentation/runtime concerns, not durable core state.
 
 ## Status And Attention
 
-Attention should be explicit and restrained:
+The header is the attention strip, scene-carried (`HeaderScene` holds its
+area, composed text, and segments — a frontend paints it without deriving
+anything). When something needs eyes it shows, in severity order:
 
-- failed task
-- blocked agent
-- pending approval
-- crashed pane
-- restore failure
-- dirty repo
-- server health warning
+- approvals waiting (count + first pane)
+- failed tasks (count + first pane)
+- blocked/failed agents (count)
 
-The user should be able to jump directly from an attention indicator to the
-surface that needs action.
+Each segment is styled with the theme's attention color and is a hit
+target: clicking it jumps to the pane in need ("Focus next waiting agent",
+palette `j`, is the keyboard cycle). When nothing needs attention the
+strip shows calm session facts — workspace name, session name, pane count,
+agent connector kind — never blank, never noisy.
+
+The status strip below stays the app's own voice: the last status message
+plus the permanent control hint (palette chord, right-click menu).
+
+Still open for attention: crashed panes, restore failures, dirty repo,
+server health.
+
+## Set Agent Objective
+
+"Set agent objective" (palette `p`, and the agent pane's context menu)
+opens a one-line prompt pre-filled with the pane's current objective.
+Enter writes it into the durable `AgentPaneIntent` (a timeline fact) —
+the next Start agent/relaunch uses it. Esc cancels; an empty objective is
+rejected. This closes the "objective only editable by hand-editing JSON"
+gap.
 
 ## Accessibility
 

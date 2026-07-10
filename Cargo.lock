@@ -317,6 +317,8 @@ dependencies = [
  "mandatum-scene",
  "mandatum-terminal-vt",
  "ratatui",
+ "serde",
+ "serde_json",
  "toml",
 ]
 

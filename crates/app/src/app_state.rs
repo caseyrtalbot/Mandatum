@@ -21,10 +21,10 @@ use mandatum_core::{
 use mandatum_pty::{NativePtyError, PtySize};
 use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, HitTarget, HitTargetKind, PaletteOverlay, PaneSceneKind,
-    SceneRect, SceneSize, Theme, WorkspaceScene,
+    PromptOverlay, SceneRect, SceneSize, SessionMapOverlay, Theme, TimelineOverlay, WorkspaceScene,
     input::{InputEvent, Key, KeyCode, PointerButton, PointerEvent, PointerKind},
     layout::{
-        context_menu_rect, layout_separators, palette_overlay_rect, pane_content_rect,
+        context_menu_rect, layout_separators, palette_overlay_rect, pane_content_rect, prompt_rect,
         workspace_scene_area,
     },
 };
@@ -35,7 +35,7 @@ use crate::{
         AgentPaneRuntime, AgentRuntimeEvent, AgentRuntimeRegistry, activate_agent_session,
         connector_for_kind,
     },
-    app_shell::AppConfig,
+    app_shell::{AgentConnectorKind, AppConfig},
     clipboard::osc52_sequence,
     config::{load_config, project_config_file},
     copy_mode::CopyModeState,
@@ -46,6 +46,10 @@ use crate::{
     pointer::{encode_mouse_event, split_percent_for_pointer},
     process_events::PtyRuntimeEvent,
     scene_builder::PaneViewState,
+    session_map::{
+        SessionMapRowModel, SessionMapState, SessionMapTarget, session_map_overlay,
+        session_map_rows,
+    },
     task_runtime::{
         TaskPaneRuntime, TaskRuntimeRegistry, prepare_task_pane_runtime, task_status_label,
     },
@@ -53,6 +57,8 @@ use crate::{
         PendingTerminalPaneRuntime, TerminalRuntimeError, TerminalRuntimeRegistry,
         exit_status_label, prepare_terminal_pane_runtime,
     },
+    timeline::{TimelineEventKind, TimelineLog, now_ms},
+    timeline_view::{TimelineViewState, timeline_overlay},
 };
 
 #[cfg(test)]
@@ -78,8 +84,17 @@ pub struct AppState {
     task_panes: TaskRuntimeRegistry,
     agent_panes: AgentRuntimeRegistry,
     agent_connector: Option<Box<dyn AgentConnector>>,
+    agent_connector_label: &'static str,
     agent_objective: String,
     agent_model: Option<String>,
+    /// The durable execution-timeline log (append side).
+    timeline: TimelineLog,
+    /// The open timeline overlay, if any (modal, like the palette).
+    timeline_view: Option<TimelineViewState>,
+    /// The open session-map overlay, if any (modal).
+    session_map: Option<SessionMapState>,
+    /// The open Set-agent-objective prompt, if any (modal).
+    objective_prompt: Option<ObjectivePrompt>,
     keymap: Keymap,
     theme: Theme,
     reduced_motion: bool,
@@ -119,6 +134,13 @@ impl AppState {
         let (agent_tx, agent_rx) = mpsc::channel();
         let restore_on_startup = config.restore_on_startup;
         let config_warnings = config.config_warnings;
+        // The timeline lives beside the workspace file; a baseline with no
+        // workspace directory (unit tests) simply disables recording.
+        let timeline_file = config
+            .workspace_file
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.join("timeline.jsonl"));
 
         let mut state = Self {
             workspace,
@@ -137,8 +159,13 @@ impl AppState {
             task_panes: TaskRuntimeRegistry::new(),
             agent_panes: AgentRuntimeRegistry::new(),
             agent_connector: connector_for_kind(config.agent_connector),
+            agent_connector_label: connector_kind_label(config.agent_connector),
             agent_objective: config.agent_objective,
             agent_model: config.agent_model,
+            timeline: TimelineLog::new(timeline_file),
+            timeline_view: None,
+            session_map: None,
+            objective_prompt: None,
             keymap: config.keymap,
             theme: config.theme,
             reduced_motion: config.reduced_motion,
@@ -227,6 +254,16 @@ impl AppState {
     /// The active theme, resolved from config, for the frontend adapter.
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// The configured agent connector kind, for the calm header strip.
+    pub(crate) fn agent_connector_label(&self) -> &'static str {
+        self.agent_connector_label
+    }
+
+    /// A task pane's current status text, live or retained.
+    pub(crate) fn task_status_text(&self, pane_id: &PaneId) -> Option<&str> {
+        self.task_view(pane_id).map(|(status, _)| status)
     }
 
     /// The permanent status-strip hint naming the workspace's entry points,
@@ -325,6 +362,7 @@ impl AppState {
                 || self.task_panes.pending_launches.contains(&focused_id),
             focused_has_live_terminal: self.terminal_panes.get(&focused_id).is_some(),
             focused_is_floating,
+            timeline_available: self.timeline.enabled(),
             // Any tiled pane sits inside a split exactly when the tiled root
             // is one.
             focused_in_tiled_split: !focused_is_floating
@@ -337,9 +375,27 @@ impl AppState {
         match event {
             InputEvent::Key(key) => self.handle_key(key),
             InputEvent::Resize(size) => self.handle_terminal_resize(size.width, size.height),
-            // Paste only reaches the shell in normal mode; copy mode and the
-            // context menu own input while open.
-            InputEvent::Paste(text) if self.copy_mode.is_none() && self.context_menu.is_none() => {
+            // Text-input overlays receive pasted text into their input.
+            InputEvent::Paste(text) if self.objective_prompt.is_some() => {
+                if let Some(prompt) = self.objective_prompt.as_mut() {
+                    prompt.input.push_str(&text);
+                }
+                self.mark_redraw();
+            }
+            InputEvent::Paste(text) if self.timeline_view.is_some() => {
+                if let Some(view) = self.timeline_view.as_mut() {
+                    view.query.push_str(&text);
+                    view.selected = 0;
+                }
+                self.mark_redraw();
+            }
+            // Paste only reaches the shell in normal mode; copy mode, the
+            // context menu, and the session map own input while open.
+            InputEvent::Paste(text)
+                if self.copy_mode.is_none()
+                    && self.context_menu.is_none()
+                    && self.session_map.is_none() =>
+            {
                 self.write_to_focused_terminal(text.as_bytes())
             }
             // [L5-GATE] Pointer events resolve against the last scene's hit
@@ -404,6 +460,24 @@ impl AppState {
 
         if self.palette.is_some() {
             self.handle_palette_key(key);
+            self.mark_redraw();
+            return;
+        }
+
+        // The visibility overlays are modal too: at most one is open, and it
+        // owns the keyboard until Esc/Enter closes it.
+        if self.objective_prompt.is_some() {
+            self.handle_objective_prompt_key(key);
+            self.mark_redraw();
+            return;
+        }
+        if self.timeline_view.is_some() {
+            self.handle_timeline_key(key);
+            self.mark_redraw();
+            return;
+        }
+        if self.session_map.is_some() {
+            self.handle_session_map_key(key);
             self.mark_redraw();
             return;
         }
@@ -594,6 +668,19 @@ impl AppState {
             return;
         }
 
+        // Timeline fact: what was asked for, and where focus was when it was.
+        self.timeline.record(TimelineEventKind::CommandDispatched {
+            command: mandatum_commands::command_for_id(command_id)
+                .map(|command| command.name.to_owned())
+                .unwrap_or_else(|| format!("{command_id:?}")),
+            pane: Some(
+                self.workspace
+                    .active_session()
+                    .focused_pane_id()
+                    .to_string(),
+            ),
+        });
+
         match command_target(command_id) {
             CommandTarget::Runtime(runtime_command) => {
                 self.dispatch_runtime_command(runtime_command);
@@ -610,13 +697,56 @@ impl AppState {
             CommandTarget::Core => {}
         }
 
+        // Pane lifecycle facts come from the before/after diff, so every
+        // core path (splits, new terminal, close) records without bespoke
+        // hooks. A session switch is not a pane diff.
+        let session_before = self.workspace.active_session().id().clone();
+        let panes_before: BTreeSet<PaneId> = self
+            .workspace
+            .active_session()
+            .panes()
+            .keys()
+            .cloned()
+            .collect();
+
         match dispatch_command(&mut self.workspace, &self.command_context, command_id) {
             Ok(outcome) => {
+                if self.workspace.active_session().id() == &session_before {
+                    self.record_pane_diff(&panes_before);
+                }
                 self.handle_command_outcome(command_id, outcome);
             }
             Err(error) => {
                 self.status = format!("command failed: {error}");
             }
+        }
+    }
+
+    /// Record created/closed panes against a pre-dispatch snapshot.
+    fn record_pane_diff(&mut self, before: &BTreeSet<PaneId>) {
+        let session = self.workspace.active_session();
+        let after: BTreeSet<PaneId> = session.panes().keys().cloned().collect();
+        let created: Vec<(String, String)> = after
+            .difference(before)
+            .filter_map(|pane_id| {
+                session.pane(pane_id).map(|pane| {
+                    let kind = match pane.kind() {
+                        PaneKind::Terminal { .. } => "terminal",
+                        PaneKind::Task { .. } => "task",
+                        PaneKind::Agent { .. } => "agent",
+                        PaneKind::StatusLog { .. } => "status",
+                    };
+                    (pane_id.to_string(), kind.to_owned())
+                })
+            })
+            .collect();
+        let closed: Vec<String> = before.difference(&after).map(ToString::to_string).collect();
+        for (pane, kind) in created {
+            self.timeline
+                .record(TimelineEventKind::PaneCreated { pane, kind });
+        }
+        for pane in closed {
+            self.timeline.record(TimelineEventKind::PaneClosed { pane });
         }
     }
 
@@ -664,6 +794,8 @@ impl AppState {
         match runtime_command {
             RuntimeCommand::EnterCopyMode => self.enter_copy_mode(),
             RuntimeCommand::ReloadConfig => self.reload_config(),
+            RuntimeCommand::ShowTimeline => self.open_timeline(),
+            RuntimeCommand::ShowSessionMap => self.open_session_map(),
             RuntimeCommand::Quit => {
                 self.should_quit = true;
                 self.status = "quitting".to_owned();
@@ -694,10 +826,14 @@ impl AppState {
         }
         if let Some(kind) = loaded.agent_connector {
             self.agent_connector = connector_for_kind(kind);
+            self.agent_connector_label = connector_kind_label(kind);
         }
         if let Some(model) = loaded.agent_model {
             self.agent_model = Some(model);
         }
+        self.timeline.record(TimelineEventKind::ConfigReloaded {
+            warnings: loaded.warnings.len(),
+        });
         self.status = if loaded.warnings.is_empty() {
             "config reloaded".to_owned()
         } else {
@@ -726,6 +862,7 @@ impl AppState {
                 self.decide_focused_agent_approval(false)
             }
             RuntimeAgentCommand::FocusNextWaitingAgent => self.focus_next_waiting_agent(),
+            RuntimeAgentCommand::SetFocusedAgentObjective => self.open_objective_prompt(),
         }
         self.mark_redraw();
     }
@@ -758,10 +895,10 @@ impl AppState {
     fn save_workspace_to_disk(&mut self) {
         match self.persistence.save_workspace(&self.workspace) {
             Ok(()) => {
-                self.status = format!(
-                    "workspace saved to {}",
-                    self.persistence.workspace_file().display()
-                );
+                let path = self.persistence.workspace_file().display().to_string();
+                self.timeline
+                    .record(TimelineEventKind::WorkspaceSaved { path: path.clone() });
+                self.status = format!("workspace saved to {path}");
             }
             Err(error) => {
                 self.status = format!("workspace save failed: {error}");
@@ -774,10 +911,10 @@ impl AppState {
             Ok(workspace) => match self.prepare_restore_runtimes(&workspace) {
                 Ok(runtimes) => {
                     self.replace_workspace_from_disk(workspace, runtimes);
-                    self.status = format!(
-                        "workspace restored from {}",
-                        self.persistence.workspace_file().display()
-                    );
+                    let path = self.persistence.workspace_file().display().to_string();
+                    self.timeline
+                        .record(TimelineEventKind::WorkspaceRestored { path: path.clone() });
+                    self.status = format!("workspace restored from {path}");
                     self.preserve_status_on_next_resize = true;
                 }
                 Err(error) => {
@@ -799,10 +936,10 @@ impl AppState {
             Ok(workspace) => match self.prepare_restore_runtimes(&workspace) {
                 Ok(runtimes) => {
                     self.replace_workspace_from_disk(workspace, runtimes);
-                    self.status = format!(
-                        "workspace restored from {}",
-                        self.persistence.workspace_file().display()
-                    );
+                    let path = self.persistence.workspace_file().display().to_string();
+                    self.timeline
+                        .record(TimelineEventKind::WorkspaceRestored { path: path.clone() });
+                    self.status = format!("workspace restored from {path}");
                 }
                 Err(error) => {
                     self.status = format!("workspace restore failed: {error}");
@@ -871,6 +1008,9 @@ impl AppState {
         }
         self.command_context = command_context_for_workspace(&self.workspace);
         self.copy_mode = None;
+        self.timeline_view = None;
+        self.session_map = None;
+        self.objective_prompt = None;
         self.clipboard_payload = None;
         self.last_copied = None;
         self.pointer_view = None;
@@ -923,6 +1063,10 @@ impl AppState {
             intent: intent.clone(),
         }) {
             Ok(ActionOutcome::Mutated { focused_pane }) => {
+                self.timeline.record(TimelineEventKind::PaneCreated {
+                    pane: focused_pane.to_string(),
+                    kind: "task".to_owned(),
+                });
                 self.status = format!("task pane created for {}", intent.command);
                 if let Err(error) = self.launch_task_pane(focused_pane, &intent) {
                     self.status = format!("task launch failed: {error}");
@@ -1060,6 +1204,10 @@ impl AppState {
             cwd,
         }) {
             Ok(ActionOutcome::Mutated { focused_pane }) => {
+                self.timeline.record(TimelineEventKind::PaneCreated {
+                    pane: focused_pane.to_string(),
+                    kind: "agent".to_owned(),
+                });
                 self.status = format!("agent pane {focused_pane} created: {objective}");
             }
             Ok(ActionOutcome::PersistenceRequested(_)) => {
@@ -1105,6 +1253,11 @@ impl AppState {
         };
 
         let Some(connector) = self.agent_connector.as_deref() else {
+            // A refused launch leaves a durable trace, not just a status line.
+            self.timeline.record(TimelineEventKind::AgentLaunchRefused {
+                pane: pane_id.to_string(),
+                reason: "no agent connector is configured".to_owned(),
+            });
             self.status = "no agent connector is configured; set agent_connector to fake or claude"
                 .to_owned();
             return;
@@ -1142,12 +1295,20 @@ impl AppState {
                     intent.pending_approvals = 0;
                     intent.pending_approval_ids.clear();
                 });
+                self.timeline.record(TimelineEventKind::AgentStatus {
+                    pane: pane_id.to_string(),
+                    status: "running".to_owned(),
+                });
                 self.status = format!("agent {pane_id} started: {objective}");
             }
             Err(error) if self.agent_panes.get(&pane_id).is_some() => {
                 // A failed relaunch never touches the previous session: it
                 // stays live and authoritative under its unchanged
                 // generation, and durable intent keeps reflecting it.
+                self.timeline.record(TimelineEventKind::AgentLaunchRefused {
+                    pane: pane_id.to_string(),
+                    reason: format!("relaunch failed: {error}; previous session still running"),
+                });
                 self.status = format!(
                     "agent relaunch failed for {pane_id}: {error}; previous session still running"
                 );
@@ -1155,6 +1316,10 @@ impl AppState {
             Err(error) => {
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Failed;
+                });
+                self.timeline.record(TimelineEventKind::AgentLaunchRefused {
+                    pane: pane_id.to_string(),
+                    reason: error.to_string(),
                 });
                 self.status = format!("agent launch failed for {pane_id}: {error}");
             }
@@ -1215,6 +1380,12 @@ impl AppState {
                     });
                 });
                 let verdict_label = if approved { "approved" } else { "rejected" };
+                self.timeline.record(TimelineEventKind::ApprovalDecided {
+                    pane: pane_id.to_string(),
+                    command: request.command.clone(),
+                    verdict: verdict_label.to_owned(),
+                    decided_by: "user".to_owned(),
+                });
                 self.status = format!("{verdict_label} '{}' for {pane_id}", request.command);
             }
             Err(error) => {
@@ -1289,6 +1460,21 @@ impl AppState {
         match event {
             AgentSessionEvent::Status(status) => {
                 let label = agent_status_label(&status);
+                // Record only real transitions (the connector may restate
+                // the status the launch path already recorded).
+                let changed = self
+                    .workspace
+                    .active_session()
+                    .pane(&pane_id)
+                    .is_some_and(|pane| {
+                        !matches!(pane.kind(), PaneKind::Agent { intent } if intent.status == status)
+                    });
+                if changed {
+                    self.timeline.record(TimelineEventKind::AgentStatus {
+                        pane: pane_id.to_string(),
+                        status: label.to_owned(),
+                    });
+                }
                 self.update_agent_intent(&pane_id, |intent| intent.status = status);
                 self.status = format!("agent {pane_id} is {label}");
             }
@@ -1325,6 +1511,19 @@ impl AppState {
             AgentSessionEvent::ApprovalRequested(request) => {
                 self.status = format!("agent {pane_id} requests approval: {}", request.command);
                 let approval_id = request.approval_id.clone();
+                // Timeline fact: what was asked, over what scope, at what
+                // assessed risk (durable copies of the request detail).
+                let scope = match &request.scope.affected_path {
+                    Some(path) => format!("{} -> {}", request.scope.cwd.display(), path.display()),
+                    None => request.scope.cwd.display().to_string(),
+                };
+                self.timeline.record(TimelineEventKind::ApprovalRequested {
+                    pane: pane_id.to_string(),
+                    command: request.command.clone(),
+                    scope,
+                    risk: format!("{:?} ({})", request.risk.level, request.risk.basis)
+                        .to_lowercase(),
+                });
                 if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
                     runtime.pending_approval = Some(request);
                 }
@@ -1342,6 +1541,10 @@ impl AppState {
                     intent.status = AgentStatus::Complete;
                     intent.latest_summary = Some(summary);
                 });
+                self.timeline.record(TimelineEventKind::AgentStatus {
+                    pane: pane_id.to_string(),
+                    status: "complete".to_owned(),
+                });
                 self.status = format!("agent {pane_id} completed");
             }
             AgentSessionEvent::Failed { error } => {
@@ -1350,6 +1553,10 @@ impl AppState {
                 }
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Failed;
+                });
+                self.timeline.record(TimelineEventKind::AgentStatus {
+                    pane: pane_id.to_string(),
+                    status: "failed".to_owned(),
                 });
                 self.status = format!("agent {pane_id} failed: {error}");
             }
@@ -1422,6 +1629,15 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn set_agent_connector(&mut self, connector: Box<dyn AgentConnector>) {
         self.agent_connector = Some(connector);
+    }
+
+    /// Test-only: retain a task status (the path a real exit or launch
+    /// failure writes) without needing a live PTY.
+    #[cfg(test)]
+    pub(crate) fn set_task_status_for_test(&mut self, pane_id: &PaneId, status: &str) {
+        self.task_panes
+            .statuses
+            .insert(pane_id.clone(), status.to_owned());
     }
 
     fn launch_task_pane(
@@ -1743,7 +1959,22 @@ impl AppState {
         .activate(pane_id.clone(), self.runtime_tx.clone());
         self.task_panes
             .insert(pane_id.clone(), TaskPaneRuntime::running(runtime));
+        self.timeline.record(TimelineEventKind::TaskStarted {
+            pane: pane_id.to_string(),
+            command: self.task_command_for(&pane_id).unwrap_or_default(),
+        });
         Ok(())
+    }
+
+    /// The durable command string of a task pane, for timeline facts.
+    fn task_command_for(&self, pane_id: &PaneId) -> Option<String> {
+        self.workspace
+            .active_session()
+            .pane(pane_id)
+            .and_then(|pane| match pane.kind() {
+                PaneKind::Task { intent } => Some(intent.command.clone()),
+                _ => None,
+            })
     }
 
     fn drain_runtime_events(&mut self) {
@@ -1875,6 +2106,21 @@ impl AppState {
                     let status = exit.status();
                     task.runtime.exit_status = Some(status);
                     task.status = task_status_label(status);
+                    // Timeline fact: which command produced this exit.
+                    let command = self
+                        .workspace
+                        .active_session()
+                        .pane(pane_id)
+                        .and_then(|pane| match pane.kind() {
+                            PaneKind::Task { intent } => Some(intent.command.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    self.timeline.record(TimelineEventKind::TaskExited {
+                        pane: pane_id.to_string(),
+                        command,
+                        exit: task.status.clone(),
+                    });
                     self.status = format!("task {pane_id} {}", task.status);
                 }
                 Ok(None) => {}
@@ -1984,6 +2230,40 @@ impl AppState {
             return;
         }
 
+        // The visibility overlays are modal the same way: rows activate,
+        // click-away dismisses, and the press is consumed.
+        if self.objective_prompt.is_some() {
+            self.objective_prompt = None;
+            self.status = "objective unchanged".to_owned();
+            return;
+        }
+        if self.timeline_view.is_some() {
+            if let Some(HitTargetKind::TimelineItem(index)) =
+                target.as_ref().map(|target| target.kind.clone())
+            {
+                if let Some(view) = self.timeline_view.as_mut() {
+                    view.selected = index;
+                }
+                self.jump_to_selected_timeline_entry(Some(index));
+            } else {
+                self.close_timeline();
+            }
+            return;
+        }
+        if self.session_map.is_some() {
+            if let Some(HitTargetKind::SessionMapRow(index)) =
+                target.as_ref().map(|target| target.kind.clone())
+            {
+                if let Some(map) = self.session_map.as_mut() {
+                    map.selected = index;
+                }
+                self.activate_session_map_row(Some(index));
+            } else {
+                self.close_session_map();
+            }
+            return;
+        }
+
         let Some(target) = target else {
             self.pointer_drag = None;
             return;
@@ -1992,6 +2272,13 @@ impl AppState {
             // The status strip is the workspace's own front door: clicking
             // it opens the command palette named in its permanent hint.
             (HitTargetKind::StatusStrip, Some(PointerButton::Left)) => self.open_palette(),
+            // An attention segment jumps straight to the pane that needs
+            // eyes (the keyboard route is Focus next waiting agent).
+            (HitTargetKind::AttentionSegment { pane, .. }, Some(PointerButton::Left)) => match pane
+            {
+                Some(pane_id) => self.focus_pane_for_pointer(&pane_id),
+                None => self.status = "this attention item has no single pane".to_owned(),
+            },
             (HitTargetKind::PaneBody(pane_id), Some(button)) => {
                 // [L5-GATE] The child's grid owns clicks while it tracks the
                 // mouse; alt+click stays workspace control.
@@ -2309,6 +2596,22 @@ impl AppState {
             }
             return;
         }
+        // Same for the visibility overlays.
+        if self.timeline_view.is_some() {
+            if dy != 0 {
+                self.move_timeline_selection(isize::from(dy));
+            }
+            return;
+        }
+        if self.session_map.is_some() {
+            if dy != 0 {
+                self.move_session_map_selection(isize::from(dy));
+            }
+            return;
+        }
+        if self.objective_prompt.is_some() {
+            return;
+        }
         let Some(target) = self.pointer_target(pointer.column, pointer.row) else {
             return;
         };
@@ -2552,6 +2855,7 @@ impl AppState {
                 } else {
                     commands.push(CommandId::StartAgent);
                 }
+                commands.push(CommandId::SetAgentObjective);
             }
             PaneKind::StatusLog { .. } => {}
         }
@@ -2710,6 +3014,359 @@ impl AppState {
         self.status = "menu closed".to_owned();
     }
 
+    // --- Visibility overlays (timeline, session map, objective prompt) ----
+
+    /// Open the execution timeline: read the durable tail once, newest
+    /// first. The other modal surfaces close.
+    fn open_timeline(&mut self) {
+        self.palette = None;
+        self.context_menu = None;
+        self.session_map = None;
+        self.objective_prompt = None;
+        let view = TimelineViewState::from_tail(self.timeline.read_tail());
+        self.status = format!("timeline: {} event(s)", view.events.len());
+        self.timeline_view = Some(view);
+    }
+
+    fn close_timeline(&mut self) {
+        self.timeline_view = None;
+        self.status = "timeline closed".to_owned();
+    }
+
+    /// Open the session map with the active session's focused pane selected.
+    fn open_session_map(&mut self) {
+        self.palette = None;
+        self.context_menu = None;
+        self.timeline_view = None;
+        self.objective_prompt = None;
+        let rows = self.session_map_row_models();
+        let focused = self.workspace.active_session().focused_pane_id().clone();
+        let active_session = self.workspace.active_session().id().clone();
+        let selected = rows
+            .iter()
+            .position(|model| {
+                model.target
+                    == SessionMapTarget::Pane {
+                        session_id: active_session.clone(),
+                        pane_id: focused.clone(),
+                    }
+            })
+            .unwrap_or(0);
+        self.session_map = Some(SessionMapState { selected });
+        self.status = "session map: up/down choose, Enter focus, Esc close".to_owned();
+    }
+
+    fn close_session_map(&mut self) {
+        self.session_map = None;
+        self.status = "session map closed".to_owned();
+    }
+
+    /// Open the Set-agent-objective prompt for the focused agent pane,
+    /// pre-filled with the current durable objective.
+    fn open_objective_prompt(&mut self) {
+        let Some(pane_id) = self.focused_agent_pane_id() else {
+            self.status = "focused pane is not an agent pane".to_owned();
+            return;
+        };
+        let Some(objective) = self
+            .workspace
+            .active_session()
+            .pane(&pane_id)
+            .and_then(|pane| match pane.kind() {
+                PaneKind::Agent { intent } => Some(intent.objective.clone()),
+                _ => None,
+            })
+        else {
+            self.status = format!("agent pane {pane_id} was not found");
+            return;
+        };
+        self.palette = None;
+        self.context_menu = None;
+        self.timeline_view = None;
+        self.session_map = None;
+        self.objective_prompt = Some(ObjectivePrompt {
+            pane_id: pane_id.clone(),
+            input: objective,
+        });
+        self.status = format!("editing objective for {pane_id}");
+    }
+
+    fn handle_timeline_key(&mut self, key: Key) {
+        if matches!(self.keymap.chord_action(key), Some(ChordAction::Quit)) {
+            self.should_quit = true;
+            self.status = "quitting".to_owned();
+            return;
+        }
+        let ctrl_only = key.mods.control && !key.mods.shift && !key.mods.alt && !key.mods.super_key;
+        if key.code == KeyCode::Up || (ctrl_only && key.code == KeyCode::Char('p')) {
+            self.move_timeline_selection(-1);
+            return;
+        }
+        if key.code == KeyCode::Down || (ctrl_only && key.code == KeyCode::Char('n')) {
+            self.move_timeline_selection(1);
+            return;
+        }
+        match key.code {
+            KeyCode::Escape => self.close_timeline(),
+            KeyCode::Enter => self.jump_to_selected_timeline_entry(None),
+            KeyCode::Backspace => {
+                if let Some(view) = self.timeline_view.as_mut() {
+                    view.query.pop();
+                    view.selected = 0;
+                }
+            }
+            KeyCode::Char(character)
+                if !key.mods.control && !key.mods.alt && !key.mods.super_key =>
+            {
+                if let Some(view) = self.timeline_view.as_mut() {
+                    view.query.push(character);
+                    view.selected = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn move_timeline_selection(&mut self, delta: isize) {
+        let now = now_ms();
+        let Some(view) = self.timeline_view.as_mut() else {
+            return;
+        };
+        let count = view.filtered_indices(now).len();
+        if count == 0 {
+            view.selected = 0;
+            return;
+        }
+        let current = view.selected.min(count - 1) as isize;
+        view.selected = (current + delta).clamp(0, count as isize - 1) as usize;
+    }
+
+    /// Enter/click on a timeline row: focus the pane the event names.
+    /// `index` overrides the selection for pointer activation.
+    fn jump_to_selected_timeline_entry(&mut self, index: Option<usize>) {
+        let Some(view) = self.timeline_view.as_ref() else {
+            return;
+        };
+        let filtered = view.filtered_indices(now_ms());
+        if filtered.is_empty() {
+            self.status = format!("no timeline event matches '{}'", view.query.trim());
+            return;
+        }
+        let row = index.unwrap_or(view.selected).min(filtered.len() - 1);
+        let event = &view.events[filtered[row]];
+        let Some(pane) = event.kind.pane().map(PaneId::new) else {
+            self.status = "this event names no pane to jump to".to_owned();
+            return;
+        };
+        if self.workspace.active_session().pane(&pane).is_none() {
+            self.status = format!("pane {pane} is not in this session");
+            return;
+        }
+        match self.workspace.apply_action(CoreAction::FocusPane {
+            pane_id: pane.clone(),
+        }) {
+            Ok(_) => {
+                self.timeline_view = None;
+                self.status = format!("focused {pane}");
+                if let Err(error) = self.reconcile_runtimes() {
+                    self.status = error.to_string();
+                }
+            }
+            Err(error) => self.status = format!("focus failed: {error}"),
+        }
+    }
+
+    fn handle_session_map_key(&mut self, key: Key) {
+        if matches!(self.keymap.chord_action(key), Some(ChordAction::Quit)) {
+            self.should_quit = true;
+            self.status = "quitting".to_owned();
+            return;
+        }
+        let ctrl_only = key.mods.control && !key.mods.shift && !key.mods.alt && !key.mods.super_key;
+        match key.code {
+            KeyCode::Escape => self.close_session_map(),
+            KeyCode::Up => self.move_session_map_selection(-1),
+            KeyCode::Down => self.move_session_map_selection(1),
+            KeyCode::Char('p') if ctrl_only => self.move_session_map_selection(-1),
+            KeyCode::Char('n') if ctrl_only => self.move_session_map_selection(1),
+            KeyCode::Enter => self.activate_session_map_row(None),
+            _ => {}
+        }
+    }
+
+    fn move_session_map_selection(&mut self, delta: isize) {
+        let count = self.session_map_row_models().len();
+        let Some(map) = self.session_map.as_mut() else {
+            return;
+        };
+        if count == 0 {
+            map.selected = 0;
+            return;
+        }
+        let current = map.selected.min(count - 1) as isize;
+        map.selected = (current + delta).clamp(0, count as isize - 1) as usize;
+    }
+
+    /// Enter/click on a session-map row: activate that session (and focus
+    /// the pane, for pane rows), then close the map.
+    fn activate_session_map_row(&mut self, index: Option<usize>) {
+        let rows = self.session_map_row_models();
+        let Some(map) = self.session_map.as_ref() else {
+            return;
+        };
+        let Some(row) = rows.get(
+            index
+                .unwrap_or(map.selected)
+                .min(rows.len().saturating_sub(1)),
+        ) else {
+            return;
+        };
+
+        let (session_id, pane_id) = match &row.target {
+            SessionMapTarget::Session(session_id) => (session_id.clone(), None),
+            SessionMapTarget::Pane {
+                session_id,
+                pane_id,
+            } => (session_id.clone(), Some(pane_id.clone())),
+        };
+
+        if self.workspace.active_session().id() != &session_id {
+            if let Err(error) = self.workspace.apply_action(CoreAction::ActivateSession {
+                session_id: session_id.clone(),
+            }) {
+                self.status = format!("session switch failed: {error}");
+                return;
+            }
+            self.command_context = command_context_for_workspace(&self.workspace);
+        }
+        if let Some(pane_id) = &pane_id
+            && let Err(error) = self.workspace.apply_action(CoreAction::FocusPane {
+                pane_id: pane_id.clone(),
+            })
+        {
+            self.status = format!("focus failed: {error}");
+            return;
+        }
+
+        self.session_map = None;
+        self.status = match pane_id {
+            Some(pane_id) => format!("focused {pane_id} in {session_id}"),
+            None => format!("switched to {session_id}"),
+        };
+        if let Err(error) = self.reconcile_runtimes() {
+            self.status = error.to_string();
+        }
+    }
+
+    fn handle_objective_prompt_key(&mut self, key: Key) {
+        if matches!(self.keymap.chord_action(key), Some(ChordAction::Quit)) {
+            self.should_quit = true;
+            self.status = "quitting".to_owned();
+            return;
+        }
+        match key.code {
+            KeyCode::Escape => {
+                self.objective_prompt = None;
+                self.status = "objective unchanged".to_owned();
+            }
+            KeyCode::Enter => self.commit_objective_prompt(),
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.objective_prompt.as_mut() {
+                    prompt.input.pop();
+                }
+            }
+            KeyCode::Char(character)
+                if !key.mods.control && !key.mods.alt && !key.mods.super_key =>
+            {
+                if let Some(prompt) = self.objective_prompt.as_mut() {
+                    prompt.input.push(character);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Commit the edited objective into the pane's durable intent; the next
+    /// StartAgent/relaunch reads it from there.
+    fn commit_objective_prompt(&mut self) {
+        let Some(prompt) = self.objective_prompt.take() else {
+            return;
+        };
+        let objective = prompt.input.trim().to_owned();
+        if objective.is_empty() {
+            self.objective_prompt = Some(prompt);
+            self.status = "objective cannot be empty (Esc cancels)".to_owned();
+            return;
+        }
+        let pane_id = prompt.pane_id;
+        if self
+            .workspace
+            .active_session_mut()
+            .agent_intent_mut(&pane_id)
+            .is_none()
+        {
+            self.status = format!("agent pane {pane_id} was not found");
+            return;
+        }
+        self.update_agent_intent(&pane_id, |intent| {
+            intent.objective = objective.clone();
+        });
+        self.timeline.record(TimelineEventKind::AgentObjectiveSet {
+            pane: pane_id.to_string(),
+            objective: objective.clone(),
+        });
+        self.status = format!("objective set for {pane_id}: {objective}");
+    }
+
+    /// The session-map rows for the current workspace, with live one-word
+    /// states for the active session's runtimes.
+    fn session_map_row_models(&self) -> Vec<SessionMapRowModel> {
+        let live = |pane_id: &PaneId| -> Option<String> {
+            if let Some(runtime) = self.terminal_panes.get(pane_id) {
+                return Some(match runtime.exit_status {
+                    Some(status) => exited_state_word(status),
+                    None => "running".to_owned(),
+                });
+            }
+            if let Some(task) = self.task_panes.get(pane_id) {
+                return Some(match task.runtime.exit_status {
+                    Some(status) => exited_state_word(status),
+                    None => "running".to_owned(),
+                });
+            }
+            None
+        };
+        session_map_rows(&self.workspace, &live)
+    }
+
+    /// The timeline overlay for the current frame, `None` while closed.
+    pub(crate) fn timeline_overlay_scene(&self, size: SceneSize) -> Option<TimelineOverlay> {
+        let view = self.timeline_view.as_ref()?;
+        Some(timeline_overlay(view, size, now_ms()))
+    }
+
+    /// The session-map overlay for the current frame, `None` while closed.
+    pub(crate) fn session_map_overlay_scene(&self, size: SceneSize) -> Option<SessionMapOverlay> {
+        let map = self.session_map.as_ref()?;
+        Some(session_map_overlay(
+            &self.session_map_row_models(),
+            map.selected,
+            size,
+        ))
+    }
+
+    /// The objective-prompt overlay for the current frame, `None` while
+    /// closed.
+    pub(crate) fn prompt_overlay_scene(&self, size: SceneSize) -> Option<PromptOverlay> {
+        let prompt = self.objective_prompt.as_ref()?;
+        Some(PromptOverlay {
+            area: prompt_rect(size),
+            title: format!(" Set agent objective — {} ", prompt.pane_id),
+            input: prompt.input.clone(),
+            footer: "enter save · esc cancel".to_owned(),
+        })
+    }
+
     // --- Copy mode -------------------------------------------------------------
 
     fn enter_copy_mode(&mut self) {
@@ -2848,6 +3505,30 @@ struct PaneClick {
     pane_id: PaneId,
     target: PaneClickTarget,
     at: Instant,
+}
+
+/// The open Set-agent-objective prompt: which pane's durable intent it
+/// edits, and the live input text. Runtime presentation only.
+struct ObjectivePrompt {
+    pane_id: PaneId,
+    input: String,
+}
+
+/// The header label for a configured connector kind.
+fn connector_kind_label(kind: AgentConnectorKind) -> &'static str {
+    match kind {
+        AgentConnectorKind::Fake => "fake",
+        AgentConnectorKind::Claude => "claude",
+    }
+}
+
+/// One-word exited state for the session map ("exited:0", "exited:signal9").
+fn exited_state_word(status: mandatum_pty::ChildExitStatus) -> String {
+    match status {
+        mandatum_pty::ChildExitStatus::Exited { code } => format!("exited:{code}"),
+        mandatum_pty::ChildExitStatus::Signaled { signal } => format!("exited:signal{signal}"),
+        mandatum_pty::ChildExitStatus::Unknown => "exited:?".to_owned(),
+    }
 }
 
 /// The open right-click menu: rows plus the pointer anchor it opened at.
@@ -5962,5 +6643,253 @@ mod tests {
         assert!(intent.pending_approval_ids.is_empty());
 
         state.shutdown();
+    }
+
+    // --- Visibility slice: timeline, session map, attention, objective ----
+
+    /// An isolated state whose timeline writes into its own temp dir.
+    fn isolated_state(temp: &TestWorkspaceDir) -> AppState {
+        AppState::new(temp.app_config(false, false))
+    }
+
+    fn timeline_overlay_of(state: &mut AppState) -> mandatum_scene::TimelineOverlay {
+        let scene = state.build_scene(SceneSize::new(120, 40));
+        match scene.overlay {
+            Some(mandatum_scene::OverlayScene::Timeline(timeline)) => timeline,
+            other => panic!("expected the timeline overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timeline_records_dispatches_filters_and_jumps_to_the_named_pane() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = isolated_state(&temp);
+        state.dispatch(CommandId::SplitRight); // creates + focuses pane-2
+        state.dispatch(CommandId::FocusPrevious); // back to pane-1
+
+        state.dispatch(CommandId::ShowTimeline);
+        let overlay = timeline_overlay_of(&mut state);
+        // Newest first: the show-timeline dispatch itself leads.
+        assert!(
+            overlay.items[0].text.contains("show-timeline"),
+            "{:?}",
+            overlay.items[0].text
+        );
+        assert_eq!(overlay.skipped_malformed, 0);
+        // The durable log holds the split, the created pane, and the focus
+        // moves.
+        let texts: Vec<&str> = overlay
+            .items
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect();
+        assert!(texts.iter().any(|text| text.contains("split-right")));
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("pane pane-2 created (terminal)"))
+        );
+
+        // Structured filtering narrows to the pane-creation fact.
+        for character in "kind:pane pane:pane-2".chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+        let overlay = timeline_overlay_of(&mut state);
+        assert_eq!(overlay.items.len(), 1, "{:?}", overlay.items);
+        assert!(overlay.items[0].text.contains("pane-2 created"));
+        assert!(!overlay.items[0].when.is_empty());
+
+        // Enter jumps focus to the pane the fact names and closes the
+        // overlay.
+        state.handle_key(key(KeyCode::Enter));
+        assert_eq!(focused(&state), "pane-2");
+        let scene = state.build_scene(SceneSize::new(120, 40));
+        assert!(scene.overlay.is_none());
+        assert!(state.status().contains("focused pane-2"));
+    }
+
+    #[test]
+    fn timeline_survives_restarts_because_the_log_is_durable() {
+        let temp = TestWorkspaceDir::new();
+        {
+            let mut first = isolated_state(&temp);
+            first.dispatch(CommandId::SplitRight);
+        }
+        // A fresh app over the same project reads the previous run's facts.
+        let mut second = isolated_state(&temp);
+        second.dispatch(CommandId::ShowTimeline);
+        let overlay = timeline_overlay_of(&mut second);
+        assert!(
+            overlay
+                .items
+                .iter()
+                .any(|item| item.text.contains("split-right")),
+            "facts recorded before the restart must still be readable"
+        );
+    }
+
+    #[test]
+    fn session_map_navigates_and_focuses_across_sessions() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = isolated_state(&temp);
+        state.dispatch(CommandId::SplitRight); // session-1: pane-1, pane-2
+        state.dispatch(CommandId::OpenProject); // session-2 (active): pane-1
+
+        state.dispatch(CommandId::ShowSessionMap);
+        let scene = state.build_scene(POINTER_FRAME);
+        let Some(mandatum_scene::OverlayScene::SessionMap(map)) = &scene.overlay else {
+            panic!("session map must be open");
+        };
+        // Tree: session-1, its two panes, session-2 (active), its pane.
+        assert_eq!(map.rows.len(), 5);
+        assert!(map.rows[3].label.contains("(active)"));
+        // The active session's focused pane starts selected.
+        assert_eq!(map.selected, 4);
+        assert!(map.rows[4].focused);
+
+        // Walk up to session-1's pane-2 and Enter: the active session
+        // switches and focus lands on that pane.
+        state.handle_key(key(KeyCode::Up));
+        state.handle_key(key(KeyCode::Up));
+        state.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            state.workspace().active_session().id().as_str(),
+            "session-1"
+        );
+        assert_eq!(focused(&state), "pane-2");
+        let scene = state.build_scene(POINTER_FRAME);
+        assert!(scene.overlay.is_none(), "the map closes after the jump");
+
+        // Rows are clickable too: reopen and click session-2's pane row.
+        state.dispatch(CommandId::ShowSessionMap);
+        let scene = state.build_scene(POINTER_FRAME);
+        let row_target = scene
+            .hit_targets
+            .iter()
+            .find(|target| target.kind == HitTargetKind::SessionMapRow(4))
+            .expect("session-map rows must be hit targets");
+        send_pointer(
+            &mut state,
+            left(PointerKind::Down, row_target.rect.x + 1, row_target.rect.y),
+        );
+        assert_eq!(
+            state.workspace().active_session().id().as_str(),
+            "session-2"
+        );
+    }
+
+    #[test]
+    fn objective_prompt_round_trips_into_durable_intent_and_the_next_launch() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = isolated_state(&temp);
+        state.dispatch(CommandId::NewAgentPane);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+
+        // The prompt opens pre-filled with the current objective.
+        state.dispatch(CommandId::SetAgentObjective);
+        let scene = state.build_scene(POINTER_FRAME);
+        let Some(mandatum_scene::OverlayScene::Prompt(prompt)) = &scene.overlay else {
+            panic!("the objective prompt must be open");
+        };
+        assert_eq!(prompt.input, "test objective");
+
+        // Edit it: clear, retype, Enter.
+        for _ in 0.."test objective".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        for character in "ship the demo".chars() {
+            state.handle_key(key(KeyCode::Char(character)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+
+        let PaneKind::Agent { intent } = state
+            .workspace()
+            .active_session()
+            .pane(&pane_id)
+            .unwrap()
+            .kind()
+        else {
+            panic!("pane must be an agent pane");
+        };
+        assert_eq!(intent.objective, "ship the demo");
+        assert!(state.status().contains("objective set"));
+
+        // The edit is a durable timeline fact, and the next launch uses it.
+        state.dispatch(CommandId::ShowTimeline);
+        let overlay = timeline_overlay_of(&mut state);
+        assert!(
+            overlay
+                .items
+                .iter()
+                .any(|item| item.text.contains("objective set: ship the demo"))
+        );
+        state.handle_key(key(KeyCode::Escape));
+
+        state.dispatch(CommandId::StartAgent);
+        assert!(
+            state.status().contains("started: ship the demo"),
+            "{}",
+            state.status()
+        );
+        state.shutdown();
+    }
+
+    #[test]
+    fn empty_objective_is_rejected_and_escape_cancels_without_changes() {
+        let temp = TestWorkspaceDir::new();
+        let mut state = isolated_state(&temp);
+        state.dispatch(CommandId::NewAgentPane);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+        state.dispatch(CommandId::SetAgentObjective);
+
+        for _ in 0.."test objective".len() {
+            state.handle_key(key(KeyCode::Backspace));
+        }
+        state.handle_key(key(KeyCode::Enter));
+        assert!(state.status().contains("objective cannot be empty"));
+        let scene = state.build_scene(POINTER_FRAME);
+        assert!(
+            matches!(scene.overlay, Some(mandatum_scene::OverlayScene::Prompt(_))),
+            "an empty commit keeps the prompt open"
+        );
+
+        state.handle_key(key(KeyCode::Escape));
+        let PaneKind::Agent { intent } = state
+            .workspace()
+            .active_session()
+            .pane(&pane_id)
+            .unwrap()
+            .kind()
+        else {
+            panic!("pane must be an agent pane");
+        };
+        assert_eq!(intent.objective, "test objective", "cancel changes nothing");
+    }
+
+    #[test]
+    fn attention_segment_click_jumps_to_the_waiting_pane() {
+        let mut state = state();
+        let mut waiting = AgentPaneIntent::draft("needs approval");
+        waiting.status = AgentStatus::WaitingForApproval;
+        state
+            .workspace_mut()
+            .active_session_mut()
+            .add_floating_pane("agent", PaneKind::Agent { intent: waiting }, None);
+        state.dispatch(CommandId::FocusPrevious); // back to pane-1
+        frame(&mut state);
+
+        let scene = state.build_scene(POINTER_FRAME);
+        let segment = scene
+            .hit_targets
+            .iter()
+            .find(|target| matches!(target.kind, HitTargetKind::AttentionSegment { .. }))
+            .expect("a waiting approval must produce a clickable header segment");
+        send_pointer(
+            &mut state,
+            left(PointerKind::Down, segment.rect.x, segment.rect.y),
+        );
+
+        assert_eq!(focused(&state), "pane-2");
     }
 }

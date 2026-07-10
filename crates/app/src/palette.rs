@@ -59,6 +59,8 @@ pub(crate) struct PaletteWorkspaceView {
     pub(crate) focused_task_running: bool,
     pub(crate) focused_has_live_terminal: bool,
     pub(crate) focused_is_floating: bool,
+    /// Whether a durable timeline log exists for this workspace.
+    pub(crate) timeline_available: bool,
     /// Whether the focused pane sits inside a tiled split (so Grow/Shrink
     /// have a boundary to move).
     pub(crate) focused_in_tiled_split: bool,
@@ -221,6 +223,20 @@ fn availability(command_id: CommandId, view: &PaletteWorkspaceView) -> Result<()
                 Err("focused pane has no live terminal".to_owned())
             }
         }
+        CommandId::SetAgentObjective => {
+            if on_agent {
+                Ok(())
+            } else {
+                Err("focused pane is not an agent pane".to_owned())
+            }
+        }
+        CommandId::ShowTimeline => {
+            if view.timeline_available {
+                Ok(())
+            } else {
+                Err("no workspace directory to keep a timeline in".to_owned())
+            }
+        }
         CommandId::ClosePane if view.pane_count <= 1 => {
             Err("cannot close the last pane".to_owned())
         }
@@ -330,6 +346,7 @@ mod tests {
             focused_task_running: false,
             focused_has_live_terminal: true,
             focused_is_floating: false,
+            timeline_available: true,
             focused_in_tiled_split: true,
             pane_count: 2,
         }
@@ -548,6 +565,33 @@ mod tests {
         };
         let rows = palette_rows("", 0, &floating, &keymap);
         assert!(!row(&rows, CommandId::ShrinkPane).enabled);
+    }
+
+    #[test]
+    fn visibility_commands_gate_on_their_preconditions() {
+        let keymap = Keymap::default();
+
+        // Set agent objective needs a focused agent pane.
+        let rows = palette_rows("", 0, &terminal_view(), &keymap);
+        let objective = row(&rows, CommandId::SetAgentObjective);
+        assert!(!objective.enabled);
+        assert_eq!(objective.entry.detail, "focused pane is not an agent pane");
+        let rows = palette_rows("", 0, &agent_view(), &keymap);
+        assert!(row(&rows, CommandId::SetAgentObjective).enabled);
+
+        // The timeline needs a workspace directory; the session map always
+        // works.
+        let rows = palette_rows("", 0, &terminal_view(), &keymap);
+        assert!(row(&rows, CommandId::ShowTimeline).enabled);
+        assert!(row(&rows, CommandId::ShowSessionMap).enabled);
+        let no_timeline = PaletteWorkspaceView {
+            timeline_available: false,
+            ..terminal_view()
+        };
+        let rows = palette_rows("", 0, &no_timeline, &keymap);
+        let timeline = row(&rows, CommandId::ShowTimeline);
+        assert!(!timeline.enabled);
+        assert!(timeline.entry.detail.contains("timeline"));
     }
 
     #[test]

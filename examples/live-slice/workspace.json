@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "workspace": {
+    "id": "workspace-1",
+    "name": "Mandatum",
+    "projects": {
+      "project-1": {
+        "id": "project-1",
+        "name": "project",
+        "path": "."
+      }
+    },
+    "sessions": {
+      "session-1": {
+        "id": "session-1",
+        "project_id": "project-1",
+        "name": "project",
+        "panes": {
+          "pane-1": {
+            "id": "pane-1",
+            "title": "terminal",
+            "kind": {
+              "type": "terminal",
+              "command": null
+            },
+            "cwd": ".",
+            "restart_generation": 0
+          },
+          "pane-2": {
+            "id": "pane-2",
+            "title": "checks",
+            "kind": {
+              "type": "task",
+              "intent": {
+                "recipe_id": "checks",
+                "command": "sh ./flaky-check.sh",
+                "cwd": null
+              }
+            },
+            "cwd": null,
+            "restart_generation": 0
+          },
+          "pane-3": {
+            "id": "pane-3",
+            "title": "dev server",
+            "kind": {
+              "type": "task",
+              "intent": {
+                "recipe_id": "dev-server",
+                "command": "i=0; while :; do i=$((i+1)); echo \"heartbeat $i\"; sleep 2; done",
+                "cwd": null
+              }
+            },
+            "cwd": null,
+            "restart_generation": 0
+          },
+          "pane-4": {
+            "id": "pane-4",
+            "title": "agent",
+            "kind": {
+              "type": "agent",
+              "intent": {
+                "thread_id": null,
+                "objective": "remove the flaky marker file so the checks pass (fake connector demo)",
+                "status": "draft",
+                "pending_approvals": 0,
+                "pending_approval_ids": [],
+                "changed_files": [],
+                "latest_summary": null,
+                "approval_history": []
+              }
+            },
+            "cwd": null,
+            "restart_generation": 0
+          }
+        },
+        "layout": {
+          "root": {
+            "type": "split",
+            "axis": "horizontal",
+            "first_percent": 50,
+            "first": {
+              "type": "split",
+              "axis": "horizontal",
+              "first_percent": 50,
+              "first": {
+                "type": "pane",
+                "pane_id": "pane-1"
+              },
+              "second": {
+                "type": "pane",
+                "pane_id": "pane-2"
+              }
+            },
+            "second": {
+              "type": "pane",
+              "pane_id": "pane-3"
+            }
+          },
+          "floating": [
+            {
+              "pane_id": "pane-4",
+              "rect": {
+                "x": 8,
+                "y": 4,
+                "width": 96,
+                "height": 28
+              }
+            }
+          ],
+          "zoomed": null
+        },
+        "focused_pane": "pane-2",
+        "next_pane_index": 5
+      }
+    },
+    "active_project_id": "project-1",
+    "active_session_id": "session-1",
+    "next_project_index": 2,
+    "next_session_index": 2
+  }
+}

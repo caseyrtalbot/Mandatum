@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::geometry::{SceneRect, SceneSize};
 use crate::pane::PaneScene;
 
-/// One frame of renderable workspace state.
+/// One frame of renderable workspace state. `&WorkspaceScene` alone must
+/// suffice to paint a frame: the header and status strips carry their own
+/// areas and composed text, so no frontend derives chrome content itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceScene {
     pub size: SceneSize,
@@ -15,8 +17,7 @@ pub struct WorkspaceScene {
     /// Panes in draw order: tiled panes first, floating panes on top.
     pub panes: Vec<PaneScene>,
     pub overlay: Option<OverlayScene>,
-    /// Status line text; a frontend shows "ready" when `None`.
-    pub status: Option<String>,
+    pub status: StatusScene,
     pub focused_pane: PaneId,
     pub hit_targets: Vec<HitTarget>,
     /// Whether the workspace is in copy mode (one pane's surface carries the
@@ -24,21 +25,126 @@ pub struct WorkspaceScene {
     pub copy_mode: bool,
 }
 
-/// Header strip fields; frontends own the exact formatting.
+/// The attention strip at the top of the frame. Never blank: when something
+/// needs attention `text` leads with the workspace name and the
+/// [`AttentionSegment`]s follow at their resolved rects; when calm, `text`
+/// is the full session-facts line and `attention` is empty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderScene {
+    pub area: SceneRect,
+    pub workspace_name: String,
     pub session_name: String,
     pub pane_count: usize,
     pub focused_pane: PaneId,
     pub zoomed: bool,
+    /// Agent connector kind label for the calm strip ("fake" / "claude" /
+    /// "none").
+    pub connector_label: String,
+    /// Pre-composed base text a frontend paints verbatim at `area.x`.
+    pub text: String,
+    /// Attention segments with resolved rects inside `area`, drawn after
+    /// `text` in the theme's attention style. Empty when nothing needs
+    /// attention.
+    pub attention: Vec<AttentionSegment>,
 }
 
-/// Modal overlays drawn above the workspace. Open for future overlays
-/// (session map, execution timeline).
+/// One clickable attention segment in the header strip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionSegment {
+    /// Where the segment's label is drawn (and hit-tested).
+    pub rect: SceneRect,
+    /// e.g. "1 approval · pane-3" or "2 tasks failed · pane-2".
+    pub label: String,
+    /// The pane a click jumps to, when the condition has one.
+    pub pane: Option<PaneId>,
+}
+
+/// The status strip at the bottom of the frame: composed text plus its area.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusScene {
+    pub area: SceneRect,
+    pub text: String,
+}
+
+/// Modal overlays drawn above the workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayScene {
     Palette(PaletteOverlay),
     ContextMenu(ContextMenuOverlay),
+    Timeline(TimelineOverlay),
+    SessionMap(SessionMapOverlay),
+    Prompt(PromptOverlay),
+}
+
+/// The execution-timeline overlay: a filter input on top, the filtered
+/// durable events below it (newest first), and a key-hint footer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineOverlay {
+    pub area: SceneRect,
+    /// The live filter text the user has typed.
+    pub query: String,
+    /// Entries matching the query, newest first.
+    pub items: Vec<TimelineEntry>,
+    /// Highlighted entry; `None` only when `items` is empty.
+    pub selected: Option<usize>,
+    /// Malformed log lines skipped while reading (never a crash).
+    pub skipped_malformed: usize,
+    /// Footer hint line naming the overlay's own keys.
+    pub footer: String,
+}
+
+/// One rendered timeline event row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineEntry {
+    /// Kind glyph ("▶", "✓", "✗", "?", …).
+    pub glyph: String,
+    /// Relative timestamp ("2m ago").
+    pub when: String,
+    /// Human description of the durable fact.
+    pub text: String,
+    /// The pane Enter jumps to, when the event names one.
+    pub pane: Option<PaneId>,
+}
+
+/// The session-map overlay: a tree of sessions and their panes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMapOverlay {
+    pub area: SceneRect,
+    pub rows: Vec<SessionMapRow>,
+    /// Highlighted row.
+    pub selected: usize,
+    /// Footer hint line naming the overlay's own keys.
+    pub footer: String,
+}
+
+/// One session-map row: a session heading (depth 0) or a pane (depth 1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMapRow {
+    /// Tree depth: 0 for sessions, 1 for panes.
+    pub depth: u8,
+    /// Kind glyph for panes; session marker for sessions.
+    pub glyph: String,
+    pub label: String,
+    /// One-word live state ("running", "exited:1", "waiting-approval", …);
+    /// empty for session rows.
+    pub state: String,
+    /// Focus marker: the focused pane of the active session.
+    pub focused: bool,
+    /// Layout badges ("zoom", "float"), space-joined; empty when none.
+    pub badges: String,
+}
+
+/// A one-line text-input overlay (Set agent objective), reusing the palette
+/// input pattern: a bordered box with a title, the editable text, a cursor,
+/// and a key-hint footer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptOverlay {
+    pub area: SceneRect,
+    pub title: String,
+    /// The editable input text.
+    pub input: String,
+    /// Footer hint line naming the overlay's own keys.
+    pub footer: String,
 }
 
 /// The right-click context menu overlay: a bordered list of the commands
@@ -131,8 +237,15 @@ pub enum HitTargetKind {
     Separator { split_index: usize, axis: SplitAxis },
     /// The status strip at the bottom of the frame.
     StatusStrip,
+    /// One header attention segment, by index into `HeaderScene::attention`,
+    /// carrying the pane a click jumps to (self-contained for hit testing).
+    AttentionSegment { index: usize, pane: Option<PaneId> },
     /// One palette row, by item index.
     PaletteItem(usize),
     /// One context-menu row, by item index.
     ContextMenuItem(usize),
+    /// One timeline row, by index into the overlay's filtered items.
+    TimelineItem(usize),
+    /// One session-map row, by row index.
+    SessionMapRow(usize),
 }

@@ -100,6 +100,36 @@ For agent work, prove:
 - verification results attach to the agent actor
 - restore keeps agent intent without inventing live runtime state
 
+## The Stranger Test (Workstation Visibility)
+
+The charter bar for the visibility surfaces: a stranger looking at the
+screen understands the session state in ten seconds. Procedure:
+
+1. Run the driven demo: `./examples/live-slice/run.sh` (setup, keystroke
+   walkthrough, and launch; see `examples/live-slice/README.md`).
+2. Drive the printed steps: start the dev-server heartbeat, run the check
+   twice (one success, one failure), start the fake agent (it requests an
+   approval and waits).
+3. Without touching the keyboard further, answer from the screen alone:
+   - what session am I in (header; `ctrl+p m` session map)
+   - what runs (heartbeat pane; session map state words)
+   - what failed and which command produced it (checks pane status,
+     "1 task failed" attention segment, timeline entry with command +
+     exit status)
+   - which agents are active/blocked/waiting approval (agent pane,
+     "1 approval waiting" attention segment)
+   - what files changed (agent pane changed-files list after approving)
+   - what can I rerun/stop/restart/restore/search (right-click menu;
+     `ctrl+p /` timeline filter)
+   - what survives restart (`ctrl+p w`, quit, relaunch: layout, intents,
+     approval history, and the timeline persist; live processes do not,
+     and the timeline records that they ran)
+4. Automated backing: timeline write/read/rotation/malformed-line tests
+   (`crates/app/src/timeline.rs`), overlay filter/jump and session-map
+   focus tests (`crates/app/src/app_state.rs`), attention aggregation
+   tests (`crates/app/src/scene_builder.rs`), and the header-in-scene
+   parity tests (`crates/app/tests/frontend_parity.rs`).
+
 ## Completion Rule
 
 Do not claim a task is complete until:

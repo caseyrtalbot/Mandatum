@@ -484,3 +484,65 @@ pane chrome (titles, separators, status, overlays), which is never the
 child's surface. The right-click context menu lists pane-relevant
 commands with their keyboard routes and is keyboard-navigable and
 clickable; Esc dismisses.
+
+## Accepted: Execution Timeline Is Append-Only JSONL With Two-File Rotation
+
+Status: accepted (2026-07-09)
+
+Decision: durable execution facts append to
+`<project>/.mandatum/timeline.jsonl`, one JSON object per line:
+`{"at_ms": <unix epoch millis>, "event": "<kind>", ...fields}` (an
+internally tagged serde enum, `crates/app/src/timeline.rs`). Recorded
+kinds: command_dispatched, task_started, task_exited (command + exit
+status), agent_status, approval_requested (command/scope/risk),
+approval_decided (verdict + decided_by), agent_objective_set,
+agent_launch_refused (reason — refusal previously left no durable trace),
+workspace_saved/restored, pane_created/closed, config_reloaded.
+
+Write discipline — the documented deviation from the temp+fsync+rename
+convention in `persistence.rs`: appends are `O_APPEND` writes of one
+complete line, without per-line fsync. A single-writer audit log cannot
+corrupt previous lines this way, a torn final line is skipped and counted
+by the reader, and per-event fsync would tax every dispatch. Symlink and
+non-regular-file rejection mirror the persistence module; reads are capped
+(4 MiB) and malformed lines are skipped with a visible count, never a
+crash.
+
+Rotation: before an append, a file at/over 2 MiB is renamed to
+`timeline.1.jsonl` (replacing any previous rotation) and a fresh file
+starts — at most two files ever exist, and the overlay's tail read (last
+~500 events) stitches the rotated file in when the active one is short.
+Repeated rotation drops the oldest window by design.
+
+L3: the event types hold plain strings and numbers copied from durable
+facts; no live handle, token, or socket path exists on them, so
+serialization excludes runtime state by construction.
+
+Consequences: the timeline is evidence, not truth — the workspace file
+remains the durable source of intent; a concurrent second process could
+lose a rotation race (accepted for a single-writer workstation log).
+
+## Accepted: The Header Is a Scene-Carried Attention Strip
+
+Status: accepted (2026-07-09)
+
+Decision: `WorkspaceScene` now carries fully composed chrome:
+`HeaderScene` gained its area, the composed strip text, the workspace
+name, the connector label, and `attention: Vec<AttentionSegment>` (label,
+resolved rect, jump pane); `status` became `StatusScene { area, text }`.
+Frontends paint scene text at scene rects and restyle attention segments
+in the theme's attention color — closing the WF2 finding that frontends
+derived header/status content and areas themselves. `&WorkspaceScene`
+alone suffices to paint a frame.
+
+Attention aggregation (in `crates/app/src/attention.rs`, severity order):
+approvals waiting (count + first pane), failed tasks (count + first
+pane), blocked/failed agents (count). Segments are hit targets
+(`HitTargetKind::AttentionSegment` carries the jump pane); when calm the
+strip shows session facts (session name, pane count, connector kind) —
+never blank, never noisy.
+
+Verification: attention aggregation tests in the scene builder, the
+segment-restyle renderer test, the attention click test in `app_state`,
+and the cross-frontend parity tests, which now assert the header text and
+attention segments survive both frontends.

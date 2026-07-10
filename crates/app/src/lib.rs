@@ -6,6 +6,7 @@
 mod agent_runtime;
 mod app_shell;
 mod app_state;
+mod attention;
 mod clipboard;
 mod config;
 mod copy_mode;
@@ -17,8 +18,11 @@ mod persistence;
 mod pointer;
 mod process_events;
 mod scene_builder;
+mod session_map;
 mod task_runtime;
 mod terminal_runtime;
+mod timeline;
+mod timeline_view;
 
 pub use app_shell::{
     AgentConnectorKind, AppConfig, AppError, default_workspace_file, run, run_with_config,

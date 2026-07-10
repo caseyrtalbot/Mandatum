@@ -1,12 +1,17 @@
 use std::path::PathBuf;
 
-use crate::{AgentPaneIntent, PaneId, TaskPaneIntent};
+use crate::{AgentPaneIntent, PaneId, SessionId, TaskPaneIntent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreAction {
     OpenProject {
         name: String,
         path: PathBuf,
+    },
+    /// Make an existing session the active one (the session map's jump
+    /// action). Durable intent: which session is active already persists.
+    ActivateSession {
+        session_id: SessionId,
     },
     NewTerminal {
         title: String,

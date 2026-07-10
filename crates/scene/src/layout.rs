@@ -52,23 +52,71 @@ pub fn palette_overlay_rect(size: SceneSize) -> SceneRect {
     centered_rect(70, 60, SceneRect::new(0, 0, size.width, size.height))
 }
 
-/// The palette items visible inside the overlay's inner rect: the top inner
-/// row holds the filter input and the bottom inner row holds the footer, so
-/// items get `height - 2` rows, scrolled just far enough to keep the
-/// selected item in view. Frontends and hit-target builders share this math
-/// so pointer rows and drawn rows can never disagree.
-pub fn palette_item_window(
-    inner: SceneRect,
+/// The centered execution-timeline overlay rect (larger than the palette:
+/// event rows carry timestamps and detail).
+pub fn timeline_overlay_rect(size: SceneSize) -> SceneRect {
+    centered_rect(80, 70, SceneRect::new(0, 0, size.width, size.height))
+}
+
+/// The centered session-map overlay rect.
+pub fn session_map_rect(size: SceneSize) -> SceneRect {
+    centered_rect(60, 60, SceneRect::new(0, 0, size.width, size.height))
+}
+
+/// The centered one-line prompt overlay rect (Set agent objective): 60% of
+/// the width, three inner rows (input plus breathing room and footer).
+pub fn prompt_rect(size: SceneSize) -> SceneRect {
+    let frame = SceneRect::new(0, 0, size.width, size.height);
+    let horizontal = centered_rect(60, 100, frame);
+    let height = 5.min(size.height);
+    let y = (size.height.saturating_sub(height)) / 2;
+    SceneRect::new(horizontal.x, y, horizontal.width, height)
+}
+
+/// The items visible in a scrolling list given `rows` visible rows: scrolled
+/// just far enough to keep the selected item in view. Frontends and
+/// hit-target builders share this math so pointer rows and drawn rows can
+/// never disagree.
+pub fn list_item_window(
+    rows: usize,
     item_count: usize,
     selected: Option<usize>,
 ) -> core::ops::Range<usize> {
-    let rows = usize::from(inner.height.saturating_sub(2));
     if rows == 0 || item_count == 0 {
         return 0..0;
     }
     let selected = selected.unwrap_or(0).min(item_count - 1);
     let start = (selected + 1).saturating_sub(rows);
     start..(start + rows).min(item_count)
+}
+
+/// The palette/timeline items visible inside an overlay's inner rect: the
+/// top inner row holds the filter input and the bottom inner row holds the
+/// footer, so items get `height - 2` rows.
+pub fn palette_item_window(
+    inner: SceneRect,
+    item_count: usize,
+    selected: Option<usize>,
+) -> core::ops::Range<usize> {
+    list_item_window(
+        usize::from(inner.height.saturating_sub(2)),
+        item_count,
+        selected,
+    )
+}
+
+/// The session-map rows visible inside its inner rect: only the bottom inner
+/// row is reserved (the footer); there is no filter input.
+pub fn session_map_item_window(
+    inner: SceneRect,
+    item_count: usize,
+    selected: Option<usize>,
+) -> core::ops::Range<usize> {
+    list_item_window(
+        usize::from(inner.height.saturating_sub(1)),
+        item_count,
+        selected,
+    )
 }
 
 /// One draggable split boundary, resolved to cell geometry.
@@ -600,6 +648,28 @@ mod tests {
             palette_overlay_rect(SceneSize::new(9, 5)),
             SceneRect::new(1, 1, 7, 3)
         );
+    }
+
+    #[test]
+    fn visibility_overlay_rects_center_and_clamp() {
+        let size = SceneSize::new(100, 30);
+        // Timeline: centered 80% x 70%.
+        assert_eq!(timeline_overlay_rect(size), SceneRect::new(10, 5, 80, 21));
+        // Session map: centered 60% x 60%.
+        assert_eq!(session_map_rect(size), SceneRect::new(20, 6, 60, 18));
+        // Prompt: centered 60% wide, five rows tall.
+        assert_eq!(prompt_rect(size), SceneRect::new(20, 12, 60, 5));
+        // A tiny frame clamps the prompt height.
+        assert_eq!(prompt_rect(SceneSize::new(10, 3)).height, 3);
+    }
+
+    #[test]
+    fn session_map_window_reserves_only_the_footer_row() {
+        let inner = SceneRect::new(1, 1, 40, 10); // 9 item rows
+        assert_eq!(session_map_item_window(inner, 24, Some(0)), 0..9);
+        assert_eq!(session_map_item_window(inner, 24, Some(9)), 1..10);
+        assert_eq!(session_map_item_window(inner, 4, Some(3)), 0..4);
+        assert_eq!(session_map_item_window(inner, 0, None), 0..0);
     }
 
     #[test]

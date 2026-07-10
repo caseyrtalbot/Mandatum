@@ -20,7 +20,8 @@ use std::{
 
 use mandatum_agent_runtime::{
     AgentConnector, AgentSession, AgentSessionControl, AgentSessionEvent, ApprovalRequest,
-    ClaudeCliConnector, FakeConnector, FakeStep,
+    ApprovalScope, ClaudeCliConnector, FakeConnector, FakeStep, FileChange, RiskAssessment,
+    RiskLevel,
 };
 use mandatum_core::{AgentStatus, PaneId};
 
@@ -183,19 +184,57 @@ pub(crate) fn connector_for_kind(
 }
 
 /// The default script the fake connector replays when selected via config
-/// (tests inject their own scripts).
+/// (tests inject their own scripts). It walks the full agent loop a
+/// stranger should see: run, work, request an approval, wait for the
+/// verdict, then finish — approve completes with a changed file, reject
+/// fails.
 fn default_fake_script() -> Vec<FakeStep> {
+    use std::path::PathBuf;
+
     vec![
         FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
         FakeStep::Emit(AgentSessionEvent::Action {
-            description: "replaying the built-in fake script".to_owned(),
+            description: "surveying the project".to_owned(),
+        }),
+        FakeStep::Emit(AgentSessionEvent::OutputChunk(
+            "reading the failing check output".to_owned(),
+        )),
+        FakeStep::Emit(AgentSessionEvent::CommandRun {
+            command: "cat .flip".to_owned(),
         }),
         FakeStep::Emit(AgentSessionEvent::Summary(
-            "fake connector demo run".to_owned(),
+            "found the flaky marker file; want to remove it".to_owned(),
         )),
-        FakeStep::Emit(AgentSessionEvent::Completed {
-            summary: "fake connector script complete".to_owned(),
-        }),
+        FakeStep::Emit(AgentSessionEvent::ApprovalRequested(ApprovalRequest {
+            approval_id: "fake-appr-1".to_owned(),
+            command: "rm .flip".to_owned(),
+            scope: ApprovalScope {
+                cwd: PathBuf::from("."),
+                affected_path: Some(PathBuf::from(".flip")),
+            },
+            risk: RiskAssessment {
+                level: RiskLevel::Medium,
+                basis: "removes files (rm)".to_owned(),
+            },
+        })),
+        FakeStep::AwaitApproval {
+            approval_id: "fake-appr-1".to_owned(),
+            then_on_approve: vec![
+                AgentSessionEvent::CommandRun {
+                    command: "rm .flip".to_owned(),
+                },
+                AgentSessionEvent::FilesChanged(vec![FileChange {
+                    path: PathBuf::from(".flip"),
+                    change_kind: mandatum_agent_runtime::FileChangeKind::Deleted,
+                }]),
+                AgentSessionEvent::Completed {
+                    summary: "removed the flaky marker; checks should pass".to_owned(),
+                },
+            ],
+            then_on_reject: vec![AgentSessionEvent::Failed {
+                error: "the gated command was rejected".to_owned(),
+            }],
+        },
     ]
 }
 

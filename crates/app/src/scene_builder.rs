@@ -9,12 +9,16 @@ use mandatum_core::{AgentPaneIntent, PaneId, PaneKind, PaneSpec, Session, TaskPa
 use mandatum_scene::{
     AgentApprovalPrompt, AgentContent, EmptyContent, HeaderScene, HitTarget, HitTargetKind,
     OverlayScene, PaneContent, PaneScene, PaneSceneKind, SceneCell, SceneCellStyle, SceneColor,
-    SceneRect, SceneSize, SurfacePosition, TaskContent, TerminalSurface, WorkspaceScene,
+    SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent, TerminalSurface,
+    WorkspaceScene,
     layout::{self, PaneLayout},
 };
 use mandatum_terminal_vt::{CellStyle, Color as VtColor, TerminalGrid};
 
-use crate::app_state::{AppState, agent_status_label};
+use crate::{
+    app_state::{AppState, agent_status_label},
+    attention::header_scene,
+};
 
 /// How many changed files an agent pane lists (most recent last).
 const AGENT_CHANGED_FILES_SHOWN: usize = 10;
@@ -46,67 +50,49 @@ pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScen
         })
         .collect::<Vec<_>>();
 
-    // The context menu and the palette are both modal; opening one closes
-    // the other, so at most one overlay exists per frame.
+    // The overlays are all modal; opening one closes the others, so at most
+    // one overlay exists per frame.
     let overlay = state
         .context_menu_overlay(size)
         .map(OverlayScene::ContextMenu)
-        .or_else(|| state.palette_overlay(size).map(OverlayScene::Palette));
+        .or_else(|| state.palette_overlay(size).map(OverlayScene::Palette))
+        .or_else(|| {
+            state
+                .timeline_overlay_scene(size)
+                .map(OverlayScene::Timeline)
+        })
+        .or_else(|| {
+            state
+                .session_map_overlay_scene(size)
+                .map(OverlayScene::SessionMap)
+        })
+        .or_else(|| state.prompt_overlay_scene(size).map(OverlayScene::Prompt));
 
-    let hit_targets = hit_targets(workspace, &panes, size, overlay.as_ref());
+    // The attention strip: approvals, failed tasks, stuck agents — or calm
+    // session facts. Composed here so `&WorkspaceScene` alone paints a frame.
+    let header = header_scene(state, layout::header_rect(size));
+    let hit_targets = hit_targets(workspace, &panes, &header, size, overlay.as_ref());
 
     WorkspaceScene {
         size,
-        header: HeaderScene {
-            session_name: session.name().to_owned(),
-            pane_count: session.panes().len(),
-            focused_pane: session.focused_pane_id().clone(),
-            zoomed: session.layout().zoomed().is_some(),
-        },
+        header,
         panes,
         overlay,
-        status: Some(status_with_agent_attention(state, session)),
+        status: StatusScene {
+            area: layout::status_rect(size),
+            text: status_text(state),
+        },
         focused_pane: session.focused_pane_id().clone(),
         hit_targets,
         copy_mode: state.copy_mode_active(),
     }
 }
 
-/// The status strip text: agent approval attention first, then the app
-/// status, then the permanent workspace-control hint. A pane waiting for
-/// approval must be visible globally; the hint means a stranger always has
-/// the palette chord and the right-click menu written on screen.
-fn status_with_agent_attention(state: &AppState, session: &Session) -> String {
-    format!(
-        "{} — {}",
-        status_attention_prefix(state, session),
-        state.control_hint()
-    )
-}
-
-fn status_attention_prefix(state: &AppState, session: &Session) -> String {
-    let waiting = session
-        .panes()
-        .iter()
-        .filter(|(pane_id, pane)| {
-            matches!(pane.kind(), PaneKind::Agent { .. })
-                && state
-                    .agent_runtime_view(pane_id)
-                    .is_some_and(|runtime| runtime.pending_approval.is_some())
-        })
-        .map(|(pane_id, _)| pane_id.clone())
-        .collect::<Vec<_>>();
-
-    match waiting.as_slice() {
-        [] => state.status().to_owned(),
-        [pane_id] => format!("1 approval waiting — {pane_id} | {}", state.status()),
-        panes => format!(
-            "{} approvals waiting — {} | {}",
-            panes.len(),
-            panes[0],
-            state.status()
-        ),
-    }
+/// The status strip text: the app status plus the permanent
+/// workspace-control hint, so a stranger always has the palette chord and
+/// the right-click menu written on screen. Attention lives in the header.
+fn status_text(state: &AppState) -> String {
+    format!("{} — {}", state.status(), state.control_hint())
 }
 
 fn pane_scene(
@@ -332,13 +318,15 @@ fn scene_color(color: VtColor) -> SceneColor {
     }
 }
 
-/// Hit targets in stacking order, bottom first: status strip, tiled panes,
-/// split separators, floating panes, then overlay rows. Pointer resolution
-/// scans this list in reverse, so later targets win where rects overlap
-/// (floats over separators, overlays over everything).
+/// Hit targets in stacking order, bottom first: status strip, header
+/// attention segments, tiled panes, split separators, floating panes, then
+/// overlay rows. Pointer resolution scans this list in reverse, so later
+/// targets win where rects overlap (floats over separators, overlays over
+/// everything).
 fn hit_targets(
     workspace: &mandatum_core::Workspace,
     panes: &[PaneScene],
+    header: &HeaderScene,
     size: SceneSize,
     overlay: Option<&OverlayScene>,
 ) -> Vec<HitTarget> {
@@ -349,6 +337,20 @@ fn hit_targets(
         targets.push(HitTarget {
             rect: status,
             kind: HitTargetKind::StatusStrip,
+        });
+    }
+
+    // Header attention segments are clickable jumps to the pane in need.
+    for (index, segment) in header.attention.iter().enumerate() {
+        if segment.rect.is_empty() {
+            continue;
+        }
+        targets.push(HitTarget {
+            rect: segment.rect,
+            kind: HitTargetKind::AttentionSegment {
+                index,
+                pane: segment.pane.clone(),
+            },
         });
     }
 
@@ -406,7 +408,31 @@ fn hit_targets(
                 });
             }
         }
-        None => {}
+        Some(OverlayScene::Timeline(timeline)) => {
+            // Same shape as the palette: filter input on the top inner row,
+            // footer on the bottom, entry rows between.
+            let inner = layout::pane_inner_rect(timeline.area);
+            let window =
+                layout::palette_item_window(inner, timeline.items.len(), timeline.selected);
+            for (row, index) in window.enumerate() {
+                targets.push(HitTarget {
+                    rect: SceneRect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1),
+                    kind: HitTargetKind::TimelineItem(index),
+                });
+            }
+        }
+        Some(OverlayScene::SessionMap(map)) => {
+            let inner = layout::pane_inner_rect(map.area);
+            let window = layout::session_map_item_window(inner, map.rows.len(), Some(map.selected));
+            for (row, index) in window.enumerate() {
+                targets.push(HitTarget {
+                    rect: SceneRect::new(inner.x, inner.y + row as u16, inner.width, 1),
+                    kind: HitTargetKind::SessionMapRow(index),
+                });
+            }
+        }
+        // The prompt has no row targets; click-away dismisses it.
+        Some(OverlayScene::Prompt(_)) | None => {}
     }
 
     targets
@@ -496,9 +522,29 @@ mod tests {
         assert_eq!(scene.header.focused_pane, PaneId::new("pane-2"));
         assert!(!scene.header.zoomed);
         assert_eq!(scene.focused_pane, PaneId::new("pane-2"));
-        // The status strip carries the app status plus the permanent
-        // workspace-control hint (palette chord + right-click menu).
-        let status = scene.status.as_deref().unwrap();
+        // The header carries its own area and composed calm text, so a
+        // frontend paints it without deriving anything.
+        assert_eq!(scene.header.area, layout::header_rect(scene.size));
+        assert!(
+            scene.header.text.contains("Mandatum"),
+            "{}",
+            scene.header.text
+        );
+        assert!(
+            scene.header.text.contains("2 pane(s)"),
+            "{}",
+            scene.header.text
+        );
+        assert!(
+            scene.header.text.contains("agent: fake"),
+            "{}",
+            scene.header.text
+        );
+        assert!(scene.header.attention.is_empty(), "nothing needs attention");
+        // The status strip carries its area plus the app status and the
+        // permanent workspace-control hint (palette chord + right-click menu).
+        assert_eq!(scene.status.area, layout::status_rect(scene.size));
+        let status = &scene.status.text;
         assert!(status.starts_with(state.status()), "{status:?}");
         assert!(status.contains("ctrl+p commands"), "{status:?}");
         assert!(status.contains("right-click menu"), "{status:?}");
@@ -646,6 +692,52 @@ mod tests {
             item_targets[0].rect,
             SceneRect::new(inner.x, inner.y + 1, inner.width, 1)
         );
+    }
+
+    #[test]
+    fn visibility_overlays_reach_the_scene_with_row_hit_targets() {
+        let mut state = AppState::new(config(false));
+        let size = SceneSize::new(100, 30);
+
+        // Timeline: the dispatch itself is recorded, so at least one entry
+        // exists; rows carry hit targets aligned with the drawn window.
+        state.dispatch(CommandId::ShowTimeline);
+        let scene = build_workspace_scene(&state, size);
+        let Some(OverlayScene::Timeline(timeline)) = &scene.overlay else {
+            panic!("timeline overlay must be in the scene");
+        };
+        assert!(!timeline.items.is_empty());
+        assert!(
+            scene
+                .hit_targets
+                .iter()
+                .any(|target| matches!(target.kind, HitTargetKind::TimelineItem(0)))
+        );
+
+        // Session map replaces it (modal exclusivity).
+        state.dispatch(CommandId::ShowSessionMap);
+        let scene = build_workspace_scene(&state, size);
+        let Some(OverlayScene::SessionMap(map)) = &scene.overlay else {
+            panic!("session map overlay must be in the scene");
+        };
+        assert!(map.rows.len() >= 2, "session heading plus its panes");
+        assert!(
+            scene
+                .hit_targets
+                .iter()
+                .any(|target| matches!(target.kind, HitTargetKind::SessionMapRow(0)))
+        );
+
+        // The objective prompt renders for a focused agent pane.
+        state.handle_key(Key::plain(KeyCode::Escape));
+        state.dispatch(CommandId::NewAgentPane);
+        state.dispatch(CommandId::SetAgentObjective);
+        let scene = build_workspace_scene(&state, size);
+        let Some(OverlayScene::Prompt(prompt)) = &scene.overlay else {
+            panic!("prompt overlay must be in the scene");
+        };
+        assert_eq!(prompt.input, "test objective");
+        assert!(prompt.title.contains("Set agent objective"));
     }
 
     #[test]
@@ -875,13 +967,82 @@ mod tests {
         assert_eq!(prompt.risk_basis, "removes files (rm)");
         assert_eq!(prompt.key_hint, "y approve / n reject");
 
-        // The waiting pane surfaces globally in the status strip.
-        let status = scene.status.as_deref().unwrap();
+        // The waiting pane surfaces globally in the attention strip, with a
+        // clickable jump target.
+        let segment = scene
+            .header
+            .attention
+            .first()
+            .expect("waiting approval must produce an attention segment");
+        assert_eq!(segment.label, format!("1 approval waiting · {pane_id}"));
+        assert_eq!(segment.pane.as_ref(), Some(&pane_id));
+        assert!(scene.header.text.contains(&segment.label));
         assert!(
-            status.starts_with(&format!("1 approval waiting — {pane_id}")),
-            "status strip must lead with the waiting approval, got {status:?}"
+            scene.hit_targets.iter().any(|target| {
+                matches!(
+                    &target.kind,
+                    HitTargetKind::AttentionSegment { index: 0, pane: Some(pane) } if pane == &pane_id
+                ) && target.rect == segment.rect
+            }),
+            "the attention segment must be clickable"
         );
 
         state.shutdown();
+    }
+
+    #[test]
+    fn attention_strip_aggregates_simultaneous_conditions_in_severity_order() {
+        let mut state = AppState::new(config(false));
+        // A waiting-approval agent, a failed agent, and a blocked agent.
+        let mut waiting = AgentPaneIntent::draft("needs approval");
+        waiting.status = AgentStatus::WaitingForApproval;
+        state
+            .workspace_mut()
+            .active_session_mut()
+            .add_floating_pane("agent", PaneKind::Agent { intent: waiting }, None);
+        let mut failed = AgentPaneIntent::draft("failed one");
+        failed.status = AgentStatus::Failed;
+        state
+            .workspace_mut()
+            .active_session_mut()
+            .add_floating_pane("agent", PaneKind::Agent { intent: failed }, None);
+        let mut blocked = AgentPaneIntent::draft("blocked one");
+        blocked.status = AgentStatus::Blocked;
+        state
+            .workspace_mut()
+            .active_session_mut()
+            .add_floating_pane("agent", PaneKind::Agent { intent: blocked }, None);
+        // A failed task (retained status; no live runtime needed).
+        state.dispatch(CommandId::RunTask);
+        let task_pane = state.workspace().active_session().focused_pane_id().clone();
+        state.set_task_status_for_test(&task_pane, "failed: exit 3");
+
+        let scene = build_workspace_scene(&state, SceneSize::new(120, 30));
+        let labels: Vec<&str> = scene
+            .header
+            .attention
+            .iter()
+            .map(|segment| segment.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "1 approval waiting · pane-2",
+                "1 task failed · pane-5",
+                "2 agents blocked/failed",
+            ]
+        );
+        assert_eq!(
+            scene.header.attention[1].pane,
+            Some(PaneId::new("pane-5")),
+            "the failed-task segment jumps to the failing pane"
+        );
+        // Segments land inside the composed header text at their rects.
+        for segment in &scene.header.attention {
+            assert!(scene.header.text.contains(&segment.label));
+            assert!(!segment.rect.is_empty());
+        }
+        // The count-only agents segment has no single jump pane.
+        assert_eq!(scene.header.attention[2].pane, None);
     }
 }

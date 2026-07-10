@@ -147,6 +147,41 @@ mod tests {
     }
 
     #[test]
+    fn activate_session_switches_the_active_session_and_project() {
+        let mut workspace = workspace();
+        let first_session = workspace.active_session().id().clone();
+        workspace
+            .apply_action(CoreAction::OpenProject {
+                name: "other".to_owned(),
+                path: PathBuf::from("/tmp/other"),
+            })
+            .unwrap();
+        let second_session = workspace.active_session().id().clone();
+        assert_ne!(first_session, second_session);
+
+        workspace
+            .apply_action(CoreAction::ActivateSession {
+                session_id: first_session.clone(),
+            })
+            .unwrap();
+        assert_eq!(workspace.active_session().id(), &first_session);
+        assert_eq!(
+            workspace.active_session().project_id(),
+            workspace.active_session().project_id()
+        );
+        // The active project follows the session.
+        let project_id = workspace.active_session().project_id().clone();
+        assert!(workspace.projects().contains_key(&project_id));
+
+        // Unknown sessions error; the active session is untouched.
+        let missing = workspace.apply_action(CoreAction::ActivateSession {
+            session_id: SessionId::new("session-99"),
+        });
+        assert!(missing.is_err());
+        assert_eq!(workspace.active_session().id(), &first_session);
+    }
+
+    #[test]
     fn zoom_preserves_underlying_layout_intent() {
         let mut workspace = workspace();
         workspace.apply_action(CoreAction::SplitRight).unwrap();
