@@ -1,0 +1,230 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1044 634" width="1044" height="634" role="img" aria-label="Mandatum — execution timeline terminal frame">
+<rect width="1044" height="634" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<circle cx="22" cy="20" r="5.5" fill="#f85149"/>
+<circle cx="42" cy="20" r="5.5" fill="#d29922"/>
+<circle cx="62" cy="20" r="5.5" fill="#3fb950"/>
+<text x="522" y="24" text-anchor="middle" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12">Mandatum — execution timeline</text>
+<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="13.5" xml:space="preserve">
+<rect x="18.0" y="40.0" width="100.8" height="18.0" fill="#282c34"/>
+<rect x="118.8" y="40.0" width="218.4" height="18.0" fill="#282c34"/>
+<rect x="337.2" y="40.0" width="25.2" height="18.0" fill="#282c34"/>
+<rect x="362.4" y="40.0" width="184.8" height="18.0" fill="#282c34"/>
+<text x="18.0" y="53.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#e6e6e6"> Mandatum | </text>
+<text x="118.8" y="53.5" textLength="218.4" lengthAdjust="spacingAndGlyphs" fill="#e06c75" font-weight="bold">1 approval waiting · agent</text>
+<text x="337.2" y="53.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#e6e6e6"> · </text>
+<text x="362.4" y="53.5" textLength="184.8" lengthAdjust="spacingAndGlyphs" fill="#e06c75" font-weight="bold">1 task failed · checks</text>
+<text x="18.0" y="71.5" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#5c6370">┌ terminal ──────────────────┐┌ checks ────────────────────┐┌ dev server ──────────────────────────────────────────────┐</text>
+<text x="18.0" y="89.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="26.4" y="89.5" textLength="235.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">caseytalbot@Caseys-MacBook-P</text>
+<text x="261.6" y="89.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#5c6370">││</text>
+<text x="278.4" y="89.5" textLength="235.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">command: sh ./flaky-check.sh</text>
+<text x="513.6" y="89.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#5c6370">││</text>
+<text x="530.4" y="89.5" textLength="487.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">command: i=0; while :; do i=$…heartbeat $i&quot;; sleep 2; done</text>
+<text x="1017.6" y="89.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="107.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="26.4" y="107.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">ro-2 demo-ws % </text>
+<text x="261.6" y="107.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#5c6370">││</text>
+<text x="278.4" y="107.5" textLength="235.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">cwd: .                      </text>
+<text x="513.6" y="107.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#5c6370">││</text>
+<text x="530.4" y="107.5" textLength="487.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">cwd: .                                                    </text>
+<text x="1017.6" y="107.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="125.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="261.6" y="125.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#5c6370">││</text>
+<text x="278.4" y="125.5" textLength="235.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">recipe: checks              </text>
+<text x="513.6" y="125.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#5c6370">││</text>
+<text x="530.4" y="125.5" textLength="487.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">recipe: dev-server                                        </text>
+<text x="1017.6" y="125.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="143.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="143.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">┌ ag</text>
+<text x="118.8" y="143.5" textLength="806.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">┌ Timeline ────────────────────────────────────────────────────────────────────────────────────┐</text>
+<text x="1017.6" y="143.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="161.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="161.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="161.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">obj</text>
+<text x="118.8" y="161.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="161.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">&gt; </text>
+<text x="144.0" y="161.5" textLength="428.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">type to filter · pane:&lt;id&gt; kind:&lt;family&gt; since:&lt;5m&gt;</text>
+<text x="916.8" y="161.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="161.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="179.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="179.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│sta</text>
+<text x="118.8" y="179.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="179.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="179.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">  just now  </text>
+<text x="253.2" y="179.5" textLength="277.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched show-timeline (pane-4)</text>
+<text x="916.8" y="179.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="179.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="197.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="197.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="197.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">act</text>
+<text x="118.8" y="197.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="197.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> ? </text>
+<text x="152.4" y="197.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">  just now  </text>
+<text x="253.2" y="197.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">agent pane-4 requests approval: rm .flip (scope . -&gt; .flip; risk medium (remove</text>
+<text x="916.8" y="197.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="197.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="215.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="215.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="215.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">sum</text>
+<text x="118.8" y="215.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="215.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> ◆ </text>
+<text x="152.4" y="215.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">  just now  </text>
+<text x="253.2" y="215.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">agent pane-4 is running                                                        </text>
+<text x="916.8" y="215.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="215.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="233.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="233.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="233.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#e06c75">app</text>
+<text x="118.8" y="233.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="233.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="233.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">  just now  </text>
+<text x="253.2" y="233.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched start-agent (pane-4)                                                </text>
+<text x="916.8" y="233.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="233.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="251.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="251.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="251.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#e06c75">sco</text>
+<text x="118.8" y="251.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="251.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="251.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    1s ago  </text>
+<text x="253.2" y="251.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched focus-next (pane-3)                                                 </text>
+<text x="916.8" y="251.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="251.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="269.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="269.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="269.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#e06c75">ris</text>
+<text x="118.8" y="269.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="269.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="269.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    1s ago  </text>
+<text x="253.2" y="269.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched focus-next (pane-2)                                                 </text>
+<text x="916.8" y="269.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="269.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="287.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="287.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="287.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#e06c75">key</text>
+<text x="118.8" y="287.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="287.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="287.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    2s ago  </text>
+<text x="253.2" y="287.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched zoom-pane (pane-2)                                                  </text>
+<text x="916.8" y="287.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="287.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="305.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="305.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="305.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">cha</text>
+<text x="118.8" y="305.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="305.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> ✗ </text>
+<text x="152.4" y="305.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    2s ago  </text>
+<text x="253.2" y="305.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">task pane-2 failed: exit 3: sh ./flaky-check.sh                                </text>
+<text x="916.8" y="305.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="305.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="323.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="323.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="323.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">out</text>
+<text x="118.8" y="323.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="323.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> ▶ </text>
+<text x="152.4" y="323.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    2s ago  </text>
+<text x="253.2" y="323.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">task pane-2 started: sh ./flaky-check.sh                                       </text>
+<text x="916.8" y="323.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="323.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="341.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="341.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="341.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">rea</text>
+<text x="118.8" y="341.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="341.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="341.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    2s ago  </text>
+<text x="253.2" y="341.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched rerun-task (pane-2)                                                 </text>
+<text x="916.8" y="341.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="341.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="359.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="359.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="359.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">$ c</text>
+<text x="118.8" y="359.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="359.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> ✓ </text>
+<text x="152.4" y="359.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    2s ago  </text>
+<text x="253.2" y="359.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">task pane-2 succeeded: exit 0: sh ./flaky-check.sh                             </text>
+<text x="916.8" y="359.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="359.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="377.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="377.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="93.6" y="377.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">(no</text>
+<text x="118.8" y="377.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="377.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> ▶ </text>
+<text x="152.4" y="377.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    2s ago  </text>
+<text x="253.2" y="377.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">task pane-2 started: sh ./flaky-check.sh                                       </text>
+<text x="916.8" y="377.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="377.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="395.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="395.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="118.8" y="395.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="395.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="395.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    2s ago  </text>
+<text x="253.2" y="395.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched rerun-task (pane-2)                                                 </text>
+<text x="916.8" y="395.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="395.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="413.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="413.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="118.8" y="413.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="413.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="413.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    3s ago  </text>
+<text x="253.2" y="413.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched zoom-pane (pane-2)                                                  </text>
+<text x="916.8" y="413.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="413.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="431.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="431.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="118.8" y="431.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="431.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="431.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    3s ago  </text>
+<text x="253.2" y="431.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched focus-next (pane-1)                                                 </text>
+<text x="916.8" y="431.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="431.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="449.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="449.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="118.8" y="449.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="449.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="449.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    3s ago  </text>
+<text x="253.2" y="449.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched focus-next (pane-4)                                                 </text>
+<text x="916.8" y="449.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="449.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="467.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="467.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="118.8" y="467.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="467.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> » </text>
+<text x="152.4" y="467.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    4s ago  </text>
+<text x="253.2" y="467.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">dispatched focus-next (pane-3)                                                 </text>
+<text x="916.8" y="467.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="467.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="485.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="485.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="118.8" y="485.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="485.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> ▶ </text>
+<text x="152.4" y="485.5" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">    4s ago  </text>
+<text x="253.2" y="485.5" textLength="663.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">task pane-3 started: i=0; while :; do i=$((i+1)); echo &quot;heartbeat $i&quot;; sleep 2;</text>
+<text x="916.8" y="485.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="485.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="503.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="503.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="118.8" y="503.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="127.2" y="503.5" textLength="789.6" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4"> ↑ 0 / ↓ 3 more · type to filter (pane:/kind:/since:) · enter jump · esc close · » command · ?</text>
+<text x="916.8" y="503.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">│</text>
+<text x="1017.6" y="503.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="521.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="521.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="118.8" y="521.5" textLength="806.4" lengthAdjust="spacingAndGlyphs" fill="#56b6c2">└──────────────────────────────────────────────────────────────────────────────────────────────┘</text>
+<text x="1017.6" y="521.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="539.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="539.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="883.2" y="539.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="1017.6" y="539.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="557.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="557.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="883.2" y="557.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="1017.6" y="557.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="575.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">│</text>
+<text x="85.2" y="575.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="883.2" y="575.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">│</text>
+<text x="1017.6" y="575.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">│</text>
+<text x="18.0" y="593.5" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#c8ccd4">└───────</text>
+<text x="85.2" y="593.5" textLength="806.4" lengthAdjust="spacingAndGlyphs" fill="#e5c07b" font-weight="bold">└──────────────────────────────────────────────────────────────────────────────────────────────┘</text>
+<text x="891.6" y="593.5" textLength="134.4" lengthAdjust="spacingAndGlyphs" fill="#5c6370">───────────────┘</text>
+<text x="18.0" y="611.5" textLength="579.6" lengthAdjust="spacingAndGlyphs" fill="#abb2bf"> timeline: 21 event(s) — ctrl+p commands · right-click menu · f1 help</text>
+</g></svg>

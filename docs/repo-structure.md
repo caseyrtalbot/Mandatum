@@ -6,12 +6,17 @@
 README.md      product entrypoint
 AGENTS.md      agent operating contract
 PLAN.md        shipped charter summary + forward horizon
+CONTRIBUTING.md contributor contract (the gate is the review)
+SECURITY.md    private vulnerability reporting + scope notes
 LICENSE        Apache-2.0
 Cargo.toml     Rust workspace manifest (excludes spikes/frontend-wgpu)
 Cargo.lock     locked Rust dependencies
+rust-toolchain.toml  pinned gate toolchain
 ci/            the merge gate: gate.sh, conformance.sh, doc-trace.sh
-.github/       GitHub Actions CI (runs ci/gate.sh)
+.github/       GitHub Actions CI (runs ci/gate.sh), Dependabot config,
+               issue and PR templates
 docs/          product and architecture specs
+docs/assets/   README frames: SVGs generated from real captured sessions
 crates/        implementation modules
 examples/      live-slice driven demo (the stranger-test scene)
 spikes/        frontend-wgpu GPU spike (outside the workspace)

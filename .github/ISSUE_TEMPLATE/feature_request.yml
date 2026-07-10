@@ -1,0 +1,21 @@
+name: Feature request
+description: Propose a capability or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can you not do, see, or trust today? Problems over solutions.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: How it might work in the session surface (palette command, overlay, pane behavior).
+  - type: textarea
+    id: fit
+    attributes:
+      label: Constitution fit
+      description: Non-goals are listed in docs/constitution.md (no chat-first UI, no decorative dashboards, no editor clone). Say briefly why this fits.

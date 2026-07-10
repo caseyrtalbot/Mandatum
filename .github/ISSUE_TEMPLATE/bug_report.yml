@@ -1,0 +1,30 @@
+name: Bug report
+description: Something behaved wrongly, crashed, or violated a documented guarantee
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Include the exact command or keystrokes, and what you saw vs. expected.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Smallest sequence that triggers it. The live-slice demo (./examples/live-slice/run.sh) is a good shared starting state.
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "macOS 15 / Ubuntu 24.04, terminal emulator, commit hash"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Status line text, timeline entries (.mandatum/timeline.jsonl), or a captured frame if relevant.
