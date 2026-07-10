@@ -5083,7 +5083,9 @@ mod tests {
         let pane_id = PaneId::new("pane-1");
         state.handle_event(InputEvent::Paste("echo SELECT_ME\r".to_owned()));
         // Wait for the output line (exactly the marker), not the echoed
-        // command line (which contains it).
+        // command line (which contains it). trim() rather than trim_end():
+        // host termios differ on whether LF implies CR (bash restores ONLCR,
+        // dash does not), so on some platforms the marker lands mid-row.
         let printed = pump_runtime_until(&mut state, |state| {
             state.terminal_panes.get(&pane_id).is_some_and(|runtime| {
                 runtime
@@ -5091,10 +5093,14 @@ mod tests {
                     .grid()
                     .snapshot()
                     .iter()
-                    .any(|line| line.trim_end() == "SELECT_ME")
+                    .any(|line| line.trim() == "SELECT_ME")
             })
         });
-        assert!(printed, "marker output never reached the grid");
+        assert!(
+            printed,
+            "marker output never reached the grid; rows:\n{}",
+            grid_text(&state, &pane_id)
+        );
         state.build_scene(POINTER_FRAME);
 
         // Locate the echoed marker in the visible grid: pane-1 inner rect
@@ -5110,7 +5116,7 @@ mod tests {
         let (grid_row, line) = snapshot
             .iter()
             .enumerate()
-            .find(|(_, line)| line.trim_end() == "SELECT_ME")
+            .find(|(_, line)| line.trim() == "SELECT_ME")
             .expect("marker row visible");
         assert_eq!(
             state
