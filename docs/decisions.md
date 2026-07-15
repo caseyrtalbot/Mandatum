@@ -792,3 +792,133 @@ Verification: the distribution procedure in `docs/verification.md`, the full
 merge gate, a disposable-root source-install smoke proving both executable
 names, release-workflow archive-content checks, and an unauthenticated
 latest-release installer smoke after publishing.
+
+## Accepted: The Public Executable Has A Non-Interactive CLI Contract
+
+Status: accepted (2026-07-14)
+
+Decision: `mandatum --help`/`-h` and `mandatum --version`/`-V` print to stdout
+and exit zero without entering terminal mode. Unknown or excess arguments
+print a concise error to stderr and exit 2. No arguments retain the current
+workspace launch behavior.
+
+Context: the released executable previously treated every invocation as a TUI
+launch, so ordinary package-manager, shell-discovery, and automation probes
+could enter raw mode instead of returning information.
+
+Rationale: a public developer tool needs a predictable non-interactive edge
+before a larger automation API exists.
+
+Consequences: argument parsing stays deliberately small; adding project or
+recipe automation requires a separate command-surface decision rather than
+silently overloading TUI behavior.
+
+Verification: `crates/app/tests/distribution.rs` executes all four information
+flags plus unknown and excess argument cases against the built public binary.
+
+## Accepted: New Session Is Not A Project Chooser
+
+Status: accepted (2026-07-14)
+
+Decision: the former Open project command is exposed as New session. It
+creates and focuses a fresh session inside the active project and never
+duplicates that project. The old `open-project` config name resolves to New
+session as a compatibility alias; `new-session` is canonical. Because pane ids
+repeat across sessions, every active-session switch retires all live terminal,
+task, and agent registries before reconciling the destination session.
+
+Context: the previous command dispatched the current project name and path
+back into core, which appended a duplicate project while presenting a chooser
+that did not exist.
+
+Rationale: command labels are product truth. A real project chooser needs an
+explicit path-selection and runtime-reconciliation design; session creation is
+already useful and accurately describes the shipped behavior.
+
+Consequences: user bindings do not break, saved workspaces avoid duplicate
+projects, a same-id pane never inherits another session's process/parser/actor,
+and project selection remains honestly listed as unbuilt.
+
+Verification: core proves project reuse and fresh session creation; command
+routing proves the canonical name and compatibility alias; a live-PTY L3 test
+proves New session and session-map activation each replace same-id runtime
+tokens while keeping only one active shell.
+
+## Accepted: Reload Resolves A Complete Effective Runtime Snapshot
+
+Status: accepted (2026-07-14)
+
+Decision: startup and Reload config share one resolution function for shell,
+task command, agent connector, and model. Every reload replaces all four
+effective settings, applying explicit values or product defaults.
+
+Context: optional fields were previously assigned only when the new parsed
+value was `Some`. Deleting an override or making it invalid could therefore
+leave the prior value active even while the file and warning said otherwise.
+
+Rationale: a reload is a snapshot transition, not a patch over invisible
+history. One resolution seam prevents startup and reload semantics from
+drifting.
+
+Consequences: correcting or removing config takes effect immediately for
+future launches; existing live runtimes are not silently restarted.
+
+Verification: the config reload test exercises valid overrides followed by
+deleted/invalid values and asserts the effective defaults and warnings.
+
+## Accepted: Frontend Input Failure Is A Fatal, Restorative Exit
+
+Status: accepted (2026-07-14)
+
+Decision: the input reader reports poll/read/thread failures to the main loop.
+The app stops live terminal, task, and agent runtimes, stops the reader,
+restores the host terminal, and returns the original input error. A secondary
+restore error never hides the primary failure.
+
+Context: the reader previously exited silently. The heartbeat kept drawing
+forever with no possible keyboard input, leaving the user trapped in the
+alternate screen while child runtimes remained active.
+
+Rationale: losing the only input channel makes the interactive session
+inoperable. Exiting visibly and restoring the shell is the only honest state.
+
+Consequences: transient frontend input failure ends the workstation session;
+durable intent remains available for the next launch, while live work is not
+left orphaned.
+
+Verification: deterministic unit tests cover poll, read, stopped, and
+disconnected outcomes. A lifecycle-coordinator test proves runtime shutdown,
+reader stop, then terminal restore ordering and proves a secondary restore
+error cannot replace the primary input failure.
+
+## Accepted: Failed Task Evidence Becomes A Bounded Agent Mandate
+
+Status: accepted (2026-07-14)
+
+Decision: Investigate task failure with agent creates a new durable agent pane
+from the focused task's command, resolved cwd, known failure status, and at
+most the last 24 nonblank output lines capped at 240 characters each. The
+workflow caps command/cwd/failure fields too, serializes all facts as JSON,
+prefixes every physical evidence line, and marks the entire block as untrusted
+task evidence, not instructions. The app launches it only through the
+configured connector and normal approval gate.
+
+Context: Mandatum could show, rerun, stop, and search a failure but could not
+turn that evidence into the next supervised action. Keeping this assembly in
+app state would also leave `mandatum-workflows` as a shallow conversion crate.
+
+Rationale: failure-to-investigation is a high-leverage developer workflow.
+The workflow Module owns the cross-actor handoff policy while the app retains
+runtime facts and launch authority; that Interface preserves L2/L3 and makes
+prompt-injection boundaries explicit.
+
+Consequences: the handoff is discoverable only for a typed non-success process
+exit or a launch/rerun failure. Parser, reader, resize, and wait diagnostics do
+not claim a still-running child failed. Save and restore keep the mandate but
+fold status to unknown and never replay the agent. Named recipe catalogs and
+richer failure classification remain future work.
+
+Verification: workflow tests prove bounds, the no-output case, and that
+newlines/framing markers cannot escape the prefixed JSON evidence block;
+palette and transient-error tests prove eligibility; the end-to-end app test
+proves task failure, mandate content, connector approval, and honest restore.

@@ -112,7 +112,8 @@ The terminal app runtime:
   runtime registries (generation + token event stamping)
 - `process_events.rs`: PTY reader threads and flow-credit backpressure
 - `persistence.rs`: workspace file persistence coordinator
-- `config.rs`: config file loading/validation; `keymap.rs`: remappable keymap
+- `config.rs`: config loading/validation and effective runtime-setting
+  resolution; `keymap.rs`: remappable keymap
 - `palette.rs`: fuzzy command palette model
 - `scene_builder.rs`: builds the per-frame `WorkspaceScene` from app state
 - `attention.rs`: header attention strip aggregation
@@ -122,13 +123,15 @@ The terminal app runtime:
   OSC 52
 - `tests/frontend_parity.rs`: cross-frontend scene parity;
   `tests/terminal_smoke.rs`: live PTY smoke;
-  `tests/distribution.rs`: public executable-name contract
+  `tests/distribution.rs`: public executable and non-interactive CLI contract
 
 ### `crates/workflows`
 
-Durable workflow intent helpers only: `TaskRecipe` and `AgentThreadSpec`
-shape pane intent for `mandatum-core`. No launching, no history (see
-docs/workflows.md for what remains unbuilt here).
+Durable workflow intent and cross-actor handoff policy: `TaskRecipe` and
+`AgentThreadSpec` shape pane intent for `mandatum-core`;
+`TaskFailureHandoff` bounds, JSON-escapes, prefixes, and labels every
+failed-task fact before creating an agent mandate. No runtime launching, no
+history (see docs/workflows.md for what remains unbuilt here).
 
 ## Spikes And Examples
 

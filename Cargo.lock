@@ -316,6 +316,7 @@ dependencies = [
  "mandatum-renderer",
  "mandatum-scene",
  "mandatum-terminal-vt",
+ "mandatum-workflows",
  "ratatui",
  "serde",
  "serde_json",
@@ -372,6 +373,7 @@ name = "mandatum-workflows"
 version = "0.1.0"
 dependencies = [
  "mandatum-core",
+ "serde_json",
 ]
 
 [[package]]

@@ -162,11 +162,14 @@ not own product behavior.
 
 ### `workflows`
 
-Owns developer-workflow definitions. Built today: `TaskRecipe` and
-`AgentThreadSpec`, which shape durable pane intent for `mandatum-core`.
-Not yet built: build/test/dev-server recipe catalogs, task history
-metadata, agent result summaries, failure classification, command history
-(see docs/workflows.md).
+Owns developer-workflow definitions and cross-actor handoff policy. Built
+today: `TaskRecipe`, `AgentThreadSpec`, and `TaskFailureHandoff`, which shape
+durable pane intent for `mandatum-core` and turn bounded, explicitly untrusted
+task-failure evidence into an agent mandate. Evidence is JSON-escaped and each
+physical line is prefixed inside an unforgeable frame. It launches no runtime.
+Not yet built: build/test/dev-server recipe catalogs, task history metadata,
+agent result summaries, richer failure classification, command history (see
+docs/workflows.md).
 
 Workflow modules request core/runtime actions instead of mutating layout or
 process state directly.

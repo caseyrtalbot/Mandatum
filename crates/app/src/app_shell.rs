@@ -5,7 +5,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::Sender,
+        mpsc::{self, Receiver, Sender, TryRecvError},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -25,7 +25,10 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use crate::{
     app_state::AppState,
-    config::{load_config, project_config_file, user_config_file},
+    config::{
+        AgentConnectorKind, default_task_command, effective_runtime_settings, load_config,
+        project_config_file, user_config_file,
+    },
     events::AppEvent,
     frontend::translate_event,
     keymap::Keymap,
@@ -52,22 +55,53 @@ pub fn run_with_config(config: AppConfig) -> Result<(), AppError> {
     app.handle_terminal_resize(size.width, size.height);
 
     let input_thread = InputThread::spawn(app.event_sender());
-    let result = event_loop(&mut terminal, &mut app);
-    // Stop the input thread before restoring the host terminal so it cannot
-    // consume keystrokes that belong to the parent shell after exit.
-    input_thread.stop_and_join();
-    terminal.restore()?;
-    result
+    let result = event_loop(&mut terminal, &mut app, &input_thread);
+    finalize_run(
+        result,
+        || app.shutdown(),
+        || input_thread.stop_and_join(),
+        || terminal.restore(),
+    )
+}
+
+/// Complete the terminal lifecycle in one testable ordering seam. The normal
+/// quit path already shut runtimes down inside `event_loop`; an early error did
+/// not, so it must close live work first. The reader always stops before host
+/// restoration, and a restoration failure never hides the primary error.
+fn finalize_run(
+    result: Result<(), AppError>,
+    shutdown_runtimes: impl FnOnce(),
+    stop_input: impl FnOnce(),
+    restore_terminal: impl FnOnce() -> io::Result<()>,
+) -> Result<(), AppError> {
+    if result.is_err() {
+        shutdown_runtimes();
+    }
+    stop_input();
+    let restore_result = restore_terminal().map_err(AppError::Io);
+
+    match result {
+        Err(error) => {
+            let _ = restore_result;
+            Err(error)
+        }
+        Ok(()) => restore_result,
+    }
 }
 
 /// The event-driven main loop: draw, then block until input or runtime
 /// activity arrives (or the heartbeat elapses). No fixed-interval polling —
 /// a keystroke wakes the loop the moment the input thread forwards it.
-fn event_loop(terminal: &mut TerminalGuard, app: &mut AppState) -> Result<(), AppError> {
+fn event_loop(
+    terminal: &mut TerminalGuard,
+    app: &mut AppState,
+    input_thread: &InputThread,
+) -> Result<(), AppError> {
     let mut last_child_poll = Instant::now();
     app.tick_runtime();
 
     while !app.should_quit() {
+        input_thread.propagate_outcome()?;
         draw(terminal, app)?;
         let last_draw = Instant::now();
 
@@ -98,6 +132,7 @@ fn event_loop(terminal: &mut TerminalGuard, app: &mut AppState) -> Result<(), Ap
             app.poll_child_exits();
             last_child_poll = Instant::now();
         }
+        input_thread.propagate_outcome()?;
     }
 
     app.shutdown();
@@ -111,14 +146,28 @@ fn event_loop(terminal: &mut TerminalGuard, app: &mut AppState) -> Result<(), Ap
 struct InputThread {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    outcome_rx: Receiver<InputThreadOutcome>,
+}
+
+#[derive(Debug)]
+enum InputThreadOutcome {
+    Stopped,
+    Failed {
+        operation: &'static str,
+        source: io::Error,
+    },
 }
 
 impl InputThread {
     fn spawn(tx: Sender<AppEvent>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
+        let (outcome_tx, outcome_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) {
+            let outcome = loop {
+                if stop_flag.load(Ordering::Relaxed) {
+                    break InputThreadOutcome::Stopped;
+                }
                 match event::poll(INPUT_STOP_CHECK) {
                     Ok(false) => {}
                     Ok(true) => match event::read() {
@@ -126,19 +175,35 @@ impl InputThread {
                             if let Some(input) = translate_event(raw)
                                 && tx.send(AppEvent::Input(input)).is_err()
                             {
-                                break;
+                                break InputThreadOutcome::Stopped;
                             }
                         }
-                        Err(_) => break,
+                        Err(source) => {
+                            break InputThreadOutcome::Failed {
+                                operation: "read",
+                                source,
+                            };
+                        }
                     },
-                    Err(_) => break,
+                    Err(source) => {
+                        break InputThreadOutcome::Failed {
+                            operation: "poll",
+                            source,
+                        };
+                    }
                 }
-            }
+            };
+            let _ = outcome_tx.send(outcome);
         });
         Self {
             stop,
             handle: Some(handle),
+            outcome_rx,
         }
+    }
+
+    fn propagate_outcome(&self) -> Result<(), AppError> {
+        propagate_input_thread_outcome(self.outcome_rx.try_recv())
     }
 
     fn stop_and_join(mut self) {
@@ -146,6 +211,24 @@ impl InputThread {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+fn propagate_input_thread_outcome(
+    outcome: Result<InputThreadOutcome, TryRecvError>,
+) -> Result<(), AppError> {
+    match outcome {
+        Ok(InputThreadOutcome::Stopped) | Err(TryRecvError::Empty) => Ok(()),
+        Ok(InputThreadOutcome::Failed { operation, source }) => {
+            Err(AppError::FrontendInput { operation, source })
+        }
+        Err(TryRecvError::Disconnected) => Err(AppError::FrontendInput {
+            operation: "thread",
+            source: io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "input reader stopped without reporting an outcome",
+            ),
+        }),
     }
 }
 
@@ -203,16 +286,6 @@ impl Default for AppConfig {
     }
 }
 
-/// Which agent connector backend the app launches sessions through.
-///
-/// `Claude` is the product default; tests wire `Fake` everywhere so no test
-/// touches a network or a live agent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AgentConnectorKind {
-    Fake,
-    Claude,
-}
-
 impl AppConfig {
     pub fn from_current_dir() -> io::Result<Self> {
         let project_path = std::env::current_dir()?;
@@ -221,15 +294,16 @@ impl AppConfig {
             user_config_file.as_deref(),
             &project_config_file(&project_path),
         );
+        let runtime = effective_runtime_settings(&loaded);
         Ok(Self {
             workspace_name: "Mandatum".to_owned(),
             workspace_file: default_workspace_file(&project_path),
             project_path,
-            shell_program: loaded.shell_program.unwrap_or_else(default_shell_program),
-            task_command: loaded.task_command.unwrap_or_else(default_task_command),
-            agent_connector: loaded.agent_connector.unwrap_or(AgentConnectorKind::Claude),
+            shell_program: runtime.shell_program,
+            task_command: runtime.task_command,
+            agent_connector: runtime.agent_connector,
             agent_objective: default_agent_objective(),
-            agent_model: loaded.agent_model.or_else(default_agent_model),
+            agent_model: runtime.agent_model,
             spawn_pty: true,
             restore_on_startup: true,
             keymap: loaded.keymap,
@@ -336,6 +410,10 @@ impl Drop for TerminalGuard {
 pub enum AppError {
     Io(io::Error),
     Command(CommandError),
+    FrontendInput {
+        operation: &'static str,
+        source: io::Error,
+    },
 }
 
 impl fmt::Display for AppError {
@@ -343,11 +421,21 @@ impl fmt::Display for AppError {
         match self {
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Command(error) => write!(formatter, "{error}"),
+            Self::FrontendInput { operation, source } => {
+                write!(formatter, "frontend input {operation} failed: {source}")
+            }
         }
     }
 }
 
-impl std::error::Error for AppError {}
+impl std::error::Error for AppError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) | Self::FrontendInput { source: error, .. } => Some(error),
+            Self::Command(error) => Some(error),
+        }
+    }
+}
 
 impl From<io::Error> for AppError {
     fn from(error: io::Error) -> Self {
@@ -380,23 +468,118 @@ fn write_clipboard_payload(payload: &[u8]) -> io::Result<()> {
     stdout.flush()
 }
 
-fn default_shell_program() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
-}
-
-fn default_task_command() -> String {
-    "cargo test".to_owned()
-}
-
 fn default_agent_objective() -> String {
     "summarize the state of this project and propose the next step".to_owned()
 }
 
-/// Model hint from `MANDATUM_AGENT_MODEL`, read once here so env access
-/// stays at the config boundary (mirrors `SHELL` for `shell_program`).
-fn default_agent_model() -> Option<String> {
-    std::env::var("MANDATUM_AGENT_MODEL")
-        .ok()
-        .map(|model| model.trim().to_owned())
-        .filter(|model| !model.is_empty())
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    #[test]
+    fn input_failure_shuts_runtimes_stops_reader_restores_and_keeps_primary_error() {
+        let order = RefCell::new(Vec::new());
+        let result = finalize_run(
+            Err(AppError::FrontendInput {
+                operation: "read",
+                source: io::Error::other("primary input failure"),
+            }),
+            || order.borrow_mut().push("shutdown runtimes"),
+            || order.borrow_mut().push("stop input"),
+            || {
+                order.borrow_mut().push("restore terminal");
+                Err(io::Error::other("secondary restore failure"))
+            },
+        );
+
+        assert_eq!(
+            *order.borrow(),
+            ["shutdown runtimes", "stop input", "restore terminal"]
+        );
+        assert!(matches!(
+            result,
+            Err(AppError::FrontendInput {
+                operation: "read",
+                source,
+            }) if source.to_string() == "primary input failure"
+        ));
+    }
+
+    #[test]
+    fn normal_completion_stops_input_then_reports_restore_failure() {
+        let order = RefCell::new(Vec::new());
+        let result = finalize_run(
+            Ok(()),
+            || order.borrow_mut().push("unexpected shutdown"),
+            || order.borrow_mut().push("stop input"),
+            || {
+                order.borrow_mut().push("restore terminal");
+                Err(io::Error::other("restore failure"))
+            },
+        );
+
+        assert_eq!(*order.borrow(), ["stop input", "restore terminal"]);
+        assert!(
+            matches!(result, Err(AppError::Io(source)) if source.to_string() == "restore failure")
+        );
+    }
+
+    #[test]
+    fn input_poll_failure_becomes_a_structured_app_error() {
+        let error = propagate_input_thread_outcome(Ok(InputThreadOutcome::Failed {
+            operation: "poll",
+            source: io::Error::other("poll broke"),
+        }))
+        .expect_err("a failed input poll must stop the app");
+
+        assert!(matches!(
+            error,
+            AppError::FrontendInput {
+                operation: "poll",
+                ..
+            }
+        ));
+        assert_eq!(error.to_string(), "frontend input poll failed: poll broke");
+    }
+
+    #[test]
+    fn input_read_failure_becomes_a_structured_app_error() {
+        let error = propagate_input_thread_outcome(Ok(InputThreadOutcome::Failed {
+            operation: "read",
+            source: io::Error::other("read broke"),
+        }))
+        .expect_err("a failed input read must stop the app");
+
+        assert!(matches!(
+            error,
+            AppError::FrontendInput {
+                operation: "read",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn normal_input_stop_and_a_running_reader_are_not_failures() {
+        propagate_input_thread_outcome(Ok(InputThreadOutcome::Stopped))
+            .expect("a requested stop is normal shutdown");
+        propagate_input_thread_outcome(Err(TryRecvError::Empty))
+            .expect("no outcome means the reader is still running");
+    }
+
+    #[test]
+    fn disappearing_input_reader_is_a_structured_failure() {
+        let error = propagate_input_thread_outcome(Err(TryRecvError::Disconnected))
+            .expect_err("an unexplained reader exit must stop the app");
+
+        assert!(matches!(
+            error,
+            AppError::FrontendInput {
+                operation: "thread",
+                ..
+            }
+        ));
+    }
 }

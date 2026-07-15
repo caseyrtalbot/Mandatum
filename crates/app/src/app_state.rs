@@ -16,7 +16,7 @@ use mandatum_commands::{
 };
 use mandatum_core::{
     ActionOutcome, AgentApprovalRecord, AgentPaneIntent, AgentStatus, CoreAction, LayoutNode,
-    PaneId, PaneKind, PersistenceRequest, SplitAxis, TaskPaneIntent, Workspace,
+    PaneId, PaneKind, PersistenceRequest, SessionId, SplitAxis, TaskPaneIntent, Workspace,
 };
 use mandatum_pty::{NativePtyError, PtySize};
 use mandatum_scene::{
@@ -31,15 +31,16 @@ use mandatum_scene::{
     },
 };
 use mandatum_terminal_vt::TerminalGrid;
+use mandatum_workflows::TaskFailureHandoff;
 
 use crate::{
     agent_runtime::{
         AgentPaneRuntime, AgentRuntimeEvent, AgentRuntimeRegistry, activate_agent_session,
         connector_for_kind,
     },
-    app_shell::{AgentConnectorKind, AppConfig},
+    app_shell::AppConfig,
     clipboard::osc52_sequence,
-    config::{load_config, project_config_file},
+    config::{AgentConnectorKind, effective_runtime_settings, load_config, project_config_file},
     copy_mode::CopyModeState,
     events::AppEvent,
     help::{HelpViewState, filter_help_rows, help_route, help_rows, welcome_lines},
@@ -59,7 +60,8 @@ use crate::{
         session_map_rows,
     },
     task_runtime::{
-        TaskPaneRuntime, TaskRuntimeRegistry, prepare_task_pane_runtime, task_status_label,
+        TaskInvestigationFailure, TaskPaneRuntime, TaskRuntimeRegistry, prepare_task_pane_runtime,
+        task_status_label,
     },
     terminal_runtime::{
         PendingTerminalPaneRuntime, TerminalRuntimeError, TerminalRuntimeRegistry,
@@ -288,10 +290,6 @@ impl AppState {
     }
 
     /// A task pane's current status text, live or retained.
-    pub(crate) fn task_status_text(&self, pane_id: &PaneId) -> Option<&str> {
-        self.task_view(pane_id).map(|(status, _)| status)
-    }
-
     /// The permanent status-strip hint naming the workspace's entry points,
     /// from the live keymap. A stranger's first breadcrumb: the palette
     /// chord, the right-click menu, and the help key are always written on
@@ -388,6 +386,7 @@ impl AppState {
                 .get(&focused_id)
                 .is_some_and(|task| task.runtime.exit_status.is_none())
                 || self.task_panes.pending_launches.contains(&focused_id),
+            focused_task_failed: self.task_failure_status(&focused_id).is_some(),
             focused_has_live_terminal: self.terminal_panes.get(&focused_id).is_some(),
             focused_is_floating,
             timeline_available: self.timeline.enabled(),
@@ -787,6 +786,8 @@ impl AppState {
             Ok(outcome) => {
                 if self.workspace.active_session().id() == &session_before {
                     self.record_pane_diff(&panes_before);
+                } else {
+                    self.retire_runtimes_for_session_switch(&session_before);
                 }
                 self.handle_command_outcome(command_id, outcome);
             }
@@ -899,23 +900,16 @@ impl AppState {
     fn reload_config(&mut self) {
         let project_file = project_config_file(&self.command_context.project_path);
         let loaded = load_config(self.user_config_file.as_deref(), &project_file);
+        let runtime = effective_runtime_settings(&loaded);
         self.keymap = loaded.keymap;
         self.theme = loaded.theme;
         self.reduced_motion = loaded.reduced_motion;
         self.debug_status = loaded.debug_status;
-        if let Some(shell_program) = loaded.shell_program {
-            self.shell_program = shell_program;
-        }
-        if let Some(task_command) = loaded.task_command {
-            self.task_command = task_command;
-        }
-        if let Some(kind) = loaded.agent_connector {
-            self.agent_connector = connector_for_kind(kind);
-            self.agent_connector_label = connector_kind_label(kind);
-        }
-        if let Some(model) = loaded.agent_model {
-            self.agent_model = Some(model);
-        }
+        self.shell_program = runtime.shell_program;
+        self.task_command = runtime.task_command;
+        self.agent_connector = connector_for_kind(runtime.agent_connector);
+        self.agent_connector_label = connector_kind_label(runtime.agent_connector);
+        self.agent_model = runtime.agent_model;
         self.timeline.record(TimelineEventKind::ConfigReloaded {
             warnings: loaded.warnings.len(),
         });
@@ -932,6 +926,9 @@ impl AppState {
             RuntimeTaskCommand::RunConfiguredTask => self.run_configured_task(),
             RuntimeTaskCommand::RerunFocusedTask => self.rerun_focused_task(),
             RuntimeTaskCommand::StopFocusedTask => self.stop_focused_task(),
+            RuntimeTaskCommand::InvestigateFocusedTaskFailure => {
+                self.investigate_focused_task_failure()
+            }
         }
     }
 
@@ -1263,6 +1260,10 @@ impl AppState {
             return;
         }
 
+        // A rerun is a new attempt. The prior exit remains in the timeline,
+        // but it no longer describes the focused task's current attempt.
+        self.task_panes.clear_failure(&pane_id);
+
         let Some(size) = self.visible_task_size(&pane_id) else {
             if let Some(mut runtime) = self.task_panes.remove(&pane_id) {
                 runtime.shutdown();
@@ -1279,12 +1280,17 @@ impl AppState {
 
         self.task_panes.pending_launches.remove(&pane_id);
         if let Err(source) = self.spawn_task_pane(pane_id.clone(), size) {
+            self.task_panes.record_failure(
+                pane_id.clone(),
+                TaskInvestigationFailure::Rerun(source.to_string()),
+            );
             self.task_panes
                 .statuses
                 .insert(pane_id.clone(), format!("task rerun failed: {source}"));
             self.status = format!("task rerun failed: {source}");
         } else {
             self.task_panes.statuses.remove(&pane_id);
+            self.task_panes.clear_failure(&pane_id);
             self.status = format!("task {pane_id} rerunning: {}", intent.command);
         }
         self.mark_redraw();
@@ -1338,6 +1344,93 @@ impl AppState {
         self.mark_redraw();
     }
 
+    /// Turn the focused task's known failure into a bounded, durable agent
+    /// mandate, then launch it through the same connector and approval seam as
+    /// every other agent. Runtime handles and parser state never cross into the
+    /// workflow module.
+    fn investigate_focused_task_failure(&mut self) {
+        let Some((task_pane_id, intent)) = self.focused_task_intent() else {
+            self.status = "focused pane is not a task pane".to_owned();
+            return;
+        };
+        let Some(failure) = self.task_failure_status(&task_pane_id) else {
+            self.status = "focused task has no known failure".to_owned();
+            return;
+        };
+        let Some((task_title, cwd)) =
+            self.workspace
+                .active_session()
+                .pane(&task_pane_id)
+                .map(|pane| {
+                    (
+                        pane.title().to_owned(),
+                        crate::terminal_runtime::resolve_pane_cwd(
+                            &self.workspace,
+                            pane,
+                            intent.cwd.as_ref(),
+                        ),
+                    )
+                })
+        else {
+            self.status = format!("task pane {task_pane_id} was not found");
+            return;
+        };
+        let handoff = TaskFailureHandoff::new(
+            intent.command,
+            cwd.clone(),
+            failure,
+            self.task_output_lines(&task_pane_id),
+        );
+        let PaneKind::Agent { intent } = handoff.agent_thread_spec().pane_kind() else {
+            unreachable!("a task failure handoff always creates agent intent");
+        };
+
+        match self.workspace.apply_action(CoreAction::CreateAgentPane {
+            title: format!("investigate {task_title}"),
+            intent,
+            cwd: Some(cwd),
+        }) {
+            Ok(ActionOutcome::Mutated { focused_pane }) => {
+                self.timeline.record(TimelineEventKind::PaneCreated {
+                    pane: focused_pane.to_string(),
+                    kind: "agent".to_owned(),
+                });
+                self.status = format!(
+                    "agent pane {focused_pane} created to investigate {task_title} ({task_pane_id})"
+                );
+                self.start_focused_agent();
+            }
+            Ok(ActionOutcome::PersistenceRequested(_)) => {
+                self.status = "failure investigation unexpectedly requested persistence".to_owned();
+            }
+            Err(error) => {
+                self.status = format!("failure investigation pane creation failed: {error}");
+            }
+        }
+        self.mark_redraw();
+    }
+
+    pub(crate) fn task_failure_status(&self, pane_id: &PaneId) -> Option<String> {
+        self.task_panes.failure_label(pane_id)
+    }
+
+    fn task_output_lines(&self, pane_id: &PaneId) -> Vec<String> {
+        let Some(task) = self.task_panes.get(pane_id) else {
+            return Vec::new();
+        };
+        let grid = task.runtime.parser.grid();
+        let scrollback = grid.scrollback_len();
+        (0..grid.total_rows())
+            .filter_map(|row| {
+                if row < scrollback {
+                    grid.scrollback_row_text(row)
+                } else {
+                    grid.row_text((row - scrollback) as u16)
+                }
+            })
+            .collect()
+    }
+
     // --- Agent runtime ---------------------------------------------------------
 
     fn focused_agent_pane_id(&self) -> Option<PaneId> {
@@ -1372,7 +1465,10 @@ impl AppState {
                     pane: focused_pane.to_string(),
                     kind: "agent".to_owned(),
                 });
-                self.status = format!("agent pane {focused_pane} created: {objective}");
+                self.status = format!(
+                    "agent pane {focused_pane} created: {}",
+                    objective_status_summary(&objective)
+                );
             }
             Ok(ActionOutcome::PersistenceRequested(_)) => {
                 self.status = "agent pane creation unexpectedly requested persistence".to_owned();
@@ -1463,7 +1559,10 @@ impl AppState {
                     pane: pane_id.to_string(),
                     status: "running".to_owned(),
                 });
-                self.status = format!("agent {pane_id} started: {objective}");
+                self.status = format!(
+                    "agent {pane_id} started: {}",
+                    objective_status_summary(&objective)
+                );
             }
             Err(error) if self.agent_panes.get(&pane_id).is_some() => {
                 // A failed relaunch never touches the previous session: it
@@ -1788,6 +1887,35 @@ impl AppState {
         }
     }
 
+    /// Runtime registries are intentionally active-session-only and keyed by
+    /// pane id. Pane ids repeat across sessions (`pane-1`, ...), so every
+    /// active-session switch must retire the old registry contents before
+    /// ordinary reconciliation can attach runtimes to the new session. This
+    /// is the session boundary for L3; a same-id pane never inherits another
+    /// session's process, parser, task state, or agent actor.
+    fn retire_runtimes_for_session_switch(&mut self, previous_session_id: &SessionId) {
+        let live_agent_ids = self.agent_panes.keys().cloned().collect::<Vec<_>>();
+        if let Some(previous_session) = self
+            .workspace
+            .sessions_mut()
+            .find(|session| session.id() == previous_session_id)
+        {
+            for pane_id in &live_agent_ids {
+                if let Some(intent) = previous_session.agent_intent_mut(pane_id) {
+                    intent.detach_live_session();
+                }
+            }
+        }
+
+        self.shutdown_agent_panes();
+        self.shutdown_task_panes();
+        self.shutdown_terminal_panes();
+        self.copy_mode = None;
+        self.pointer_view = None;
+        self.context_menu = None;
+        self.objective_prompt = None;
+    }
+
     /// The live agent runtime view for a pane, if a session is attached.
     pub(crate) fn agent_runtime_view(&self, pane_id: &PaneId) -> Option<&AgentPaneRuntime> {
         self.agent_panes.get(pane_id)
@@ -1805,6 +1933,25 @@ impl AppState {
         self.task_panes
             .statuses
             .insert(pane_id.clone(), status.to_owned());
+        let exit = status
+            .strip_prefix("failed: exit ")
+            .and_then(|code| code.parse().ok())
+            .map(|code| mandatum_pty::ChildExitStatus::Exited { code })
+            .or_else(|| {
+                status
+                    .strip_prefix("failed: signal ")
+                    .and_then(|signal| signal.parse().ok())
+                    .map(|signal| mandatum_pty::ChildExitStatus::Signaled { signal })
+            })
+            .or_else(|| {
+                (status == "failed: unknown exit").then_some(mandatum_pty::ChildExitStatus::Unknown)
+            });
+        if let Some(exit) = exit {
+            self.task_panes
+                .record_failure(pane_id.clone(), TaskInvestigationFailure::ProcessExit(exit));
+        } else {
+            self.task_panes.clear_failure(pane_id);
+        }
     }
 
     fn launch_task_pane(
@@ -1833,6 +1980,10 @@ impl AppState {
 
         if let Err(source) = self.spawn_task_pane(pane_id.clone(), size) {
             self.task_panes.pending_launches.remove(&pane_id);
+            self.task_panes.record_failure(
+                pane_id.clone(),
+                TaskInvestigationFailure::Launch(source.to_string()),
+            );
             self.task_panes
                 .statuses
                 .insert(pane_id.clone(), format!("task launch failed: {source}"));
@@ -1843,6 +1994,7 @@ impl AppState {
         }
         self.task_panes.pending_launches.remove(&pane_id);
         self.task_panes.statuses.remove(&pane_id);
+        self.task_panes.clear_failure(&pane_id);
         self.status = format!("task {pane_id} running: {}", intent.command);
         Ok(())
     }
@@ -1951,6 +2103,10 @@ impl AppState {
         for (pane_id, size) in pending_visible {
             if let Err(source) = self.spawn_task_pane(pane_id.clone(), size) {
                 self.task_panes.pending_launches.remove(&pane_id);
+                self.task_panes.record_failure(
+                    pane_id.clone(),
+                    TaskInvestigationFailure::Launch(source.to_string()),
+                );
                 self.task_panes
                     .statuses
                     .insert(pane_id.clone(), format!("task launch failed: {source}"));
@@ -1961,6 +2117,7 @@ impl AppState {
             }
             self.task_panes.pending_launches.remove(&pane_id);
             self.task_panes.statuses.remove(&pane_id);
+            self.task_panes.clear_failure(&pane_id);
             self.status = format!("task {pane_id} running");
         }
 
@@ -2273,6 +2430,7 @@ impl AppState {
             }
         }
 
+        let mut task_failure_updates = Vec::new();
         for (pane_id, task) in self.task_panes.iter_mut() {
             if task.runtime.exit_status.is_some() {
                 continue;
@@ -2283,6 +2441,9 @@ impl AppState {
                     let status = exit.status();
                     task.runtime.exit_status = Some(status);
                     task.status = task_status_label(status);
+                    let failure = (status != mandatum_pty::ChildExitStatus::Exited { code: 0 })
+                        .then_some(TaskInvestigationFailure::ProcessExit(status));
+                    task_failure_updates.push((pane_id.clone(), failure));
                     // Timeline fact: which command produced this exit.
                     let command = self
                         .workspace
@@ -2310,6 +2471,13 @@ impl AppState {
                     task.status = format!("task wait failed: {error}");
                     self.status = format!("task wait failed for {pane_id}: {error}");
                 }
+            }
+        }
+        for (pane_id, failure) in task_failure_updates {
+            if let Some(failure) = failure {
+                self.task_panes.record_failure(pane_id, failure);
+            } else {
+                self.task_panes.clear_failure(&pane_id);
             }
         }
     }
@@ -3100,6 +3268,9 @@ impl AppState {
             }
             PaneKind::Task { .. } => {
                 commands.extend([CommandId::RerunTask, CommandId::StopTask]);
+                if self.task_failure_status(pane_id).is_some() {
+                    commands.push(CommandId::InvestigateTaskFailure);
+                }
             }
             PaneKind::Agent { .. } => {
                 let live = self.agent_panes.get(pane_id);
@@ -3888,12 +4059,14 @@ impl AppState {
         };
 
         if self.workspace.active_session().id() != &session_id {
+            let previous_session_id = self.workspace.active_session().id().clone();
             if let Err(error) = self.workspace.apply_action(CoreAction::ActivateSession {
                 session_id: session_id.clone(),
             }) {
                 self.status = format!("session switch failed: {error}");
                 return;
             }
+            self.retire_runtimes_for_session_switch(&previous_session_id);
             self.command_context = command_context_for_workspace(&self.workspace);
         }
         if let Some(pane_id) = &pane_id
@@ -4339,6 +4512,16 @@ fn status_for_outcome(command_id: CommandId, outcome: ActionOutcome) -> String {
             format!("unhandled persistence request: {request:?}")
         }
     }
+}
+
+fn objective_status_summary(objective: &str) -> String {
+    const MAX_CHARS: usize = 96;
+    let first_line = objective.lines().next().unwrap_or_default().trim();
+    let mut summary: String = first_line.chars().take(MAX_CHARS).collect();
+    if first_line.chars().count() > MAX_CHARS {
+        summary.push('…');
+    }
+    summary
 }
 
 fn command_context_for_workspace(workspace: &Workspace) -> CommandContext {

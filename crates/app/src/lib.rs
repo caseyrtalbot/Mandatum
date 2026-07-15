@@ -27,11 +27,11 @@ mod terminal_runtime;
 mod timeline;
 mod timeline_view;
 
-pub use app_shell::{
-    AgentConnectorKind, AppConfig, AppError, default_workspace_file, run, run_with_config,
-};
+pub use app_shell::{AppConfig, AppError, default_workspace_file, run, run_with_config};
 pub use app_state::AppState;
-pub use config::{LoadedConfig, load_config, project_config_file, user_config_file};
+pub use config::{
+    AgentConnectorKind, LoadedConfig, load_config, project_config_file, user_config_file,
+};
 pub use input::{RuntimeInput, key_to_input, key_to_input_with_keymap, key_to_terminal_input};
 pub use keymap::{ChordAction, Keymap, format_chord, parse_chord};
 pub use scene_builder::build_workspace_scene;

@@ -14,6 +14,27 @@ pub(crate) struct TaskRuntimeRegistry {
     runtimes: BTreeMap<PaneId, TaskPaneRuntime>,
     pub(crate) pending_launches: BTreeSet<PaneId>,
     pub(crate) statuses: BTreeMap<PaneId, String>,
+    failures: BTreeMap<PaneId, TaskInvestigationFailure>,
+}
+
+/// Failures that are honest inputs to a new investigation. Transient parser,
+/// reader, resize, and wait errors remain visible runtime diagnostics but do
+/// not claim the child task itself has failed while it may still be running.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TaskInvestigationFailure {
+    ProcessExit(ChildExitStatus),
+    Launch(String),
+    Rerun(String),
+}
+
+impl TaskInvestigationFailure {
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::ProcessExit(status) => task_status_label(*status),
+            Self::Launch(problem) => format!("task launch failed: {problem}"),
+            Self::Rerun(problem) => format!("task rerun failed: {problem}"),
+        }
+    }
 }
 
 impl TaskRuntimeRegistry {
@@ -64,6 +85,7 @@ impl TaskRuntimeRegistry {
         self.runtimes.clear();
         self.pending_launches.clear();
         self.statuses.clear();
+        self.failures.clear();
     }
 
     pub(crate) fn retain_pane_ids(&mut self, pane_ids: &BTreeSet<PaneId>) {
@@ -71,6 +93,22 @@ impl TaskRuntimeRegistry {
             .retain(|pane_id| pane_ids.contains(pane_id));
         self.statuses
             .retain(|pane_id, _| pane_ids.contains(pane_id));
+        self.failures
+            .retain(|pane_id, _| pane_ids.contains(pane_id));
+    }
+
+    pub(crate) fn record_failure(&mut self, pane_id: PaneId, failure: TaskInvestigationFailure) {
+        self.failures.insert(pane_id, failure);
+    }
+
+    pub(crate) fn clear_failure(&mut self, pane_id: &PaneId) {
+        self.failures.remove(pane_id);
+    }
+
+    pub(crate) fn failure_label(&self, pane_id: &PaneId) -> Option<String> {
+        self.failures
+            .get(pane_id)
+            .map(TaskInvestigationFailure::label)
     }
 }
 

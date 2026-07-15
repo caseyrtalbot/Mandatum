@@ -128,8 +128,33 @@ impl Workspace {
         session_id
     }
 
+    /// Create and activate a fresh session for the active project without
+    /// duplicating the project record or pretending to choose another path.
+    pub fn new_session(&mut self) -> SessionId {
+        let project = self
+            .projects
+            .get(&self.active_project_id)
+            .expect("active project should be validated by workspace constructors")
+            .clone();
+        let session_id = self.next_session_id();
+        let session = Session::new(
+            session_id.clone(),
+            project.id().clone(),
+            format!("{} {}", project.name(), session_id),
+            project.path().to_path_buf(),
+        );
+
+        self.sessions.insert(session_id.clone(), session);
+        self.active_session_id = session_id.clone();
+        session_id
+    }
+
     pub fn apply_action(&mut self, action: CoreAction) -> Result<ActionOutcome, WorkspaceError> {
         match action {
+            CoreAction::NewSession => {
+                self.new_session();
+                Ok(self.mutated_outcome())
+            }
             CoreAction::OpenProject { name, path } => {
                 self.open_project(name, path);
                 Ok(self.mutated_outcome())

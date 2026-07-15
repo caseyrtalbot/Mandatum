@@ -57,6 +57,7 @@ pub(crate) struct PaletteWorkspaceView {
     pub(crate) agent_panes_exist: bool,
     pub(crate) any_agent_waiting: bool,
     pub(crate) focused_task_running: bool,
+    pub(crate) focused_task_failed: bool,
     pub(crate) focused_has_live_terminal: bool,
     pub(crate) focused_is_floating: bool,
     /// Whether a durable timeline log exists for this workspace.
@@ -201,6 +202,17 @@ pub(crate) fn availability(
                 Ok(())
             }
         }
+        CommandId::InvestigateTaskFailure => {
+            if !on_task {
+                Err("focused pane is not a task pane".to_owned())
+            } else if !view.focused_task_failed {
+                Err("focused task has no known failure".to_owned())
+            } else if !view.agent_connector_configured {
+                Err("no agent connector is configured".to_owned())
+            } else {
+                Ok(())
+            }
+        }
         CommandId::RestartPane if on_task => {
             Err("task panes rerun instead (use Rerun task)".to_owned())
         }
@@ -326,7 +338,9 @@ fn previews_focused_pane(command_id: CommandId, focused: PaneSceneKind) -> bool 
         | CommandId::MoveFloatDown
         | CommandId::StackPanes
         | CommandId::EnterCopyMode => true,
-        CommandId::RerunTask | CommandId::StopTask => focused == PaneSceneKind::Task,
+        CommandId::RerunTask | CommandId::StopTask | CommandId::InvestigateTaskFailure => {
+            focused == PaneSceneKind::Task
+        }
         CommandId::StartAgent
         | CommandId::StopAgent
         | CommandId::ApproveAgentAction
@@ -365,6 +379,7 @@ mod tests {
             agent_panes_exist: false,
             any_agent_waiting: false,
             focused_task_running: false,
+            focused_task_failed: false,
             focused_has_live_terminal: true,
             focused_is_floating: false,
             timeline_available: true,
@@ -382,6 +397,31 @@ mod tests {
             agent_panes_exist: true,
             ..terminal_view()
         }
+    }
+
+    #[test]
+    fn investigate_task_failure_is_discoverable_and_gated_on_a_known_failure() {
+        let keymap = Keymap::default();
+        let task_view = PaletteWorkspaceView {
+            focused_kind: PaneSceneKind::Task,
+            focused_pane_label: "checks (pane-2)".to_owned(),
+            ..terminal_view()
+        };
+
+        let rows = palette_rows("investigate", 0, &task_view, &keymap);
+        let investigate = row(&rows, CommandId::InvestigateTaskFailure);
+        assert!(!investigate.enabled);
+        assert_eq!(
+            investigate.entry.detail,
+            "focused task has no known failure"
+        );
+
+        let failed = PaletteWorkspaceView {
+            focused_task_failed: true,
+            ..task_view
+        };
+        let rows = palette_rows("investigate", 0, &failed, &keymap);
+        assert!(row(&rows, CommandId::InvestigateTaskFailure).enabled);
     }
 
     fn row(rows: &[PaletteRow], command_id: CommandId) -> &PaletteRow {
@@ -495,7 +535,7 @@ mod tests {
             row(&rows, CommandId::SplitRight).entry.key_hint.as_deref(),
             Some("v")
         );
-        assert_eq!(row(&rows, CommandId::OpenProject).entry.key_hint, None);
+        assert_eq!(row(&rows, CommandId::NewSession).entry.key_hint, None);
 
         // A rebind and a global chord both show up.
         keymap.palette.rebind(CommandId::SplitRight, 'u');

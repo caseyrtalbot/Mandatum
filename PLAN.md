@@ -33,8 +33,46 @@ ships beside the app), a latest-release installer, and cross-renderer-safe
 README captures. The Cargo package remains `mandatum-app`; package selection
 is an internal build concern, while `mandatum` is the user-facing command.
 
+The post-charter developer-trust pass made the existing workstation safer and
+more useful without pretending the wider vision is finished:
+
+- `mandatum --help` and `mandatum --version` are non-interactive public
+  contracts; unknown arguments fail clearly instead of entering the TUI.
+- config reload now resolves a complete effective snapshot, so deleting or
+  invalidating a shell, task, connector, or model override restores the
+  product default instead of retaining stale runtime behavior.
+- frontend input-reader failures stop all live runtimes, restore the host
+  terminal, and return the original error instead of trapping the user in an
+  unwakeable alternate screen.
+- New session creates a fresh session in the current project without
+  duplicating that project or reusing a same-id pane's live runtime; the
+  historical `open-project` config name remains a compatibility alias, not a
+  fictional project chooser.
+- a failed task can become a new agent mandate carrying its command, cwd,
+  failure status, and a bounded output tail. Every fact is JSON-escaped,
+  line-prefixed, and explicitly labeled as untrusted evidence. It launches
+  through the existing connector and approval gate and restores only as
+  durable intent.
+
 ## Next horizon
 
+- **Named task and dev-server recipes.** Replace the one configured command
+  with a project-local catalog for build, test, lint, and server recipes. Keep
+  recipe intent in `mandatum-workflows`; add duration, cwd, start time, port,
+  and health facts without moving runtime handles into durable state.
+- **Recovery cockpit.** On restore, itemize what was recreated, what was
+  intentionally detached, and what needs an explicit rerun or relaunch. Add
+  acknowledgement for resolved failures so attention remains signal, not
+  history.
+- **Deep runtime engine module.** Move lifecycle policy out of the broad app
+  state into one engine-facing Module with a narrow Interface over terminal,
+  task, and agent registry Implementations. Preserve generation/token checks,
+  connector approval enforcement, and L2's runtime-free core while improving
+  Locality and making runtime replacement one testable Seam.
+- **Connector catalog and automation surface.** Add capability-described
+  connectors beyond Claude/Fake plus a scriptable command/control surface for
+  projects, sessions, recipes, and approval profiles. Human approval remains
+  the default; policy broadening requires its own decision and proof.
 - **GPU adapter, when the conditions arrive.** The wgpu adapter stays warm
   behind the scene contract. Revisit when the roadmap needs GPU-only
   capability (per-frame animation, pixel-precise layout, embedded non-text
@@ -44,9 +82,6 @@ is an internal build concern, while `mandatum` is the user-facing command.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.
-- **Connector breadth.** The connector protocol is model-agnostic (anything
-  that can emit `ApprovalRequested` and accept a decision fits the trait);
-  only the Claude CLI and Fake connectors exist today.
 - **Damage tracking.** Per-frame grid-to-surface conversion is an accepted
   cost until profiling says otherwise.
 - **Minors worth doing.**

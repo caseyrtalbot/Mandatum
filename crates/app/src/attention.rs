@@ -63,9 +63,7 @@ fn attention_items(state: &AppState, session: &Session) -> Vec<AttentionItem> {
         .iter()
         .filter(|(pane_id, pane)| {
             matches!(pane.kind(), PaneKind::Task { .. })
-                && state
-                    .task_status_text(pane_id)
-                    .is_some_and(|status| status.contains("failed"))
+                && state.task_failure_status(pane_id).is_some()
         })
         .map(|(pane_id, _)| pane_id)
         .collect();

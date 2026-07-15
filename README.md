@@ -73,6 +73,10 @@ objective, status, current action, latest summary, changed files, and
 output tail at a glance. The reference connector runs Claude Code headless
 (`claude -p`, stream-json); a deterministic FakeConnector drives scripted
 agent-flow tests and the demo. The connector contract is model-agnostic.
+From a failed task, one command creates an agent mandate with the command,
+cwd, failure status, and a bounded output tail explicitly labeled as
+untrusted evidence. Every fact is escaped as prefixed JSON before the mandate
+uses the same approval gate.
 
 **A real approval gate.** Gated actions block inside the connector via a
 PreToolUse hook that waits on a Unix socket until you decide in the
@@ -115,6 +119,8 @@ Make sure `~/.local/bin` is on `PATH`, then launch it by name:
 
 ```sh
 mandatum
+mandatum --help
+mandatum --version
 ```
 
 Set `MANDATUM_INSTALL_DIR` to install elsewhere, or download the archive and
@@ -166,6 +172,7 @@ from an empty `ctrl+p` prompt.
 | `ctrl+p` then type | search all commands |
 | `ctrl+p n` / `v` / `s` | new terminal, split right, split down |
 | `ctrl+p b` / `r` | run task, rerun (on a task pane) |
+| `ctrl+p` then type `investigate` | hand a failed task to an agent |
 | `ctrl+p g`, then `y` / `n` | start agent; approve / reject its request |
 | `ctrl+p /` and `ctrl+p m` | timeline, session map |
 | `ctrl+shift+f` | search session output |
@@ -234,7 +241,7 @@ crates/scene          renderer-neutral scene contract: WorkspaceScene output
                       model, pane layout math, neutral input types
 crates/agent-runtime  agent connector contract, approval events, FakeConnector,
                       Claude CLI connector + the approval-bridge hook binary
-crates/workflows      task recipes and agent launch intent
+crates/workflows      task recipes, agent intent, failure-handoff policy
 crates/renderer       the ratatui frontend adapter: render(frame, &scene, &theme)
 crates/app            the workstation: event loop, runtime registries, scene
                       builder, timeline, search, config, save/restore
@@ -259,7 +266,7 @@ Local runs and CI execute the same script on the same pinned toolchain.
 The conformance step is where the Constitution lives: dependency scans for
 L1/L2, `[Lx-GATE]`-tagged tests for L3/L4/L5, and a doc-trace gate that
 fails the build if any law loses its documentation or its test. Current
-suite: 411 tests (plus 2 ignored live-connector tests that exercise the
+suite: 430 tests (plus 2 ignored live-connector tests that exercise the
 real Claude CLI).
 
 Contributions: read [CONTRIBUTING.md](CONTRIBUTING.md) first; the gate and

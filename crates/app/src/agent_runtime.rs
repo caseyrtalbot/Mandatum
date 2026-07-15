@@ -178,15 +178,13 @@ pub(crate) fn activate_agent_session(
 /// Build the connector configured in [`crate::AppConfig`], if it is
 /// available in this build.
 pub(crate) fn connector_for_kind(
-    kind: crate::app_shell::AgentConnectorKind,
+    kind: crate::config::AgentConnectorKind,
 ) -> Option<Box<dyn AgentConnector>> {
     match kind {
-        crate::app_shell::AgentConnectorKind::Fake => {
+        crate::config::AgentConnectorKind::Fake => {
             Some(Box::new(FakeConnector::new(default_fake_script())))
         }
-        crate::app_shell::AgentConnectorKind::Claude => {
-            Some(Box::new(ClaudeCliConnector::default()))
-        }
+        crate::config::AgentConnectorKind::Claude => Some(Box::new(ClaudeCliConnector::default())),
     }
 }
 
@@ -248,7 +246,7 @@ fn default_fake_script() -> Vec<FakeStep> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_shell::AgentConnectorKind;
+    use crate::config::AgentConnectorKind;
 
     /// Every connector kind AppConfig can select must resolve to a live
     /// connector: a kind that maps to None makes Start Agent unlaunchable

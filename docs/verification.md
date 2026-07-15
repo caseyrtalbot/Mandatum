@@ -61,8 +61,18 @@ For terminal and task runtime work, prove:
 - process exit becomes visible status
 - pane restart replaces the runtime for the same pane identity
 - task launch/rerun/stop works
+- a known failed task can create an agent mandate containing command, cwd,
+  failure status, and only bounded/prefixed JSON labeled as untrusted evidence;
+  injected newlines/markers cannot escape the frame, and transient runtime
+  errors do not claim the child task exited
 - events from replaced runtimes are ignored
 - restore preserves durable intent without live handles
+- a frontend input-reader failure shuts down live runtimes and restores the
+  host terminal before returning the original error; the lifecycle coordinator
+  test proves shutdown -> reader stop -> restore ordering and primary-error
+  precedence
+- New session and session-map activation replace same-id live PTYs rather than
+  reusing another session's process/parser
 
 ## Terminal Engine Checks
 
@@ -102,6 +112,9 @@ For agent work, prove:
 - running, blocked, failed, complete, unknown, and waiting states render
 - pending approvals become global attention items
 - changed-file summaries are visible
+- failed-task investigation launches through the ordinary connector and
+  approval seam, then restores as unknown intent rather than a live session;
+  adversarial task text cannot forge its evidence framing
 - verification results attach to the agent actor (not yet built: the
   checks surface is aspirational; see docs/agent-runtime.md "Not Yet Built")
 - restore keeps agent intent without inventing live runtime state
@@ -118,7 +131,12 @@ Before a release change lands:
 cargo build --locked --release -p mandatum-app --bin mandatum \
   -p mandatum-agent-runtime --bin mandatum-approval-bridge
 bash -n install.sh
+target/release/mandatum --help
+target/release/mandatum --version
 ```
+
+Both informational flags must print to stdout and exit zero without entering
+the TUI. An unknown argument must print a concise error to stderr and exit 2.
 
 For a local install smoke, use a disposable root and prove both installed
 names rather than launching the TUI:

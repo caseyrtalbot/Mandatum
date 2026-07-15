@@ -77,10 +77,16 @@ focus) in docs/interaction-model.md.
 
 Matches PLAN.md ("Next horizon"); see it for detail:
 
+- Named task and dev-server recipe catalog with durable run facts.
+- Recovery cockpit with itemized restore outcomes and failure acknowledgement.
+- Deep runtime engine Module over the terminal, task, and agent registry
+  Implementations, preserving the existing generation/token and approval
+  seams.
+- Capability-described connector catalog plus a scriptable project/session/
+  recipe control surface and explicit approval profiles.
 - GPU adapter, when the roadmap needs GPU-only capability or a sub-20 ms
   end-to-end latency goal (known remaining work listed in PLAN.md).
 - Rewrap on resize, in the `mandatum-terminal-vt` grid if adopted.
-- Connector breadth beyond the Claude CLI and Fake connectors.
 - Damage tracking, when profiling says per-frame conversion costs too much.
 - Minors: `approval_history` growth cap, ratatui bump, idle-heartbeat
   repaint scope.

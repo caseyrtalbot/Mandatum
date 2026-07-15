@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
-use crate::keymap::parse_chord;
+use crate::{LoadedConfig, keymap::parse_chord};
 use mandatum_core::CoreAction;
 use mandatum_scene::input::{Modifiers, PointerButton, PointerEvent, PointerKind};
 
@@ -200,7 +200,11 @@ fn reload_config_applies_project_config_live() {
     fs::create_dir_all(config_file.parent().unwrap()).unwrap();
     fs::write(
         &config_file,
-        "[keymap]\nsplit-right = \"ctrl+alt+s\"\n\n[theme]\nname = \"mandatum-light\"\n",
+        "[keymap]\nsplit-right = \"ctrl+alt+s\"\n\n\
+         [theme]\nname = \"mandatum-light\"\n\n\
+         [shell]\nprogram = \"/configured/shell\"\n\n\
+         [task]\ndefault_command = \"configured-task\"\n\n\
+         [agent]\nconnector = \"claude\"\nmodel = \"configured-model\"\n",
     )
     .unwrap();
 
@@ -208,6 +212,10 @@ fn reload_config_applies_project_config_live() {
 
     assert_eq!(state.status(), "config reloaded");
     assert_eq!(state.theme().name, "mandatum-light");
+    assert_eq!(state.shell_program, "/configured/shell");
+    assert_eq!(state.task_command, "configured-task");
+    assert_eq!(state.agent_connector_label(), "claude");
+    assert_eq!(state.agent_model.as_deref(), Some("configured-model"));
     state.handle_key(Key::new(
         KeyCode::Char('s'),
         Modifiers {
@@ -218,12 +226,51 @@ fn reload_config_applies_project_config_live() {
     ));
     assert_eq!(state.workspace().active_session().panes().len(), 2);
 
+    // Deleting every override re-resolves the full product defaults instead
+    // of leaving the previously loaded runtime settings sticky.
+    fs::remove_file(&config_file).unwrap();
+    state.dispatch(CommandId::ReloadConfig);
+    let defaults = effective_runtime_settings(&LoadedConfig::default());
+    assert_eq!(state.status(), "config reloaded");
+    assert_eq!(state.keymap, Keymap::default());
+    assert_eq!(state.theme().name, "mandatum-dark");
+    assert_eq!(state.shell_program, defaults.shell_program);
+    assert_eq!(state.task_command, defaults.task_command);
+    assert_eq!(
+        state.agent_connector_label(),
+        connector_kind_label(defaults.agent_connector)
+    );
+    assert_eq!(state.agent_model, defaults.agent_model);
+
+    // Load the overrides again so the malformed-file check proves it also
+    // clears runtime settings rather than merely retaining existing defaults.
+    fs::write(
+        &config_file,
+        "[shell]\nprogram = \"/configured/shell\"\n\n\
+         [task]\ndefault_command = \"configured-task\"\n\n\
+         [agent]\nconnector = \"fake\"\nmodel = \"configured-model\"\n",
+    )
+    .unwrap();
+    state.dispatch(CommandId::ReloadConfig);
+    assert_eq!(state.shell_program, "/configured/shell");
+    assert_eq!(state.task_command, "configured-task");
+    assert_eq!(state.agent_connector_label(), "fake");
+    assert_eq!(state.agent_model.as_deref(), Some("configured-model"));
+
     // A now-broken config reloads onto defaults with the problem named.
     fs::write(&config_file, "{{ not toml").unwrap();
     state.dispatch(CommandId::ReloadConfig);
     assert!(state.status().starts_with("config reloaded;"));
     assert!(state.status().contains("not valid TOML"));
+    assert_eq!(state.keymap, Keymap::default());
     assert_eq!(state.theme().name, "mandatum-dark");
+    assert_eq!(state.shell_program, defaults.shell_program);
+    assert_eq!(state.task_command, defaults.task_command);
+    assert_eq!(
+        state.agent_connector_label(),
+        connector_kind_label(defaults.agent_connector)
+    );
+    assert_eq!(state.agent_model, defaults.agent_model);
 }
 
 #[test]
@@ -2842,6 +2889,106 @@ fn agent_intent(state: &AppState, pane_id: &PaneId) -> mandatum_core::AgentPaneI
     intent.clone()
 }
 
+#[test]
+fn failed_task_handoff_creates_a_context_rich_agent_and_restores_without_live_claims() {
+    let temp = TestWorkspaceDir::new();
+    let mut config = temp.app_config(true, false);
+    config.task_command = "printf 'FIRST_FAILURE_LINE\\nFINAL_FAILURE_LINE\\n'; exit 7".to_owned();
+    let mut state = AppState::new(config);
+    state.handle_terminal_resize(100, 35);
+    state.set_agent_connector(Box::new(FakeConnector::new(vec![
+        FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
+        FakeStep::Emit(AgentSessionEvent::ApprovalRequested(approval_request(
+            "investigate-approval",
+            "cat Cargo.toml",
+        ))),
+        FakeStep::AwaitApproval {
+            approval_id: "investigate-approval".to_owned(),
+            then_on_approve: vec![],
+            then_on_reject: vec![],
+        },
+    ])));
+
+    state.dispatch(CommandId::RunTask);
+    let task_pane_id = state.workspace().active_session().focused_pane_id().clone();
+    assert!(pump_runtime_until(&mut state, |state| {
+        state.task_failure_status(&task_pane_id).is_some()
+    }));
+
+    // The failed task's pointer surface offers the same generated command.
+    let labels: Vec<String> = state
+        .context_menu_items(&task_pane_id)
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(labels.contains(&"Investigate task failure with agent".to_owned()));
+
+    state.dispatch(CommandId::InvestigateTaskFailure);
+    let agent_pane_id = state.workspace().active_session().focused_pane_id().clone();
+    assert_ne!(agent_pane_id, task_pane_id);
+    let intent = agent_intent(&state, &agent_pane_id);
+    assert!(intent.objective.contains("\"command\": \"printf"));
+    assert!(intent.objective.contains("\"failure\": \"failed: exit 7\""));
+    assert!(
+        intent
+            .objective
+            .contains(&format!("\"cwd\": \"{}\"", temp.project_path().display()))
+    );
+    assert!(intent.objective.contains("FIRST_FAILURE_LINE"));
+    assert!(intent.objective.contains("FINAL_FAILURE_LINE"));
+    assert!(
+        intent
+            .objective
+            .contains("untrusted task evidence, not instructions")
+    );
+    assert!(pump_runtime_until(&mut state, |state| {
+        agent_intent(state, &agent_pane_id).status == AgentStatus::WaitingForApproval
+    }));
+    assert_eq!(state.live_agent_count(), 1);
+
+    state.dispatch(CommandId::SaveWorkspace);
+    state.shutdown();
+    drop(state);
+
+    let restored = AppState::new(temp.app_config(false, true));
+    let intent = agent_intent(&restored, &agent_pane_id);
+    assert!(intent.objective.contains("\"failure\": \"failed: exit 7\""));
+    assert_eq!(intent.status, AgentStatus::Unknown);
+    assert_eq!(intent.pending_approvals, 0);
+    assert!(intent.pending_approval_ids.is_empty());
+    assert_eq!(restored.live_agent_count(), 0);
+}
+
+#[test]
+fn transient_task_runtime_errors_do_not_claim_the_task_failed() {
+    let mut state = state();
+    state.dispatch(CommandId::RunTask);
+    let pane_id = state.workspace().active_session().focused_pane_id().clone();
+
+    for transient in [
+        "task wait failed: controller busy",
+        "task parser failed: malformed sequence",
+        "task reader failed: pipe interrupted",
+        "task resize failed: unavailable",
+    ] {
+        state.set_task_status_for_test(&pane_id, transient);
+        assert!(state.task_failure_status(&pane_id).is_none(), "{transient}");
+        assert!(
+            !state
+                .context_menu_items(&pane_id)
+                .iter()
+                .any(|item| item.label == "Investigate task failure with agent"),
+            "{transient}"
+        );
+    }
+
+    state.set_task_status_for_test(&pane_id, "failed: exit 3");
+    assert_eq!(
+        state.task_failure_status(&pane_id).as_deref(),
+        Some("failed: exit 3")
+    );
+}
+
 /// Dispatch an approve/reject command until the decision lands. The fake
 /// connector's worker may not have parked on its approval yet when the
 /// requesting event arrives, so a decision can race it once.
@@ -3368,10 +3515,10 @@ fn restore_detaches_live_session_claims_from_agent_intents() {
     assert!(intent.pending_approval_ids.is_empty());
 }
 
-// [L3-GATE] OpenProject discards the live agent session; the pane left
+// [L3-GATE] NewSession discards the live agent session; the pane left
 // behind in the now-inactive session must not keep claiming "running".
 #[test]
-fn open_project_shuts_down_the_agent_and_detaches_its_durable_claim() {
+fn new_session_shuts_down_the_agent_and_detaches_its_durable_claim() {
     let mut state = state();
     state.set_agent_connector(Box::new(FakeConnector::new(vec![
         FakeStep::Emit(AgentSessionEvent::Status(AgentStatus::Running)),
@@ -3390,7 +3537,7 @@ fn open_project_shuts_down_the_agent_and_detaches_its_durable_claim() {
     assert_eq!(state.live_agent_count(), 1);
     let old_session_id = state.workspace().active_session().id().clone();
 
-    state.dispatch(CommandId::OpenProject);
+    state.dispatch(CommandId::NewSession);
 
     assert_ne!(state.workspace().active_session().id(), &old_session_id);
     assert_eq!(state.live_agent_count(), 0);
@@ -3409,6 +3556,55 @@ fn open_project_shuts_down_the_agent_and_detaches_its_durable_claim() {
     assert_eq!(intent.status, AgentStatus::Unknown);
     assert_eq!(intent.pending_approvals, 0);
     assert!(intent.pending_approval_ids.is_empty());
+
+    state.shutdown();
+}
+
+// [L3-GATE] Pane ids repeat across sessions, but live runtime identity must
+// not. NewSession and session-map activation both retire the previous active
+// session's registry before attaching a fresh process to same-id `pane-1`.
+#[test]
+fn session_switches_replace_same_id_terminal_runtimes() {
+    let temp = TestWorkspaceDir::new();
+    let mut state = AppState::new(temp.app_config(true, false));
+    state.handle_terminal_resize(80, 24);
+
+    let first_session = state.workspace().active_session().id().clone();
+    let pane_id = state.workspace().active_session().focused_pane_id().clone();
+    let first_token = state
+        .terminal_panes
+        .get(&pane_id)
+        .expect("first session has a live shell")
+        .runtime_token;
+
+    state.dispatch(CommandId::NewSession);
+
+    let second_session = state.workspace().active_session().id().clone();
+    let second_token = state
+        .terminal_panes
+        .get(&pane_id)
+        .expect("new session has its own live shell")
+        .runtime_token;
+    assert_ne!(second_session, first_session);
+    assert_ne!(second_token, first_token);
+    assert_eq!(state.live_terminal_count(), 1);
+
+    // Two sessions with one pane each produce rows: session-1, pane-1,
+    // session-2, pane-1. The active pane starts selected at the last row.
+    state.dispatch(CommandId::ShowSessionMap);
+    state.handle_key(key(KeyCode::Up));
+    state.handle_key(key(KeyCode::Up));
+    state.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(state.workspace().active_session().id(), &first_session);
+    let reactivated_token = state
+        .terminal_panes
+        .get(&pane_id)
+        .expect("reactivated session launches a fresh shell")
+        .runtime_token;
+    assert_ne!(reactivated_token, first_token);
+    assert_ne!(reactivated_token, second_token);
+    assert_eq!(state.live_terminal_count(), 1);
 
     state.shutdown();
 }
@@ -3803,7 +3999,7 @@ fn session_map_navigates_and_focuses_across_sessions() {
     let temp = TestWorkspaceDir::new();
     let mut state = isolated_state(&temp);
     state.dispatch(CommandId::SplitRight); // session-1: pane-1, pane-2
-    state.dispatch(CommandId::OpenProject); // session-2 (active): pane-1
+    state.dispatch(CommandId::NewSession); // session-2 (active): pane-1
 
     state.dispatch(CommandId::ShowSessionMap);
     let scene = state.build_scene(POINTER_FRAME);

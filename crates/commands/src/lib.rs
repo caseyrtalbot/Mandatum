@@ -9,7 +9,7 @@ use mandatum_core::{ActionOutcome, CoreAction, Workspace, WorkspaceError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CommandId {
-    OpenProject,
+    NewSession,
     NewTerminal,
     SplitRight,
     SplitDown,
@@ -22,6 +22,7 @@ pub enum CommandId {
     RunTask,
     RerunTask,
     StopTask,
+    InvestigateTaskFailure,
     NewAgentPane,
     StartAgent,
     StopAgent,
@@ -80,9 +81,9 @@ pub struct Command {
 
 pub const BUILT_IN_COMMANDS: &[Command] = &[
     Command {
-        id: CommandId::OpenProject,
-        label: "Open project",
-        name: "open-project",
+        id: CommandId::NewSession,
+        label: "New session",
+        name: "new-session",
         category: CommandCategory::Project,
         palette_key: None,
     },
@@ -170,6 +171,15 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         name: "stop-task",
         category: CommandCategory::Task,
         palette_key: Some('c'),
+    },
+    Command {
+        id: CommandId::InvestigateTaskFailure,
+        label: "Investigate task failure with agent",
+        name: "investigate-task-failure",
+        category: CommandCategory::Task,
+        // Context-specific and intentionally searchable rather than consuming
+        // another bare-letter fast path.
+        palette_key: None,
     },
     Command {
         id: CommandId::NewAgentPane,
@@ -360,6 +370,11 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
 
 /// The command a config file names with this stable kebab-case key, if any.
 pub fn command_id_for_name(name: &str) -> Option<CommandId> {
+    // v0.1 exposed this behavior under the inaccurate `open-project` name.
+    // Keep old keymaps working while every generated surface tells the truth.
+    if name == "open-project" {
+        return Some(CommandId::NewSession);
+    }
     BUILT_IN_COMMANDS
         .iter()
         .find(|command| command.name == name)
@@ -423,6 +438,7 @@ pub enum RuntimeTaskCommand {
     RunConfiguredTask,
     RerunFocusedTask,
     StopFocusedTask,
+    InvestigateFocusedTaskFailure,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -490,6 +506,9 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
         CommandId::RunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RunConfiguredTask),
         CommandId::RerunTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::RerunFocusedTask),
         CommandId::StopTask => CommandTarget::RuntimeTask(RuntimeTaskCommand::StopFocusedTask),
+        CommandId::InvestigateTaskFailure => {
+            CommandTarget::RuntimeTask(RuntimeTaskCommand::InvestigateFocusedTaskFailure)
+        }
         CommandId::NewAgentPane => CommandTarget::RuntimeAgent(RuntimeAgentCommand::NewAgentPane),
         CommandId::StartAgent => {
             CommandTarget::RuntimeAgent(RuntimeAgentCommand::StartFocusedAgent)
@@ -622,10 +641,7 @@ pub fn core_action_for_command(
     }
 
     Ok(match command_id {
-        CommandId::OpenProject => CoreAction::OpenProject {
-            name: context.project_name.clone(),
-            path: context.project_path.clone(),
-        },
+        CommandId::NewSession => CoreAction::NewSession,
         CommandId::NewTerminal => CoreAction::NewTerminal {
             title: context.new_terminal_title.clone(),
             cwd: context.new_terminal_cwd.clone(),
@@ -663,6 +679,7 @@ pub fn core_action_for_command(
         | CommandId::RunTask
         | CommandId::RerunTask
         | CommandId::StopTask
+        | CommandId::InvestigateTaskFailure
         | CommandId::NewAgentPane
         | CommandId::StartAgent
         | CommandId::StopAgent
@@ -738,7 +755,7 @@ mod tests {
             .map(|command| command.id)
             .collect::<Vec<_>>();
 
-        assert!(command_ids.contains(&CommandId::OpenProject));
+        assert!(command_ids.contains(&CommandId::NewSession));
         assert!(command_ids.contains(&CommandId::NewTerminal));
         assert!(command_ids.contains(&CommandId::SplitRight));
         assert!(command_ids.contains(&CommandId::SplitDown));
@@ -746,8 +763,29 @@ mod tests {
         assert!(command_ids.contains(&CommandId::RunTask));
         assert!(command_ids.contains(&CommandId::RerunTask));
         assert!(command_ids.contains(&CommandId::StopTask));
+        assert!(command_ids.contains(&CommandId::InvestigateTaskFailure));
         assert!(command_ids.contains(&CommandId::SaveWorkspace));
         assert!(command_ids.contains(&CommandId::RestoreWorkspace));
+    }
+
+    #[test]
+    fn new_session_is_truthfully_named_and_keeps_the_v01_config_alias() {
+        let command = command_for_id(CommandId::NewSession).unwrap();
+
+        assert_eq!(command.label, "New session");
+        assert_eq!(command.name, "new-session");
+        assert_eq!(
+            command_id_for_name("open-project"),
+            Some(CommandId::NewSession)
+        );
+        assert_eq!(
+            core_action_for_command(
+                CommandId::NewSession,
+                &CommandContext::for_project("project", "/tmp/project")
+            )
+            .unwrap(),
+            CoreAction::NewSession
+        );
     }
 
     #[test]
@@ -1056,6 +1094,10 @@ mod tests {
             (CommandId::RunTask, RuntimeTaskCommand::RunConfiguredTask),
             (CommandId::RerunTask, RuntimeTaskCommand::RerunFocusedTask),
             (CommandId::StopTask, RuntimeTaskCommand::StopFocusedTask),
+            (
+                CommandId::InvestigateTaskFailure,
+                RuntimeTaskCommand::InvestigateFocusedTaskFailure,
+            ),
         ] {
             let command = command_for_id(command_id).unwrap();
 

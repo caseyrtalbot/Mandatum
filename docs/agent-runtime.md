@@ -79,6 +79,10 @@ Built and dispatched through the palette (`crates/commands`):
 - Set Agent Objective (`p`): one-line prompt writing the durable
   objective; also in the agent pane's context menu (see
   docs/interaction-model.md)
+- Investigate Task Failure (type to search): from a focused failed task,
+  creates a new agent mandate from command, cwd, failure status, and bounded
+  output; every fact is JSON-escaped, line-prefixed, and labeled as untrusted
+  evidence before launching through the same connector and approval seam
 
 ### Agent Pane Surface
 
@@ -149,6 +153,10 @@ Covered today (all with `FakeConnector`, no network):
 - restore and OpenProject detach live-session claims (running/waiting,
   pending approval ids) instead of persisting them as actionable truth
 - live agent runtime state never serializes with workspace intent
+- failed-task handoff preserves bounded failure facts, uses the configured
+  connector and approval flow, rejects forgeable evidence framing, and
+  restores the resulting pane as unknown durable intent rather than a live
+  session
 
 Connector-side (no live Claude process):
 

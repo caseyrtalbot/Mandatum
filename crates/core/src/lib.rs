@@ -182,6 +182,25 @@ mod tests {
     }
 
     #[test]
+    fn new_session_reuses_the_active_project_without_duplicating_it() {
+        let mut workspace = workspace();
+        let project_id = workspace.active_session().project_id().clone();
+        let project_count = workspace.projects().len();
+        let first_session = workspace.active_session().id().clone();
+
+        workspace.apply_action(CoreAction::NewSession).unwrap();
+
+        assert_ne!(workspace.active_session().id(), &first_session);
+        assert_eq!(workspace.active_session().project_id(), &project_id);
+        assert_eq!(workspace.projects().len(), project_count);
+        assert_eq!(
+            workspace.active_project_path(),
+            PathBuf::from("/tmp/project")
+        );
+        assert_eq!(workspace.active_session().panes().len(), 1);
+    }
+
+    #[test]
     fn zoom_preserves_underlying_layout_intent() {
         let mut workspace = workspace();
         workspace.apply_action(CoreAction::SplitRight).unwrap();

@@ -123,6 +123,12 @@ keyboard too: Move float left/right/up/down step the durable float rect
 (2 columns / 1 row per step, clamped like a drag), so float placement
 never requires a pointer.
 
+"New session" creates and focuses a fresh session under the current project.
+It is deliberately not named Open project: choosing another project is not
+built. Existing configs using the historical `open-project` command name keep
+working as a compatibility alias. A session switch retires all live runtimes
+before same-id panes in the destination session are reconciled.
+
 If a child terminal app requests mouse capture, the workspace must respect that
 until the user invokes workspace-level control.
 
@@ -263,6 +269,20 @@ Enter writes it into the durable `AgentPaneIntent` (a timeline fact) —
 the next Start agent/relaunch uses it. Esc cancels; an empty objective is
 rejected. This closes the "objective only editable by hand-editing JSON"
 gap.
+
+## Investigate A Failed Task
+
+"Investigate task failure with agent" is discoverable in the fuzzy palette
+and the context menu of a failed task. It is disabled, with an explicit
+reason, when focus is not a task, the task has no known failure, or no agent
+connector is configured. Running it creates a focused agent pane whose durable
+objective contains the task command, resolved cwd, failure status, and a
+bounded output tail. Every fact is bounded, JSON-escaped, line-prefixed, and
+labeled as untrusted evidence. Transient runtime diagnostics do not enable the
+command without a typed process-exit, launch-failure, or rerun-failure fact.
+The agent then uses the same connector, approval requests, and stop/relaunch
+controls as every other agent. Restore keeps the objective but folds away the
+live-session claim.
 
 ## Accessibility
 

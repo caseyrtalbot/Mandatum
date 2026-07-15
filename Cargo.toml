@@ -40,6 +40,7 @@ mandatum-pty = { path = "crates/pty" }
 mandatum-renderer = { path = "crates/renderer" }
 mandatum-scene = { path = "crates/scene" }
 mandatum-terminal-vt = { path = "crates/terminal-vt" }
+mandatum-workflows = { path = "crates/workflows" }
 portable-pty = "0.9"
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }

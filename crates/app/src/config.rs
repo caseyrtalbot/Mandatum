@@ -14,8 +14,14 @@ use std::path::{Path, PathBuf};
 use mandatum_commands::{CommandId, command_id_for_name};
 use mandatum_scene::{SceneColor, Theme};
 
-use crate::app_shell::AgentConnectorKind;
 use crate::keymap::{ChordAction, Keymap, format_chord, parse_chord};
+
+/// Which configured agent connector backend future launches use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentConnectorKind {
+    Fake,
+    Claude,
+}
 
 /// Everything the config files can influence, resolved against defaults.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -32,6 +38,49 @@ pub struct LoadedConfig {
     pub agent_connector: Option<AgentConnectorKind>,
     pub agent_model: Option<String>,
     pub warnings: Vec<String>,
+}
+
+/// Runtime launch settings after optional config values have been resolved
+/// against product defaults. Startup and Reload Config share this Interface,
+/// so reload is a complete snapshot transition rather than a sticky patch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EffectiveRuntimeSettings {
+    pub(crate) shell_program: String,
+    pub(crate) task_command: String,
+    pub(crate) agent_connector: AgentConnectorKind,
+    pub(crate) agent_model: Option<String>,
+}
+
+pub(crate) fn effective_runtime_settings(loaded: &LoadedConfig) -> EffectiveRuntimeSettings {
+    EffectiveRuntimeSettings {
+        shell_program: loaded
+            .shell_program
+            .clone()
+            .unwrap_or_else(default_shell_program),
+        task_command: loaded
+            .task_command
+            .clone()
+            .unwrap_or_else(default_task_command),
+        agent_connector: loaded.agent_connector.unwrap_or(AgentConnectorKind::Claude),
+        agent_model: loaded.agent_model.clone().or_else(default_agent_model),
+    }
+}
+
+pub(crate) fn default_shell_program() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
+}
+
+pub(crate) fn default_task_command() -> String {
+    "cargo test".to_owned()
+}
+
+/// Model hint from `MANDATUM_AGENT_MODEL`; env access stays at the config
+/// boundary, mirroring `SHELL` for the default shell program.
+pub(crate) fn default_agent_model() -> Option<String> {
+    std::env::var("MANDATUM_AGENT_MODEL")
+        .ok()
+        .map(|model| model.trim().to_owned())
+        .filter(|model| !model.is_empty())
 }
 
 /// The user-level config file honoring `XDG_CONFIG_HOME`, when a home

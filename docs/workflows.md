@@ -5,7 +5,7 @@ claims trace to the driven demo (`examples/live-slice/run.sh`, the stranger
 test in docs/verification.md) and the test suite; "Not yet built" items are
 targets, not descriptions of the product.
 
-## Open Project
+## Open Project And Sessions
 
 Built:
 
@@ -16,6 +16,9 @@ Built:
 4. The header attention strip shows what needs eyes (approvals, failed
    tasks, blocked agents); when calm it shows workspace, session, pane
    count, and agent connector kind.
+5. New session creates and focuses a fresh session under the active project;
+   it does not duplicate the project, reuse a same-id pane's prior runtime, or
+   imply a project chooser exists.
 
 Not yet built: project chooser (the project is the launch directory),
 branch display in the header.
@@ -34,11 +37,18 @@ Built:
    (session search).
 5. The execution timeline records task starts and exits with the command
    string and exit status (`crates/app/src/timeline.rs`).
+6. On a known failure, Investigate task failure with agent creates a durable
+   agent mandate with the task command, resolved cwd, failure status, and the
+   last 24 nonblank output lines (each capped at 240 characters). The output
+   and every other task fact are bounded, JSON-escaped, line-prefixed, and
+   explicitly labeled untrusted evidence. Only typed process-exit,
+   launch-failure, and rerun-failure facts enable the handoff; transient
+   parser/reader/resize/wait errors do not. The agent launches through the
+   normal connector and approval gate.
 
 Not yet built: named multi-recipe catalog (one configured task command
 exists today; `TaskRecipe` in `crates/workflows` shapes durable intent
-only), task history with cwd/duration/start-time fields, "send the failure
-to an agent".
+only), task history with cwd/duration/start-time fields.
 
 ## Dev Server Loop
 
@@ -77,8 +87,11 @@ Built:
    the pane in need.
 3. User can copy output, rerun the task, or relaunch the agent (failed
    agent panes show the relaunch hint).
+4. From a failed task, Investigate task failure with agent creates and starts
+   a separate agent pane. Save/restore keeps the mandate but never invents a
+   live agent session or replays the launch.
 
-Not yet built: "start an agent from this failure", mark-as-acknowledged.
+Not yet built: mark-as-acknowledged.
 
 ## Review Changes
 

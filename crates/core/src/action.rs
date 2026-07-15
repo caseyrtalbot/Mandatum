@@ -4,6 +4,9 @@ use crate::{AgentPaneIntent, PaneId, SessionId, TaskPaneIntent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreAction {
+    /// Create a fresh session for the active project. The project identity and
+    /// path are reused; only session-local panes, layout, and focus start over.
+    NewSession,
     OpenProject {
         name: String,
         path: PathBuf,
