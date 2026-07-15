@@ -305,10 +305,11 @@ time-driven; a scene-equality test pins that adding unguarded motion
 fails the build.
 
 **Visible focus.** The focused pane border has its own theme color in all
-three built-in themes (bright yellow against bright white in
-mandatum-high-contrast — never white-on-white), reinforced bold, and the
-`focused` word appears in the pane title, so focus never rides on color
-alone. Theme- and renderer-level tests assert the distinction per theme.
+three built-in themes (bright blue in mandatum-dark; bright yellow against
+bright white in mandatum-high-contrast — never white-on-white), reinforced
+bold, and the `focused` word appears in the pane title, so focus never rides
+on color alone. Theme- and renderer-level tests assert the distinction per
+theme.
 
 **Configurable keymaps.** Every command is rebindable (`[keymap]`), all
 surfaces (palette hints, context menu, help, first-run note, status strip)

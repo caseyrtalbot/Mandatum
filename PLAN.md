@@ -59,6 +59,9 @@ more useful without pretending the wider vision is finished:
   transactional restore. `AppState` receives typed effects and lifecycle
   facts while durable workspace and presentation state remain outside the
   live engine.
+- the default dark theme now uses ANSI bright blue for focused-pane chrome,
+  separating navigation from yellow waiting states and red attention while
+  preserving the high-contrast theme's bright-yellow focus treatment.
 
 ## Next horizon
 

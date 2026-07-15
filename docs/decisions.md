@@ -986,3 +986,31 @@ classification, valid recovery actions, and session retirement. App tests
 retain the L3 stale-event, same-id session replacement, approval, task, live
 PTY, and honest-restore coverage. The standard merge gate and latency probe
 remain required because the unified event plumbing moved behind the Module.
+
+## Accepted: Dark-Theme Focus Uses Bright Blue
+
+Status: accepted (2026-07-14)
+
+Decision: `mandatum-dark` uses ANSI bright blue (`SceneColor::Ansi(12)`) for
+the focused-pane border. `mandatum-light` keeps ANSI blue, and
+`mandatum-high-contrast` keeps bright yellow because its unfocused borders are
+bright white. The bold border modifier and the explicit `focused` title word
+remain unchanged.
+
+Context: the dark theme's ANSI yellow focus border read as a warning-colored
+frame and dominated otherwise calm terminal content. Yellow also carries the
+agent-waiting semantic role.
+
+Rationale: bright blue reads as navigation and selection, stays distinct from
+red attention, yellow waiting, green running, and cyan overlay chrome, and
+continues to respect each host terminal's ANSI palette instead of imposing a
+fixed RGB value.
+
+Consequences: existing user overrides remain authoritative; only the built-in
+dark default changes. Focus remains redundant across color, bold weight, and
+text, so the accessibility contract does not weaken.
+
+Verification: scene-theme tests keep focus distinct from unfocused and
+attention roles in every built-in theme; the renderer test asserts that the
+dark focused-border cell resolves to ratatui `LightBlue`; the full merge gate
+remains required.

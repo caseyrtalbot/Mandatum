@@ -560,11 +560,11 @@ mod tests {
     fn theme_resolves_semantic_roles_to_different_concrete_colors() {
         let workspace = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
 
-        // The focused pane border takes the theme's focus color: yellow in
-        // mandatum-dark, blue in mandatum-light.
+        // The focused pane border takes the theme's focus color: bright blue
+        // in mandatum-dark, blue in mandatum-light.
         let dark = draw_with_theme(&workspace, &Theme::default());
         let dark_border = dark.backend().buffer().cell((0u16, 1u16)).unwrap().fg;
-        assert_eq!(dark_border, Color::Yellow);
+        assert_eq!(dark_border, Color::LightBlue);
 
         let light = draw_with_theme(&workspace, &Theme::builtin("mandatum-light").unwrap());
         let light_border = light.backend().buffer().cell((0u16, 1u16)).unwrap().fg;

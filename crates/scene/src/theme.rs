@@ -11,8 +11,7 @@ use crate::style::SceneColor;
 
 /// Named color for every themable role in the workspace chrome.
 ///
-/// `Theme::default()` is the built-in `mandatum-dark` theme, which matches
-/// the pre-theme hardcoded palette exactly.
+/// `Theme::default()` is the built-in `mandatum-dark` theme.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Theme {
     pub name: String,
@@ -69,14 +68,14 @@ impl Theme {
 fn mandatum_dark() -> Theme {
     Theme {
         name: "mandatum-dark".to_owned(),
-        focus_border: SceneColor::Ansi(3), // yellow
-        pane_border: SceneColor::Ansi(8),  // dark gray
+        focus_border: SceneColor::Ansi(12), // bright blue
+        pane_border: SceneColor::Ansi(8),   // dark gray
         pane_title: SceneColor::Default,
         header: SceneColor::Ansi(15),           // white
         header_background: SceneColor::Ansi(0), // black
         status: SceneColor::Ansi(7),            // gray
-        // Red, not yellow: focus is yellow in this theme, and "focused" and
-        // "needs attention" must never share a color.
+        // Red stays reserved for attention; bright blue marks focus while
+        // yellow remains available for waiting states.
         attention: SceneColor::Ansi(1),
         palette_border: SceneColor::Ansi(6), // cyan
         palette_selection: SceneColor::Default,
@@ -171,5 +170,13 @@ mod tests {
                 "theme {name} must not reuse the attention color for focus"
             );
         }
+    }
+
+    #[test]
+    fn dark_focus_stays_distinct_from_waiting_and_overlay_chrome() {
+        let theme = Theme::default();
+
+        assert_ne!(theme.focus_border, theme.agent_waiting);
+        assert_ne!(theme.focus_border, theme.palette_border);
     }
 }
