@@ -9,7 +9,7 @@ PLAN.md        shipped charter summary + forward horizon
 CONTRIBUTING.md contributor contract (the gate is the review)
 SECURITY.md    private vulnerability reporting + scope notes
 LICENSE        Apache-2.0
-Cargo.toml     Rust workspace manifest (excludes spikes/frontend-wgpu)
+Cargo.toml     Rust workspace manifest + shared release version
 Cargo.lock     locked Rust dependencies
 rust-toolchain.toml  pinned gate toolchain
 install.sh     latest-release installer (checksum verification + both binaries)

@@ -32,6 +32,9 @@ checksum-verified release archives for macOS and Linux (the approval bridge
 ships beside the app), a latest-release installer, and cross-renderer-safe
 README captures. The Cargo package remains `mandatum-app`; package selection
 is an internal build concern, while `mandatum` is the user-facing command.
+`mandatum update` now consumes the latest published release without requiring
+a checkout or GitHub permissions; publication remains a version-tagged
+maintainer action, and every workspace crate inherits one root release version.
 
 The post-charter developer-trust pass made the existing workstation safer and
 more useful without pretending the wider vision is finished:

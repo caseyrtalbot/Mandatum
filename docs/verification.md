@@ -139,10 +139,14 @@ cargo build --locked --release -p mandatum-app --bin mandatum \
 bash -n install.sh
 target/release/mandatum --help
 target/release/mandatum --version
+cargo test -p mandatum-app --bin mandatum update::tests
 ```
 
 Both informational flags must print to stdout and exit zero without entering
-the TUI. An unknown argument must print a concise error to stderr and exit 2.
+the TUI. Help must advertise `mandatum update`; the updater tests prove the
+embedded installer receives the running executable's directory and propagates
+the running version, while propagating a non-zero installer result. An unknown
+argument must print a concise error to stderr and exit 2.
 
 For a local install smoke, use a disposable root and prove both installed
 names rather than launching the TUI:
@@ -161,7 +165,10 @@ archives for macOS and Linux. Each archive must contain exactly `mandatum`,
 `mandatum-approval-bridge`, and `LICENSE`, with a sibling `.sha256` file.
 After publishing, run `install.sh` against the unauthenticated latest-release
 URLs with a temporary `MANDATUM_INSTALL_DIR` and repeat the two executable
-assertions.
+assertions. Then run that temporary `mandatum update`, repeat both assertions,
+and confirm `mandatum --version` reports the version represented by the tag.
+Before publishing a newer version, the same update smoke must refuse the older
+latest release without replacing the staged executable.
 
 ## Input Latency Regression Check
 

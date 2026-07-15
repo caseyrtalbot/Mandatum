@@ -123,6 +123,25 @@ mandatum --help
 mandatum --version
 ```
 
+### Update
+
+Update an installed copy to the latest published release with:
+
+```sh
+mandatum update
+mandatum --version
+```
+
+The updater needs no GitHub account, repository checkout, or write access. It
+uses the checksum-verifying installer embedded in the running binary and
+replaces both `mandatum` and `mandatum-approval-bridge` beside that binary.
+It refuses to replace a newer build with an older release. It consumes
+published releases; an ordinary commit pushed to `main` is not a release until
+the maintainer publishes a matching version tag.
+
+If an older build reports that `update` is unrecognized, rerun the one-line
+installer above once. That bootstraps the update command for future releases.
+
 Set `MANDATUM_INSTALL_DIR` to install elsewhere, or download the archive and
 checksum directly from [GitHub Releases](https://github.com/caseyrtalbot/Mandatum/releases).
 Every archive contains `mandatum`, `mandatum-approval-bridge`, and the
@@ -139,6 +158,16 @@ cd Mandatum
 cargo install --locked --path crates/app --bin mandatum
 cargo install --locked --path crates/agent-runtime --bin mandatum-approval-bridge
 mandatum
+```
+
+After that source install, `mandatum update` can switch the installed command
+to the latest prebuilt release. To keep building from source instead, update
+the checkout and repeat both Cargo installs:
+
+```sh
+git pull --ff-only
+cargo install --locked --path crates/app --bin mandatum
+cargo install --locked --path crates/agent-runtime --bin mandatum-approval-bridge
 ```
 
 Three doors in, no manual required:
@@ -275,7 +304,7 @@ Local runs and CI execute the same script on the same pinned toolchain.
 The conformance step is where the Constitution lives: dependency scans for
 L1/L2, `[Lx-GATE]`-tagged tests for L3/L4/L5, and a doc-trace gate that
 fails the build if any law loses its documentation or its test. Current
-suite: 442 tests (plus 2 ignored live-connector tests that exercise the
+suite: 453 tests (plus 2 ignored live-connector tests that exercise the
 real Claude CLI).
 
 Contributions: read [CONTRIBUTING.md](CONTRIBUTING.md) first; the gate and

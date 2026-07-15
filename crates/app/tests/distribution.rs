@@ -19,6 +19,11 @@ fn help_flags_print_usage_to_stdout_and_exit_successfully() {
         assert!(stdout.contains("Usage:\n  mandatum"), "{flag}: {stdout}");
         assert!(stdout.contains("-h, --help"), "{flag}: {stdout}");
         assert!(stdout.contains("-V, --version"), "{flag}: {stdout}");
+        assert!(stdout.contains("mandatum update"), "{flag}: {stdout}");
+        assert!(
+            stdout.contains("update          Install the latest published release"),
+            "{flag}: {stdout}"
+        );
     }
 }
 

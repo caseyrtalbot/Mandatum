@@ -1090,3 +1090,45 @@ refuse to advertise reserved-chord shadows, migrate the legacy serialized
 theme shape, preserve first-run dismissal/config compatibility, and retain
 frontend parity. Run `./ci/gpu-spike.sh` for the scene-contract fixture and
 `./ci/gate.sh` as the merge gate.
+
+## Accepted: Updating Consumes A Release; Publishing Remains Tag-Driven
+
+Status: accepted (2026-07-15)
+
+Decision: `mandatum update` installs the latest published GitHub Release beside
+the running executable, including `mandatum-approval-bridge`. It runs the
+checksum-verifying `install.sh` embedded at compile time, targeting the current
+executable's directory. Publishing remains a maintainer-only, version-tagged
+GitHub Actions operation; there is no public `mandatum push` command. All Cargo
+workspace crates inherit one root package version. The updater passes that
+running version to the installer, which refuses an unidentifiable or older
+release before replacing either executable.
+
+Context: release consumers had two manual choices: rerun the remote one-line
+installer or pull a source checkout and reinstall both binaries. The existing
+release workflow already built and verified the correct four platform archives,
+but a normal push to `main` did not—and should not silently—become a user
+release. The repeated version in every crate also made a consistent version
+bump needlessly error-prone.
+
+Rationale: update and publish are different authority boundaries. A user should
+need no checkout, GitHub account, or repository permission to consume a stable,
+rollbackable release. A maintainer should explicitly select the version that
+ships. Embedding the reviewed installer avoids downloading and executing a
+mutable installer script during self-update while preserving the established
+checksum, archive-allowlist, sibling-binary, and staged-replacement checks.
+
+Consequences: installer-based and Cargo-based users can converge on the latest
+prebuilt release with one command. Builds predating the command need one final
+installer rerun. Updates replace the installation containing the executable;
+non-writable system locations fail rather than escalating privileges. Maintainers
+bump one root version, pass the gate, and push the matching annotated tag; the
+existing workflow publishes the release consumed by users. A development build
+ahead of the latest published tag cannot silently downgrade itself.
+
+Verification: CLI distribution tests keep `update` visible in help, parser
+tests prove it is non-interactive, updater tests prove exact install-directory
+and running-version forwarding plus non-zero status propagation, and the full
+merge gate checks the embedded installer and release/install artifact
+allowlists. The standing post-publish smoke installs into a disposable
+directory and then exercises the public update path against the latest release.

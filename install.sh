@@ -42,6 +42,28 @@ download() {
     fi
 }
 
+is_numeric_triplet() {
+    printf '%s\n' "$1" | awk -F. '
+        NF == 3 &&
+        $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {
+            valid = 1
+        }
+        END { exit !valid }
+    '
+}
+
+version_is_older() {
+    awk -v candidate="$1" -v current="$2" 'BEGIN {
+        split(candidate, a, ".")
+        split(current, b, ".")
+        for (i = 1; i <= 3; i += 1) {
+            if ((a[i] + 0) < (b[i] + 0)) exit 0
+            if ((a[i] + 0) > (b[i] + 0)) exit 1
+        }
+        exit 1
+    }'
+}
+
 operating_system=$(uname -s) || fail "could not detect the operating system"
 machine=$(uname -m) || fail "could not detect the processor architecture"
 
@@ -165,6 +187,24 @@ for binary in mandatum mandatum-approval-bridge; do
 done
 [ -f "${extract_dir}/LICENSE" ] && [ ! -L "${extract_dir}/LICENSE" ] \
     || fail "release archive contains an invalid LICENSE"
+
+if [ -n "${MANDATUM_CURRENT_VERSION:-}" ]; then
+    is_numeric_triplet "$MANDATUM_CURRENT_VERSION" \
+        || fail "running version is not a numeric x.y.z release: $MANDATUM_CURRENT_VERSION"
+
+    if ! release_version_output=$("${extract_dir}/mandatum" --version 2>/dev/null); then
+        fail "latest published release predates self-update; current installation was not changed"
+    fi
+    case "$release_version_output" in
+        "mandatum "*) release_version=${release_version_output#mandatum } ;;
+        *) fail "latest published release reported an invalid version; current installation was not changed" ;;
+    esac
+    is_numeric_triplet "$release_version" \
+        || fail "latest published release is not a numeric x.y.z version: $release_version"
+    if version_is_older "$release_version" "$MANDATUM_CURRENT_VERSION"; then
+        fail "latest published release $release_version is older than running version $MANDATUM_CURRENT_VERSION; current installation was not changed"
+    fi
+fi
 
 if [ -e "$install_dir" ] || [ -L "$install_dir" ]; then
     [ -d "$install_dir" ] || fail "install path is not a directory: $install_dir"

@@ -47,6 +47,28 @@ to discuss the design instead.
 `<type>: <description>` where type is one of
 feat, fix, refactor, docs, test, chore, perf, ci.
 
+## Publishing a release
+
+A normal push to `main` runs CI but does not replace the version users receive.
+User downloads are deliberately tag-driven so every shipped build has a stable
+version and rollback point.
+
+1. Change the single `version` in `[workspace.package]` in `Cargo.toml`.
+2. Run `./ci/gate.sh`, commit the versioned release state, and ensure `main` is
+   current on `origin`.
+3. Create an annotated tag with the same version and push it:
+
+```sh
+git tag -a v0.2.0 -m "Mandatum v0.2.0"
+git push origin main v0.2.0
+```
+
+The tag starts `.github/workflows/release.yml`, which reruns the full gate,
+builds four native archives, verifies their checksums, and publishes the GitHub
+Release consumed by `mandatum update`. Do not expose this maintainer operation
+as `mandatum push`: the public command updates an installation and requires no
+repository permissions.
+
 ## Setup
 
 ```sh
