@@ -38,7 +38,7 @@ use crate::{
     config::{AgentConnectorKind, effective_runtime_settings, load_config, project_config_file},
     copy_mode::CopyModeState,
     events::AppEvent,
-    help::{HelpViewState, filter_help_rows, help_route, help_rows, welcome_lines},
+    help::{HelpViewState, filter_help_rows, help_route, help_rows, welcome_entries},
     input::{RuntimeInput, key_to_input_with_keymap},
     keymap::{ChordAction, Keymap, format_chord},
     palette::{PaletteRow, PaletteState, PaletteWorkspaceView, palette_footer, palette_rows},
@@ -3321,10 +3321,13 @@ impl AppState {
         if !self.first_run_note {
             return None;
         }
-        let lines = welcome_lines(&self.keymap);
+        let entries = welcome_entries(&self.keymap);
         Some(WelcomeOverlay {
-            area: welcome_rect(size, lines.len() as u16),
-            lines,
+            // Introduction + blank + route rows + blank + dismissal.
+            area: welcome_rect(size, entries.len() as u16 + 4),
+            introduction: "A workspace for terminals, tasks, and agents.".to_owned(),
+            entries,
+            dismissal: "Any key or click dismisses this note".to_owned(),
         })
     }
 

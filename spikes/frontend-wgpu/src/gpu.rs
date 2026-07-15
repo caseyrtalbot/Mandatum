@@ -731,7 +731,9 @@ mod tests {
         let mut with_overlay = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
         with_overlay.overlay = Some(OverlayScene::Welcome(WelcomeOverlay {
             area: SceneRect::new(0, 0, 2, 1),
-            lines: vec!["welcome".to_owned()],
+            introduction: "welcome".to_owned(),
+            entries: Vec::new(),
+            dismissal: "dismiss".to_owned(),
         }));
         assert_eq!(
             supported_terminal_scene(&with_overlay).unwrap_err(),

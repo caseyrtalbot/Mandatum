@@ -331,10 +331,6 @@ byte-count diagnostics were removed from the status line (restorable via
 - Help does not teach the `ctrl+p r` task-pane substitution route that
   the pane hint and context menu advertise, and the help filter matches
   route text, which can bury the best hit.
-- The first-run status line duplicates its hint text (the first-run
-  message carries "ctrl+p commands · f1 help" and the generic status
-  suffix appends the same hints again; `scene_builder.rs` appends
-  unconditionally).
 - The theme focus-vs-attention color collision flagged by the audit was
   fixed (verified in `crates/scene/src/theme.rs`: attention is red in
   mandatum-dark and bright red in high-contrast, with comments that
@@ -351,7 +347,6 @@ byte-count diagnostics were removed from the status line (restorable via
 | GPU production adapter | Held warm, not shipped | Revisit when the roadmap needs GPU-only capability or sets sub-20 ms end-to-end latency as a goal. Owes: full multi-pane/overlay scene binding, grapheme widths, IME, runtime DPI, surface-loss recovery, damage tracking. |
 | Idle-CPU doc figure | WF7 leftover | Docs say ~0.1%; the independent soak measured ~0.5% (heartbeat clock repaint). Docs not reconciled. |
 | Help substitution routes | WF7 leftover | Generated help omits the `ctrl+p r` task-pane rerun route; help filter matches route text and can bury the best hit. |
-| First-run hint duplication | WF7 leftover | The first line a stranger reads repeats "ctrl+p commands" and help hints twice. |
 | Timeline over-cap line | Accepted minor | A single JSONL line over the 4 MiB read cap blinds the tail window until rotation passes it (facts hidden, not lost). |
 | `/tmp/mandatum` test residue | Accepted minor | The shared unit-test baseline appends to a real timeline file under `/tmp/mandatum`; nothing cleans it. |
 | Cell-level frontend parity | Accepted minor | The two-frontend parity test asserts essential content, not cell-for-cell equality; styling fidelity is renderer-unit-tested only. |

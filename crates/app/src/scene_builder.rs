@@ -878,8 +878,12 @@ mod tests {
         let Some(OverlayScene::Welcome(welcome)) = &scene.overlay else {
             panic!("a fresh dir must show the first-run note");
         };
-        assert!(welcome.lines.len() <= 8, "the note stays under 8 lines");
-        assert!(welcome.lines.join("\n").contains("ctrl+p"));
+        assert!(
+            welcome.entries.len() + 4 <= 8,
+            "the note stays under 8 lines"
+        );
+        assert!(welcome.entries.iter().any(|entry| entry.keys == "ctrl+p"));
+        assert!(welcome.dismissal.contains("dismisses"));
 
         // Any action dismisses it, and the action itself still lands.
         state.handle_key(ctrl('p'));

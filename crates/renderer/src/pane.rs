@@ -3,6 +3,7 @@
 use mandatum_scene::{AgentContent, AgentStatus, PaneContent, PaneScene, Theme};
 use ratatui::{
     Frame,
+    layout::Rect,
     style::Modifier,
     text::Line,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
@@ -11,16 +12,16 @@ use ratatui::{
 use crate::{surface::surface_lines, theme_fg, to_rect};
 
 pub(crate) fn render_pane(frame: &mut Frame<'_>, pane: &PaneScene, theme: &Theme) {
-    let border_style = if pane.focused {
-        theme_fg(theme.focus_border).add_modifier(Modifier::BOLD)
+    let title_style = if pane.focused {
+        theme_fg(theme.focus_title).add_modifier(Modifier::BOLD)
     } else {
-        theme_fg(theme.pane_border)
+        theme_fg(theme.pane_title)
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
+        .border_style(theme_fg(theme.pane_border))
         .title(pane_title(pane))
-        .title_style(theme_fg(theme.pane_title));
+        .title_style(title_style);
     let area = to_rect(pane.area);
 
     // A floating pane owns every cell of its rect: without the clear,
@@ -79,6 +80,17 @@ pub(crate) fn render_pane(frame: &mut Frame<'_>, pane: &PaneScene, theme: &Theme
                 area,
             );
         }
+    }
+
+    // A 1-3 column pane has no usable title cell after its border corners
+    // and the title's deliberate padding. Keep focus visible at those
+    // degenerate widths with one accented corner; normal panes use title-only
+    // emphasis and retain the calm full perimeter.
+    if pane.focused && pane.area.width < 4 && pane.area.width > 0 && pane.area.height > 0 {
+        frame.render_widget(
+            Paragraph::new("●").style(theme_fg(theme.focus_title).add_modifier(Modifier::BOLD)),
+            Rect::new(area.x, area.y, 1, 1),
+        );
     }
 }
 

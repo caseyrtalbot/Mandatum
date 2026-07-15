@@ -989,7 +989,7 @@ remain required because the unified event plumbing moved behind the Module.
 
 ## Accepted: Dark-Theme Focus Uses Bright Blue
 
-Status: accepted (2026-07-14)
+Status: superseded (2026-07-14) by “Focus And Overlays Use Layered Chrome”
 
 Decision: `mandatum-dark` uses ANSI bright blue (`SceneColor::Ansi(12)`) for
 the focused-pane border. `mandatum-light` keeps ANSI blue, and
@@ -1041,3 +1041,52 @@ Verification: the scene-level first-run regression asserts the complete
 default footer and counts both the palette and help phrases exactly once; it
 failed against the duplicated composition before the fix. The full merge gate
 remains required.
+
+## Accepted: Focus And Overlays Use Layered Chrome
+
+Status: accepted (2026-07-14)
+
+Decision: normal-width pane focus accents only the title with the theme's
+`focus_title` color and bold weight; every pane perimeter uses the calm
+`pane_border` role. At one-to-three-column widths, where no title content is
+visible, one accented corner cell is the compact fallback. The explicit
+`focused` title word remains. The former `focus_border` config key is a
+compatibility alias for `focus_title`. All eight overlays share explicit
+`overlay_foreground` and `overlay_background` surface roles while retaining
+`palette_border` as edge chrome. The first-run scene carries an introduction,
+typed key/description entries, and dismissal guidance instead of flattened
+strings; the renderer accents keys, keeps descriptions normal, and dims the
+dismissal line.
+
+Context: a bright bold frame around every focused pane dominated terminal
+content even after its color moved from warning-yellow to navigation-blue.
+Overlays used only `Clear` plus a border, so their interiors inherited the
+same terminal surface as panes and read as nested panes. The welcome card had
+the right live-keymap content but no semantic structure from which a frontend
+could express hierarchy.
+
+Rationale: layered chrome should communicate navigation without competing
+with the work. A focused title plus literal label is a lighter redundant
+signal; an explicit overlay surface establishes depth; typed welcome entries
+preserve renderer neutrality and prevent frontends from parsing whitespace.
+Explicit overlay foregrounds protect contrast once backgrounds stop inheriting
+the host terminal default.
+
+Consequences: built-in dark, light, and high-contrast themes each own an
+overlay surface palette. Custom themes can override the new roles. Existing
+`focus_border` overrides continue to work but now color the focused title.
+Legacy serialized themes accept `focus_border` and default the new overlay
+roles; downstream Rust struct literals must adopt the new public fields.
+The welcome structure changes the shared scene contract, so the deferred GPU
+adapter fixture must stay source-compatible even though that adapter still
+rejects overlays explicitly.
+
+Verification: renderer tests assert focused-title accent/bold plus calm equal
+borders in every built-in theme, the one-cell fallback at widths one through
+three, key/description/dismissal hierarchy, and background containment for
+every overlay variant. Scene-theme tests assert explicit overlay
+foreground/background roles; app tests preserve live-keymap generation,
+refuse to advertise reserved-chord shadows, migrate the legacy serialized
+theme shape, preserve first-run dismissal/config compatibility, and retain
+frontend parity. Run `./ci/gpu-spike.sh` for the scene-contract fixture and
+`./ci/gate.sh` as the merge gate.

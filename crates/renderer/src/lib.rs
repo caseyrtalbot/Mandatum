@@ -126,10 +126,10 @@ fn render_status(frame: &mut Frame<'_>, status: &StatusScene, theme: &Theme) {
 mod tests {
     use mandatum_scene::{
         AgentApprovalPrompt, AgentContent, AgentStatus, AttentionSegment, ContextMenuEntry,
-        ContextMenuOverlay, EmptyContent, PaletteEntry, PaletteOverlay, PaneContent, PaneId,
-        PaneScene, PaneSceneKind, PromptOverlay, SceneCell, SceneCellStyle, SceneSize, SearchEntry,
-        SearchOverlay, SessionMapOverlay, SessionMapRow, SurfacePosition, TaskContent,
-        TerminalSurface, TimelineEntry, TimelineOverlay, layout,
+        ContextMenuOverlay, EmptyContent, HelpOverlay, PaletteEntry, PaletteOverlay, PaneContent,
+        PaneId, PaneScene, PaneSceneKind, PromptOverlay, SceneCell, SceneCellStyle, SceneSize,
+        SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow, SurfacePosition, TaskContent,
+        TerminalSurface, TimelineEntry, TimelineOverlay, WelcomeEntry, WelcomeOverlay, layout,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -557,27 +557,33 @@ mod tests {
     }
 
     #[test]
-    fn theme_resolves_semantic_roles_to_different_concrete_colors() {
+    fn theme_resolves_focused_title_without_loudening_the_border() {
         let workspace = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
 
-        // The focused pane border takes the theme's focus color: bright blue
-        // in mandatum-dark, blue in mandatum-light.
+        // Focus accents only the title: bright blue in mandatum-dark, blue in
+        // mandatum-light. The full border keeps the calm pane role.
         let dark = draw_with_theme(&workspace, &Theme::default());
-        let dark_border = dark.backend().buffer().cell((0u16, 1u16)).unwrap().fg;
-        assert_eq!(dark_border, Color::LightBlue);
+        let dark_buffer = dark.backend().buffer();
+        let dark_border = dark_buffer.cell((0u16, 2u16)).unwrap();
+        let dark_title = dark_buffer.cell((2u16, 1u16)).unwrap();
+        assert_eq!(dark_border.fg, Color::DarkGray);
+        assert!(!dark_border.modifier.contains(Modifier::BOLD));
+        assert_eq!(dark_title.fg, Color::LightBlue);
+        assert!(dark_title.modifier.contains(Modifier::BOLD));
 
         let light = draw_with_theme(&workspace, &Theme::builtin("mandatum-light").unwrap());
-        let light_border = light.backend().buffer().cell((0u16, 1u16)).unwrap().fg;
-        assert_eq!(light_border, Color::Blue);
+        let light_buffer = light.backend().buffer();
+        assert_eq!(light_buffer.cell((0u16, 2u16)).unwrap().fg, Color::Gray);
+        assert_eq!(light_buffer.cell((2u16, 1u16)).unwrap().fg, Color::Blue);
 
         // Inline overrides land on the drawn cells too.
         let custom = Theme {
-            focus_border: mandatum_scene::SceneColor::Rgb(10, 20, 30),
+            focus_title: mandatum_scene::SceneColor::Rgb(10, 20, 30),
             ..Theme::default()
         };
         let overridden = draw_with_theme(&workspace, &custom);
         assert_eq!(
-            overridden.backend().buffer().cell((0u16, 1u16)).unwrap().fg,
+            overridden.backend().buffer().cell((2u16, 1u16)).unwrap().fg,
             Color::Rgb(10, 20, 30)
         );
     }
@@ -828,6 +834,119 @@ mod tests {
     }
 
     #[test]
+    fn every_overlay_variant_paints_the_shared_surface_background() {
+        let area = SceneRect::new(10, 2, 30, 8);
+        let overlays = vec![
+            (
+                "palette",
+                OverlayScene::Palette(PaletteOverlay {
+                    area,
+                    query: String::new(),
+                    items: Vec::new(),
+                    selected: None,
+                    footer: "esc close".to_owned(),
+                }),
+            ),
+            (
+                "context menu",
+                OverlayScene::ContextMenu(ContextMenuOverlay {
+                    area,
+                    items: Vec::new(),
+                    selected: 0,
+                }),
+            ),
+            (
+                "timeline",
+                OverlayScene::Timeline(TimelineOverlay {
+                    area,
+                    query: String::new(),
+                    items: Vec::new(),
+                    selected: None,
+                    skipped_malformed: 0,
+                    footer: "esc close".to_owned(),
+                }),
+            ),
+            (
+                "search",
+                OverlayScene::Search(SearchOverlay {
+                    area,
+                    query: String::new(),
+                    items: Vec::new(),
+                    selected: None,
+                    overflow: 0,
+                    footer: "esc close".to_owned(),
+                }),
+            ),
+            (
+                "session map",
+                OverlayScene::SessionMap(SessionMapOverlay {
+                    area,
+                    rows: Vec::new(),
+                    selected: 0,
+                    footer: "esc close".to_owned(),
+                }),
+            ),
+            (
+                "prompt",
+                OverlayScene::Prompt(PromptOverlay {
+                    area,
+                    title: " Prompt ".to_owned(),
+                    input: String::new(),
+                    footer: "esc close".to_owned(),
+                }),
+            ),
+            (
+                "help",
+                OverlayScene::Help(HelpOverlay {
+                    area,
+                    query: String::new(),
+                    items: Vec::new(),
+                    selected: None,
+                    footer: "esc close".to_owned(),
+                }),
+            ),
+            (
+                "welcome",
+                OverlayScene::Welcome(WelcomeOverlay {
+                    area,
+                    introduction: "Welcome".to_owned(),
+                    entries: Vec::new(),
+                    dismissal: "Dismiss".to_owned(),
+                }),
+            ),
+        ];
+        let theme = Theme {
+            overlay_foreground: mandatum_scene::SceneColor::Rgb(4, 5, 6),
+            overlay_background: mandatum_scene::SceneColor::Rgb(1, 2, 3),
+            ..Theme::default()
+        };
+
+        for (name, overlay) in overlays {
+            let mut workspace = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
+            workspace.overlay = Some(overlay);
+            let terminal = draw_with_theme(&workspace, &theme);
+            let buffer = terminal.backend().buffer();
+            let border = buffer.cell((area.x, area.y)).unwrap();
+            let inner = buffer.cell((area.x + 1, area.y + 1)).unwrap();
+            assert_eq!(
+                border.bg,
+                Color::Rgb(1, 2, 3),
+                "{name} border keeps the overlay surface"
+            );
+            assert_eq!(
+                inner.bg,
+                Color::Rgb(1, 2, 3),
+                "{name} text/blank cells keep the overlay surface"
+            );
+            assert_ne!(
+                buffer.cell((area.x - 1, area.y + 1)).unwrap().bg,
+                Color::Rgb(1, 2, 3),
+                "{name} background must not leak outside its scene rect"
+            );
+        }
+    }
+
+    #[test]
     fn palette_marks_matches_selection_and_greyed_entries() {
         let mut split = PaletteEntry::new("Split pane right", "layout");
         split.match_indices = vec![0, 1, 2];
@@ -939,33 +1058,59 @@ mod tests {
     }
 
     #[test]
-    fn welcome_overlay_renders_its_scene_lines() {
-        use mandatum_scene::WelcomeOverlay;
-
+    fn welcome_overlay_gives_keys_descriptions_and_dismissal_a_hierarchy() {
         let mut with_welcome = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
         with_welcome.size = SceneSize::new(80, 24);
-        let lines = vec![
-            "A workspace for terminals, tasks, and agents.".to_owned(),
-            "  ctrl+p  command palette".to_owned(),
-            "any key or click dismisses this note".to_owned(),
+        let entries = vec![
+            WelcomeEntry {
+                keys: "ctrl+p".to_owned(),
+                description: "Command palette".to_owned(),
+            },
+            WelcomeEntry {
+                keys: "f1".to_owned(),
+                description: "Help".to_owned(),
+            },
         ];
         with_welcome.overlay = Some(OverlayScene::Welcome(WelcomeOverlay {
-            area: layout::welcome_rect(with_welcome.size, lines.len() as u16),
-            lines,
+            area: layout::welcome_rect(with_welcome.size, entries.len() as u16 + 4),
+            introduction: "A workspace for terminals, tasks, and agents.".to_owned(),
+            entries,
+            dismissal: "Any key or click dismisses this note".to_owned(),
         }));
-        let all = buffer_rows(&draw(&with_welcome)).join("\n");
+        let terminal = draw(&with_welcome);
+        let rows = buffer_rows(&terminal);
+        let all = rows.join("\n");
 
         assert!(all.contains("Mandatum"));
         assert!(all.contains("A workspace for terminals, tasks, and agents."));
-        assert!(all.contains("ctrl+p  command palette"));
-        assert!(all.contains("any key or click dismisses this note"));
+        assert!(all.contains("ctrl+p  Command palette"));
+        assert!(all.contains("Any key or click dismisses this note"));
+
+        let buffer = terminal.backend().buffer();
+        let find_cell = |needle: &str, marker: char| {
+            let y = (0..buffer.area.height)
+                .find(|y| rows[usize::from(*y)].contains(needle))
+                .unwrap_or_else(|| panic!("row containing {needle:?} rendered"));
+            let x = rows[usize::from(y)]
+                .chars()
+                .position(|character| character == marker)
+                .unwrap() as u16;
+            buffer.cell((x, y)).unwrap()
+        };
+        let key = find_cell("ctrl+p", 'c');
+        assert_eq!(key.fg, Color::Cyan);
+        assert!(key.modifier.contains(Modifier::BOLD));
+        let description = find_cell("Command palette", 'C');
+        assert!(!description.modifier.contains(Modifier::BOLD));
+        assert!(!description.modifier.contains(Modifier::DIM));
+        let dismissal = find_cell("Any key or click", 'A');
+        assert!(dismissal.modifier.contains(Modifier::DIM));
     }
 
     #[test]
-    fn focused_border_is_visibly_distinct_in_every_builtin_theme() {
-        // Two tiled panes; only the first is focused. The border colors must
-        // differ in every built-in theme — including high-contrast, where
-        // white-on-white borders once made focus rely on bold alone.
+    fn focused_title_is_distinct_while_borders_stay_calm_in_every_builtin_theme() {
+        // Two tiled panes; only the first is focused. Focus lives on the title
+        // while both full perimeters keep the same calm border role.
         let mut focused = pane(PaneContent::Terminal(text_surface(&["sh"])));
         focused.area = SceneRect::new(0, 1, 30, 10);
         let mut unfocused = pane(PaneContent::Terminal(text_surface(&["ok"])));
@@ -978,15 +1123,51 @@ mod tests {
             let theme = Theme::builtin(name).unwrap();
             let terminal = draw_with_theme(&workspace, &theme);
             let buffer = terminal.backend().buffer();
-            let focused_border = buffer.cell((0u16, 1u16)).unwrap();
-            let unfocused_border = buffer.cell((35u16, 1u16)).unwrap();
+            let focused_title = buffer.cell((2u16, 1u16)).unwrap();
+            let unfocused_title = buffer.cell((32u16, 1u16)).unwrap();
             assert_ne!(
-                focused_border.fg, unfocused_border.fg,
-                "theme {name} must give the focused border its own color"
+                focused_title.fg, unfocused_title.fg,
+                "theme {name} must give the focused title its own color"
             );
             assert!(
-                focused_border.modifier.contains(Modifier::BOLD),
-                "theme {name} keeps the bold reinforcement on focus"
+                focused_title.modifier.contains(Modifier::BOLD),
+                "theme {name} keeps the bold reinforcement on the title"
+            );
+            assert!(!unfocused_title.modifier.contains(Modifier::BOLD));
+            let focused_border = buffer.cell((0u16, 2u16)).unwrap();
+            let unfocused_border = buffer.cell((30u16, 2u16)).unwrap();
+            assert_eq!(focused_border.fg, unfocused_border.fg);
+            assert!(!focused_border.modifier.contains(Modifier::BOLD));
+        }
+    }
+
+    #[test]
+    fn compact_focused_panes_keep_a_one_cell_focus_fallback() {
+        for width in 1..=3 {
+            let mut compact = pane(PaneContent::Terminal(text_surface(&["sh"])));
+            compact.area = SceneRect::new(0, 1, width, 4);
+            let mut workspace = scene(vec![compact.clone()]);
+            workspace.size = SceneSize::new(8, 6);
+            workspace.header.area = SceneRect::new(0, 0, 8, 1);
+            workspace.status.area = SceneRect::new(0, 5, 8, 1);
+
+            let terminal = draw(&workspace);
+            let marker = terminal.backend().buffer().cell((0u16, 1u16)).unwrap();
+            assert_eq!(marker.symbol(), "●", "width {width} keeps a focus marker");
+            assert_eq!(marker.fg, Color::LightBlue);
+            assert!(marker.modifier.contains(Modifier::BOLD));
+
+            compact.focused = false;
+            let unfocused = draw(&scene(vec![compact]));
+            assert_ne!(
+                unfocused
+                    .backend()
+                    .buffer()
+                    .cell((0u16, 1u16))
+                    .unwrap()
+                    .symbol(),
+                "●",
+                "width {width} never marks an unfocused pane"
             );
         }
     }

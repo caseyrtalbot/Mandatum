@@ -35,5 +35,5 @@ pub use workspace::{
     AttentionSegment, ContextMenuEntry, ContextMenuOverlay, HeaderScene, HelpEntry, HelpOverlay,
     HitTarget, HitTargetKind, OverlayScene, PaletteEntry, PaletteOverlay, PromptOverlay,
     SESSION_MAP_FOCUS_GLYPH, SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow,
-    StatusScene, TimelineEntry, TimelineOverlay, WelcomeOverlay, WorkspaceScene,
+    StatusScene, TimelineEntry, TimelineOverlay, WelcomeEntry, WelcomeOverlay, WorkspaceScene,
 };

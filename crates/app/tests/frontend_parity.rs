@@ -85,7 +85,14 @@ fn render_scene_to_text(scene: &WorkspaceScene) -> Vec<String> {
             lines.push(help.footer.clone());
         }
         Some(OverlayScene::Welcome(welcome)) => {
-            lines.extend(welcome.lines.iter().cloned());
+            lines.push(welcome.introduction.clone());
+            lines.extend(
+                welcome
+                    .entries
+                    .iter()
+                    .map(|entry| format!("{}  {}", entry.keys, entry.description)),
+            );
+            lines.push(welcome.dismissal.clone());
         }
         None => {}
     }

@@ -195,7 +195,8 @@ split-right = "i"              # single-letter fast paths, too
 
 [theme]
 name = "mandatum-dark"         # or mandatum-light, mandatum-high-contrast
-focus_border = "#ff8800"       # per-role overrides
+focus_title = "#ff8800"        # per-role overrides
+overlay_background = "#121212"
 attention = "bright-yellow"
 
 [ui]
@@ -212,6 +213,9 @@ default_command = "cargo check"
 connector = "claude"           # or "fake" (deterministic, offline)
 model = "claude-opus-4-6"      # passed through to the connector
 ```
+
+The former `focus_border` key remains accepted as a compatibility alias for
+`focus_title`.
 
 ## Architecture
 

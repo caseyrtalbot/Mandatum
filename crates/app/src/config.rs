@@ -334,7 +334,10 @@ fn apply_theme(config: &mut LoadedConfig, mut table: toml::Table, label: &str) {
 
 fn theme_slot<'a>(theme: &'a mut Theme, key: &str) -> Option<&'a mut SceneColor> {
     Some(match key {
-        "focus_border" => &mut theme.focus_border,
+        // `focus_border` shipped before focus emphasis moved to the title.
+        // Keep it as a compatibility alias so existing color overrides still
+        // control the focused chrome instead of becoming an unknown key.
+        "focus_title" | "focus_border" => &mut theme.focus_title,
         "pane_border" => &mut theme.pane_border,
         "pane_title" => &mut theme.pane_title,
         "header" => &mut theme.header,
@@ -342,6 +345,8 @@ fn theme_slot<'a>(theme: &'a mut Theme, key: &str) -> Option<&'a mut SceneColor>
         "status" => &mut theme.status,
         "attention" => &mut theme.attention,
         "palette_border" => &mut theme.palette_border,
+        "overlay_foreground" => &mut theme.overlay_foreground,
+        "overlay_background" => &mut theme.overlay_background,
         "palette_selection" => &mut theme.palette_selection,
         "selection_highlight" => &mut theme.selection_highlight,
         "agent_running" => &mut theme.agent_running,
@@ -515,6 +520,7 @@ mod tests {
     use mandatum_scene::input::{Key, KeyCode, Modifiers};
 
     use super::*;
+    use crate::help::{help_route, welcome_entries};
     use crate::keymap::ChordAction;
 
     static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -590,7 +596,8 @@ split-right = "i"
 
 [theme]
 name = "mandatum-light"
-focus_border = "#ff8800"
+focus_title = "#ff8800"
+overlay_background = "#202020"
 attention = "bright-yellow"
 
 [ui]
@@ -633,7 +640,11 @@ model = "claude-opus-4-6"
         // The old default letter was released by the rebind.
         assert_eq!(config.keymap.palette.resolve_char('v'), None);
         assert_eq!(config.theme.name, "mandatum-light");
-        assert_eq!(config.theme.focus_border, SceneColor::Rgb(0xff, 0x88, 0x00));
+        assert_eq!(config.theme.focus_title, SceneColor::Rgb(0xff, 0x88, 0x00));
+        assert_eq!(
+            config.theme.overlay_background,
+            SceneColor::Rgb(0x20, 0x20, 0x20)
+        );
         assert_eq!(config.theme.attention, SceneColor::Ansi(11));
         assert!(config.reduced_motion);
         assert!(config.debug_status);
@@ -641,6 +652,29 @@ model = "claude-opus-4-6"
         assert_eq!(config.task_command.as_deref(), Some("cargo check"));
         assert_eq!(config.agent_connector, Some(AgentConnectorKind::Fake));
         assert_eq!(config.agent_model.as_deref(), Some("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn legacy_focus_border_override_now_targets_the_focused_title() {
+        let dir = TestConfigDir::new();
+        let user = dir.write("user.toml", "[theme]\nfocus_border = \"bright-magenta\"\n");
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+
+        assert!(config.warnings.is_empty());
+        assert_eq!(config.theme.focus_title, SceneColor::Ansi(13));
+    }
+
+    #[test]
+    fn legacy_serialized_theme_shape_migrates_to_the_new_roles() {
+        let mut legacy = serde_json::to_value(Theme::default()).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        let focus = object.remove("focus_title").unwrap();
+        object.insert("focus_border".to_owned(), focus);
+        object.remove("overlay_foreground");
+        object.remove("overlay_background");
+
+        let migrated: Theme = serde_json::from_value(legacy).unwrap();
+        assert_eq!(migrated, Theme::default());
     }
 
     #[test]
@@ -675,7 +709,7 @@ fly-mode = "ctrl+f"
 
 [theme]
 name = "solarized"
-focus_border = "#zzz"
+focus_title = "#zzz"
 
 [unknown-section]
 x = 1
@@ -772,6 +806,30 @@ zoom-pane = "v"
         );
         let config = load_config(Some(&user), &dir.missing("project.toml"));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn welcome_never_advertises_a_command_chord_shadowed_by_reserved_input() {
+        let dir = TestConfigDir::new();
+        let user = dir.write("user.toml", "[keymap]\nhelp = \"ctrl+p\"\n");
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("taken by toggle-palette"))
+        );
+        assert_eq!(
+            config.keymap.chord_action(Key::ctrl('p')),
+            Some(ChordAction::TogglePalette)
+        );
+        assert_eq!(help_route(&config.keymap), "ctrl+p ?");
+        let help = welcome_entries(&config.keymap)
+            .into_iter()
+            .find(|entry| entry.description.starts_with("Help"))
+            .expect("welcome carries a Help route");
+        assert_eq!(help.keys, "ctrl+p ?");
     }
 
     #[test]

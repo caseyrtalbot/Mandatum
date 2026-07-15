@@ -6,9 +6,9 @@
 //! written here, next to the code that implements them.
 
 use mandatum_commands::{BUILT_IN_COMMANDS, CommandCategory, CommandId, fuzzy::fuzzy_match};
-use mandatum_scene::HelpEntry;
+use mandatum_scene::{HelpEntry, WelcomeEntry};
 
-use crate::keymap::{Keymap, format_chord};
+use crate::keymap::{ChordAction, Keymap, format_chord};
 use crate::session_map::SESSION_MAP_GLYPH_LEGEND;
 use crate::timeline::TIMELINE_GLYPH_LEGEND;
 
@@ -158,7 +158,12 @@ fn key_route(command_id: CommandId, keymap: &Keymap) -> String {
     if command_id == CommandId::Quit {
         routes.push(format_chord(keymap.quit));
     }
-    if let Some(chord) = keymap.chord_for(command_id) {
+    if let Some(chord) = keymap.chord_for(command_id)
+        && matches!(
+            keymap.chord_action(chord),
+            Some(ChordAction::Dispatch(bound)) if bound == command_id
+        )
+    {
         routes.push(format_chord(chord));
     }
     // Dock rides the float letter (one toggle key for the pair).
@@ -179,7 +184,12 @@ fn key_route(command_id: CommandId, keymap: &Keymap) -> String {
 /// The shortest live route to Help itself, for the status-strip hint and
 /// the first-run note.
 pub(crate) fn help_route(keymap: &Keymap) -> String {
-    if let Some(chord) = keymap.chord_for(CommandId::ShowHelp) {
+    if let Some(chord) = keymap.chord_for(CommandId::ShowHelp)
+        && matches!(
+            keymap.chord_action(chord),
+            Some(ChordAction::Dispatch(CommandId::ShowHelp))
+        )
+    {
         return format_chord(chord);
     }
     if let Some(letter) = keymap.palette.key_for(CommandId::ShowHelp) {
@@ -188,21 +198,27 @@ pub(crate) fn help_route(keymap: &Keymap) -> String {
     "palette: help".to_owned()
 }
 
-/// The one-time first-run note: under 8 lines, generated from the live
-/// keymap so a config that rebinds chords is never contradicted.
-pub(crate) fn welcome_lines(keymap: &Keymap) -> Vec<String> {
+/// The one-time first-run routes, generated from the live keymap so a config
+/// that rebinds chords is never contradicted. The scene keeps keys separate
+/// from descriptions so frontends can give them a real visual hierarchy.
+pub(crate) fn welcome_entries(keymap: &Keymap) -> Vec<WelcomeEntry> {
     vec![
-        "A workspace for terminals, tasks, and agents.".to_owned(),
-        String::new(),
-        format!(
-            "  {}  command palette (every command, searchable)",
-            format_chord(keymap.toggle_palette)
-        ),
-        "  right-click  pane menu".to_owned(),
-        format!("  {}  help: keys, mouse, glyphs", help_route(keymap)),
-        format!("  {}  quit", format_chord(keymap.quit)),
-        String::new(),
-        "any key or click dismisses this note".to_owned(),
+        WelcomeEntry {
+            keys: format_chord(keymap.toggle_palette),
+            description: "Command palette — every command, searchable".to_owned(),
+        },
+        WelcomeEntry {
+            keys: "right-click".to_owned(),
+            description: "Pane menu".to_owned(),
+        },
+        WelcomeEntry {
+            keys: help_route(keymap),
+            description: "Help — keys, mouse, and glyphs".to_owned(),
+        },
+        WelcomeEntry {
+            keys: format_chord(keymap.quit),
+            description: "Quit Mandatum".to_owned(),
+        },
     ]
 }
 
@@ -327,19 +343,33 @@ mod tests {
     }
 
     #[test]
-    fn welcome_note_is_short_and_generated_from_the_live_keymap() {
-        let lines = welcome_lines(&Keymap::default());
-        assert!(lines.len() <= 8, "the first-run note stays under 8 lines");
-        let all = lines.join("\n");
+    fn welcome_note_is_short_structured_and_generated_from_the_live_keymap() {
+        let entries = welcome_entries(&Keymap::default());
+        // Introduction + blank + routes + blank + dismissal stays at eight
+        // rendered rows without flattening the route semantics.
+        assert!(
+            entries.len() + 4 <= 8,
+            "the first-run note stays under 8 lines"
+        );
+        let all = entries
+            .iter()
+            .map(|entry| format!("{} {}", entry.keys, entry.description))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(all.contains("ctrl+p"));
         assert!(all.contains("right-click"));
         assert!(all.contains("f1"));
         assert!(all.contains("ctrl+q"));
+        assert!(entries.iter().all(|entry| !entry.description.is_empty()));
 
         // A rebound palette chord is reflected, not contradicted.
         let mut keymap = Keymap::default();
         keymap.toggle_palette = parse_chord("ctrl+k").unwrap();
-        let all = welcome_lines(&keymap).join("\n");
+        let all = welcome_entries(&keymap)
+            .into_iter()
+            .map(|entry| entry.keys)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(all.contains("ctrl+k"));
         assert!(!all.contains("ctrl+p"));
     }

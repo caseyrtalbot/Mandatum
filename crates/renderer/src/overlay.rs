@@ -1,19 +1,21 @@
-//! Overlay renderers: palette, context menu, timeline, session map, prompt.
+//! Overlay renderers: palette, context menu, timeline, search, session map,
+//! prompt, help, and welcome.
 //! Pure scene-to-widget translation; all layout math comes from
 //! `mandatum_scene::layout`.
 
 use mandatum_scene::{
     ContextMenuOverlay, HelpOverlay, PaletteOverlay, PromptOverlay, SESSION_MAP_FOCUS_GLYPH,
-    SearchOverlay, SessionMapOverlay, Theme, TimelineOverlay, WelcomeOverlay, layout,
+    SceneRect, SearchOverlay, SessionMapOverlay, Theme, TimelineOverlay, WelcomeOverlay, layout,
 };
 use ratatui::{
     Frame,
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-use crate::{theme_fg, to_rect};
+use crate::{theme_color, theme_fg, to_rect};
 
 /// Draw the palette overlay: the filter input on the top inner row, the
 /// visible slice of entries (matched label chars bold+underlined, greyed
@@ -21,18 +23,8 @@ use crate::{theme_fg, to_rect};
 /// to the bottom inner row. Calm styling: modifiers plus the theme's
 /// palette roles, no extra color.
 pub(crate) fn render_palette(frame: &mut Frame<'_>, palette: &PaletteOverlay, theme: &Theme) {
-    let overlay = to_rect(palette.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .title(" Command Palette ")
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
     let inner = layout::pane_inner_rect(palette.area);
-    let inner_rect = to_rect(inner);
+    let inner_rect = render_overlay_frame(frame, palette.area, Some(" Command Palette "), theme);
     if inner_rect.height == 0 || inner_rect.width == 0 {
         return;
     }
@@ -81,25 +73,15 @@ pub(crate) fn render_palette(frame: &mut Frame<'_>, palette: &PaletteOverlay, th
         lines.push(Line::from(spans).style(line_style));
     }
 
-    render_with_pinned_footer(frame, inner_rect, lines, &palette.footer, dim);
+    render_with_pinned_footer(frame, inner_rect, lines, &palette.footer, dim, theme);
 }
 
 /// Draw the execution timeline: the filter input on top, the visible slice
 /// of events (glyph, relative time, description; the selection reversed),
 /// and the key-hint footer.
 pub(crate) fn render_timeline(frame: &mut Frame<'_>, timeline: &TimelineOverlay, theme: &Theme) {
-    let overlay = to_rect(timeline.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .title(" Timeline ")
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
     let inner = layout::pane_inner_rect(timeline.area);
-    let inner_rect = to_rect(inner);
+    let inner_rect = render_overlay_frame(frame, timeline.area, Some(" Timeline "), theme);
     if inner_rect.height == 0 || inner_rect.width == 0 {
         return;
     }
@@ -130,7 +112,7 @@ pub(crate) fn render_timeline(frame: &mut Frame<'_>, timeline: &TimelineOverlay,
         lines.push(Line::from(spans).style(line_style));
     }
 
-    render_with_pinned_footer(frame, inner_rect, lines, &timeline.footer, dim);
+    render_with_pinned_footer(frame, inner_rect, lines, &timeline.footer, dim, theme);
 }
 
 /// Draw the session-search overlay: the search input on top, the visible
@@ -138,18 +120,9 @@ pub(crate) fn render_timeline(frame: &mut Frame<'_>, timeline: &TimelineOverlay,
 /// above — then the matched line with matched chars bold+underlined; the
 /// selection reversed), and the key-hint footer.
 pub(crate) fn render_search(frame: &mut Frame<'_>, search: &SearchOverlay, theme: &Theme) {
-    let overlay = to_rect(search.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .title(" Search Session Output ")
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
     let inner = layout::pane_inner_rect(search.area);
-    let inner_rect = to_rect(inner);
+    let inner_rect =
+        render_overlay_frame(frame, search.area, Some(" Search Session Output "), theme);
     if inner_rect.height == 0 || inner_rect.width == 0 {
         return;
     }
@@ -201,24 +174,14 @@ pub(crate) fn render_search(frame: &mut Frame<'_>, search: &SearchOverlay, theme
         lines.push(Line::from(spans).style(line_style));
     }
 
-    render_with_pinned_footer(frame, inner_rect, lines, &search.footer, dim);
+    render_with_pinned_footer(frame, inner_rect, lines, &search.footer, dim, theme);
 }
 
 /// Draw the session map: sessions with their panes indented beneath them,
 /// each pane carrying its glyph, one-word state, focus marker, and badges.
 pub(crate) fn render_session_map(frame: &mut Frame<'_>, map: &SessionMapOverlay, theme: &Theme) {
-    let overlay = to_rect(map.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .title(" Sessions ")
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
     let inner = layout::pane_inner_rect(map.area);
-    let inner_rect = to_rect(inner);
+    let inner_rect = render_overlay_frame(frame, map.area, Some(" Sessions "), theme);
     if inner_rect.height == 0 || inner_rect.width == 0 {
         return;
     }
@@ -253,24 +216,13 @@ pub(crate) fn render_session_map(frame: &mut Frame<'_>, map: &SessionMapOverlay,
         lines.push(Line::from(spans).style(line_style));
     }
 
-    render_with_pinned_footer(frame, inner_rect, lines, &map.footer, dim);
+    render_with_pinned_footer(frame, inner_rect, lines, &map.footer, dim, theme);
 }
 
 /// Draw the one-line text prompt (Set agent objective): a titled box with
 /// the editable input and a cursor, plus the key-hint footer.
 pub(crate) fn render_prompt(frame: &mut Frame<'_>, prompt: &PromptOverlay, theme: &Theme) {
-    let overlay = to_rect(prompt.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .title(prompt.title.clone())
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
-    let inner = layout::pane_inner_rect(prompt.area);
-    let inner_rect = to_rect(inner);
+    let inner_rect = render_overlay_frame(frame, prompt.area, Some(&prompt.title), theme);
     if inner_rect.height == 0 || inner_rect.width == 0 {
         return;
     }
@@ -283,23 +235,13 @@ pub(crate) fn render_prompt(frame: &mut Frame<'_>, prompt: &PromptOverlay, theme
     ));
     let lines = vec![Line::from(input)];
 
-    render_with_pinned_footer(frame, inner_rect, lines, &prompt.footer, dim);
+    render_with_pinned_footer(frame, inner_rect, lines, &prompt.footer, dim, theme);
 }
 
 /// Draw the right-click context menu: a calm bordered list, the selected
 /// row reversed, each row's key-chord hint right-aligned and dimmed.
 pub(crate) fn render_context_menu(frame: &mut Frame<'_>, menu: &ContextMenuOverlay, theme: &Theme) {
-    let overlay = to_rect(menu.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
-    let inner = layout::pane_inner_rect(menu.area);
-    let inner_rect = to_rect(inner);
+    let inner_rect = render_overlay_frame(frame, menu.area, None, theme);
     if inner_rect.height == 0 || inner_rect.width == 0 {
         return;
     }
@@ -333,24 +275,17 @@ pub(crate) fn render_context_menu(frame: &mut Frame<'_>, menu: &ContextMenuOverl
         lines.push(Line::from(spans).style(line_style));
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner_rect);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(overlay_surface_style(theme)),
+        inner_rect,
+    );
 }
 
 /// Draw the help overlay: the filter input on top, the visible slice of
 /// rows (section headings bold, key hints dimmed), and the key-hint footer.
 pub(crate) fn render_help(frame: &mut Frame<'_>, help: &HelpOverlay, theme: &Theme) {
-    let overlay = to_rect(help.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .title(" Help ")
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
     let inner = layout::pane_inner_rect(help.area);
-    let inner_rect = to_rect(inner);
+    let inner_rect = render_overlay_frame(frame, help.area, Some(" Help "), theme);
     if inner_rect.height == 0 || inner_rect.width == 0 {
         return;
     }
@@ -385,32 +320,72 @@ pub(crate) fn render_help(frame: &mut Frame<'_>, help: &HelpOverlay, theme: &The
         lines.push(Line::from(spans).style(line_style));
     }
 
-    render_with_pinned_footer(frame, inner_rect, lines, &help.footer, dim);
+    render_with_pinned_footer(frame, inner_rect, lines, &help.footer, dim, theme);
 }
 
 /// Draw the one-time first-run note: a calm bordered card of scene-carried
 /// lines. Not modal — it never owns input, and any action dismisses it.
 pub(crate) fn render_welcome(frame: &mut Frame<'_>, welcome: &WelcomeOverlay, theme: &Theme) {
-    let overlay = to_rect(welcome.area);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Block::default()
-            .title(" Mandatum ")
-            .borders(Borders::ALL)
-            .border_style(theme_fg(theme.palette_border)),
-        overlay,
-    );
-
-    let inner_rect = to_rect(layout::pane_inner_rect(welcome.area));
+    let inner_rect = render_overlay_frame(frame, welcome.area, Some(" Mandatum "), theme);
     if inner_rect.height == 0 || inner_rect.width == 0 {
         return;
     }
-    let lines: Vec<Line<'_>> = welcome
-        .lines
+    let key_width = welcome
+        .entries
         .iter()
-        .map(|line| Line::from(line.clone()))
-        .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner_rect);
+        .map(|entry| entry.keys.chars().count())
+        .max()
+        .unwrap_or(0);
+    let key_style = theme_fg(theme.palette_border).add_modifier(Modifier::BOLD);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut lines = vec![
+        Line::styled(
+            welcome.introduction.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Line::default(),
+    ];
+    for entry in &welcome.entries {
+        let padding = key_width.saturating_sub(entry.keys.chars().count());
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{}{}", entry.keys, " ".repeat(padding)), key_style),
+            Span::raw(format!("  {}", entry.description)),
+        ]));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(welcome.dismissal.clone(), dim)));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(overlay_surface_style(theme)),
+        inner_rect,
+    );
+}
+
+/// Paint one overlay shell. Every overlay shares one distinct surface role,
+/// while its cyan/blue/high-contrast edge remains a separate chrome signal.
+fn render_overlay_frame(
+    frame: &mut Frame<'_>,
+    area: SceneRect,
+    title: Option<&str>,
+    theme: &Theme,
+) -> Rect {
+    let overlay = to_rect(area);
+    frame.render_widget(Clear, overlay);
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme_fg(theme.palette_border))
+        .style(overlay_surface_style(theme));
+    if let Some(title) = title {
+        block = block.title(title.to_owned());
+    }
+    frame.render_widget(block, overlay);
+    to_rect(layout::pane_inner_rect(area))
+}
+
+fn overlay_surface_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme_color(theme.overlay_foreground))
+        .bg(theme_color(theme.overlay_background))
 }
 
 /// The shared "> input" line with a block cursor, or a dim placeholder while
@@ -436,6 +411,7 @@ fn render_with_pinned_footer(
     mut lines: Vec<Line<'_>>,
     footer: &str,
     dim: Style,
+    theme: &Theme,
 ) {
     let footer_row = usize::from(inner_rect.height).saturating_sub(1);
     lines.truncate(footer_row.max(1));
@@ -445,5 +421,8 @@ fn render_with_pinned_footer(
     if footer_row > 0 {
         lines.push(Line::from(Span::styled(format!(" {footer}"), dim)));
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner_rect);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(overlay_surface_style(theme)),
+        inner_rect,
+    );
 }

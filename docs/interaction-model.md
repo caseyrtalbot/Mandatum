@@ -305,12 +305,21 @@ emphasis steady instead of alternating it. Nothing else in the scene is
 time-driven; a scene-equality test pins that adding unguarded motion
 fails the build.
 
-**Visible focus.** The focused pane border has its own theme color in all
-three built-in themes (bright blue in mandatum-dark; bright yellow against
-bright white in mandatum-high-contrast — never white-on-white), reinforced
-bold, and the `focused` word appears in the pane title, so focus never rides
-on color alone. Theme- and renderer-level tests assert the distinction per
-theme.
+**Visible focus.** The focused pane title has its own theme color in all three
+built-in themes (bright blue in mandatum-dark; bright yellow in
+mandatum-high-contrast), reinforced bold, while the full perimeter stays on
+the calm pane-border role. The `focused` word remains in the title, so focus
+never rides on color alone. Theme- and renderer-level tests assert the title
+distinction and neutral border per theme. At degenerate one-to-three-column
+widths, where no title text can survive, one accented corner cell preserves a
+visible focus signal without restoring a loud perimeter.
+
+**Layered surfaces.** Every overlay paints an explicit foreground/background
+surface inside its accent border, so palettes, maps, prompts, help, and the
+first-run card read as a layer above the workspace rather than another pane.
+The first-run card keeps live keys, descriptions, and dismissal guidance as
+separate scene fields: keys are accented and bold, descriptions are normal,
+and the dismissal line is dim.
 
 **Configurable keymaps.** Every command is rebindable (`[keymap]`), all
 surfaces (palette hints, context menu, help, first-run note, status strip)

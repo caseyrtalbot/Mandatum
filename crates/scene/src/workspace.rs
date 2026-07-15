@@ -106,12 +106,22 @@ pub struct HelpEntry {
 }
 
 /// The one-time first-run note: a short orientation card shown only when no
-/// saved workspace exists. Dismissed by any action; not modal (input under
-/// it behaves normally).
+/// saved workspace exists. Its semantic rows let every frontend distinguish
+/// keys, descriptions, and dismissal guidance without parsing whitespace.
+/// Dismissed by any action; not modal (input under it behaves normally).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomeOverlay {
     pub area: SceneRect,
-    pub lines: Vec<String>,
+    pub introduction: String,
+    pub entries: Vec<WelcomeEntry>,
+    pub dismissal: String,
+}
+
+/// One first-run route: the live key gesture and the behavior it opens.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WelcomeEntry {
+    pub keys: String,
+    pub description: String,
 }
 
 /// The marker frontends draw in front of the focused pane's session-map row.

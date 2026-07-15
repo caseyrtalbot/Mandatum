@@ -59,9 +59,13 @@ more useful without pretending the wider vision is finished:
   transactional restore. `AppState` receives typed effects and lifecycle
   facts while durable workspace and presentation state remain outside the
   live engine.
-- the default dark theme now uses ANSI bright blue for focused-pane chrome,
-  separating navigation from yellow waiting states and red attention while
-  preserving the high-contrast theme's bright-yellow focus treatment.
+- focus now normally accents only the pane title (bright blue in the default dark
+  theme) while the full perimeter stays calm; the explicit `focused` label
+  preserves a non-color signal, with a one-cell corner fallback when a pane is
+  too narrow to show any title text.
+- overlays now paint explicit foreground/background surfaces instead of
+  reading as nested panes, and the first-run card separates emphasized live
+  key routes, normal descriptions, and dim dismissal guidance.
 - first-run status now contributes only `new workspace`; the permanent
   keymap-derived control hint owns palette, menu, and help guidance, so the
   footer names each route once.
