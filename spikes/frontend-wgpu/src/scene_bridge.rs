@@ -9,7 +9,8 @@
 
 use mandatum_scene::{
     HeaderScene, PaneContent, PaneId, PaneScene, PaneSceneKind, SceneCell, SceneCellStyle,
-    SceneColor, SceneRect, SceneSize, SurfacePosition, TerminalSurface, WorkspaceScene,
+    SceneColor, SceneRect, SceneSize, StatusScene, SurfacePosition, TerminalSurface,
+    WorkspaceScene,
 };
 use mandatum_terminal_vt::{CellStyle, Color as VtColor};
 
@@ -30,9 +31,10 @@ pub fn build_scene(
     let surface = terminal_surface(session, selection, cols, rows);
 
     let pane_id = PaneId::new(SPIKE_PANE_ID);
+    let shell_name = session.shell_name().to_owned();
     let pane = PaneScene {
         id: pane_id.clone(),
-        title: session.shell_name().to_owned(),
+        title: shell_name.clone(),
         kind: PaneSceneKind::Terminal,
         area: SceneRect::new(0, 0, cols, rows),
         focused: true,
@@ -46,14 +48,25 @@ pub fn build_scene(
         // One row below the pane is reserved for the status strip.
         size: SceneSize::new(cols, rows.saturating_add(1)),
         header: HeaderScene {
-            session_name: session.shell_name().to_owned(),
+            // The spike still reserves only the status row. Carry the current
+            // header contract so schema drift is caught, but leave its area
+            // empty until full workspace chrome becomes a production goal.
+            area: SceneRect::new(0, 0, cols, 0),
+            workspace_name: "wgpu spike".to_owned(),
+            session_name: shell_name.clone(),
             pane_count: 1,
             focused_pane: pane_id.clone(),
             zoomed: false,
+            connector_label: "none".to_owned(),
+            text: format!("wgpu spike · {shell_name}"),
+            attention: Vec::new(),
         },
         panes: vec![pane],
         overlay: None,
-        status: Some(status.to_owned()),
+        status: StatusScene {
+            area: SceneRect::new(0, rows, cols, 1),
+            text: status.to_owned(),
+        },
         focused_pane: pane_id,
         hit_targets: Vec::new(),
         copy_mode: session.scroll_offset() > 0,

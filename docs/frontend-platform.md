@@ -94,11 +94,15 @@ Evaluate frontend options against:
 ## The Spike (Done) And The Platform Decision
 
 The required spike ran and completed (2026-07-09). A winit + wgpu + glyphon
-frontend at `spikes/frontend-wgpu` (outside the Cargo workspace, so its GPU
-dependency tree never joins the product build or CI gate) delivered the full
-vertical slice: a native window rendering a live PTY-backed terminal grid,
-typing and paste, resize, scrollback, mouse selection and copy, a status
-strip, and self-instrumenting latency/frame-time measurement. Full evidence:
+frontend at `spikes/frontend-wgpu` delivered the full vertical slice: a native
+window rendering a live PTY-backed terminal grid, typing and paste, resize,
+scrollback, mouse selection and copy, a status strip, and self-instrumenting
+latency/frame-time measurement. It remains outside the Cargo workspace, product
+build, release artifacts, and merge gate. The opt-in `./ci/gpu-spike.sh`
+maintenance check runs spike-local format, locked all-target tests, and the
+renderer dependency-boundary proof after scene-contract or spike changes. The
+paint path is a separate spike-local crate that cannot depend on the PTY or
+terminal parser. Full evidence:
 `spikes/frontend-wgpu/RESULTS.md`.
 
 ### Measured numbers (from RESULTS.md)
@@ -108,7 +112,7 @@ strip, and self-instrumenting latency/frame-time measurement. Full evidence:
 | GPU spike | key -> GPU present (paint included) | 21.6 ms | 22.2 ms |
 | ratatui frontend, 40 ms poll loop (then-current) | key -> app-emitted bytes (host paint excluded) | 42.9 ms | 45.8 ms |
 
-Max latency is omitted: RESULTS.md's headline max (23.1 ms) disagrees
+Max latency is omitted: RESULTS.md's original headline max (23.1 ms) disagrees
 with the raw run JSON in the same file (41.2 ms), so only the figures
 consistent across both are cited (see the correction note in RESULTS.md).
 
@@ -137,9 +141,15 @@ Redraw Cap"), the same external probe measured the terminal frontend at
 and before/after table: docs/verification.md, "Input Latency Regression
 Check"; addendum in RESULTS.md).
 
+A 2026-07-14 live refresh measured **p50 11.30 ms / p95 13.08 ms**, also
+key-to-bytes-out with host-terminal paint excluded. It therefore does not prove
+sub-20 ms end-to-end latency. Scene-contract compile drift in the excluded spike
+was repaired the same day and its opt-in maintenance check passed.
+
 The wgpu adapter stays warm behind the scene contract, with its probe
 (`spikes/frontend-wgpu/src/bin/tui_probe.rs`) kept as the product's standing
 latency-regression harness. Revisit when the roadmap needs GPU-only
 capability (true GPU visuals, per-frame animation, pixel-precise layout,
 embedded non-text surfaces) or sets sub-20 ms end-to-end latency as a
-product goal.
+product goal. Neither trigger is currently met, so the adapter remains
+unshipped and excluded from the product workspace/build/release.

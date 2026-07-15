@@ -369,6 +369,26 @@ Consequences: the adapter stays warm behind the scene contract with its
 measurement harness (tui_probe) reusable for latency regressions; evidence
 in spikes/frontend-wgpu/RESULTS.md.
 
+Maintenance addendum (2026-07-14): scene-contract compile drift in the excluded
+spike was repaired, and `./ci/gpu-spike.sh` now provides an explicit opt-in
+format, locked all-target test, and structural renderer-boundary check. The GPU
+paint path is a separate spike-local crate whose dependency tree cannot reach
+PTY or parser packages. Heavy GPU frontend
+dependencies remain outside the product workspace/build/release and merge gate;
+the merge gate instead fails closed if a listed GPU frontend dependency enters
+a production member before an accepted decision has either a typed pixel-native
+scene surface with executable adapter tests, or a sub-20 ms key-to-present
+product target with symmetric end-to-end evidence. The dependency list is a
+known-stack tripwire, not an exhaustive taxonomy.
+Conformance resolves all workspace features and separately allowlists the two
+release package/binary pairs, archive members, and installer binaries, so an
+optional dependency or excluded-manifest release cannot silently bypass the
+admission decision.
+Neither production trigger is met: no roadmap item requires a GPU-only or
+pixel-native surface, and sub-20 ms end-to-end latency is not a stated product
+goal. The current terminal refresh (p50 11.30 ms / p95 13.08 ms) is
+key-to-bytes-out only, with host-terminal paint excluded.
+
 ## Accepted: Neutral Input Wiring Landed At The Frontend Boundary
 
 Status: accepted (2026-07-09)

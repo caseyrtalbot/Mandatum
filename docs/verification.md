@@ -184,11 +184,42 @@ Reference numbers (2026-07-09, M-series MacBook, release build):
 | 40 ms `event::poll` (before) | 42.62 ms | 44.09 ms | 45.54 ms | 0.13 s (~0.4%) |
 | event-driven (after) | 13.30 ms | 15.04 ms | 15.27 ms | 0.03 s (~0.1%) |
 
+Dated live refresh (2026-07-14): p50 11.30 ms / p95 13.08 ms. Like every
+`tui_probe` result, this stops at app-output bytes and excludes host-terminal
+paint; it is not an end-to-end input-to-photon measurement.
+
 Regression bar: p50 must stay well under 25 ms. A p50 drifting back toward
 40 ms means something reintroduced interval polling into the wake path.
 The floor is the shell echo round-trip plus the ~8 ms redraw-cap window,
 so numbers meaningfully below ~9 ms require changing the cap, not the
 loop.
+
+## Deferred GPU Adapter Maintenance Check
+
+The GPU spike stays outside the product Cargo workspace, build, release
+artifacts, and merge gate. After any change to `mandatum-scene`, the spike, its
+locked dependencies, or the pinned toolchain, run:
+
+```sh
+./ci/gpu-spike.sh
+```
+
+This opt-in workflow runs spike-local format, locked tests across all
+targets, and a renderer-boundary scan. Green means the warm adapter compiles,
+its headless contract tests pass, and the isolated `gpu-renderer` crate's normal
+dependency tree contains the neutral scene contract but no PTY/parser package.
+It does not ship the adapter, exercise a native window, or satisfy either
+production trigger. The merge gate separately
+fails closed if a listed GPU frontend dependency enters a production workspace
+member before an accepted decision has either a typed pixel-native scene
+surface with executable adapter tests, or a sub-20 ms key-to-present product
+target with symmetric end-to-end evidence. The list is a tripwire for known
+stacks, not an exhaustive taxonomy of GPU libraries.
+
+The same conformance check resolves all Cargo features and keeps release builds,
+archive members, and installer binaries on explicit allowlists (`mandatum`, the
+approval bridge, and `LICENSE`). Release and install surfaces may not reference
+the excluded GPU spike directly.
 
 ## The Stranger Test (Workstation Visibility)
 

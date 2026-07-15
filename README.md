@@ -247,7 +247,11 @@ crates/app            the workstation: event loop, runtime registries, scene
                       builder, timeline, search, config, save/restore
 spikes/               experiments outside the Cargo workspace; they may depend
                       on engine crates, but their heavy dependency trees never
-                      join the product build or the CI gate
+                      join the product build, release, or merge gate; the GPU
+                      spike has an opt-in maintenance check
+  frontend-wgpu/gpu-renderer/
+                      scene-only GPU paint crate, structurally unable to import
+                      the spike's PTY/parser modules
 ```
 
 The scene contract keeps frontends swappable: the same `WorkspaceScene`

@@ -1,6 +1,6 @@
-//! GPU frontend: wgpu surface + an instanced solid-quad pipeline for cell
-//! backgrounds/selection/cursor/status, layered under GPU-rasterized glyphs
-//! rendered by glyphon. All rendering is per-frame from a grid snapshot.
+// GPU frontend: wgpu surface + an instanced solid-quad pipeline for cell
+// backgrounds/selection/cursor/status, layered under GPU-rasterized glyphs
+// rendered by glyphon. All rendering is per-frame from a grid snapshot.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,7 +13,7 @@ use glyphon::{
 // mandatum-terminal-vt: the grid -> scene conversion lives in scene_bridge.rs,
 // so no parser type crosses into the paint path. This is the clean-adapter
 // boundary the spike is proving.
-use mandatum_scene::{PaneContent, SceneColor, WorkspaceScene};
+use mandatum_scene::{PaneContent, PaneScene, SceneColor, TerminalSurface, WorkspaceScene};
 use winit::window::Window;
 
 const DEFAULT_FG: [u8; 3] = [220, 220, 224];
@@ -23,6 +23,47 @@ const CURSOR_BG: [u8; 4] = [210, 210, 220, 150];
 const STATUS_BG: [u8; 3] = [30, 32, 40];
 const STATUS_FG: [u8; 3] = [170, 176, 190];
 const BASE_FONT_PT: f32 = 15.0;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum UnsupportedScene {
+    Overlay,
+    PaneCount(usize),
+    PaneContent(&'static str),
+}
+
+impl std::fmt::Display for UnsupportedScene {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Overlay => write!(f, "overlays are not implemented"),
+            Self::PaneCount(count) => {
+                write!(f, "expected exactly one pane, received {count}")
+            }
+            Self::PaneContent(kind) => write!(f, "{kind} pane content is not implemented"),
+        }
+    }
+}
+
+/// Validate the deliberately narrow spike boundary without touching a GPU.
+/// Production-only scene shapes fail explicitly instead of being silently
+/// ignored while the renderer paints whichever terminal pane appears first.
+fn supported_terminal_scene(
+    scene: &WorkspaceScene,
+) -> Result<(&PaneScene, &TerminalSurface), UnsupportedScene> {
+    if scene.overlay.is_some() {
+        return Err(UnsupportedScene::Overlay);
+    }
+    if scene.panes.len() != 1 {
+        return Err(UnsupportedScene::PaneCount(scene.panes.len()));
+    }
+
+    let pane = &scene.panes[0];
+    match &pane.content {
+        PaneContent::Terminal(surface) => Ok((pane, surface)),
+        PaneContent::Task(_) => Err(UnsupportedScene::PaneContent("task")),
+        PaneContent::Agent(_) => Err(UnsupportedScene::PaneContent("agent")),
+        PaneContent::Empty(_) => Err(UnsupportedScene::PaneContent("empty")),
+    }
+}
 
 pub struct GpuText {
     surface: wgpu::Surface<'static>,
@@ -276,17 +317,13 @@ impl GpuText {
     /// Render one frame from a `WorkspaceScene`. Consumes only scene types: the
     /// visible cells, styles, cursor/selection marks, and status come from the
     /// scene, never from a grid or parser. Returns the instant right after
-    /// `present()` for input-to-present measurement, or `None` when the
-    /// swapchain frame could not be acquired (skip) or the scene has no terminal.
-    pub fn render(&mut self, scene: &WorkspaceScene) -> Option<Instant> {
-        // Find the single terminal surface and the cell origin of its pane.
-        let (pane, surface) = scene.panes.iter().find_map(|pane| match &pane.content {
-            PaneContent::Terminal(surface) => Some((pane, surface)),
-            _ => None,
-        })?;
+    /// `present()` for input-to-present measurement. `Ok(None)` means the
+    /// swapchain frame could not be acquired; unsupported scene shapes return
+    /// a visible adapter error instead of being skipped or panicking.
+    pub fn render(&mut self, scene: &WorkspaceScene) -> Result<Option<Instant>, UnsupportedScene> {
+        let (pane, surface) = supported_terminal_scene(scene)?;
         let origin_x = pane.area.x as f32 * self.cell_w;
         let origin_y = pane.area.y as f32 * self.cell_h;
-        let rows_count = surface.rows.len();
 
         // Assemble foreground text (rich-text color runs) and background quads,
         // painting straight from the scene surface.
@@ -312,7 +349,14 @@ impl GpuText {
                 let column = x as u16;
                 let px = origin_x + x as f32 * self.cell_w;
                 if bg != DEFAULT_BG {
-                    push_quad(&mut quads, px, py, self.cell_w, self.cell_h, [bg[0], bg[1], bg[2], 255]);
+                    push_quad(
+                        &mut quads,
+                        px,
+                        py,
+                        self.cell_w,
+                        self.cell_h,
+                        [bg[0], bg[1], bg[2], 255],
+                    );
                 }
                 if surface.selection_contains(abs, column) {
                     push_quad(&mut quads, px, py, self.cell_w, self.cell_h, SELECTION_BG);
@@ -337,14 +381,16 @@ impl GpuText {
             screen_text.push('\n');
         }
 
-        // Status strip background just below the pane.
-        let status_y = origin_y + rows_count as f32 * self.cell_h;
-        let status = scene.status.as_deref().unwrap_or("ready");
+        // Status geometry and text are carried by the current scene contract.
+        let status_x = scene.status.area.x as f32 * self.cell_w;
+        let status_y = scene.status.area.y as f32 * self.cell_h;
+        let status_width = scene.status.area.width as f32 * self.cell_w;
+        let status = scene.status.text.as_str();
         push_quad(
             &mut quads,
-            0.0,
+            status_x,
             status_y,
-            self.config.width as f32,
+            status_width,
             self.cell_h,
             [STATUS_BG[0], STATUS_BG[1], STATUS_BG[2], 255],
         );
@@ -368,9 +414,11 @@ impl GpuText {
             .set_size(Some(self.config.width as f32), Some(self.cell_h));
         self.status_buffer.set_text(
             status,
-            &Attrs::new()
-                .family(Family::Monospace)
-                .color(GColor::rgb(STATUS_FG[0], STATUS_FG[1], STATUS_FG[2])),
+            &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                STATUS_FG[0],
+                STATUS_FG[1],
+                STATUS_FG[2],
+            )),
             Shaping::Advanced,
             None,
         );
@@ -387,10 +435,16 @@ impl GpuText {
                 mapped_at_creation: false,
             });
         }
-        self.queue.write_buffer(&self.inst_buf, 0, bytes_of_slice(&quads));
+        self.queue
+            .write_buffer(&self.inst_buf, 0, bytes_of_slice(&quads));
         let instance_count = (quads.len() / 8) as u32;
 
-        let res = [self.config.width as f32, self.config.height as f32, 0.0, 0.0];
+        let res = [
+            self.config.width as f32,
+            self.config.height as f32,
+            0.0,
+            0.0,
+        ];
         self.queue.write_buffer(&self.res_buf, 0, bytes_of(&res));
 
         self.viewport.update(
@@ -426,7 +480,7 @@ impl GpuText {
                     },
                     TextArea {
                         buffer: &self.status_buffer,
-                        left: 6.0,
+                        left: status_x + 6.0,
                         top: status_y,
                         scale: 1.0,
                         bounds: full,
@@ -438,13 +492,13 @@ impl GpuText {
             )
             .is_err()
         {
-            return None;
+            return Ok(None);
         }
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            _ => return None,
+            _ => return Ok(None),
         };
         let view = frame
             .texture
@@ -487,7 +541,7 @@ impl GpuText {
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
-        Some(Instant::now())
+        Ok(Some(Instant::now()))
     }
 }
 
@@ -569,18 +623,11 @@ fn measure_cell_width(font_system: &mut FontSystem, metrics: Metrics) -> f32 {
 }
 
 fn bytes_of<T: Copy>(value: &T) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
-    }
+    unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) }
 }
 
 fn bytes_of_slice<T: Copy>(slice: &[T]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            slice.as_ptr() as *const u8,
-            std::mem::size_of_val(slice),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
 }
 
 const QUAD_WGSL: &str = r#"
@@ -609,3 +656,137 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     return in.color;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mandatum_scene::{
+        AgentContent, AgentStatus, EmptyContent, HeaderScene, OverlayScene, PaneId, PaneSceneKind,
+        SceneCell, SceneRect, SceneSize, StatusScene, TaskContent, WelcomeOverlay,
+    };
+
+    fn terminal_content() -> PaneContent {
+        PaneContent::Terminal(TerminalSurface {
+            rows: vec![vec![SceneCell::default(); 2]],
+            ..TerminalSurface::default()
+        })
+    }
+
+    fn pane(kind: PaneSceneKind, content: PaneContent) -> PaneScene {
+        PaneScene {
+            id: PaneId::new("pane-1"),
+            title: kind.label().to_owned(),
+            kind,
+            area: SceneRect::new(0, 0, 2, 1),
+            focused: true,
+            floating: false,
+            stacked: false,
+            zoomed: false,
+            content,
+        }
+    }
+
+    fn scene(panes: Vec<PaneScene>) -> WorkspaceScene {
+        let focused_pane = panes
+            .first()
+            .map(|pane| pane.id.clone())
+            .unwrap_or_else(|| PaneId::new("none"));
+        WorkspaceScene {
+            size: SceneSize::new(2, 2),
+            header: HeaderScene {
+                area: SceneRect::new(0, 0, 2, 0),
+                workspace_name: "test".to_owned(),
+                session_name: "session".to_owned(),
+                pane_count: panes.len(),
+                focused_pane: focused_pane.clone(),
+                zoomed: false,
+                connector_label: "none".to_owned(),
+                text: "test header".to_owned(),
+                attention: Vec::new(),
+            },
+            panes,
+            overlay: None,
+            status: StatusScene {
+                area: SceneRect::new(0, 1, 2, 1),
+                text: "test status".to_owned(),
+            },
+            focused_pane,
+            hit_targets: Vec::new(),
+            copy_mode: false,
+        }
+    }
+
+    #[test]
+    fn current_single_terminal_scene_is_supported_headlessly() {
+        let scene = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let (selected_pane, surface) = supported_terminal_scene(&scene).unwrap();
+
+        assert_eq!(selected_pane.id, PaneId::new("pane-1"));
+        assert_eq!(surface.rows.len(), 1);
+        assert_eq!(scene.status.text, "test status");
+    }
+
+    #[test]
+    fn overlay_and_multiple_panes_fail_explicitly() {
+        let mut with_overlay = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        with_overlay.overlay = Some(OverlayScene::Welcome(WelcomeOverlay {
+            area: SceneRect::new(0, 0, 2, 1),
+            lines: vec!["welcome".to_owned()],
+        }));
+        assert_eq!(
+            supported_terminal_scene(&with_overlay).unwrap_err(),
+            UnsupportedScene::Overlay
+        );
+
+        let multiple = scene(vec![
+            pane(PaneSceneKind::Terminal, terminal_content()),
+            pane(PaneSceneKind::Terminal, terminal_content()),
+        ]);
+        assert_eq!(
+            supported_terminal_scene(&multiple).unwrap_err(),
+            UnsupportedScene::PaneCount(2)
+        );
+    }
+
+    #[test]
+    fn task_agent_and_empty_content_fail_explicitly() {
+        let task = PaneContent::Task(TaskContent {
+            command: "cargo test".to_owned(),
+            cwd_label: "/tmp".to_owned(),
+            recipe_label: None,
+            status_label: None,
+            rerun_hint: None,
+            output: None,
+        });
+        let agent = PaneContent::Agent(AgentContent {
+            objective: "test".to_owned(),
+            status_label: "running".to_owned(),
+            status_role: AgentStatus::Running,
+            pending_approvals: 0,
+            changed_file_count: 0,
+            changed_files: Vec::new(),
+            latest_summary: None,
+            current_action: None,
+            last_error: None,
+            relaunch_hint: None,
+            pending_approval: None,
+            output_tail: Vec::new(),
+        });
+        let empty = PaneContent::Empty(EmptyContent {
+            cwd_label: "/tmp".to_owned(),
+            restart_generation: 0,
+        });
+
+        for (kind, content, expected) in [
+            (PaneSceneKind::Task, task, "task"),
+            (PaneSceneKind::Agent, agent, "agent"),
+            (PaneSceneKind::StatusLog, empty, "empty"),
+        ] {
+            let scene = scene(vec![pane(kind, content)]);
+            assert_eq!(
+                supported_terminal_scene(&scene).unwrap_err(),
+                UnsupportedScene::PaneContent(expected)
+            );
+        }
+    }
+}

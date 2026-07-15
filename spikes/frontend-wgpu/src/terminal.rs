@@ -67,17 +67,9 @@ impl TerminalSession {
     /// Spawn the user's shell on a PTY of `cols`x`rows` and start a background
     /// reader thread that forwards raw output and invokes `wake` after each read
     /// so the event loop can pull and repaint.
-    pub fn spawn(
-        cols: u16,
-        rows: u16,
-        wake: impl Fn() + Send + 'static,
-    ) -> Result<Self, String> {
+    pub fn spawn(cols: u16, rows: u16, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let shell_name = shell
-            .rsplit('/')
-            .next()
-            .unwrap_or(&shell)
-            .to_string();
+        let shell_name = shell.rsplit('/').next().unwrap_or(&shell).to_string();
 
         let size = PtySize::new(cols, rows).map_err(|e| e.to_string())?;
         let mut intent = SpawnIntent::new("frontend-wgpu-spike".into(), shell.clone(), size)
@@ -113,8 +105,7 @@ impl TerminalSession {
             })
             .map_err(|e| e.to_string())?;
 
-        let parser =
-            TerminalParser::new(TerminalSize::new(cols, rows).map_err(|e| e.to_string())?);
+        let parser = TerminalParser::new(TerminalSize::new(cols, rows).map_err(|e| e.to_string())?);
 
         Ok(Self {
             parser,
@@ -185,10 +176,9 @@ impl TerminalSession {
         if let (Ok(pty_size), Ok(term_size)) =
             (PtySize::new(cols, rows), TerminalSize::new(cols, rows))
         {
-            let _ = self.controller.resize(ResizeIntent::new(
-                "frontend-wgpu-spike".into(),
-                pty_size,
-            ));
+            let _ = self
+                .controller
+                .resize(ResizeIntent::new("frontend-wgpu-spike".into(), pty_size));
             self.parser.resize(term_size);
             self.cols = cols;
             self.rows = rows;
@@ -256,7 +246,11 @@ impl TerminalSession {
             let from = if row == r0 { c0 } else { 0 };
             // Inclusive end column, matching the scene contract's inclusive
             // selection span so copied text agrees with the highlight.
-            let to = if row == r1 { c1.saturating_add(1) } else { self.cols };
+            let to = if row == r1 {
+                c1.saturating_add(1)
+            } else {
+                self.cols
+            };
             let mut line = String::new();
             for col in from..to.min(self.cols) {
                 let ch = grid

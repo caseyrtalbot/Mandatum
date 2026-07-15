@@ -9,10 +9,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo metadata --format-version 1 --locked >/tmp/mandatum-metadata.json
+cargo metadata --format-version 1 --locked --all-features >/tmp/mandatum-metadata.json
 
 python3 - <<'PY'
-import json, sys
+import json, re, sys
 
 meta = json.load(open("/tmp/mandatum-metadata.json"))
 packages = {p["id"]: p for p in meta["packages"]}
@@ -71,6 +71,121 @@ for name in ENGINE_SIDE:
             f"[L1] {name} transitively depends on forbidden crates: {sorted(hit)}"
         )
 
+# ---- fail-closed production GPU admission --------------------------------
+# A GPU frontend remains an isolated spike until a new accepted decision is
+# backed by either a typed pixel-native scene surface plus adapter tests, or a
+# sub-20 ms key-to-present product target plus symmetric end-to-end evidence.
+# Windowing alone is not GPU admission, so winit is deliberately absent. This
+# known-stack list is a tripwire, not a claim to enumerate every GPU library.
+GPU_FRONTEND_DEPS = {
+    "wgpu", "glyphon", "vello", "skia-safe", "metal", "ash", "glow", "glium",
+    "vulkano", "vulkano-shaders",
+}
+for pkg_id in meta["workspace_members"]:
+    pkg = packages[pkg_id]
+    closure = transitive_normal_deps(pkg_id)
+    hit = closure & GPU_FRONTEND_DEPS
+    if hit:
+        failures.append(
+            f"[GPU-ADMISSION-GATE] {pkg['name']} transitively depends on GPU "
+            f"frontend crates: {sorted(hit)}. Keep listed GPU dependencies spike-only "
+            "until an accepted decision proves a typed pixel-native scene surface "
+            "with executable adapter tests, or a sub-20 ms key-to-present product "
+            "target with symmetric end-to-end evidence."
+        )
+
+# An excluded manifest is intentionally absent from workspace metadata. Keep
+# the release/install surfaces on an explicit product-artifact allowlist so an
+# excluded GPU spike cannot bypass admission by being built and packaged
+# directly.
+ALLOWED_RELEASE_TARGETS = {
+    ("mandatum-app", "mandatum"),
+    ("mandatum-agent-runtime", "mandatum-approval-bridge"),
+}
+ALLOWED_RELEASE_MEMBERS = {"LICENSE", "mandatum", "mandatum-approval-bridge"}
+ALLOWED_RELEASE_BINARIES = {"mandatum", "mandatum-approval-bridge"}
+release_path = ".github/workflows/release.yml"
+install_path = "install.sh"
+release_text = open(release_path).read()
+install_text = open(install_path).read()
+for forbidden_ref in ("spikes/frontend-wgpu", "frontend-wgpu", "mandatum-frontend-wgpu-spike"):
+    for path, source in ((release_path, release_text), (install_path, install_text)):
+        if forbidden_ref in source:
+            failures.append(
+                f"[GPU-ADMISSION-GATE] shipping surface {path} references excluded "
+                f"GPU spike token {forbidden_ref!r}"
+            )
+
+release_targets = set()
+for line in release_text.splitlines():
+    if "cargo build" not in line:
+        continue
+    package = re.search(r"(?:^|\s)-p\s+([A-Za-z0-9_-]+)", line)
+    binary = re.search(r"(?:^|\s)--bin\s+([A-Za-z0-9_-]+)", line)
+    if "--manifest-path" in line or "--workspace" in line or not package or not binary:
+        failures.append(
+            f"[GPU-ADMISSION-GATE] release build is not an allowlisted package/bin pair: "
+            f"{line.strip()}"
+        )
+        continue
+    release_targets.add((package.group(1), binary.group(1)))
+
+if release_targets != ALLOWED_RELEASE_TARGETS:
+    failures.append(
+        f"[GPU-ADMISSION-GATE] release targets changed: {sorted(release_targets)} "
+        f"(allowed: {sorted(ALLOWED_RELEASE_TARGETS)})"
+    )
+
+def printf_member_set(source, variable):
+    match = re.search(rf"{variable}=\$\(printf '%s\\n' ([^|]+)\|", source)
+    return set(match.group(1).split()) if match else set()
+
+release_members = printf_member_set(release_text, "expected")
+installer_members = printf_member_set(install_text, "expected_members")
+if release_members != ALLOWED_RELEASE_MEMBERS:
+    failures.append(
+        f"[GPU-ADMISSION-GATE] release archive members changed: "
+        f"{sorted(release_members)} (allowed: {sorted(ALLOWED_RELEASE_MEMBERS)})"
+    )
+if installer_members != ALLOWED_RELEASE_MEMBERS:
+    failures.append(
+        f"[GPU-ADMISSION-GATE] installer archive members changed: "
+        f"{sorted(installer_members)} (allowed: {sorted(ALLOWED_RELEASE_MEMBERS)})"
+    )
+if 'test "$actual" = "$expected"' not in release_text:
+    failures.append("[GPU-ADMISSION-GATE] release archive allowlist assertion is missing")
+if '[ "$archive_members" = "$expected_members" ]' not in install_text:
+    failures.append("[GPU-ADMISSION-GATE] installer archive allowlist assertion is missing")
+
+release_stage_sources = set(
+    re.findall(r"install -m 0755 target/release/([A-Za-z0-9_-]+)", release_text)
+)
+installer_stage_sources = set(
+    re.findall(r'install -m 0755 "\$\{extract_dir\}/([A-Za-z0-9_-]+)"', install_text)
+)
+installer_binary_loops = [
+    set(match.split())
+    for match in re.findall(r"for binary in ([^;]+); do", install_text)
+]
+if release_stage_sources != ALLOWED_RELEASE_BINARIES:
+    failures.append(
+        f"[GPU-ADMISSION-GATE] release staging binaries changed: "
+        f"{sorted(release_stage_sources)} (allowed: {sorted(ALLOWED_RELEASE_BINARIES)})"
+    )
+if installer_stage_sources != ALLOWED_RELEASE_BINARIES:
+    failures.append(
+        f"[GPU-ADMISSION-GATE] installer staging binaries changed: "
+        f"{sorted(installer_stage_sources)} (allowed: {sorted(ALLOWED_RELEASE_BINARIES)})"
+    )
+if len(installer_binary_loops) != 2 or any(
+    binaries != ALLOWED_RELEASE_BINARIES for binaries in installer_binary_loops
+):
+    failures.append(
+        f"[GPU-ADMISSION-GATE] installer binary loops changed: "
+        f"{[sorted(binaries) for binaries in installer_binary_loops]} "
+        f"(allowed twice: {sorted(ALLOWED_RELEASE_BINARIES)})"
+    )
+
 # ---- [L1-GATE] direct-dependency bans across the render seam ------------
 # Frontend adapters consume the scene contract only. The ratatui renderer
 # must never reach the terminal engine directly; the app converts engine
@@ -97,7 +212,7 @@ if failures:
         print("  -", f)
     sys.exit(1)
 
-print("conformance: L1/L2 dependency laws hold")
+print("conformance: L1/L2 dependency laws and GPU admission policy hold")
 PY
 
 # ---- [L1-GATE] module-level input seam inside the app crate --------------

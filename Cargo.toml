@@ -23,7 +23,8 @@ default-members = [
 ]
 # Frontend spikes live outside the workspace: they may depend on engine
 # crates, but their heavy frontend dependency trees never join the product
-# build or the CI gate. See docs/frontend-platform.md.
+# build or merge gate. The isolated GPU manifest has an opt-in maintenance
+# check for scene-contract changes. See docs/frontend-platform.md.
 exclude = ["spikes/frontend-wgpu"]
 resolver = "3"
 

@@ -60,7 +60,8 @@ loses its documentation or its gate.
   event is accepted.
 - Spikes live in `spikes/`, outside the Cargo workspace: they may depend on
   engine crates, but their dependency trees never join the product build or
-  the gate.
+  gate. After a scene-contract or GPU-spike change, run `./ci/gpu-spike.sh` to
+  keep the deferred adapter source-compatible without promoting it.
 
 ## Test conventions
 

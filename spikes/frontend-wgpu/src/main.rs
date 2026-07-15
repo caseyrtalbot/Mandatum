@@ -7,7 +7,6 @@
 //! time and prints a JSON summary so the GPU path can be judged on numbers, not
 //! vibes.
 
-mod gpu;
 mod scene_bridge;
 mod stats;
 mod terminal;
@@ -23,7 +22,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
-use gpu::GpuText;
+use mandatum_gpu_renderer_spike::{GpuText, UnsupportedScene};
 use stats::Samples;
 use terminal::{Selection, TerminalSession};
 
@@ -92,7 +91,7 @@ struct App {
     start: Instant,
     deadline: Option<Instant>,
     summary_printed: bool,
-    init_error: Option<String>,
+    fatal_error: Option<String>,
 
     // Bench + input state.
     injected: u32,
@@ -128,7 +127,7 @@ impl App {
             start: now,
             deadline: None,
             summary_printed: false,
-            init_error: None,
+            fatal_error: None,
             injected: 0,
             next_inject: now,
             inject_letter: b'a',
@@ -168,8 +167,8 @@ impl App {
             (Some(g), Some(s)) => (g, s),
             _ => return (0, 0),
         };
-        let col = ((px / gpu.cell_w() as f64).floor() as i64).clamp(0, session.cols() as i64 - 1)
-            as u16;
+        let col =
+            ((px / gpu.cell_w() as f64).floor() as i64).clamp(0, session.cols() as i64 - 1) as u16;
         let screen_row = (py / gpu.cell_h() as f64).floor() as isize;
         let abs = session.top_absolute_row() + screen_row;
         (abs, col)
@@ -204,13 +203,15 @@ impl App {
         let (w, h) = gpu.surface_size();
         let cols = ((w as f32 / gpu.cell_w()).floor() as u16).max(1);
         // Reserve one line for the status strip.
-        let rows = ((h as f32 / gpu.cell_h()).floor() as u16).saturating_sub(1).max(1);
+        let rows = ((h as f32 / gpu.cell_h()).floor() as u16)
+            .saturating_sub(1)
+            .max(1);
         session.resize(cols, rows);
     }
 
-    fn render_frame(&mut self) {
+    fn render_frame(&mut self) -> Result<(), UnsupportedScene> {
         if self.session.is_none() || self.gpu.is_none() {
-            return;
+            return Ok(());
         }
         let status = self.status_line();
         let selection = self.selection;
@@ -221,7 +222,7 @@ impl App {
             scene_bridge::build_scene(session, selection, &status)
         };
         let gpu = self.gpu.as_mut().unwrap();
-        if let Some(present) = gpu.render(&scene) {
+        if let Some(present) = gpu.render(&scene)? {
             if let Some(last) = self.last_present {
                 let d = present.duration_since(last).as_secs_f64() * 1000.0;
                 if d < IDLE_FRAME_CUTOFF_MS {
@@ -239,6 +240,7 @@ impl App {
                 self.dirty_from_pty = false;
             }
         }
+        Ok(())
     }
 
     fn maybe_inject(&mut self, now: Instant) {
@@ -265,9 +267,9 @@ impl App {
         }
         self.summary_printed = true;
 
-        if let Some(err) = &self.init_error {
+        if let Some(err) = &self.fatal_error {
             println!(
-                "{{\"error\":{:?},\"notes\":\"initialization failed; no frames rendered\"}}",
+                "{{\"error\":{:?},\"notes\":\"run failed; measurements are incomplete\"}}",
                 err
             );
             return;
@@ -312,12 +314,12 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let window = match event_loop.create_window(
-            Window::default_attributes().with_title("mandatum-frontend-wgpu-spike"),
-        ) {
+        let window = match event_loop
+            .create_window(Window::default_attributes().with_title("mandatum-frontend-wgpu-spike"))
+        {
             Ok(w) => std::sync::Arc::new(w),
             Err(e) => {
-                self.init_error = Some(format!("no window (headless?): {e}"));
+                self.fatal_error = Some(format!("no window (headless?): {e}"));
                 self.print_summary();
                 event_loop.exit();
                 return;
@@ -327,7 +329,7 @@ impl ApplicationHandler<UserEvent> for App {
         let gpu = match pollster::block_on(GpuText::new(window.clone())) {
             Ok(g) => g,
             Err(e) => {
-                self.init_error = Some(e);
+                self.fatal_error = Some(e);
                 self.print_summary();
                 event_loop.exit();
                 return;
@@ -337,7 +339,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Grid size from the physical surface and measured cell metrics.
         let (w, h) = gpu.surface_size();
         let cols = ((w as f32 / gpu.cell_w()).floor() as u16).max(1);
-        let rows = ((h as f32 / gpu.cell_h()).floor() as u16).saturating_sub(1).max(1);
+        let rows = ((h as f32 / gpu.cell_h()).floor() as u16)
+            .saturating_sub(1)
+            .max(1);
 
         let proxy = self.proxy.clone();
         let wake_pending = self.wake_pending.clone();
@@ -350,7 +354,7 @@ impl ApplicationHandler<UserEvent> for App {
         }) {
             Ok(s) => s,
             Err(e) => {
-                self.init_error = Some(format!("pty spawn failed: {e}"));
+                self.fatal_error = Some(format!("pty spawn failed: {e}"));
                 self.print_summary();
                 event_loop.exit();
                 return;
@@ -364,9 +368,13 @@ impl ApplicationHandler<UserEvent> for App {
         // Establish the run deadline.
         self.start = Instant::now();
         self.next_inject = self.start + Duration::from_millis(400); // let the prompt settle
-        self.deadline = self.config.exit_after.map(|s| self.start + Duration::from_secs_f64(s));
+        self.deadline = self
+            .config
+            .exit_after
+            .map(|s| self.start + Duration::from_secs_f64(s));
         if self.deadline.is_none() && self.config.typing_bench {
-            self.deadline = Some(self.next_inject + INJECT_INTERVAL * INJECT_TOTAL + Duration::from_secs(2));
+            self.deadline =
+                Some(self.next_inject + INJECT_INTERVAL * INJECT_TOTAL + Duration::from_secs(2));
         }
 
         if self.config.flood {
@@ -387,12 +395,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.request_redraw();
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 self.print_summary();
@@ -403,18 +406,23 @@ impl ApplicationHandler<UserEvent> for App {
                 // render once. While output keeps streaming, re-arm the redraw so
                 // the loop runs at the display's refresh rate (one present per
                 // vsync coalescing all data for that frame).
-                let outcome = self
-                    .session
-                    .as_mut()
-                    .map(|s| s.pump())
-                    .unwrap_or(terminal::PumpOutcome {
-                        screen_changed: false,
-                        more_pending: false,
-                    });
+                let outcome =
+                    self.session
+                        .as_mut()
+                        .map(|s| s.pump())
+                        .unwrap_or(terminal::PumpOutcome {
+                            screen_changed: false,
+                            more_pending: false,
+                        });
                 if outcome.screen_changed {
                     self.dirty_from_pty = true;
                 }
-                self.render_frame();
+                if let Err(error) = self.render_frame() {
+                    self.fatal_error = Some(format!("unsupported GPU spike scene: {error}"));
+                    self.print_summary();
+                    event_loop.exit();
+                    return;
+                }
                 if outcome.more_pending {
                     self.request_redraw();
                 }
@@ -550,12 +558,9 @@ impl ApplicationHandler<UserEvent> for App {
 impl App {
     fn copy_selection(&mut self) {
         let text = match (self.selection, &self.session) {
-            (Some(sel), Some(session)) => session.text_in_range(
-                sel.start_row,
-                sel.start_col,
-                sel.end_row,
-                sel.end_col,
-            ),
+            (Some(sel), Some(session)) => {
+                session.text_in_range(sel.start_row, sel.start_col, sel.end_row, sel.end_col)
+            }
             _ => return,
         };
         if let Some(clip) = &mut self.clipboard {
@@ -624,6 +629,10 @@ fn encode_key(event: &winit::event::KeyEvent, mods: ModifiersState) -> KeyAction
     }
 }
 
+fn run_exit_code(fatal_error: Option<&str>) -> i32 {
+    if fatal_error.is_some() { 2 } else { 0 }
+}
+
 fn main() {
     let config = parse_config();
 
@@ -655,7 +664,22 @@ fn main() {
     let proxy = event_loop.create_proxy();
     let mut app = App::new(config, proxy);
     if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("event loop error: {e}");
+        app.fatal_error = Some(format!("event loop error: {e}"));
     }
     app.print_summary();
+    let exit_code = run_exit_code(app.fatal_error.as_deref());
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_exit_code;
+
+    #[test]
+    fn fatal_runs_return_nonzero_and_clean_runs_return_zero() {
+        assert_eq!(run_exit_code(Some("unsupported scene")), 2);
+        assert_eq!(run_exit_code(None), 0);
+    }
 }

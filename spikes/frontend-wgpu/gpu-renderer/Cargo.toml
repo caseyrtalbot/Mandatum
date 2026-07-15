@@ -1,0 +1,12 @@
+[package]
+name = "mandatum-gpu-renderer-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[dependencies]
+mandatum-scene = { path = "../../../crates/scene" }
+glyphon = "0.12"
+wgpu = "30"
+winit = "0.30"

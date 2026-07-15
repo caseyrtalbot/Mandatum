@@ -13,7 +13,7 @@ Cargo.toml     Rust workspace manifest (excludes spikes/frontend-wgpu)
 Cargo.lock     locked Rust dependencies
 rust-toolchain.toml  pinned gate toolchain
 install.sh     latest-release installer (checksum verification + both binaries)
-ci/            the merge gate: gate.sh, conformance.sh, doc-trace.sh
+ci/            the merge gate plus gpu-spike.sh opt-in maintenance check
 .github/       GitHub Actions CI + tag-driven native release archives,
                Dependabot config, issue and PR templates
 docs/          product and architecture specs
@@ -137,7 +137,8 @@ history (see docs/workflows.md for what remains unbuilt here).
 
 ```text
 spikes/frontend-wgpu/   winit+wgpu GPU frontend spike + tui_probe latency
-                        harness; RESULTS.md is the evidence record
+                        harness; its gpu-renderer/ member is a scene-only paint
+                        crate; RESULTS.md is the evidence record
 examples/live-slice/    driven demo workspace for the stranger test
 ```
 

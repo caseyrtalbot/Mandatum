@@ -57,7 +57,10 @@ fn main() {
     let session = match NativePtySession::spawn(intent) {
         Ok(session) => session,
         Err(error) => {
-            println!("{{\"error\":\"spawn failed\",\"detail\":{:?}}}", error.to_string());
+            println!(
+                "{{\"error\":\"spawn failed\",\"detail\":{:?}}}",
+                error.to_string()
+            );
             std::process::exit(2);
         }
     };
@@ -208,5 +211,8 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 fn default_app_bin() -> String {
     // The workspace target dir (the spike is excluded and builds elsewhere).
-    format!("{}/../../target/release/mandatum", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../../target/release/mandatum",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
