@@ -67,6 +67,12 @@ For terminal and task runtime work, prove:
   errors do not claim the child task exited
 - events from replaced runtimes are ignored
 - restore preserves durable intent without live handles
+- runtime mutation stays behind `RuntimeEngine` product operations; production
+  callers do not receive concrete terminal, task, or agent registry handles
+- restore staging is transactional and a staging error commits no lifecycle
+  facts; committed facts distinguish fresh, deferred, detached, and
+  not-replayed outcomes with valid next actions only; first geometry updates
+  the same restore epoch without duplicate facts
 - a frontend input-reader failure shuts down live runtimes and restores the
   host terminal before returning the original error; the lifecycle coordinator
   test proves shutdown -> reader stop -> restore ordering and primary-error
@@ -184,9 +190,11 @@ Reference numbers (2026-07-09, M-series MacBook, release build):
 | 40 ms `event::poll` (before) | 42.62 ms | 44.09 ms | 45.54 ms | 0.13 s (~0.4%) |
 | event-driven (after) | 13.30 ms | 15.04 ms | 15.27 ms | 0.03 s (~0.1%) |
 
-Dated live refresh (2026-07-14): p50 11.30 ms / p95 13.08 ms. Like every
-`tui_probe` result, this stops at app-output bytes and excludes host-terminal
-paint; it is not an end-to-end input-to-photon measurement.
+Dated live refresh (2026-07-14, after the RuntimeEngine move): p50 11.71 ms /
+p95 13.56 ms / max 17.84 ms, 100 samples with zero misses. Idle CPU advanced
+0.23 s over a clean 30 s window (~0.8% of one core), with no busy spin. Like
+every `tui_probe` result, this stops at app-output bytes and excludes
+host-terminal paint; it is not an end-to-end input-to-photon measurement.
 
 Regression bar: p50 must stay well under 25 ms. A p50 drifting back toward
 40 ms means something reintroduced interval polling into the wake path.

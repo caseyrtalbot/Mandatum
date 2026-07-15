@@ -19,6 +19,7 @@ mod palette;
 mod persistence;
 mod pointer;
 mod process_events;
+mod runtime_engine;
 mod scene_builder;
 mod search;
 mod session_map;

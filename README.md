@@ -243,8 +243,9 @@ crates/agent-runtime  agent connector contract, approval events, FakeConnector,
                       Claude CLI connector + the approval-bridge hook binary
 crates/workflows      task recipes, agent intent, failure-handoff policy
 crates/renderer       the ratatui frontend adapter: render(frame, &scene, &theme)
-crates/app            the workstation: event loop, runtime registries, scene
-                      builder, timeline, search, config, save/restore
+crates/app            the workstation: deep RuntimeEngine over terminal/task/
+                      agent registries, event loop, scene builder, timeline,
+                      search, config, transactional save/restore
 spikes/               experiments outside the Cargo workspace; they may depend
                       on engine crates, but their heavy dependency trees never
                       join the product build, release, or merge gate; the GPU
@@ -270,7 +271,7 @@ Local runs and CI execute the same script on the same pinned toolchain.
 The conformance step is where the Constitution lives: dependency scans for
 L1/L2, `[Lx-GATE]`-tagged tests for L3/L4/L5, and a doc-trace gate that
 fails the build if any law loses its documentation or its test. Current
-suite: 430 tests (plus 2 ignored live-connector tests that exercise the
+suite: 442 tests (plus 2 ignored live-connector tests that exercise the
 real Claude CLI).
 
 Contributions: read [CONTRIBUTING.md](CONTRIBUTING.md) first; the gate and

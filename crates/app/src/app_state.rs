@@ -1,14 +1,12 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt, io,
+    collections::BTreeSet,
+    io,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::Sender,
     time::{Duration, Instant},
 };
 
-use mandatum_agent_runtime::{
-    AgentConnector, AgentLaunchSpec, AgentSessionEvent, ApprovalDecision, ApprovalVerdict,
-};
+use mandatum_agent_runtime::{AgentConnector, AgentLaunchSpec, AgentSessionEvent};
 use mandatum_commands::{
     BUILT_IN_COMMANDS, CommandContext, CommandId, CommandTarget, PaletteContext, PaletteInput,
     PaletteKey, RuntimeAgentCommand, RuntimeCommand, RuntimeTaskCommand, command_target,
@@ -18,7 +16,7 @@ use mandatum_core::{
     ActionOutcome, AgentApprovalRecord, AgentPaneIntent, AgentStatus, CoreAction, LayoutNode,
     PaneId, PaneKind, PersistenceRequest, SessionId, SplitAxis, TaskPaneIntent, Workspace,
 };
-use mandatum_pty::{NativePtyError, PtySize};
+use mandatum_pty::PtySize;
 use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind, PaletteOverlay,
     PaneSceneKind, PromptOverlay, SceneRect, SceneSize, SearchOverlay, SessionMapOverlay, Theme,
@@ -34,10 +32,7 @@ use mandatum_terminal_vt::TerminalGrid;
 use mandatum_workflows::TaskFailureHandoff;
 
 use crate::{
-    agent_runtime::{
-        AgentPaneRuntime, AgentRuntimeEvent, AgentRuntimeRegistry, activate_agent_session,
-        connector_for_kind,
-    },
+    agent_runtime::{AgentRuntimeEvent, connector_for_kind},
     app_shell::AppConfig,
     clipboard::osc52_sequence,
     config::{AgentConnectorKind, effective_runtime_settings, load_config, project_config_file},
@@ -50,6 +45,12 @@ use crate::{
     persistence::{PersistenceCoordinator, WorkspaceFileError},
     pointer::{encode_mouse_event, split_percent_for_pointer},
     process_events::PtyRuntimeEvent,
+    runtime_engine::{
+        AgentApprovalError, AgentRuntimeView, PreparedRuntimeRestore, RestoreGeometry,
+        RestoreRuntimeError, RuntimeEngine, RuntimeExitEffect, RuntimeLifecycleTrigger,
+        RuntimePtyEffect, RuntimeReconcileError, RuntimeReconcileNotice, TaskAttempt,
+        TaskLaunchOutcome, TaskStopOutcome,
+    },
     scene_builder::PaneViewState,
     search::{
         SearchCorpus, SearchHitTarget, SearchSource, SearchSourceKind, SearchViewState,
@@ -59,14 +60,7 @@ use crate::{
         SessionMapRowModel, SessionMapState, SessionMapTarget, session_map_overlay,
         session_map_rows,
     },
-    task_runtime::{
-        TaskInvestigationFailure, TaskPaneRuntime, TaskRuntimeRegistry, prepare_task_pane_runtime,
-        task_status_label,
-    },
-    terminal_runtime::{
-        PendingTerminalPaneRuntime, TerminalRuntimeError, TerminalRuntimeRegistry,
-        exit_status_label, prepare_terminal_pane_runtime,
-    },
+    terminal_runtime::exit_status_label,
     timeline::{TimelineEventKind, TimelineLog, now_ms},
     timeline_view::{TimelineViewState, timeline_overlay},
 };
@@ -75,6 +69,7 @@ use crate::{
 use crate::{
     input::key_to_input,
     persistence::{MAX_WORKSPACE_FILE_BYTES, ensure_parent_dir, write_workspace_file},
+    task_runtime::TaskInvestigationFailure,
 };
 
 /// The most events one `drain_events` call applies. Bounding per-call work
@@ -95,9 +90,7 @@ pub struct AppState {
     status: String,
     preserve_status_on_next_resize: bool,
     last_redraw: Instant,
-    terminal_panes: TerminalRuntimeRegistry,
-    task_panes: TaskRuntimeRegistry,
-    agent_panes: AgentRuntimeRegistry,
+    runtime: RuntimeEngine,
     agent_connector: Option<Box<dyn AgentConnector>>,
     agent_connector_label: &'static str,
     agent_objective: String,
@@ -144,12 +137,6 @@ pub struct AppState {
     context_menu: Option<ContextMenuState>,
     /// The previous button press, for double-click detection.
     last_pane_click: Option<PaneClick>,
-    /// The unified event channel: frontend input, PTY reader, and agent
-    /// forwarder threads all send here, so the shell can block on arrival
-    /// instead of polling on an interval.
-    event_tx: Sender<AppEvent>,
-    event_rx: Receiver<AppEvent>,
-    next_runtime_token: u64,
 }
 
 impl AppState {
@@ -157,7 +144,6 @@ impl AppState {
         let command_context =
             CommandContext::for_project(config.workspace_name.clone(), config.project_path.clone());
         let workspace = Workspace::new(config.workspace_name, config.project_path);
-        let (event_tx, event_rx) = mpsc::channel();
         let restore_on_startup = config.restore_on_startup;
         let config_warnings = config.config_warnings;
         // The timeline lives beside the workspace file; a baseline with no
@@ -181,9 +167,7 @@ impl AppState {
             status: "ready".to_owned(),
             preserve_status_on_next_resize: false,
             last_redraw: Instant::now(),
-            terminal_panes: TerminalRuntimeRegistry::new(),
-            task_panes: TaskRuntimeRegistry::new(),
-            agent_panes: AgentRuntimeRegistry::new(),
+            runtime: RuntimeEngine::new(),
             agent_connector: connector_for_kind(config.agent_connector),
             agent_connector_label: connector_kind_label(config.agent_connector),
             agent_objective: config.agent_objective,
@@ -209,9 +193,6 @@ impl AppState {
             pointer_view: None,
             context_menu: None,
             last_pane_click: None,
-            event_tx,
-            event_rx,
-            next_runtime_token: 1,
         };
 
         if restore_on_startup {
@@ -253,15 +234,15 @@ impl AppState {
     }
 
     pub fn live_terminal_count(&self) -> usize {
-        self.terminal_panes.len()
+        self.runtime.terminal_count()
     }
 
     pub fn live_task_count(&self) -> usize {
-        self.task_panes.len()
+        self.runtime.task_count()
     }
 
     pub fn live_agent_count(&self) -> usize {
-        self.agent_panes.len()
+        self.runtime.agent_count()
     }
 
     pub fn copy_mode_active(&self) -> bool {
@@ -366,7 +347,7 @@ impl AppState {
         let focused_pane_label = focused
             .map(|pane| format!("{} ({focused_id})", pane.title()))
             .unwrap_or_else(|| focused_id.to_string());
-        let agent_runtime = self.agent_panes.get(&focused_id);
+        let agent_runtime = self.runtime.agent_view(&focused_id);
         let focused_is_floating = session.layout().is_floating(&focused_id);
 
         PaletteWorkspaceView {
@@ -381,13 +362,9 @@ impl AppState {
                 .panes()
                 .iter()
                 .any(|(pane_id, _)| self.pane_waiting_for_approval(pane_id)),
-            focused_task_running: self
-                .task_panes
-                .get(&focused_id)
-                .is_some_and(|task| task.runtime.exit_status.is_none())
-                || self.task_panes.pending_launches.contains(&focused_id),
+            focused_task_running: self.runtime.task_running_or_pending(&focused_id),
             focused_task_failed: self.task_failure_status(&focused_id).is_some(),
-            focused_has_live_terminal: self.terminal_panes.get(&focused_id).is_some(),
+            focused_has_live_terminal: self.runtime.has_terminal(&focused_id),
             focused_is_floating,
             timeline_available: self.timeline.enabled(),
             // Any tiled pane sits inside a split exactly when the tiled root
@@ -957,7 +934,7 @@ impl AppState {
     /// A clone of the unified event channel's send side, for the frontend's
     /// input thread.
     pub(crate) fn event_sender(&self) -> Sender<AppEvent> {
-        self.event_tx.clone()
+        self.runtime.event_sender()
     }
 
     /// Block until the next event arrives (and apply it) or `timeout`
@@ -965,7 +942,7 @@ impl AppState {
     /// one blocking wait: input, PTY output, and agent events all land on
     /// the same channel, so nothing can arrive without waking the loop.
     pub(crate) fn wait_event(&mut self, timeout: Duration) -> bool {
-        match self.event_rx.recv_timeout(timeout) {
+        match self.runtime.recv_event_timeout(timeout) {
             Ok(event) => {
                 self.apply_app_event(event);
                 true
@@ -985,7 +962,7 @@ impl AppState {
             if self.should_quit {
                 break;
             }
-            match self.event_rx.try_recv() {
+            match self.runtime.try_recv_event() {
                 Ok(event) => self.apply_app_event(event),
                 Err(_) => break,
             }
@@ -1006,22 +983,8 @@ impl AppState {
     }
 
     pub fn shutdown(&mut self) {
-        self.shutdown_agent_panes();
-        self.shutdown_task_panes();
-        self.shutdown_terminal_panes();
+        self.runtime.shutdown_all();
         self.status = "terminal sessions stopped".to_owned();
-    }
-
-    fn shutdown_agent_panes(&mut self) {
-        self.agent_panes.shutdown_all();
-    }
-
-    fn shutdown_terminal_panes(&mut self) {
-        self.terminal_panes.shutdown_all();
-    }
-
-    fn shutdown_task_panes(&mut self) {
-        self.task_panes.shutdown_all();
     }
 
     fn save_workspace_to_disk(&mut self) {
@@ -1040,7 +1003,9 @@ impl AppState {
 
     fn restore_workspace_at_startup(&mut self) {
         match self.persistence.read_workspace() {
-            Ok(workspace) => match self.prepare_restore_runtimes(&workspace) {
+            Ok(workspace) => match self
+                .prepare_restore_runtimes(&workspace, RuntimeLifecycleTrigger::StartupRestore)
+            {
                 Ok(runtimes) => {
                     self.replace_workspace_from_disk(workspace, runtimes);
                     let path = self.persistence.workspace_file().display().to_string();
@@ -1077,7 +1042,9 @@ impl AppState {
 
     fn restore_workspace_from_disk(&mut self) {
         match self.persistence.read_workspace() {
-            Ok(workspace) => match self.prepare_restore_runtimes(&workspace) {
+            Ok(workspace) => match self
+                .prepare_restore_runtimes(&workspace, RuntimeLifecycleTrigger::ExplicitRestore)
+            {
                 Ok(runtimes) => {
                     self.replace_workspace_from_disk(workspace, runtimes);
                     let path = self.persistence.workspace_file().display().to_string();
@@ -1098,58 +1065,35 @@ impl AppState {
     fn prepare_restore_runtimes(
         &mut self,
         workspace: &Workspace,
-    ) -> Result<BTreeMap<PaneId, PendingTerminalPaneRuntime>, RestoreRuntimeError> {
-        if !self.spawn_pty {
-            return Ok(BTreeMap::new());
-        }
-
-        let mut runtimes = BTreeMap::new();
-        for (pane_id, size) in self.visible_terminal_pane_sizes_for_workspace(workspace) {
-            let runtime_token = self.next_runtime_token();
-            match prepare_terminal_pane_runtime(
-                workspace,
-                &self.shell_program,
-                runtime_token,
-                pane_id.clone(),
-                size,
-            ) {
-                Ok(runtime) => {
-                    runtimes.insert(pane_id, runtime);
-                }
-                Err(error) => {
-                    for runtime in runtimes.values_mut() {
-                        runtime.shutdown();
-                    }
-                    return Err(RestoreRuntimeError {
-                        pane_id,
-                        source: error,
-                    });
-                }
-            }
-        }
-
-        Ok(runtimes)
+        trigger: RuntimeLifecycleTrigger,
+    ) -> Result<PreparedRuntimeRestore, RestoreRuntimeError> {
+        let visible_terminals = self.visible_terminal_pane_sizes_for_workspace(workspace);
+        let geometry = if self.terminal_size.is_some() {
+            RestoreGeometry::Available
+        } else {
+            RestoreGeometry::Unavailable
+        };
+        self.runtime.prepare_restore(
+            workspace,
+            &self.shell_program,
+            self.spawn_pty,
+            trigger,
+            geometry,
+            visible_terminals,
+        )
     }
 
     fn replace_workspace_from_disk(
         &mut self,
-        workspace: Workspace,
-        runtimes: BTreeMap<PaneId, PendingTerminalPaneRuntime>,
+        mut workspace: Workspace,
+        runtimes: PreparedRuntimeRestore,
     ) {
-        self.shutdown_terminal_panes();
-        self.shutdown_task_panes();
-        self.shutdown_agent_panes();
-        self.discard_pending_runtime_events();
+        let outgoing_session_id = self.workspace.active_session().id().clone();
+        let report = self
+            .runtime
+            .commit_restore(&mut workspace, &outgoing_session_id, runtimes);
+        debug_assert_eq!(self.runtime.last_lifecycle_report(), &report);
         self.workspace = workspace;
-        // [L3-GATE] A loaded workspace has no live agent sessions, so durable
-        // intents must not keep session-scoped claims from the run that saved
-        // them: running/waiting statuses and pending approval ids name a live
-        // session (and connector-scoped approval ids) that no longer exists.
-        for session in self.workspace.sessions_mut() {
-            for intent in session.agent_intents_mut() {
-                intent.detach_live_session();
-            }
-        }
         self.command_context = command_context_for_workspace(&self.workspace);
         self.copy_mode = None;
         self.timeline_view = None;
@@ -1163,39 +1107,12 @@ impl AppState {
         self.pointer_drag = None;
         self.pointer_forward = None;
         self.context_menu = None;
-        self.task_panes.pending_launches.clear();
-        self.task_panes.statuses.clear();
-        self.terminal_panes = runtimes
-            .into_iter()
-            .map(|(pane_id, runtime)| {
-                let active = runtime.activate(pane_id.clone(), self.event_tx.clone());
-                (pane_id, active)
-            })
-            .collect();
-    }
-
-    fn discard_pending_runtime_events(&mut self) {
-        // Only runtime events from the replaced runtimes are stale; buffered
-        // input keeps its relative order because everything between two
-        // input events in the queue is discarded. Collect first: re-sending
-        // while draining the same channel would loop forever.
-        let pending: Vec<AppEvent> = std::iter::from_fn(|| self.event_rx.try_recv().ok()).collect();
-        for event in pending {
-            if matches!(event, AppEvent::Input(_)) {
-                let _ = self.event_tx.send(event);
-            }
-        }
     }
 
     fn write_to_focused_terminal(&mut self, bytes: &[u8]) {
         let focused = self.workspace.active_session().focused_pane_id().clone();
-        let Some(runtime) = self.terminal_panes.get_mut(&focused) else {
-            self.status = format!("pane {focused} has no live PTY");
-            return;
-        };
-
-        match runtime.write_input(bytes) {
-            Ok(()) => {
+        match self.runtime.write_terminal(&focused, bytes) {
+            Ok(true) => {
                 // Byte-level diagnostics are debug-only: writing them on
                 // every keystroke would bury meaningful status (failures,
                 // attention) under noise.
@@ -1203,8 +1120,8 @@ impl AppState {
                     self.status = format!("sent {} byte(s) to {focused}", bytes.len());
                 }
             }
+            Ok(false) => self.status = format!("pane {focused} has no live PTY"),
             Err(error) => {
-                runtime.error = Some(error.to_string());
                 self.status = format!("PTY input failed for {focused}: {error}");
             }
         }
@@ -1250,49 +1167,30 @@ impl AppState {
             return;
         };
 
-        if !self.spawn_pty {
-            let status = "rerun unavailable: PTY spawning is disabled".to_owned();
-            self.task_panes
-                .statuses
-                .insert(pane_id.clone(), status.clone());
-            self.status = format!("task {pane_id} {status}");
-            self.mark_redraw();
-            return;
-        }
-
-        // A rerun is a new attempt. The prior exit remains in the timeline,
-        // but it no longer describes the focused task's current attempt.
-        self.task_panes.clear_failure(&pane_id);
-
-        let Some(size) = self.visible_task_size(&pane_id) else {
-            if let Some(mut runtime) = self.task_panes.remove(&pane_id) {
-                runtime.shutdown();
+        let outcome = self.runtime.launch_task(
+            &self.workspace,
+            &self.shell_program,
+            pane_id.clone(),
+            self.visible_task_size(&pane_id),
+            self.spawn_pty,
+            TaskAttempt::Rerun,
+        );
+        self.status = match outcome {
+            TaskLaunchOutcome::Disabled => {
+                format!("task {pane_id} rerun unavailable: PTY spawning is disabled")
             }
-            let status = "pending rerun: waiting for visible pane size".to_owned();
-            self.task_panes.pending_launches.insert(pane_id.clone());
-            self.task_panes
-                .statuses
-                .insert(pane_id.clone(), status.clone());
-            self.status = format!("task {pane_id} {status}");
-            self.mark_redraw();
-            return;
+            TaskLaunchOutcome::Deferred => {
+                format!("task {pane_id} pending rerun: waiting for visible pane size")
+            }
+            TaskLaunchOutcome::Running => {
+                self.timeline.record(TimelineEventKind::TaskStarted {
+                    pane: pane_id.to_string(),
+                    command: intent.command.clone(),
+                });
+                format!("task {pane_id} rerunning: {}", intent.command)
+            }
+            TaskLaunchOutcome::Failed(status) => status,
         };
-
-        self.task_panes.pending_launches.remove(&pane_id);
-        if let Err(source) = self.spawn_task_pane(pane_id.clone(), size) {
-            self.task_panes.record_failure(
-                pane_id.clone(),
-                TaskInvestigationFailure::Rerun(source.to_string()),
-            );
-            self.task_panes
-                .statuses
-                .insert(pane_id.clone(), format!("task rerun failed: {source}"));
-            self.status = format!("task rerun failed: {source}");
-        } else {
-            self.task_panes.statuses.remove(&pane_id);
-            self.task_panes.clear_failure(&pane_id);
-            self.status = format!("task {pane_id} rerunning: {}", intent.command);
-        }
         self.mark_redraw();
     }
 
@@ -1303,44 +1201,17 @@ impl AppState {
             return;
         };
 
-        if self.task_panes.pending_launches.remove(&pane_id) {
-            let status = "stopped before launch".to_owned();
-            self.task_panes.statuses.insert(pane_id.clone(), status);
-            self.status = format!("task {pane_id} stopped before launch");
-            self.mark_redraw();
-            return;
-        }
-
-        let Some(mut task) = self.task_panes.remove(&pane_id) else {
-            let status = "not running".to_owned();
-            self.task_panes.statuses.insert(pane_id.clone(), status);
-            self.status = format!("task {pane_id} is not running");
-            self.mark_redraw();
-            return;
+        self.status = match self.runtime.stop_task(&pane_id) {
+            TaskStopOutcome::StoppedBeforeLaunch => {
+                format!("task {pane_id} stopped before launch")
+            }
+            TaskStopOutcome::NotRunning => format!("task {pane_id} is not running"),
+            TaskStopOutcome::Already(status) => format!("task {pane_id} is already {status}"),
+            TaskStopOutcome::Stopped => format!("task {pane_id} stopped"),
+            TaskStopOutcome::Failed(error) => {
+                format!("task stop failed for {pane_id}: {error}")
+            }
         };
-
-        if task.runtime.exit_status.is_some() {
-            let status = task.status.clone();
-            self.task_panes.insert(pane_id.clone(), task);
-            self.status = format!("task {pane_id} is already {status}");
-            self.mark_redraw();
-            return;
-        }
-
-        match task.stop() {
-            Ok(()) => {
-                self.task_panes
-                    .statuses
-                    .insert(pane_id.clone(), "stopped".to_owned());
-                self.status = format!("task {pane_id} stopped");
-            }
-            Err(error) => {
-                task.runtime.error = Some(error.to_string());
-                task.status = format!("task stop failed: {error}");
-                self.task_panes.insert(pane_id.clone(), task);
-                self.status = format!("task stop failed for {pane_id}: {error}");
-            }
-        }
         self.mark_redraw();
     }
 
@@ -1411,24 +1282,11 @@ impl AppState {
     }
 
     pub(crate) fn task_failure_status(&self, pane_id: &PaneId) -> Option<String> {
-        self.task_panes.failure_label(pane_id)
+        self.runtime.task_failure_label(pane_id)
     }
 
     fn task_output_lines(&self, pane_id: &PaneId) -> Vec<String> {
-        let Some(task) = self.task_panes.get(pane_id) else {
-            return Vec::new();
-        };
-        let grid = task.runtime.parser.grid();
-        let scrollback = grid.scrollback_len();
-        (0..grid.total_rows())
-            .filter_map(|row| {
-                if row < scrollback {
-                    grid.scrollback_row_text(row)
-                } else {
-                    grid.row_text((row - scrollback) as u16)
-                }
-            })
-            .collect()
+        self.runtime.task_output_lines(pane_id)
     }
 
     // --- Agent runtime ---------------------------------------------------------
@@ -1446,8 +1304,8 @@ impl AppState {
 
     fn focused_agent_has_pending_approval(&self) -> bool {
         let focused = self.workspace.active_session().focused_pane_id();
-        self.agent_panes
-            .get(focused)
+        self.runtime
+            .agent_view(focused)
             .is_some_and(|runtime| runtime.pending_approval.is_some())
     }
 
@@ -1536,20 +1394,13 @@ impl AppState {
                 // then fails would leave the old runtime live under a retired
                 // generation, making its events overwrite durable truth
                 // ([L3-GATE]).
-                if let Some(mut old) = self.agent_panes.remove(&pane_id) {
-                    old.shutdown();
+                let replacing = self.runtime.has_agent(&pane_id);
+                if replacing {
                     let _ = self.workspace.apply_action(CoreAction::RestartFocused);
                 }
                 let restart_generation = self.pane_restart_generation(&pane_id);
-                let runtime_token = self.next_runtime_token();
-                let runtime = activate_agent_session(
-                    pane_id.clone(),
-                    restart_generation,
-                    runtime_token,
-                    session,
-                    self.event_tx.clone(),
-                );
-                self.agent_panes.insert(pane_id.clone(), runtime);
+                self.runtime
+                    .replace_agent(pane_id.clone(), restart_generation, session);
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Running;
                     intent.pending_approvals = 0;
@@ -1564,7 +1415,7 @@ impl AppState {
                     objective_status_summary(&objective)
                 );
             }
-            Err(error) if self.agent_panes.get(&pane_id).is_some() => {
+            Err(error) if self.runtime.has_agent(&pane_id) => {
                 // A failed relaunch never touches the previous session: it
                 // stays live and authoritative under its unchanged
                 // generation, and durable intent keeps reflecting it.
@@ -1594,11 +1445,10 @@ impl AppState {
             self.status = "focused pane is not an agent pane".to_owned();
             return;
         };
-        let Some(mut runtime) = self.agent_panes.remove(&pane_id) else {
+        if !self.runtime.stop_agent(&pane_id) {
             self.status = format!("agent {pane_id} is not running");
             return;
-        };
-        runtime.shutdown();
+        }
         // An interrupted session has no known outcome; terminal states the
         // session already reported stay as they are.
         self.update_agent_intent(&pane_id, AgentPaneIntent::detach_live_session);
@@ -1610,28 +1460,8 @@ impl AppState {
             self.status = "focused pane is not an agent pane".to_owned();
             return;
         };
-        let Some(runtime) = self.agent_panes.get_mut(&pane_id) else {
-            self.status = format!("agent {pane_id} is not running");
-            return;
-        };
-        let Some(request) = runtime.pending_approval.clone() else {
-            self.status = format!("agent {pane_id} has no pending approval");
-            return;
-        };
-
-        let verdict = if approved {
-            ApprovalVerdict::Approved
-        } else {
-            ApprovalVerdict::Rejected {
-                reason: Some("rejected from the workstation".to_owned()),
-            }
-        };
-        match runtime.control.decide(ApprovalDecision {
-            approval_id: request.approval_id.clone(),
-            verdict,
-        }) {
-            Ok(()) => {
-                runtime.pending_approval = None;
+        match self.runtime.decide_agent_approval(&pane_id, approved) {
+            Ok(request) => {
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.pending_approvals = 0;
                     intent.pending_approval_ids.clear();
@@ -1651,8 +1481,14 @@ impl AppState {
                 });
                 self.status = format!("{verdict_label} '{}' for {pane_id}", request.command);
             }
-            Err(error) => {
-                self.status = format!("approval decision failed for {pane_id}: {error}");
+            Err(AgentApprovalError::NotRunning) => {
+                self.status = format!("agent {pane_id} is not running")
+            }
+            Err(AgentApprovalError::NoPendingApproval) => {
+                self.status = format!("agent {pane_id} has no pending approval")
+            }
+            Err(AgentApprovalError::DecisionFailed(error)) => {
+                self.status = format!("approval decision failed for {pane_id}: {error}")
             }
         }
     }
@@ -1694,29 +1530,17 @@ impl AppState {
     }
 
     fn apply_agent_runtime_event(&mut self, runtime_event: AgentRuntimeEvent) {
-        let AgentRuntimeEvent {
-            pane_id,
-            restart_generation,
-            runtime_token,
-            event,
-        } = runtime_event;
-        // [L3-GATE] Events from a replaced agent runtime are rejected:
-        // apply an event only if the pane's current generation and token
-        // match the stamp the forwarder recorded at launch.
-        let current = self.agent_panes.get(&pane_id).is_some_and(|runtime| {
-            runtime.restart_generation == restart_generation
-                && runtime.runtime_token == runtime_token
-        });
-        if !current {
-            return;
+        // [L3-GATE] The RuntimeEngine authenticates every event against the
+        // current generation and token before durable intent can change.
+        if let Some((pane_id, event)) = self.runtime.accept_agent_event(runtime_event) {
+            self.apply_agent_event(pane_id, event);
         }
-        self.apply_agent_event(pane_id, event);
     }
 
     /// Fold one accepted agent session event into state: the durable subset
     /// (status, summary, changed files, approval count/ids) into the pane's
-    /// `AgentPaneIntent`; live-only detail (current action, output tail, full
-    /// approval request) into the runtime registry.
+    /// `AgentPaneIntent`. RuntimeEngine has already authenticated the event and
+    /// folded its live-only detail before this method runs.
     fn apply_agent_event(&mut self, pane_id: PaneId, event: AgentSessionEvent) {
         match event {
             AgentSessionEvent::Status(status) => {
@@ -1739,27 +1563,13 @@ impl AppState {
                 self.update_agent_intent(&pane_id, |intent| intent.status = status);
                 self.status = format!("agent {pane_id} is {label}");
             }
-            AgentSessionEvent::Action { description } => {
-                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
-                    runtime.current_action = Some(description);
-                }
-            }
+            AgentSessionEvent::Action { .. } => {}
             AgentSessionEvent::Summary(summary) => {
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.latest_summary = Some(summary);
                 });
             }
-            AgentSessionEvent::OutputChunk(chunk) => {
-                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
-                    runtime.push_output(&chunk);
-                }
-            }
-            AgentSessionEvent::CommandRun { command } => {
-                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
-                    runtime.push_output(&format!("$ {command}"));
-                    runtime.current_action = Some(format!("ran {command}"));
-                }
-            }
+            AgentSessionEvent::OutputChunk(_) | AgentSessionEvent::CommandRun { .. } => {}
             AgentSessionEvent::FilesChanged(changes) => {
                 self.update_agent_intent(&pane_id, |intent| {
                     for change in changes {
@@ -1785,9 +1595,6 @@ impl AppState {
                     risk: format!("{:?} ({})", request.risk.level, request.risk.basis)
                         .to_lowercase(),
                 });
-                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
-                    runtime.pending_approval = Some(request);
-                }
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::WaitingForApproval;
                     intent.pending_approvals = 1;
@@ -1795,9 +1602,6 @@ impl AppState {
                 });
             }
             AgentSessionEvent::Completed { summary } => {
-                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
-                    runtime.current_action = None;
-                }
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Complete;
                     intent.latest_summary = Some(summary);
@@ -1809,14 +1613,6 @@ impl AppState {
                 self.status = format!("agent {pane_id} completed");
             }
             AgentSessionEvent::Failed { error } => {
-                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
-                    runtime.current_action = None;
-                    // Keep the reason on the pane: the status line is
-                    // transient, a failure must stay legible until the
-                    // agent is relaunched (a relaunch replaces this
-                    // registry entry, clearing it).
-                    runtime.last_error = Some(error.clone());
-                }
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Failed;
                 });
@@ -1827,10 +1623,6 @@ impl AppState {
                 self.status = format!("agent {pane_id} failed: {error}");
             }
             AgentSessionEvent::Closed => {
-                if let Some(runtime) = self.agent_panes.get_mut(&pane_id) {
-                    runtime.closed = true;
-                    runtime.pending_approval = None;
-                }
                 // A session that closed without reporting an outcome has an
                 // unknown durable state.
                 self.update_agent_intent(&pane_id, AgentPaneIntent::detach_live_session);
@@ -1858,35 +1650,6 @@ impl AppState {
             .collect()
     }
 
-    /// Shut down live agent sessions whose pane is no longer in the active
-    /// session, and fold the stop semantics into the pane's durable intent
-    /// wherever it still lives. OpenProject switches sessions without
-    /// closing panes, so the killed session's pane may survive in an
-    /// inactive session; leaving it claiming running/waiting would persist a
-    /// live-session claim with no live session behind it ([L3-GATE]).
-    fn reconcile_agent_runtimes(&mut self) {
-        let agent_pane_ids = self.agent_pane_ids();
-        let removed_runtime_ids = self
-            .agent_panes
-            .keys()
-            .filter(|pane_id| !agent_pane_ids.contains(*pane_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        for pane_id in removed_runtime_ids {
-            if let Some(mut runtime) = self.agent_panes.remove(&pane_id) {
-                runtime.shutdown();
-            }
-            // The registry is keyed by pane id alone, so the removed runtime
-            // was the only live session any same-id pane could point at:
-            // detaching every match is safe.
-            for session in self.workspace.sessions_mut() {
-                if let Some(intent) = session.agent_intent_mut(&pane_id) {
-                    intent.detach_live_session();
-                }
-            }
-        }
-    }
-
     /// Runtime registries are intentionally active-session-only and keyed by
     /// pane id. Pane ids repeat across sessions (`pane-1`, ...), so every
     /// active-session switch must retire the old registry contents before
@@ -1894,22 +1657,9 @@ impl AppState {
     /// is the session boundary for L3; a same-id pane never inherits another
     /// session's process, parser, task state, or agent actor.
     fn retire_runtimes_for_session_switch(&mut self, previous_session_id: &SessionId) {
-        let live_agent_ids = self.agent_panes.keys().cloned().collect::<Vec<_>>();
-        if let Some(previous_session) = self
-            .workspace
-            .sessions_mut()
-            .find(|session| session.id() == previous_session_id)
-        {
-            for pane_id in &live_agent_ids {
-                if let Some(intent) = previous_session.agent_intent_mut(pane_id) {
-                    intent.detach_live_session();
-                }
-            }
-        }
-
-        self.shutdown_agent_panes();
-        self.shutdown_task_panes();
-        self.shutdown_terminal_panes();
+        let _report = self
+            .runtime
+            .retire_session(&mut self.workspace, previous_session_id);
         self.copy_mode = None;
         self.pointer_view = None;
         self.context_menu = None;
@@ -1917,8 +1667,8 @@ impl AppState {
     }
 
     /// The live agent runtime view for a pane, if a session is attached.
-    pub(crate) fn agent_runtime_view(&self, pane_id: &PaneId) -> Option<&AgentPaneRuntime> {
-        self.agent_panes.get(pane_id)
+    pub(crate) fn agent_runtime_view(&self, pane_id: &PaneId) -> Option<AgentRuntimeView<'_>> {
+        self.runtime.agent_view(pane_id)
     }
 
     #[cfg(test)]
@@ -1930,9 +1680,8 @@ impl AppState {
     /// failure writes) without needing a live PTY.
     #[cfg(test)]
     pub(crate) fn set_task_status_for_test(&mut self, pane_id: &PaneId, status: &str) {
-        self.task_panes
-            .statuses
-            .insert(pane_id.clone(), status.to_owned());
+        self.runtime
+            .set_task_status(pane_id.clone(), status.to_owned());
         let exit = status
             .strip_prefix("failed: exit ")
             .and_then(|code| code.parse().ok())
@@ -1947,10 +1696,13 @@ impl AppState {
                 (status == "failed: unknown exit").then_some(mandatum_pty::ChildExitStatus::Unknown)
             });
         if let Some(exit) = exit {
-            self.task_panes
-                .record_failure(pane_id.clone(), TaskInvestigationFailure::ProcessExit(exit));
+            self.runtime.record_task_failure(
+                pane_id.clone(),
+                TaskInvestigationFailure::ProcessExit(exit),
+                status.to_owned(),
+            );
         } else {
-            self.task_panes.clear_failure(pane_id);
+            self.runtime.clear_task_failure(pane_id);
         }
     }
 
@@ -1958,44 +1710,33 @@ impl AppState {
         &mut self,
         pane_id: PaneId,
         intent: &TaskPaneIntent,
-    ) -> Result<(), ReconcileRuntimeError> {
-        if !self.spawn_pty {
-            self.status = format!("task pane {pane_id} created; PTY spawning is disabled");
-            return Ok(());
-        }
-
-        let Some(size) = self
-            .visible_task_pane_sizes()
-            .into_iter()
-            .find_map(|(candidate, size)| (candidate == pane_id).then_some(size))
-        else {
-            let status = "pending launch: waiting for visible pane size".to_owned();
-            self.task_panes.pending_launches.insert(pane_id.clone());
-            self.task_panes
-                .statuses
-                .insert(pane_id.clone(), status.clone());
-            self.status = format!("task pane {pane_id} created; {status}");
-            return Ok(());
+    ) -> Result<(), RuntimeReconcileError> {
+        let outcome = self.runtime.launch_task(
+            &self.workspace,
+            &self.shell_program,
+            pane_id.clone(),
+            self.visible_task_size(&pane_id),
+            self.spawn_pty,
+            TaskAttempt::Initial,
+        );
+        self.status = match outcome {
+            TaskLaunchOutcome::Disabled => {
+                format!("task pane {pane_id} created; PTY spawning is disabled")
+            }
+            TaskLaunchOutcome::Deferred => {
+                format!(
+                    "task pane {pane_id} created; pending launch: waiting for visible pane size"
+                )
+            }
+            TaskLaunchOutcome::Running => {
+                self.timeline.record(TimelineEventKind::TaskStarted {
+                    pane: pane_id.to_string(),
+                    command: intent.command.clone(),
+                });
+                format!("task {pane_id} running: {}", intent.command)
+            }
+            TaskLaunchOutcome::Failed(status) => status,
         };
-
-        if let Err(source) = self.spawn_task_pane(pane_id.clone(), size) {
-            self.task_panes.pending_launches.remove(&pane_id);
-            self.task_panes.record_failure(
-                pane_id.clone(),
-                TaskInvestigationFailure::Launch(source.to_string()),
-            );
-            self.task_panes
-                .statuses
-                .insert(pane_id.clone(), format!("task launch failed: {source}"));
-            return Err(ReconcileRuntimeError::Spawn {
-                pane_id: pane_id.clone(),
-                source,
-            });
-        }
-        self.task_panes.pending_launches.remove(&pane_id);
-        self.task_panes.statuses.remove(&pane_id);
-        self.task_panes.clear_failure(&pane_id);
-        self.status = format!("task {pane_id} running: {}", intent.command);
         Ok(())
     }
 
@@ -2005,158 +1746,50 @@ impl AppState {
             .find_map(|(candidate, size)| (candidate == *pane_id).then_some(size))
     }
 
-    fn reconcile_runtimes(&mut self) -> Result<(), ReconcileRuntimeError> {
-        self.reconcile_terminal_runtimes()?;
-        self.reconcile_agent_runtimes();
-        self.reconcile_task_runtimes()
-    }
-
-    fn reconcile_terminal_runtimes(&mut self) -> Result<(), ReconcileRuntimeError> {
-        if !self.spawn_pty {
-            return Ok(());
-        }
-
-        let desired = self.visible_terminal_pane_sizes();
-        let terminal_pane_ids = self.terminal_pane_ids();
-
-        let removed_runtime_ids = self
-            .terminal_panes
-            .keys()
-            .filter(|pane_id| !terminal_pane_ids.contains(*pane_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        for pane_id in removed_runtime_ids {
-            if let Some(mut runtime) = self.terminal_panes.remove(&pane_id) {
-                runtime.shutdown();
-            }
-        }
-
-        for (pane_id, size) in desired {
-            let core_generation = self.pane_restart_generation(&pane_id);
-            let needs_restart = self
-                .terminal_panes
-                .get(&pane_id)
-                .is_some_and(|runtime| core_generation > runtime.restart_generation);
-
-            if needs_restart {
-                self.restart_terminal_pane(pane_id, size)?;
-            } else if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
-                if let Err(error) = runtime.resize(size) {
-                    runtime.error = Some(error.to_string());
-                    return Err(ReconcileRuntimeError::Resize {
-                        pane_id,
-                        source: error,
-                    });
+    fn reconcile_runtimes(&mut self) -> Result<(), RuntimeReconcileError> {
+        let visible_terminals = self.visible_terminal_pane_sizes();
+        let visible_tasks = self.visible_task_pane_sizes();
+        let notices = self.runtime.reconcile(
+            &mut self.workspace,
+            &self.shell_program,
+            self.spawn_pty,
+            visible_terminals,
+            visible_tasks,
+        )?;
+        for notice in notices {
+            match notice {
+                RuntimeReconcileNotice::TerminalSpawned(pane_id) => {
+                    self.status = format!(
+                        "spawned shell for {} · {pane_id}",
+                        pane_status_name(&self.workspace, &pane_id)
+                    );
                 }
-            } else if let Err(error) = self.spawn_terminal_pane(pane_id.clone(), size) {
-                return Err(ReconcileRuntimeError::Spawn {
-                    pane_id,
-                    source: error,
-                });
+                RuntimeReconcileNotice::TerminalRestarted(pane_id) => {
+                    if self
+                        .copy_mode
+                        .as_ref()
+                        .is_some_and(|state| state.pane_id == pane_id)
+                    {
+                        self.copy_mode = None;
+                    }
+                    if self
+                        .pointer_view
+                        .as_ref()
+                        .is_some_and(|view| view.pane_id == pane_id)
+                    {
+                        self.pointer_view = None;
+                    }
+                    self.status = format!("restarted shell for {pane_id}");
+                }
+                RuntimeReconcileNotice::TaskStarted(pane_id) => {
+                    self.timeline.record(TimelineEventKind::TaskStarted {
+                        pane: pane_id.to_string(),
+                        command: self.task_command_for(&pane_id).unwrap_or_default(),
+                    });
+                    self.status = format!("task {pane_id} running");
+                }
             }
         }
-
-        Ok(())
-    }
-
-    fn reconcile_task_runtimes(&mut self) -> Result<(), ReconcileRuntimeError> {
-        if !self.spawn_pty {
-            return Ok(());
-        }
-
-        let task_pane_ids = self.task_pane_ids();
-        self.task_panes.retain_pane_ids(&task_pane_ids);
-        let removed_runtime_ids = self
-            .task_panes
-            .keys()
-            .filter(|pane_id| !task_pane_ids.contains(*pane_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        for pane_id in removed_runtime_ids {
-            if let Some(mut runtime) = self.task_panes.remove(&pane_id) {
-                runtime.shutdown();
-            }
-        }
-
-        let visible_task_sizes = self.visible_task_pane_sizes();
-        for (pane_id, size) in &visible_task_sizes {
-            let Some(runtime) = self.task_panes.get_mut(pane_id) else {
-                continue;
-            };
-            if let Err(error) = runtime.resize(*size) {
-                runtime.runtime.error = Some(error.to_string());
-                runtime.status = format!("task resize failed: {error}");
-                return Err(ReconcileRuntimeError::Resize {
-                    pane_id: pane_id.clone(),
-                    source: error,
-                });
-            }
-        }
-
-        let pending_visible = visible_task_sizes
-            .into_iter()
-            .filter(|(pane_id, _)| {
-                self.task_panes.pending_launches.contains(pane_id)
-                    && !self.task_panes.contains_key(pane_id)
-            })
-            .collect::<Vec<_>>();
-        for (pane_id, size) in pending_visible {
-            if let Err(source) = self.spawn_task_pane(pane_id.clone(), size) {
-                self.task_panes.pending_launches.remove(&pane_id);
-                self.task_panes.record_failure(
-                    pane_id.clone(),
-                    TaskInvestigationFailure::Launch(source.to_string()),
-                );
-                self.task_panes
-                    .statuses
-                    .insert(pane_id.clone(), format!("task launch failed: {source}"));
-                return Err(ReconcileRuntimeError::Spawn {
-                    pane_id: pane_id.clone(),
-                    source,
-                });
-            }
-            self.task_panes.pending_launches.remove(&pane_id);
-            self.task_panes.statuses.remove(&pane_id);
-            self.task_panes.clear_failure(&pane_id);
-            self.status = format!("task {pane_id} running");
-        }
-
-        Ok(())
-    }
-
-    /// Tear down a pane's live PTY/parser/runtime and launch a fresh one for the
-    /// same `PaneId`. Core layout intent (the durable `PaneId` and its restart
-    /// generation) is preserved; no runtime handles are serialized.
-    fn restart_terminal_pane(
-        &mut self,
-        pane_id: PaneId,
-        size: PtySize,
-    ) -> Result<(), ReconcileRuntimeError> {
-        if let Some(mut runtime) = self.terminal_panes.remove(&pane_id) {
-            runtime.shutdown();
-        }
-        // A restart invalidates copy-mode coordinates for that pane.
-        if self
-            .copy_mode
-            .as_ref()
-            .is_some_and(|state| state.pane_id == pane_id)
-        {
-            self.copy_mode = None;
-        }
-        // Pointer selection/scroll addresses the replaced grid too.
-        if self
-            .pointer_view
-            .as_ref()
-            .is_some_and(|view| view.pane_id == pane_id)
-        {
-            self.pointer_view = None;
-        }
-        self.spawn_terminal_pane(pane_id.clone(), size)
-            .map_err(|source| ReconcileRuntimeError::Restart {
-                pane_id: pane_id.clone(),
-                source,
-            })?;
-        self.status = format!("restarted shell for {pane_id}");
         Ok(())
     }
 
@@ -2214,10 +1847,12 @@ impl AppState {
             .collect()
     }
 
+    #[cfg(test)]
     fn terminal_pane_ids(&self) -> BTreeSet<PaneId> {
         self.terminal_pane_ids_for_workspace(&self.workspace)
     }
 
+    #[cfg(test)]
     fn terminal_pane_ids_for_workspace(&self, workspace: &Workspace) -> BTreeSet<PaneId> {
         workspace
             .active_session()
@@ -2226,71 +1861,6 @@ impl AppState {
             .filter(|(_, pane)| matches!(pane.kind(), PaneKind::Terminal { .. }))
             .map(|(pane_id, _)| pane_id.clone())
             .collect()
-    }
-
-    fn task_pane_ids(&self) -> BTreeSet<PaneId> {
-        self.workspace
-            .active_session()
-            .panes()
-            .iter()
-            .filter(|(_, pane)| matches!(pane.kind(), PaneKind::Task { .. }))
-            .map(|(pane_id, _)| pane_id.clone())
-            .collect()
-    }
-
-    fn next_runtime_token(&mut self) -> u64 {
-        let token = self.next_runtime_token;
-        self.next_runtime_token += 1;
-        token
-    }
-
-    fn spawn_terminal_pane(
-        &mut self,
-        pane_id: PaneId,
-        size: PtySize,
-    ) -> Result<(), TerminalRuntimeError> {
-        let runtime_token = self.next_runtime_token();
-        let runtime = prepare_terminal_pane_runtime(
-            &self.workspace,
-            &self.shell_program,
-            runtime_token,
-            pane_id.clone(),
-            size,
-        )?
-        .activate(pane_id.clone(), self.event_tx.clone());
-        self.terminal_panes.insert(pane_id.clone(), runtime);
-        self.status = format!(
-            "spawned shell for {} · {pane_id}",
-            pane_status_name(&self.workspace, &pane_id)
-        );
-        Ok(())
-    }
-
-    fn spawn_task_pane(
-        &mut self,
-        pane_id: PaneId,
-        size: PtySize,
-    ) -> Result<(), TerminalRuntimeError> {
-        if let Some(mut runtime) = self.task_panes.remove(&pane_id) {
-            runtime.shutdown();
-        }
-
-        let runtime_token = self.next_runtime_token();
-        let runtime = prepare_task_pane_runtime(
-            &self.workspace,
-            &self.shell_program,
-            runtime_token,
-            pane_id.clone(),
-            size,
-        )?
-        .activate(pane_id.clone(), self.event_tx.clone());
-        self.task_panes
-            .insert(pane_id.clone(), TaskPaneRuntime::running(runtime));
-        self.timeline.record(TimelineEventKind::TaskStarted {
-            pane: pane_id.to_string(),
-            command: self.task_command_for(&pane_id).unwrap_or_default(),
-        });
-        Ok(())
     }
 
     /// The durable command string of a task pane, for timeline facts.
@@ -2305,201 +1875,77 @@ impl AppState {
     }
 
     fn apply_pty_runtime_event(&mut self, event: PtyRuntimeEvent) {
-        match event {
-            PtyRuntimeEvent::Output {
-                pane_id,
-                restart_generation,
-                runtime_token,
-                bytes,
-            } => {
-                if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
-                    if runtime.restart_generation != restart_generation
-                        || runtime.runtime_token != runtime_token
-                    {
-                        return;
-                    }
-                    match runtime.parser.feed_pty_bytes(&bytes) {
-                        Ok(_) => {
-                            // Read diagnostics never overwrite the visible
-                            // status: a PTY flood must not bury a failure or
-                            // attention message under byte counts.
-                            if self.debug_status {
-                                self.status =
-                                    format!("read {} byte(s) from {pane_id}", bytes.len());
-                            }
-                        }
-                        Err(error) => {
-                            runtime.error = Some(error.to_string());
-                            self.status = format!("terminal parser failed for {pane_id}: {error}");
-                        }
-                    }
-                } else if let Some(task) = self.task_panes.get_mut(&pane_id) {
-                    if task.runtime.restart_generation != restart_generation
-                        || task.runtime.runtime_token != runtime_token
-                    {
-                        return;
-                    }
-                    match task.runtime.parser.feed_pty_bytes(&bytes) {
-                        Ok(_) => {
-                            if self.debug_status {
-                                self.status =
-                                    format!("read {} task byte(s) from {pane_id}", bytes.len());
-                            }
-                        }
-                        Err(error) => {
-                            task.runtime.error = Some(error.to_string());
-                            task.status = format!("task parser failed: {error}");
-                            self.status = format!("task parser failed for {pane_id}: {error}");
-                        }
-                    }
-                }
+        let Some(effect) = self.runtime.apply_pty_event(event) else {
+            return;
+        };
+        match effect {
+            RuntimePtyEffect::TerminalRead { pane_id, bytes } if self.debug_status => {
+                self.status = format!("read {bytes} byte(s) from {pane_id}")
             }
-            PtyRuntimeEvent::ReaderClosed {
-                pane_id,
-                restart_generation,
-                runtime_token,
-            } => {
-                if !self.runtime_generation_matches(&pane_id, restart_generation, runtime_token) {
-                    return;
-                }
-                if let Some(task) = self.task_panes.get_mut(&pane_id) {
-                    if task.runtime.exit_status.is_some() {
-                        return;
-                    }
-                    task.status = "task reader closed".to_owned();
-                }
-                self.status = format!("PTY reader closed for {pane_id}");
+            RuntimePtyEffect::TaskRead { pane_id, bytes } if self.debug_status => {
+                self.status = format!("read {bytes} task byte(s) from {pane_id}")
             }
-            PtyRuntimeEvent::Error {
-                pane_id,
-                restart_generation,
-                runtime_token,
-                message,
-            } => {
-                if !self.runtime_generation_matches(&pane_id, restart_generation, runtime_token) {
-                    return;
-                }
-                if let Some(runtime) = self.terminal_panes.get_mut(&pane_id) {
-                    runtime.error = Some(message.clone());
-                } else if let Some(task) = self.task_panes.get_mut(&pane_id) {
-                    task.runtime.error = Some(message.clone());
-                    task.status = format!("task reader failed: {message}");
-                }
-                self.status = format!("PTY reader failed for {pane_id}: {message}");
+            RuntimePtyEffect::TerminalParserFailed { pane_id, error } => {
+                self.status = format!("terminal parser failed for {pane_id}: {error}")
             }
+            RuntimePtyEffect::TaskParserFailed { pane_id, error } => {
+                self.status = format!("task parser failed for {pane_id}: {error}")
+            }
+            RuntimePtyEffect::ReaderClosed { pane_id } => {
+                self.status = format!("PTY reader closed for {pane_id}")
+            }
+            RuntimePtyEffect::ReaderFailed { pane_id, error } => {
+                self.status = format!("PTY reader failed for {pane_id}: {error}")
+            }
+            RuntimePtyEffect::TerminalRead { .. } | RuntimePtyEffect::TaskRead { .. } => {}
         }
-    }
-
-    fn runtime_generation_matches(
-        &self,
-        pane_id: &PaneId,
-        restart_generation: u64,
-        runtime_token: u64,
-    ) -> bool {
-        self.terminal_panes.get(pane_id).is_some_and(|runtime| {
-            runtime.restart_generation == restart_generation
-                && runtime.runtime_token == runtime_token
-        }) || self.task_panes.get(pane_id).is_some_and(|task| {
-            task.runtime.restart_generation == restart_generation
-                && task.runtime.runtime_token == runtime_token
-        })
     }
 
     /// Heartbeat work: notice exited children. Called from `tick_runtime`
     /// and on the shell's heartbeat cadence rather than per event.
     pub(crate) fn poll_child_exits(&mut self) {
-        for (pane_id, runtime) in self.terminal_panes.iter_mut() {
-            if runtime.exit_status.is_some() {
-                continue;
-            }
-
-            match runtime.controller.try_wait() {
-                Ok(Some(exit)) => {
-                    runtime.exit_status = Some(exit.status());
+        for effect in self.runtime.poll_child_exits() {
+            match effect {
+                RuntimeExitEffect::TerminalExited { pane_id, status } => {
                     self.status = format!(
                         "{} exited: {} · {pane_id}",
-                        pane_status_name(&self.workspace, pane_id),
-                        exit_status_label(exit.status())
+                        pane_status_name(&self.workspace, &pane_id),
+                        exit_status_label(status)
                     );
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    runtime.error = Some(error.to_string());
+                RuntimeExitEffect::TerminalWaitFailed { pane_id, error } => {
                     self.status = format!("PTY wait failed for {pane_id}: {error}");
                 }
-            }
-        }
-
-        let mut task_failure_updates = Vec::new();
-        for (pane_id, task) in self.task_panes.iter_mut() {
-            if task.runtime.exit_status.is_some() {
-                continue;
-            }
-
-            match task.runtime.controller.try_wait() {
-                Ok(Some(exit)) => {
-                    let status = exit.status();
-                    task.runtime.exit_status = Some(status);
-                    task.status = task_status_label(status);
-                    let failure = (status != mandatum_pty::ChildExitStatus::Exited { code: 0 })
-                        .then_some(TaskInvestigationFailure::ProcessExit(status));
-                    task_failure_updates.push((pane_id.clone(), failure));
-                    // Timeline fact: which command produced this exit.
-                    let command = self
-                        .workspace
-                        .active_session()
-                        .pane(pane_id)
-                        .and_then(|pane| match pane.kind() {
-                            PaneKind::Task { intent } => Some(intent.command.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
+                RuntimeExitEffect::TaskExited { pane_id, status } => {
+                    let command = self.task_command_for(&pane_id).unwrap_or_default();
                     self.timeline.record(TimelineEventKind::TaskExited {
                         pane: pane_id.to_string(),
                         command,
-                        exit: task.status.clone(),
+                        exit: status.clone(),
                     });
                     self.status = format!(
                         "{} {} · {pane_id}",
-                        pane_status_name(&self.workspace, pane_id),
-                        task.status
+                        pane_status_name(&self.workspace, &pane_id),
+                        status
                     );
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    task.runtime.error = Some(error.to_string());
-                    task.status = format!("task wait failed: {error}");
+                RuntimeExitEffect::TaskWaitFailed { pane_id, error } => {
                     self.status = format!("task wait failed for {pane_id}: {error}");
                 }
-            }
-        }
-        for (pane_id, failure) in task_failure_updates {
-            if let Some(failure) = failure {
-                self.task_panes.record_failure(pane_id, failure);
-            } else {
-                self.task_panes.clear_failure(&pane_id);
             }
         }
     }
 
     /// The live terminal grid attached to a pane, if any.
     pub(crate) fn terminal_grid(&self, pane_id: &PaneId) -> Option<&TerminalGrid> {
-        self.terminal_panes
-            .get(pane_id)
-            .map(|runtime| runtime.parser.grid())
+        self.runtime.terminal_grid(pane_id)
     }
 
     /// The live task runtime view for a pane: its status label plus the
     /// output grid when a runtime is attached. Falls back to the retained
     /// status of a stopped/pending task.
     pub(crate) fn task_view(&self, pane_id: &PaneId) -> Option<(&str, Option<&TerminalGrid>)> {
-        if let Some(task) = self.task_panes.get(pane_id) {
-            return Some((task.status.as_str(), Some(task.runtime.parser.grid())));
-        }
-        self.task_panes
-            .statuses
-            .get(pane_id)
-            .map(|status| (status.as_str(), None))
+        self.runtime.task_view(pane_id)
     }
 
     /// How a pane's grid is being viewed: copy-mode scroll/selection/cursor
@@ -2685,10 +2131,9 @@ impl AppState {
         if pointer.mods.alt || self.copy_mode.is_some() {
             return false;
         }
-        let Some(runtime) = self.terminal_panes.get_mut(pane_id) else {
+        let Some(mode) = self.runtime.terminal_mouse_mode(pane_id) else {
             return false;
         };
-        let mode = runtime.parser.mouse_mode();
         if !mode.wants_mouse() {
             return false;
         }
@@ -2702,9 +2147,8 @@ impl AppState {
             .saturating_sub(inner.y)
             .min(inner.height.saturating_sub(1));
         if let Some(bytes) = encode_mouse_event(mode, pointer, column, row)
-            && let Err(error) = runtime.write_input(&bytes)
+            && let Err(error) = self.runtime.write_terminal(pane_id, &bytes)
         {
-            runtime.error = Some(error.to_string());
             self.status = format!("PTY mouse input failed for {pane_id}: {error}");
         }
         // The child that received the press owns the rest of the gesture.
@@ -2722,8 +2166,7 @@ impl AppState {
         inner: SceneRect,
         pointer: &PointerEvent,
     ) {
-        if let Some(runtime) = self.terminal_panes.get_mut(pane_id) {
-            let mode = runtime.parser.mouse_mode();
+        if let Some(mode) = self.runtime.terminal_mouse_mode(pane_id) {
             let column = pointer
                 .column
                 .saturating_sub(inner.x)
@@ -2733,9 +2176,9 @@ impl AppState {
                 .saturating_sub(inner.y)
                 .min(inner.height.saturating_sub(1));
             if let Some(bytes) = encode_mouse_event(mode, pointer, column, row)
-                && let Err(error) = runtime.write_input(&bytes)
+                && let Err(error) = self.runtime.write_terminal(pane_id, &bytes)
             {
-                runtime.error = Some(error.to_string());
+                self.status = format!("PTY mouse input failed for {pane_id}: {error}");
             }
         }
         if pointer.kind == PointerKind::Up {
@@ -3059,16 +2502,14 @@ impl AppState {
             .as_ref()
             .is_some_and(|state| state.pane_id == pane_id)
         {
-            if !self.terminal_panes.contains_key(&pane_id) {
+            if !self.runtime.has_terminal(&pane_id) {
                 return;
             }
             let state = self.copy_mode.as_mut().expect("copy mode present");
             let grid = self
-                .terminal_panes
-                .get(&pane_id)
-                .expect("runtime present")
-                .parser
-                .grid();
+                .runtime
+                .terminal_grid(&pane_id)
+                .expect("runtime present");
             let step = WHEEL_SCROLL_ROWS * usize::from(dy.unsigned_abs());
             if dy < 0 {
                 state.move_up(step, grid);
@@ -3184,7 +2625,7 @@ impl AppState {
             self.status = "nothing is selected to copy".to_owned();
             return;
         };
-        let Some(runtime) = self.terminal_panes.get(&pane_id) else {
+        let Some(grid) = self.runtime.terminal_grid(&pane_id) else {
             self.status = format!("pane {pane_id} has no live terminal to copy from");
             return;
         };
@@ -3196,7 +2637,7 @@ impl AppState {
             cursor_col: cursor.1,
             anchor: Some(anchor),
         };
-        let text = extractor.selected_text(runtime.parser.grid());
+        let text = extractor.selected_text(grid);
         self.clipboard_payload = Some(osc52_sequence(&text));
         let count = text.chars().count();
         self.last_copied = Some(text);
@@ -3273,7 +2714,7 @@ impl AppState {
                 }
             }
             PaneKind::Agent { .. } => {
-                let live = self.agent_panes.get(pane_id);
+                let live = self.runtime.agent_view(pane_id);
                 if live.is_some_and(|runtime| runtime.pending_approval.is_some()) {
                     commands.extend([CommandId::ApproveAgentAction, CommandId::RejectAgentAction]);
                 }
@@ -3538,17 +2979,17 @@ impl AppState {
                     }
                 }
                 PaneKind::Task { .. } => {
-                    if let Some(task) = self.task_panes.get(pane_id) {
+                    if let Some(grid) = self.runtime.task_grid(pane_id) {
                         sources.push(SearchSource::from_grid(
                             pane_id.clone(),
                             pane.title(),
                             SearchSourceKind::Task,
-                            task.runtime.parser.grid(),
+                            grid,
                         ));
                     }
                 }
                 PaneKind::Agent { .. } => {
-                    if let Some(runtime) = self.agent_panes.get(pane_id) {
+                    if let Some(runtime) = self.runtime.agent_view(pane_id) {
                         sources.push(SearchSource::from_lines(
                             pane_id.clone(),
                             pane.title(),
@@ -4152,8 +3593,8 @@ impl AppState {
     /// states for the active session's runtimes.
     fn session_map_row_models(&self) -> Vec<SessionMapRowModel> {
         let live = |pane_id: &PaneId| -> Option<String> {
-            if let Some(runtime) = self.terminal_panes.get(pane_id) {
-                return Some(match runtime.exit_status {
+            if let Some(exit_status) = self.runtime.terminal_exit_status(pane_id) {
+                return Some(match exit_status {
                     Some(status) => format!("exited: {}", exit_status_label(status)),
                     // A live shell at a prompt is not doing work; "running"
                     // would read as activity. "open" states what is true
@@ -4161,12 +3602,12 @@ impl AppState {
                     None => "open".to_owned(),
                 });
             }
-            if let Some(task) = self.task_panes.get(pane_id) {
-                return Some(match task.runtime.exit_status {
+            if let Some((exit_status, status)) = self.runtime.task_live_status(pane_id) {
+                return Some(match exit_status {
                     // The retained status label ("failed: exit 3") — the
                     // exact vocabulary the pane body and status line use,
                     // so the same fact never reads two ways.
-                    Some(_) => task.status.clone(),
+                    Some(_) => status.to_owned(),
                     None => "running".to_owned(),
                 });
             }
@@ -4214,11 +3655,11 @@ impl AppState {
 
     fn enter_copy_mode(&mut self) {
         let focused = self.workspace.active_session().focused_pane_id().clone();
-        let Some(runtime) = self.terminal_panes.get(&focused) else {
+        let Some(grid) = self.runtime.terminal_grid(&focused) else {
             self.status = format!("pane {focused} has no live terminal to copy from");
             return;
         };
-        self.copy_mode = Some(CopyModeState::enter(focused, runtime.parser.grid()));
+        self.copy_mode = Some(CopyModeState::enter(focused, grid));
         self.palette = None;
         // Copy mode owns the pane's viewport; a stale pointer selection
         // underneath it would reappear on exit, addressing moved rows.
@@ -4235,7 +3676,7 @@ impl AppState {
         let Some(pane_id) = self.copy_mode.as_ref().map(|state| state.pane_id.clone()) else {
             return;
         };
-        if !self.terminal_panes.contains_key(&pane_id) {
+        if !self.runtime.has_terminal(&pane_id) {
             self.copy_mode = None;
             self.status = "copy mode closed: pane is no longer live".to_owned();
             return;
@@ -4253,11 +3694,9 @@ impl AppState {
         let action = {
             let state = self.copy_mode.as_mut().expect("copy mode present");
             let grid = self
-                .terminal_panes
-                .get(&pane_id)
-                .expect("runtime present")
-                .parser
-                .grid();
+                .runtime
+                .terminal_grid(&pane_id)
+                .expect("runtime present");
             copy_mode_action(state, grid, key)
         };
 
@@ -4270,9 +3709,9 @@ impl AppState {
 
     fn copy_selection(&mut self, pane_id: &PaneId) {
         let Some(text) = self.copy_mode.as_ref().and_then(|state| {
-            self.terminal_panes
-                .get(pane_id)
-                .map(|runtime| state.selected_text(runtime.parser.grid()))
+            self.runtime
+                .terminal_grid(pane_id)
+                .map(|grid| state.selected_text(grid))
         }) else {
             return;
         };
@@ -4433,69 +3872,6 @@ fn copy_mode_action(state: &mut CopyModeState, grid: &TerminalGrid, key: Key) ->
 impl Drop for AppState {
     fn drop(&mut self) {
         self.shutdown();
-    }
-}
-
-#[derive(Debug)]
-enum ReconcileRuntimeError {
-    Spawn {
-        pane_id: PaneId,
-        source: TerminalRuntimeError,
-    },
-    Restart {
-        pane_id: PaneId,
-        source: TerminalRuntimeError,
-    },
-    Resize {
-        pane_id: PaneId,
-        source: NativePtyError,
-    },
-}
-
-impl fmt::Display for ReconcileRuntimeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Spawn { pane_id, source } => {
-                write!(formatter, "PTY spawn failed for {pane_id}: {source}")
-            }
-            Self::Restart { pane_id, source } => {
-                write!(formatter, "PTY restart failed for {pane_id}: {source}")
-            }
-            Self::Resize { pane_id, source } => {
-                write!(formatter, "PTY resize failed for {pane_id}: {source}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ReconcileRuntimeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Spawn { source, .. } | Self::Restart { source, .. } => Some(source),
-            Self::Resize { source, .. } => Some(source),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct RestoreRuntimeError {
-    pane_id: PaneId,
-    source: TerminalRuntimeError,
-}
-
-impl fmt::Display for RestoreRuntimeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "PTY spawn failed for {}: {}",
-            self.pane_id, self.source
-        )
-    }
-}
-
-impl std::error::Error for RestoreRuntimeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
     }
 }
 

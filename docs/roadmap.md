@@ -73,15 +73,26 @@ generated help/first-run/legend surfaces, calm failure states, and the
 accessibility floor (keyboard-only completeness, reduced motion, visible
 focus) in docs/interaction-model.md.
 
+## Post-Charter Runtime Engine Deepening: DONE
+
+Outcome: terminal, task, and agent lifecycle policy has one deep Module and a
+narrow, product-shaped Interface.
+
+Delivered: `crates/app/src/runtime_engine.rs` owns all three live registries,
+the unified event channel, runtime tokens, identity checks, reconciliation,
+replacement, approval control, child-event application, shutdown, and
+transactional restore. It returns typed effects to `AppState` and typed
+lifecycle facts describing fresh, deferred, detached, and not-replayed
+outcomes. Restore staging failures return a typed error and commit no facts.
+Concrete registry mutation remains inside the Module; durable workspace intent
+and presentation/timeline folds remain outside it.
+
 ## Next Horizon
 
 Matches PLAN.md ("Next horizon"); see it for detail:
 
 - Named task and dev-server recipe catalog with durable run facts.
 - Recovery cockpit with itemized restore outcomes and failure acknowledgement.
-- Deep runtime engine Module over the terminal, task, and agent registry
-  Implementations, preserving the existing generation/token and approval
-  seams.
 - Capability-described connector catalog plus a scriptable project/session/
   recipe control surface and explicit approval profiles.
 - GPU adapter, when the roadmap needs GPU-only capability or a sub-20 ms

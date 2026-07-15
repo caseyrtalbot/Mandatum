@@ -55,9 +55,11 @@ loses its documentation or its gate.
   `std::sync::mpsc`, mirroring the PTY runtime. All runtime event streams
   (input, PTY, agent) feed one unified channel (`crates/app/src/events.rs`).
 - Live runtime state (process handles, sessions, tokens, output tails,
-  pending approval detail) lives in the app runtime registries and is never
-  serialized. The durable subset folds into core intent at the moment an
-  event is accepted.
+  pending approval detail) lives behind the app's `RuntimeEngine` and is never
+  serialized. The engine owns the terminal, task, and agent registries, the
+  unified event channel, identity checks, replacement, reconciliation, and
+  restore lifecycle facts. `AppState` folds accepted typed effects into core
+  intent, the timeline, status, and presentation state.
 - Spikes live in `spikes/`, outside the Cargo workspace: they may depend on
   engine crates, but their dependency trees never join the product build or
   gate. After a scene-contract or GPU-spike change, run `./ci/gpu-spike.sh` to

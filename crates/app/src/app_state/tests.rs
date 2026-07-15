@@ -1325,7 +1325,8 @@ fn restore_failure_preserves_current_runtime_when_pty_staging_fails() {
     let before = state.workspace().clone();
     let pane_id = PaneId::new("pane-1");
     let before_pid = state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(&pane_id)
         .unwrap()
         .controller
@@ -1341,7 +1342,8 @@ fn restore_failure_preserves_current_runtime_when_pty_staging_fails() {
     assert_eq!(state.live_terminal_count(), 1);
     assert_eq!(
         state
-            .terminal_panes
+            .runtime
+            .terminals()
             .get(&pane_id)
             .unwrap()
             .controller
@@ -1416,27 +1418,30 @@ const SHELL_READY_COMMAND: &[u8] = b"printf '%s%s\\n' '__MANDATUM_SHELL_' 'READY
 /// fragments, so only `printf` output can satisfy the suffix check even when
 /// the startup prompt shares its row.
 fn wait_for_shell_ready(state: &mut AppState, pane_id: &PaneId) {
-    state
-        .terminal_panes
-        .get_mut(pane_id)
-        .unwrap_or_else(|| panic!("fresh terminal runtime {pane_id} should exist"))
-        .write_input(SHELL_READY_COMMAND)
+    let written = state
+        .runtime
+        .write_terminal(pane_id, SHELL_READY_COMMAND)
         .unwrap_or_else(|error| {
             panic!("failed to send shell readiness probe to {pane_id}: {error}")
         });
+    assert!(written, "fresh terminal runtime {pane_id} should exist");
 
     let ready = pump_runtime_until(state, |state| {
-        state.terminal_panes.get(pane_id).is_some_and(|runtime| {
-            runtime
-                .parser
-                .grid()
-                .snapshot()
-                .iter()
-                // dash can paint its prompt before the command's output on
-                // the same row. The echoed input cannot contain the assembled
-                // marker, so a suffix match still proves `printf` executed.
-                .any(|line| line.trim_end().ends_with(SHELL_READY_MARKER))
-        })
+        state
+            .runtime
+            .terminals()
+            .get(pane_id)
+            .is_some_and(|runtime| {
+                runtime
+                    .parser
+                    .grid()
+                    .snapshot()
+                    .iter()
+                    // dash can paint its prompt before the command's output on
+                    // the same row. The echoed input cannot contain the assembled
+                    // marker, so a suffix match still proves `printf` executed.
+                    .any(|line| line.trim_end().ends_with(SHELL_READY_MARKER))
+            })
     });
     assert!(
         ready,
@@ -1523,7 +1528,7 @@ fn drain_events_bounds_work_per_call() {
 
     state.drain_events();
     assert!(
-        state.event_rx.try_recv().is_ok(),
+        state.runtime.try_recv_event().is_ok(),
         "one drain call must leave events beyond the budget queued"
     );
 }
@@ -1549,7 +1554,8 @@ fn pty_flood_stays_bounded_responsive_and_quittable() {
     }
     assert!(saw_output, "the flood never reached the grid");
     let in_flight = state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(&pane_id)
         .expect("pane-1 runtime")
         .flow
@@ -1617,12 +1623,13 @@ fn task_with_unset_cwd_runs_in_the_project_directory_not_home() {
 
     let exited = pump_runtime_until(&mut state, |state| {
         state
-            .task_panes
+            .runtime
+            .tasks()
             .get(&pane_id)
             .is_some_and(|task| task.runtime.exit_status.is_some())
     });
     assert!(exited, "the task never exited");
-    let status = state.task_panes.get(&pane_id).unwrap().status.clone();
+    let status = state.runtime.tasks().get(&pane_id).unwrap().status.clone();
     assert_eq!(status, "succeeded: exit 0", "task ran outside the project");
     assert!(
         project_dir.join("RAN_IN_PROJECT").exists(),
@@ -1678,12 +1685,13 @@ fn demo_checks_pane_reruns_alternate_exit_0_and_exit_3() {
         state.dispatch(CommandId::RerunTask);
         let exited = pump_runtime_until(state, |state| {
             state
-                .task_panes
+                .runtime
+                .tasks()
                 .get(&pane_id)
                 .is_some_and(|task| task.runtime.exit_status.is_some())
         });
         assert!(exited, "the checks task never exited");
-        state.task_panes.get(&pane_id).unwrap().status.clone()
+        state.runtime.tasks().get(&pane_id).unwrap().status.clone()
     };
 
     assert_eq!(rerun_status(&mut state), "succeeded: exit 0");
@@ -1699,7 +1707,8 @@ fn demo_checks_pane_reruns_alternate_exit_0_and_exit_3() {
 /// The rendered grid text of a live terminal pane.
 fn grid_text(state: &AppState, pane_id: &PaneId) -> String {
     state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(pane_id)
         .map(|runtime| runtime.parser.grid().snapshot().join("\n"))
         .unwrap_or_default()
@@ -1722,7 +1731,8 @@ fn live_state_with_capturing_child() -> AppState {
     state.write_to_focused_terminal(b"printf '\\033[?1000h\\033[?1006h'\r");
     let tracking = pump_runtime_until(&mut state, |state| {
         state
-            .terminal_panes
+            .runtime
+            .terminals()
             .get(&PaneId::new("pane-1"))
             .is_some_and(|runtime| runtime.parser.mouse_mode().wants_mouse())
     });
@@ -1797,7 +1807,8 @@ fn clicks_are_workspace_control_when_child_does_not_capture() {
     let pane_1 = PaneId::new("pane-1");
     assert!(
         !state
-            .terminal_panes
+            .runtime
+            .terminals()
             .get(&pane_1)
             .unwrap()
             .parser
@@ -1823,7 +1834,8 @@ fn wheel_scrolls_terminal_scrollback_and_returns_to_live() {
     );
     let scrolled = pump_runtime_until(&mut state, |state| {
         state
-            .terminal_panes
+            .runtime
+            .terminals()
             .get(&pane_id)
             .is_some_and(|runtime| runtime.parser.grid().scrollback_len() > 10)
     });
@@ -1864,16 +1876,18 @@ fn pointer_drag_selects_cells_and_copy_selection_copies_them() {
     state.handle_event(InputEvent::Paste("echo SELECT_ME\r".to_owned()));
     // Wait for the output line: ends with the marker but is not the
     // echoed command line (which contains "echo").
-    let printed = pump_runtime_until(&mut state, |state| {
-        state.terminal_panes.get(&pane_id).is_some_and(|runtime| {
-            runtime
-                .parser
-                .grid()
-                .snapshot()
-                .iter()
-                .any(|line| line.trim_end().ends_with("SELECT_ME") && !line.contains("echo"))
-        })
-    });
+    let printed =
+        pump_runtime_until(&mut state, |state| {
+            state
+                .runtime
+                .terminals()
+                .get(&pane_id)
+                .is_some_and(|runtime| {
+                    runtime.parser.grid().snapshot().iter().any(|line| {
+                        line.trim_end().ends_with("SELECT_ME") && !line.contains("echo")
+                    })
+                })
+        });
     assert!(
         printed,
         "marker output never reached the grid; rows:\n{}",
@@ -1885,7 +1899,8 @@ fn pointer_drag_selects_cells_and_copy_selection_copies_them() {
     // starts at (1, 2), and with no scrollback the visible row N is
     // screen row 2 + N.
     let snapshot = state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(&pane_id)
         .unwrap()
         .parser
@@ -1898,7 +1913,8 @@ fn pointer_drag_selects_cells_and_copy_selection_copies_them() {
         .expect("marker row visible");
     assert_eq!(
         state
-            .terminal_panes
+            .runtime
+            .terminals()
             .get(&pane_id)
             .unwrap()
             .parser
@@ -2063,7 +2079,8 @@ fn restore_spawns_fresh_live_runtime_and_clears_runtime_presentation_state() {
 
     let pane_id = PaneId::new("pane-1");
     let before_pid = state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(&pane_id)
         .unwrap()
         .controller
@@ -2076,7 +2093,8 @@ fn restore_spawns_fresh_live_runtime_and_clears_runtime_presentation_state() {
 
     assert_eq!(state.live_terminal_count(), 1);
     let after_pid = state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(&pane_id)
         .unwrap()
         .controller
@@ -2096,7 +2114,7 @@ fn restart_replaces_live_runtime_for_same_pane() {
     assert_eq!(state.live_terminal_count(), 1);
 
     let pane_id = PaneId::new("pane-1");
-    let before = state.terminal_panes.get(&pane_id).unwrap();
+    let before = state.runtime.terminals().get(&pane_id).unwrap();
     assert_eq!(before.restart_generation, 0);
     let before_pid = before.controller.process_id();
 
@@ -2105,7 +2123,7 @@ fn restart_replaces_live_runtime_for_same_pane() {
     // The same pane identity still has exactly one live runtime, now tracking
     // the bumped restart generation with a fresh child process.
     assert_eq!(state.live_terminal_count(), 1);
-    let after = state.terminal_panes.get(&pane_id).unwrap();
+    let after = state.runtime.terminals().get(&pane_id).unwrap();
     assert_eq!(after.restart_generation, 1);
     assert_ne!(before_pid, after.controller.process_id());
     assert_eq!(
@@ -2127,7 +2145,7 @@ fn old_reader_events_after_restart_are_ignored() {
 
     state.dispatch(CommandId::RestartPane);
     state
-        .event_tx
+        .event_sender()
         .send(AppEvent::Pty(
             PtyRuntimeEvent::Output {
                 pane_id: pane_id.clone(),
@@ -2141,7 +2159,8 @@ fn old_reader_events_after_restart_are_ignored() {
     state.tick_runtime();
 
     let rendered = state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(&pane_id)
         .unwrap()
         .parser
@@ -2161,13 +2180,13 @@ fn old_reader_terminal_close_and_error_events_after_restart_are_ignored() {
     let mut state = live_state();
     state.handle_terminal_resize(80, 24);
     let pane_id = PaneId::new("pane-1");
-    let before = state.terminal_panes.get(&pane_id).unwrap();
+    let before = state.runtime.terminals().get(&pane_id).unwrap();
     let before_generation = before.restart_generation;
     let before_token = before.runtime_token;
 
     state.dispatch(CommandId::RestartPane);
     state
-        .event_tx
+        .event_sender()
         .send(AppEvent::Pty(
             PtyRuntimeEvent::ReaderClosed {
                 pane_id: pane_id.clone(),
@@ -2178,7 +2197,7 @@ fn old_reader_terminal_close_and_error_events_after_restart_are_ignored() {
         ))
         .unwrap();
     state
-        .event_tx
+        .event_sender()
         .send(AppEvent::Pty(
             PtyRuntimeEvent::Error {
                 pane_id: pane_id.clone(),
@@ -2191,7 +2210,7 @@ fn old_reader_terminal_close_and_error_events_after_restart_are_ignored() {
         .unwrap();
     state.tick_runtime();
 
-    let after = state.terminal_panes.get(&pane_id).unwrap();
+    let after = state.runtime.terminals().get(&pane_id).unwrap();
     assert_ne!(before_token, after.runtime_token);
     assert!(after.error.is_none());
     assert!(!state.status().contains("STALE_TERMINAL_READER_ERROR"));
@@ -2251,13 +2270,13 @@ fn live_pane_survives_resize_and_tracks_new_geometry() {
     let mut state = live_state();
     state.handle_terminal_resize(80, 24);
     let pane_id = PaneId::new("pane-1");
-    let first_size = state.terminal_panes.get(&pane_id).unwrap().size;
+    let first_size = state.runtime.terminals().get(&pane_id).unwrap().size;
 
     state.handle_terminal_resize(120, 40);
 
     // The same live runtime survived and the PTY tracked the new geometry.
     assert_eq!(state.live_terminal_count(), 1);
-    let runtime = state.terminal_panes.get(&pane_id).unwrap();
+    let runtime = state.runtime.terminals().get(&pane_id).unwrap();
     assert_ne!(
         first_size, runtime.size,
         "PTY size should follow pane geometry"
@@ -2280,7 +2299,8 @@ fn exited_child_is_surfaced_as_visible_status() {
     for _ in 0..300 {
         state.tick_runtime();
         if state
-            .terminal_panes
+            .runtime
+            .terminals()
             .get(&pane_id)
             .and_then(|runtime| runtime.exit_status)
             .is_some()
@@ -2321,7 +2341,7 @@ fn run_task_launches_configured_shell_command_and_surfaces_success_status() {
     assert!(state.status().contains("running"));
 
     let observed = pump_runtime_until(&mut state, |state| {
-        state.task_panes.get(&pane_id).is_some_and(|task| {
+        state.runtime.tasks().get(&pane_id).is_some_and(|task| {
             task.runtime.exit_status.is_some()
                 && task
                     .runtime
@@ -2334,7 +2354,7 @@ fn run_task_launches_configured_shell_command_and_surfaces_success_status() {
     });
 
     assert!(observed, "task success output/status was not observed");
-    let task = state.task_panes.get(&pane_id).unwrap();
+    let task = state.runtime.tasks().get(&pane_id).unwrap();
     assert_eq!(task.status, "succeeded: exit 0");
     assert!(state.status().contains("succeeded: exit 0"));
 
@@ -2354,7 +2374,8 @@ fn run_task_surfaces_nonzero_exit_as_failure_status() {
     let pane_id = state.workspace().active_session().focused_pane_id().clone();
     let observed = pump_runtime_until(&mut state, |state| {
         state
-            .task_panes
+            .runtime
+            .tasks()
             .get(&pane_id)
             .is_some_and(|task| task.status == "failed: exit 7")
     });
@@ -2388,16 +2409,21 @@ fn hidden_task_launch_stays_pending_until_task_pane_becomes_visible() {
 
     let pane_id = state.workspace().active_session().focused_pane_id().clone();
     assert_eq!(state.live_task_count(), 0);
-    assert!(state.task_panes.pending_launches.contains(&pane_id));
+    assert!(state.runtime.tasks().pending_launches.contains(&pane_id));
     assert_eq!(
-        state.task_panes.statuses.get(&pane_id).map(String::as_str),
+        state
+            .runtime
+            .tasks()
+            .statuses
+            .get(&pane_id)
+            .map(String::as_str),
         Some("pending launch: waiting for visible pane size")
     );
 
     state.dispatch(CommandId::ZoomPane);
 
     let observed = pump_runtime_until(&mut state, |state| {
-        state.task_panes.get(&pane_id).is_some_and(|task| {
+        state.runtime.tasks().get(&pane_id).is_some_and(|task| {
             task.status == "succeeded: exit 0"
                 && task
                     .runtime
@@ -2410,8 +2436,8 @@ fn hidden_task_launch_stays_pending_until_task_pane_becomes_visible() {
     });
 
     assert!(observed, "pending task did not launch when visible");
-    assert!(!state.task_panes.pending_launches.contains(&pane_id));
-    assert!(!state.task_panes.statuses.contains_key(&pane_id));
+    assert!(!state.runtime.tasks().pending_launches.contains(&pane_id));
+    assert!(!state.runtime.tasks().statuses.contains_key(&pane_id));
 
     state.shutdown();
 }
@@ -2431,7 +2457,8 @@ fn task_spawn_failure_sets_nonserialized_runtime_status_for_task_pane() {
     assert_eq!(state.live_task_count(), 0);
     assert!(
         state
-            .task_panes
+            .runtime
+            .tasks()
             .statuses
             .get(&pane_id)
             .is_some_and(|status| status.contains("task launch failed"))
@@ -2482,7 +2509,7 @@ fn rerun_task_replaces_live_runtime_for_same_task_pane_and_ignores_old_events() 
     state.dispatch(CommandId::RunTask);
 
     let pane_id = state.workspace().active_session().focused_pane_id().clone();
-    let before = state.task_panes.get(&pane_id).unwrap();
+    let before = state.runtime.tasks().get(&pane_id).unwrap();
     let before_token = before.runtime.runtime_token;
     let before_generation = before.runtime.restart_generation;
     let pane_count = state.workspace().active_session().panes().len();
@@ -2492,7 +2519,7 @@ fn rerun_task_replaces_live_runtime_for_same_task_pane_and_ignores_old_events() 
 
     assert_eq!(state.workspace().active_session().panes().len(), pane_count);
     assert_eq!(state.live_task_count(), 1);
-    let after = state.task_panes.get(&pane_id).unwrap();
+    let after = state.runtime.tasks().get(&pane_id).unwrap();
     assert_ne!(before_token, after.runtime.runtime_token);
     assert_eq!(before_generation, after.runtime.restart_generation);
     let PaneKind::Task { intent } = state
@@ -2507,7 +2534,7 @@ fn rerun_task_replaces_live_runtime_for_same_task_pane_and_ignores_old_events() 
     assert_eq!(intent.command, "printf 'TASK_ORIGINAL\\n'; sleep 5");
 
     state
-        .event_tx
+        .event_sender()
         .send(AppEvent::Pty(
             PtyRuntimeEvent::Output {
                 pane_id: pane_id.clone(),
@@ -2520,7 +2547,7 @@ fn rerun_task_replaces_live_runtime_for_same_task_pane_and_ignores_old_events() 
         .unwrap();
 
     let observed = pump_runtime_until(&mut state, |state| {
-        state.task_panes.get(&pane_id).is_some_and(|task| {
+        state.runtime.tasks().get(&pane_id).is_some_and(|task| {
             task.runtime
                 .parser
                 .grid()
@@ -2532,7 +2559,8 @@ fn rerun_task_replaces_live_runtime_for_same_task_pane_and_ignores_old_events() 
 
     assert!(observed, "rerun task output was not observed");
     let rendered = state
-        .task_panes
+        .runtime
+        .tasks()
         .get(&pane_id)
         .unwrap()
         .runtime
@@ -2558,7 +2586,7 @@ fn hidden_task_rerun_stays_pending_until_task_pane_becomes_visible() {
 
     let pane_id = state.workspace().active_session().focused_pane_id().clone();
     assert_eq!(state.live_task_count(), 1);
-    let before = state.task_panes.get(&pane_id).unwrap();
+    let before = state.runtime.tasks().get(&pane_id).unwrap();
     let before_token = before.runtime.runtime_token;
     let before_generation = before.runtime.restart_generation;
     let PaneKind::Task { intent } = state
@@ -2590,9 +2618,14 @@ fn hidden_task_rerun_stays_pending_until_task_pane_becomes_visible() {
     state.dispatch(CommandId::RerunTask);
 
     assert_eq!(state.live_task_count(), 0);
-    assert!(state.task_panes.pending_launches.contains(&pane_id));
+    assert!(state.runtime.tasks().pending_launches.contains(&pane_id));
     assert_eq!(
-        state.task_panes.statuses.get(&pane_id).map(String::as_str),
+        state
+            .runtime
+            .tasks()
+            .statuses
+            .get(&pane_id)
+            .map(String::as_str),
         Some("pending rerun: waiting for visible pane size")
     );
     let pane = state.workspace().active_session().pane(&pane_id).unwrap();
@@ -2603,7 +2636,7 @@ fn hidden_task_rerun_stays_pending_until_task_pane_becomes_visible() {
     assert_eq!(intent.command, command);
 
     state
-        .event_tx
+        .event_sender()
         .send(AppEvent::Pty(
             PtyRuntimeEvent::Output {
                 pane_id: pane_id.clone(),
@@ -2616,14 +2649,19 @@ fn hidden_task_rerun_stays_pending_until_task_pane_becomes_visible() {
         .unwrap();
     state.tick_runtime();
     assert_eq!(
-        state.task_panes.statuses.get(&pane_id).map(String::as_str),
+        state
+            .runtime
+            .tasks()
+            .statuses
+            .get(&pane_id)
+            .map(String::as_str),
         Some("pending rerun: waiting for visible pane size")
     );
 
     state.dispatch(CommandId::ZoomPane);
 
     let observed = pump_runtime_until(&mut state, |state| {
-        state.task_panes.get(&pane_id).is_some_and(|task| {
+        state.runtime.tasks().get(&pane_id).is_some_and(|task| {
             task.runtime
                 .parser
                 .grid()
@@ -2634,10 +2672,11 @@ fn hidden_task_rerun_stays_pending_until_task_pane_becomes_visible() {
     });
 
     assert!(observed, "pending hidden rerun did not launch when visible");
-    assert!(!state.task_panes.pending_launches.contains(&pane_id));
-    assert!(!state.task_panes.statuses.contains_key(&pane_id));
+    assert!(!state.runtime.tasks().pending_launches.contains(&pane_id));
+    assert!(!state.runtime.tasks().statuses.contains_key(&pane_id));
     let rendered = state
-        .task_panes
+        .runtime
+        .tasks()
         .get(&pane_id)
         .unwrap()
         .runtime
@@ -2665,12 +2704,12 @@ fn restored_task_pane_stays_inert_until_explicit_rerun() {
 
     let pane_id = state.workspace().active_session().focused_pane_id().clone();
     assert_eq!(state.live_task_count(), 0);
-    assert!(!state.task_panes.pending_launches.contains(&pane_id));
+    assert!(!state.runtime.tasks().pending_launches.contains(&pane_id));
 
     state.dispatch(CommandId::RerunTask);
 
     let observed = pump_runtime_until(&mut state, |state| {
-        state.task_panes.get(&pane_id).is_some_and(|task| {
+        state.runtime.tasks().get(&pane_id).is_some_and(|task| {
             task.status == "succeeded: exit 0"
                 && task
                     .runtime
@@ -2700,7 +2739,7 @@ fn stop_task_terminates_live_runtime_and_surfaces_nonserialized_status() {
     state.dispatch(CommandId::RunTask);
 
     let pane_id = state.workspace().active_session().focused_pane_id().clone();
-    let task = state.task_panes.get(&pane_id).unwrap();
+    let task = state.runtime.tasks().get(&pane_id).unwrap();
     let restart_generation = task.runtime.restart_generation;
     let runtime_token = task.runtime.runtime_token;
 
@@ -2708,13 +2747,18 @@ fn stop_task_terminates_live_runtime_and_surfaces_nonserialized_status() {
 
     assert_eq!(state.live_task_count(), 0);
     assert_eq!(
-        state.task_panes.statuses.get(&pane_id).map(String::as_str),
+        state
+            .runtime
+            .tasks()
+            .statuses
+            .get(&pane_id)
+            .map(String::as_str),
         Some("stopped")
     );
     assert!(state.status().contains("stopped"));
 
     state
-        .event_tx
+        .event_sender()
         .send(AppEvent::Pty(
             PtyRuntimeEvent::Error {
                 pane_id: pane_id.clone(),
@@ -2727,7 +2771,12 @@ fn stop_task_terminates_live_runtime_and_surfaces_nonserialized_status() {
         .unwrap();
     state.tick_runtime();
     assert_eq!(
-        state.task_panes.statuses.get(&pane_id).map(String::as_str),
+        state
+            .runtime
+            .tasks()
+            .statuses
+            .get(&pane_id)
+            .map(String::as_str),
         Some("stopped")
     );
 
@@ -2753,13 +2802,18 @@ fn stop_task_clears_pending_hidden_launch() {
     state.dispatch(CommandId::RunTask);
 
     let pane_id = state.workspace().active_session().focused_pane_id().clone();
-    assert!(state.task_panes.pending_launches.contains(&pane_id));
+    assert!(state.runtime.tasks().pending_launches.contains(&pane_id));
 
     state.dispatch(CommandId::StopTask);
 
-    assert!(!state.task_panes.pending_launches.contains(&pane_id));
+    assert!(!state.runtime.tasks().pending_launches.contains(&pane_id));
     assert_eq!(
-        state.task_panes.statuses.get(&pane_id).map(String::as_str),
+        state
+            .runtime
+            .tasks()
+            .statuses
+            .get(&pane_id)
+            .map(String::as_str),
         Some("stopped before launch")
     );
 
@@ -2771,7 +2825,12 @@ fn stop_task_clears_pending_hidden_launch() {
 
     assert_eq!(state.live_task_count(), 0);
     assert_eq!(
-        state.task_panes.statuses.get(&pane_id).map(String::as_str),
+        state
+            .runtime
+            .tasks()
+            .statuses
+            .get(&pane_id)
+            .map(String::as_str),
         Some("stopped before launch")
     );
 
@@ -2790,15 +2849,16 @@ fn late_task_reader_closed_event_does_not_overwrite_exit_status() {
     let pane_id = state.workspace().active_session().focused_pane_id().clone();
     let observed = pump_runtime_until(&mut state, |state| {
         state
-            .task_panes
+            .runtime
+            .tasks()
             .get(&pane_id)
             .is_some_and(|task| task.status == "succeeded: exit 0")
     });
     assert!(observed, "task success status was not observed");
 
-    let task = state.task_panes.get(&pane_id).unwrap();
+    let task = state.runtime.tasks().get(&pane_id).unwrap();
     state
-        .event_tx
+        .event_sender()
         .send(AppEvent::Pty(
             PtyRuntimeEvent::ReaderClosed {
                 pane_id: pane_id.clone(),
@@ -2811,7 +2871,7 @@ fn late_task_reader_closed_event_does_not_overwrite_exit_status() {
     state.tick_runtime();
 
     assert_eq!(
-        state.task_panes.get(&pane_id).unwrap().status,
+        state.runtime.tasks().get(&pane_id).unwrap().status,
         "succeeded: exit 0"
     );
 
@@ -3216,7 +3276,7 @@ fn stale_agent_events_after_restart_are_ignored() {
 
     // A stale buffered event from the killed session must be dropped.
     state
-        .event_tx
+        .event_sender()
         .send(AppEvent::Agent(crate::agent_runtime::AgentRuntimeEvent {
             pane_id: pane_id.clone(),
             restart_generation: before_generation,
@@ -3572,7 +3632,8 @@ fn session_switches_replace_same_id_terminal_runtimes() {
     let first_session = state.workspace().active_session().id().clone();
     let pane_id = state.workspace().active_session().focused_pane_id().clone();
     let first_token = state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(&pane_id)
         .expect("first session has a live shell")
         .runtime_token;
@@ -3581,7 +3642,8 @@ fn session_switches_replace_same_id_terminal_runtimes() {
 
     let second_session = state.workspace().active_session().id().clone();
     let second_token = state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(&pane_id)
         .expect("new session has its own live shell")
         .runtime_token;
@@ -3598,7 +3660,8 @@ fn session_switches_replace_same_id_terminal_runtimes() {
 
     assert_eq!(state.workspace().active_session().id(), &first_session);
     let reactivated_token = state
-        .terminal_panes
+        .runtime
+        .terminals()
         .get(&pane_id)
         .expect("reactivated session launches a fresh shell")
         .runtime_token;
@@ -3856,7 +3919,8 @@ fn search_results_stay_stable_and_jumps_clamp_while_a_pane_floods() {
     state.write_to_focused_terminal(b"seq 1 2200\r");
     let ring_full = |state: &AppState| {
         state
-            .terminal_panes
+            .runtime
+            .terminals()
             .get(&PaneId::new("pane-1"))
             .is_some_and(|runtime| {
                 runtime.parser.grid().scrollback_len() >= runtime.parser.grid().scrollback_limit()

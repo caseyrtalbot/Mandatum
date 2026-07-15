@@ -101,26 +101,43 @@ depending on a concrete parser backend.
 
 ### Runtime Engine
 
-Owns live state:
+`crates/app/src/runtime_engine.rs` is the deep app-local Module for live
+runtime state. Its Interface owns product-shaped operations and observations;
+the terminal, task, and agent registries are low-level Implementations that do
+not escape for production mutation.
+
+It owns:
 
 - terminal pane runtime registry
 - task runtime registry
 - agent runtime registry
+- the unified input / PTY / agent event channel
 - process event routing
 - reader-thread lifecycle
 - runtime tokens and replaced-runtime event rejection
 - live status strings
 - launch failures
 - stop/rerun/restart behavior
-- restore reconciliation
+- approval decisions against live agent controls
+- active-session reconciliation and retirement
+- transactional restore staging and activation
+- typed lifecycle facts for fresh, deferred, detached, and not-replayed runtime
+  outcomes; restore staging failures return a typed error and commit no facts
 
-The current app implementation isolates these responsibilities in
-`app_shell`, `events`, `frontend`, `input`, `persistence`, `process_events`,
-`terminal_runtime`, `task_runtime`, and `agent_runtime` modules under
-`crates/app` (full module map: docs/repo-structure.md). The run loop is
-event-driven: one unified channel (`AppEvent::Input | Pty | Agent`), a
-250 ms heartbeat, and an 8 ms redraw cap; PTY readers are bounded by
-flow-credit backpressure (256 KiB in flight per pane).
+`AppState` owns the durable workspace fold, timeline, status copy, and
+presentation coordination. It asks `RuntimeEngine` to perform live operations
+and maps returned typed effects into those durable and visible concerns. This
+keeps registry ordering, runtime replacement, and identity policy local without
+moving process handles into `core` or introducing one generic registry trait
+over three materially different runtime kinds.
+
+Supporting Implementations remain in `events`, `process_events`,
+`terminal_runtime`, `task_runtime`, and `agent_runtime`; `app_shell`,
+`frontend`, `input`, and `persistence` remain adjacent orchestration Modules
+(full module map: docs/repo-structure.md). The run loop is event-driven: one
+unified channel (`AppEvent::Input | Pty | Agent`), a 250 ms heartbeat, and an
+8 ms redraw cap; PTY readers are bounded by flow-credit backpressure (256 KiB
+in flight per pane).
 
 Live runtime state is never serialized as durable truth.
 

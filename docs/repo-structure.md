@@ -102,14 +102,19 @@ no layout and has no terminal-engine dependency (banned by the L1 gate).
 The terminal app runtime:
 
 - `app_shell.rs`: terminal lifecycle, event-driven run loop, renderer handoff
-- `app_state.rs`: command dispatch, event application, runtime reconciliation
+- `app_state.rs`: command dispatch plus durable workspace, timeline, status,
+  and presentation folds over typed runtime effects
 - `app_state/tests.rs`: private app-state unit and live-PTY tests
+- `runtime_engine.rs`: deep live-runtime Module over terminal, task, and agent
+  registries; owns the event channel, identity, reconciliation, replacement,
+  approval control, shutdown, and transactional restore lifecycle facts
 - `events.rs`: the unified app event channel (input / PTY / agent)
 - `frontend.rs`: crossterm-to-neutral input translation (the only module
   besides `app_shell.rs` allowed to name crossterm)
 - `input.rs`: neutral input routing to runtime intents
-- `terminal_runtime.rs` / `task_runtime.rs` / `agent_runtime.rs`: live
-  runtime registries (generation + token event stamping)
+- `terminal_runtime.rs` / `task_runtime.rs` / `agent_runtime.rs`: low-level live
+  runtime registry Implementations behind `RuntimeEngine` (generation + token
+  event stamping)
 - `process_events.rs`: PTY reader threads and flow-credit backpressure
 - `persistence.rs`: workspace file persistence coordinator
 - `config.rs`: config loading/validation and effective runtime-setting

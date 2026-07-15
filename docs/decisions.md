@@ -285,14 +285,14 @@ dependency scan in `ci/conformance.sh`.
 Status: accepted (2026-07-09)
 
 Decision: Live agent sessions are integrated through an
-`AgentRuntimeRegistry` in `crates/app/src/agent_runtime.rs` that mirrors
-`task_runtime.rs` / `process_events.rs` exactly: one forwarder thread per
-live session pumps `AgentSessionEvent`s into the app event loop wrapped as
-`AgentRuntimeEvent { pane_id, restart_generation, runtime_token, event }`,
-and `app_state` applies an event only if the pane's current generation and
-token match — anything else is dropped. Agent events travel on their own
-`std::sync::mpsc` channel drained by the same `tick_runtime` pass that
-drains PTY events, keeping the existing `PtyRuntimeEvent` type untouched.
+`AgentRuntimeRegistry` Implementation in `crates/app/src/agent_runtime.rs`
+that mirrors `task_runtime.rs` / `process_events.rs`: one forwarder thread per
+live session pumps `AgentSessionEvent`s into the unified app event channel
+wrapped as `AgentRuntimeEvent { pane_id, restart_generation, runtime_token,
+event }`. `RuntimeEngine` accepts an event only if the pane's current
+generation and token match — anything else is dropped — then returns the
+durable event for `AppState` to fold. The existing `PtyRuntimeEvent` type stays
+untouched.
 
 Rationale: the (generation, token) stamp is the workspace's proven L3
 mechanism for rejecting events from replaced runtimes; reusing it verbatim
@@ -942,3 +942,47 @@ Verification: workflow tests prove bounds, the no-output case, and that
 newlines/framing markers cannot escape the prefixed JSON evidence block;
 palette and transient-error tests prove eligibility; the end-to-end app test
 proves task failure, mandate content, connector approval, and honest restore.
+
+## Accepted: RuntimeEngine Is The Deep Live-Lifecycle Module
+
+Status: accepted (2026-07-14)
+
+Decision: `crates/app/src/runtime_engine.rs` owns the terminal, task, and agent
+runtime registries; the unified event channel; runtime token allocation and
+identity checks; reconciliation, replacement, approval control, event folding,
+child polling, shutdown, and transactional restore. Its production Interface
+exposes product-shaped operations and observations rather than concrete
+registry handles. `AppState` owns durable workspace changes, timeline entries,
+status text, and presentation state by applying typed runtime effects.
+
+Context: the earlier Gate 2 decomposition isolated three registries but left
+their cross-registry lifecycle policy spread through a broad `AppState`.
+Session switches, restore ordering, approval decisions, event authentication,
+and replacement semantics therefore lacked one local authority. A future
+recovery cockpit also needs renderer-neutral facts that say whether a runtime
+was freshly created, deferred, detached, or not replayed without reconstructing
+those judgments from UI strings. Restore staging failures are typed errors and
+commit no lifecycle facts because no replacement occurred.
+
+Rationale: one deep Module increases Locality and gives lifecycle replacement
+one testable Seam. Terminal, task, and agent runtimes remain distinct
+Implementations because their behavior is materially different; forcing them
+through one generic registry abstraction would make the Interface wider and
+shallower. Typed effects keep durable and presentation policy outside the live
+engine, preserving L2 and L3.
+
+Consequences: all live mutation and concrete control handles stay behind
+`RuntimeEngine`; runtime tokens remain monotonic across runtime kinds; restore
+is staged before existing runtimes are retired; and lifecycle facts carry a
+typed epoch, trigger, session/pane target, disposition, reason, and optional
+next action. The recovery cockpit and connector/control catalog remain separate
+future workflows; this decision supplies a stable lifecycle boundary but does
+not claim either surface exists.
+
+Verification: runtime-engine tests prove shared token identity, stale-event
+discard, transactional restore rollback, outgoing-live versus incoming-cold
+classification, geometry-deferred promotion in one epoch, inactive-session
+classification, valid recovery actions, and session retirement. App tests
+retain the L3 stale-event, same-id session replacement, approval, task, live
+PTY, and honest-restore coverage. The standard merge gate and latency probe
+remain required because the unified event plumbing moved behind the Module.

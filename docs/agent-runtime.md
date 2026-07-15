@@ -30,17 +30,18 @@ conformance gate). Owns:
 
 ### App integration (`crates/app`)
 
-- `AgentRuntimeRegistry` (`crates/app/src/agent_runtime.rs`) mirrors the PTY
-  runtime discipline: one forwarder thread per live session pumps events into
-  the app channel wrapped as `AgentRuntimeEvent { pane_id, restart_generation,
-  runtime_token, event }`; `app_state` applies an event only when the pane's
-  current generation and token match, else drops it ([L3-GATE] tested by
-  `stale_agent_events_after_restart_are_ignored`).
+- `RuntimeEngine` (`crates/app/src/runtime_engine.rs`) owns the
+  `AgentRuntimeRegistry` Implementation, live approval control, replacement,
+  shutdown, and identity checks. One forwarder thread per live session pumps
+  events into the engine-owned app channel wrapped as `AgentRuntimeEvent {
+  pane_id, restart_generation, runtime_token, event }`; the engine accepts an
+  event only when the pane's current generation and token match, else drops it
+  ([L3-GATE] tested by `stale_agent_events_after_restart_are_ignored`).
 - Durable folding: accepted events update `mandatum_core::AgentPaneIntent`
   (status, latest summary, changed-file path list, pending approval count and
   ids, decided-approval history). Live-only state (current action, ~200-line
-  output tail, full `ApprovalRequest` detail) lives in the registry and is
-  never serialized ([L3-GATE] tested by
+  output tail, full `ApprovalRequest` detail) lives behind `RuntimeEngine` and
+  is never serialized ([L3-GATE] tested by
   `agent_runtime_state_is_not_serialized_with_workspace_intent`).
 - Approval history: every decision appends an `AgentApprovalRecord
   { approval_id, command, approved }` to the durable intent, so past
@@ -58,8 +59,8 @@ conformance gate). Owns:
   ([L3-GATE] tested by
   `failed_relaunch_keeps_the_previous_session_authoritative`).
 - Detach folding: whenever a live session is discarded without an outcome
-  (Stop Agent, session `Closed`, OpenProject reconciling away a runtime whose
-  pane is no longer in the active session, or loading a workspace from disk),
+  (Stop Agent, session `Closed`, New session or session-map activation changing
+  the active session, or loading a workspace from disk),
   `AgentPaneIntent::detach_live_session` folds running/waiting to `unknown`
   and clears pending approval count/ids (approval history stays).
 
@@ -108,7 +109,8 @@ Not yet built: distinct `queued` and `stopped` states.
 
 ## Runtime Boundaries
 
-The runtime registry owns (live, never persisted):
+`RuntimeEngine`, through its agent registry Implementation, owns (live, never
+persisted):
 
 - live session control handles and forwarder threads
 - approval wait state (the full pending request)
@@ -150,8 +152,9 @@ Covered today (all with `FakeConnector`, no network):
   ([L3-GATE])
 - durable intent (including approval history) survives a save/restore round
   trip; restore invents no live runtime
-- restore and OpenProject detach live-session claims (running/waiting,
-  pending approval ids) instead of persisting them as actionable truth
+- restore and active-session changes detach live-session claims
+  (running/waiting, pending approval ids) instead of persisting them as
+  actionable truth
 - live agent runtime state never serializes with workspace intent
 - failed-task handoff preserves bounded failure facts, uses the configured
   connector and approval flow, rejects forgeable evidence framing, and

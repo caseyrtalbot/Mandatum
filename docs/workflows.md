@@ -114,7 +114,10 @@ Built:
 3. Live-session claims are detached on restore: running/waiting agent
    statuses fold to `unknown`, pending approval ids clear (history stays).
 4. The execution timeline persists and records that prior work ran.
+5. The runtime engine records typed, renderer-neutral lifecycle facts for what
+   was freshly created, deferred, detached, or not replayed, including
+   explicit task-rerun and agent-relaunch actions where they are valid.
 
 Not yet built: a restore report that itemizes what resumed versus what
-needs action (today the folding rules guarantee honesty; the summary
-surface does not exist).
+needs action. The engine facts and honest folding rules exist; the recovery
+cockpit that presents and acknowledges them does not.

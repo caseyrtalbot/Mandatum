@@ -233,12 +233,12 @@ fn agent_content(state: &AppState, pane_id: &PaneId, intent: &AgentPaneIntent) -
         changed_file_count: intent.changed_files.len(),
         changed_files,
         latest_summary: intent.latest_summary.clone(),
-        current_action: live.and_then(|runtime| runtime.current_action.clone()),
-        last_error: live.and_then(|runtime| runtime.last_error.clone()),
+        current_action: live.and_then(|runtime| runtime.current_action.map(str::to_owned)),
+        last_error: live.and_then(|runtime| runtime.last_error.map(str::to_owned)),
         relaunch_hint: Some(state.command_key_hint(mandatum_commands::CommandId::StartAgent))
             .filter(|hint| !hint.is_empty()),
         pending_approval: live
-            .and_then(|runtime| runtime.pending_approval.as_ref())
+            .and_then(|runtime| runtime.pending_approval)
             .map(|request| AgentApprovalPrompt {
                 command: request.command.clone(),
                 cwd: request.scope.cwd.display().to_string(),

@@ -53,6 +53,12 @@ more useful without pretending the wider vision is finished:
   line-prefixed, and explicitly labeled as untrusted evidence. It launches
   through the existing connector and approval gate and restores only as
   durable intent.
+- `RuntimeEngine` is now the deep app-local Module over terminal, task, and
+  agent runtime Implementations. It owns the unified event channel, runtime
+  identity, reconciliation, replacement, approval control, shutdown, and
+  transactional restore. `AppState` receives typed effects and lifecycle
+  facts while durable workspace and presentation state remain outside the
+  live engine.
 
 ## Next horizon
 
@@ -64,11 +70,6 @@ more useful without pretending the wider vision is finished:
   intentionally detached, and what needs an explicit rerun or relaunch. Add
   acknowledgement for resolved failures so attention remains signal, not
   history.
-- **Deep runtime engine module.** Move lifecycle policy out of the broad app
-  state into one engine-facing Module with a narrow Interface over terminal,
-  task, and agent registry Implementations. Preserve generation/token checks,
-  connector approval enforcement, and L2's runtime-free core while improving
-  Locality and making runtime replacement one testable Seam.
 - **Connector catalog and automation surface.** Add capability-described
   connectors beyond Claude/Fake plus a scriptable command/control surface for
   projects, sessions, recipes, and approval profiles. Human approval remains
