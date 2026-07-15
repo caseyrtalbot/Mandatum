@@ -79,13 +79,14 @@ route from the live keymap, so a rebind is never contradicted on screen.
 
 ## First Run
 
-When launched with no saved workspace — and only then — the status line
-orients ("new workspace — ctrl+p commands · f1 help", from the live
-keymap) and a calm eight-line note names the four doors: the palette
-chord, the right-click menu, the help key, and the quit chord. It is not
-modal: any key, paste, or click dismisses it and the action itself still
-lands. Once a workspace has been saved the launch path restores instead,
-so the note never returns. No splash theater.
+When launched with no saved workspace — and only then — the state-only status
+`new workspace` composes with the permanent live-keymap hint into `new
+workspace — ctrl+p commands · right-click menu · f1 help`; each route appears
+once. A calm eight-line note names the four doors: the palette chord, the
+right-click menu, the help key, and the quit chord. It is not modal: any key,
+paste, or click dismisses it and the action itself still lands. Once a
+workspace has been saved the launch path restores instead, so the note never
+returns. No splash theater.
 
 ## Pane Interaction
 

@@ -62,6 +62,9 @@ more useful without pretending the wider vision is finished:
 - the default dark theme now uses ANSI bright blue for focused-pane chrome,
   separating navigation from yellow waiting states and red attention while
   preserving the high-contrast theme's bright-yellow focus treatment.
+- first-run status now contributes only `new workspace`; the permanent
+  keymap-derived control hint owns palette, menu, and help guidance, so the
+  footer names each route once.
 
 ## Next horizon
 

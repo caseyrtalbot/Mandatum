@@ -1023,14 +1023,11 @@ impl AppState {
                 if source.kind() == io::ErrorKind::NotFound =>
             {
                 // First run: no saved workspace exists. Show the one-time
-                // orientation note and an orienting status line. Saving a
+                // orientation note and label the state; the shared status-strip
+                // control hint adds the generated routes exactly once. Saving a
                 // workspace makes this branch unreachable on later launches.
                 self.first_run_note = true;
-                self.status = format!(
-                    "new workspace — {} commands · {} help",
-                    format_chord(self.keymap.toggle_palette),
-                    help_route(&self.keymap)
-                );
+                self.status = "new workspace".to_owned();
                 self.preserve_status_on_next_resize = true;
             }
             Err(error) => {

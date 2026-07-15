@@ -94,9 +94,10 @@ pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScen
     }
 }
 
-/// The status strip text: the app status plus the permanent
-/// workspace-control hint, so a stranger always has the palette chord and
-/// the right-click menu written on screen. Attention lives in the header.
+/// The status strip text: state-only app status plus the permanent
+/// workspace-control hint, so a stranger always has the palette chord,
+/// right-click menu, and help route written on screen exactly once. Attention
+/// lives in the header.
 fn status_text(state: &AppState) -> String {
     format!("{} — {}", state.status(), state.control_hint())
 }
@@ -853,17 +854,27 @@ mod tests {
     fn first_run_note_shows_on_a_fresh_dir_dismisses_on_action_and_never_returns() {
         let dir = FreshDir::new("gating");
 
-        // Fresh dir, no saved workspace: the note is up and the status line
-        // orients (palette chord + help key from the live keymap).
+        // Fresh dir, no saved workspace: the note is up; the base status names
+        // the state, and the composed scene adds each generated route once.
         let mut state = AppState::new(dir.config());
-        assert!(
-            state.status().contains("new workspace"),
-            "{}",
-            state.status()
-        );
-        assert!(state.status().contains("ctrl+p"), "{}", state.status());
-        assert!(state.status().contains("f1"), "{}", state.status());
+        assert_eq!(state.status(), "new workspace");
         let scene = build_workspace_scene(&state, SceneSize::new(100, 30));
+        assert_eq!(
+            scene.status.text,
+            "new workspace — ctrl+p commands · right-click menu · f1 help"
+        );
+        assert_eq!(
+            scene.status.text.matches("ctrl+p commands").count(),
+            1,
+            "the composed footer must name the palette once: {}",
+            scene.status.text
+        );
+        assert_eq!(
+            scene.status.text.matches("f1 help").count(),
+            1,
+            "the composed footer must name help once: {}",
+            scene.status.text
+        );
         let Some(OverlayScene::Welcome(welcome)) = &scene.overlay else {
             panic!("a fresh dir must show the first-run note");
         };

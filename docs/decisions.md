@@ -1014,3 +1014,30 @@ Verification: scene-theme tests keep focus distinct from unfocused and
 attention roles in every built-in theme; the renderer test asserts that the
 dark focused-border cell resolves to ratatui `LightBlue`; the full merge gate
 remains required.
+
+## Accepted: First-Run Footer Composes Shared Guidance Once
+
+Status: accepted (2026-07-14)
+
+Decision: first-run startup status stores only the state label `new workspace`.
+`scene_builder::status_text` remains the single composition point that appends
+the permanent, live-keymap-derived control hint for the command palette,
+right-click menu, and help.
+
+Context: first-run startup embedded the palette and help routes in `AppState`
+while scene construction appended the permanent control hint containing the
+same routes. The rendered footer therefore repeated `ctrl+p commands` and `f1
+help`, with terminal-width clipping sometimes hiding the second help phrase.
+
+Rationale: status messages should describe state; permanent control guidance
+should have one owner. Keeping route text in `control_hint` preserves rebind
+correctness without adding string-level deduplication to the renderer.
+
+Consequences: the first-run footer reads `new workspace — ctrl+p commands ·
+right-click menu · f1 help` under the default keymap. Other status messages
+continue to compose with the same hint unchanged.
+
+Verification: the scene-level first-run regression asserts the complete
+default footer and counts both the palette and help phrases exactly once; it
+failed against the duplicated composition before the fix. The full merge gate
+remains required.
