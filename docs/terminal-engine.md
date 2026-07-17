@@ -35,6 +35,22 @@ the default parser path; backend swaps land only if fixture parity holds.
 The L1 dependency scan additionally forbids `vte` from reaching any
 engine-side crate, so parser types cannot leak past this interface.
 
+## Input Encoding Boundary
+
+Frontend adapters emit neutral `scene::input::Key` values. After explicit
+workspace chords are resolved, `crates/app/src/input.rs` encodes the remaining
+keys for the focused child under the `TERM=xterm-256color` contract used by
+terminal and task runtimes. This includes plain Tab (`HT`) and Shift+Tab /
+BackTab (`CSI Z`). Frontend differences are normalized at this seam: crossterm
+reports Shift+Tab as BackTab with the Shift modifier, while another adapter may
+emit Tab with Shift.
+
+Mode-dependent or negotiated keyboard extensions such as modifyOtherKeys or
+CSI-u require an explicit terminal capability before they can be claimed; the
+baseline encoder must not invent them. Explicit workspace-control chords are
+resolved before byte encoding, preserving L5 without shadowing configured
+commands.
+
 ## Optional Backends
 
 A future backend can be introduced when it materially improves:
@@ -93,4 +109,5 @@ Conformance tests should cover:
 - invalid UTF-8 handling
 - bounded scrollback
 - child TUI behavior
+- baseline special-key input encoding, including Shift+Tab / BackTab
 - output stress

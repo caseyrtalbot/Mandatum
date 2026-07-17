@@ -119,6 +119,23 @@ mod tests {
     }
 
     #[test]
+    fn backtab_keeps_the_shift_modifier_at_the_neutral_boundary() {
+        assert_eq!(
+            translate_event(Event::Key(KeyEvent::new(
+                CtKeyCode::BackTab,
+                KeyModifiers::SHIFT
+            ))),
+            Some(InputEvent::Key(Key::new(
+                KeyCode::BackTab,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                }
+            )))
+        );
+    }
+
+    #[test]
     fn paste_resize_and_mouse_translate_to_neutral_events() {
         assert_eq!(
             translate_event(Event::Paste("hi".to_owned())),

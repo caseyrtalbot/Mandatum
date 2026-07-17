@@ -326,6 +326,14 @@ surfaces (palette hints, context menu, help, first-run note, status strip)
 derive key text from the live keymap, and bare-key chords are rejected at
 the config boundary (L5).
 
+**Terminal key forwarding.** Shift+Tab reaches the focused child as the
+standard xterm BackTab sequence (`ESC [ Z`), including both neutral frontend
+representations (`BackTab` and Shift+Tab). An explicit workspace chord still
+wins before terminal fallback; BackTab is normalized to Shift+Tab while
+matching so a configured `ctrl+shift+tab` route behaves consistently with
+crossterm input. Enhanced modified-key protocols are not implied by this
+baseline sequence.
+
 **Font scaling — honest limits.** The terminal frontend renders in the
 host terminal and therefore inherits its font, size, and zoom; scale text
 with your terminal's own controls (this is also why there is no `[ui]

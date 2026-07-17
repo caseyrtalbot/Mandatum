@@ -108,6 +108,8 @@ impl Keymap {
 /// whether the terminal reports `Char('r')` or `Char('R')` alongside the
 /// shift modifier.
 fn chord_matches(chord: Key, key: Key) -> bool {
+    let chord = normalize_backtab(chord);
+    let key = normalize_backtab(key);
     if chord.mods != key.mods {
         return false;
     }
@@ -115,6 +117,17 @@ fn chord_matches(chord: Key, key: Key) -> bool {
         (KeyCode::Char(a), KeyCode::Char(b)) => a == b || a.eq_ignore_ascii_case(&b),
         (a, b) => a == b,
     }
+}
+
+/// BackTab semantically carries Shift even though frontend adapters differ
+/// on whether they also set the explicit modifier bit. Normalize it to the
+/// natural `shift+tab` chord form before comparing workspace bindings.
+fn normalize_backtab(mut key: Key) -> Key {
+    if key.code == KeyCode::BackTab {
+        key.code = KeyCode::Tab;
+        key.mods.shift = true;
+    }
+    key
 }
 
 /// Parse a chord like `ctrl+shift+r` or `alt+f5` into a neutral [`Key`].

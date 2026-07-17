@@ -904,6 +904,51 @@ fn normal_keys_are_terminal_input_when_palette_is_closed() {
     );
 }
 
+// [L5-GATE] Shift+Tab reaches the child unless an explicit workspace chord
+// intercepts the same physical key.
+#[test]
+fn shift_tab_reaches_the_child_unless_a_workspace_chord_intercepts() {
+    let shift_only = Modifiers {
+        shift: true,
+        ..Modifiers::NONE
+    };
+    // Crossterm reports Shift+Tab as BackTab + SHIFT. Keep a plain BackTab
+    // valid for other frontend adapters, and accept Tab + SHIFT as the
+    // equivalent neutral representation.
+    for shifted_tab in [
+        Key::new(KeyCode::BackTab, shift_only),
+        key(KeyCode::BackTab),
+        Key::new(KeyCode::Tab, shift_only),
+    ] {
+        assert_eq!(
+            key_to_input(shifted_tab),
+            RuntimeInput::SendToTerminal(b"\x1b[Z".to_vec())
+        );
+    }
+
+    // A crossterm BackTab event must still honor an explicit workspace chord
+    // written in the natural `ctrl+shift+tab` form before terminal fallback.
+    let mut keymap = Keymap::default();
+    keymap.bind_chord(
+        CommandId::FocusPrevious,
+        parse_chord("ctrl+shift+tab").unwrap(),
+    );
+    assert_eq!(
+        key_to_input_with_keymap(
+            Key::new(
+                KeyCode::BackTab,
+                Modifiers {
+                    shift: true,
+                    control: true,
+                    ..Modifiers::NONE
+                }
+            ),
+            &keymap,
+        ),
+        RuntimeInput::Dispatch(CommandId::FocusPrevious)
+    );
+}
+
 #[test]
 fn input_dispatch_updates_core_workspace_layout_in_palette_mode() {
     let mut state = state();

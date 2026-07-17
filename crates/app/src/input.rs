@@ -54,6 +54,11 @@ pub fn key_to_terminal_input(key: Key) -> Option<Vec<u8>> {
         KeyCode::Char(character) => Some(character.to_string().into_bytes()),
         KeyCode::Enter => Some(b"\r".to_vec()),
         KeyCode::Backspace => Some(vec![0x7f]),
+        // xterm-256color's conventional BackTab sequence. Crossterm emits
+        // Shift+Tab as `BackTab` + SHIFT, while another frontend may emit
+        // `Tab` + SHIFT; both neutral forms must reach the child (L5).
+        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
+        KeyCode::Tab if key.mods.shift => Some(b"\x1b[Z".to_vec()),
         KeyCode::Tab => Some(b"\t".to_vec()),
         KeyCode::Escape => Some(vec![0x1b]),
         KeyCode::Up => Some(b"\x1b[A".to_vec()),

@@ -56,6 +56,8 @@ For terminal and task runtime work, prove:
 
 - a shell launches in a pane
 - typed input reaches the focused pane
+- Shift+Tab / BackTab reaches the focused child as `ESC [ Z`, while an explicit
+  workspace chord using the same physical key still intercepts first
 - output reaches terminal parser state
 - resize updates PTY and parser size
 - process exit becomes visible status

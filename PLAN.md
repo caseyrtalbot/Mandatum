@@ -66,6 +66,9 @@ more useful without pretending the wider vision is finished:
   theme) while the full perimeter stays calm; the explicit `focused` label
   preserves a non-color signal, with a one-cell corner fallback when a pane is
   too narrow to show any title text.
+- Shift+Tab now reaches terminal applications as the standard xterm BackTab
+  sequence instead of being dropped, while explicit workspace chords continue
+  to intercept before terminal fallback.
 - overlays now paint explicit foreground/background surfaces instead of
   reading as nested panes, and the first-run card separates emphasized live
   key routes, normal descriptions, and dim dismissal guidance.

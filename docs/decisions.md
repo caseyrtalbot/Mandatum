@@ -1132,3 +1132,39 @@ and running-version forwarding plus non-zero status propagation, and the full
 merge gate checks the embedded installer and release/install artifact
 allowlists. The standing post-publish smoke installs into a disposable
 directory and then exercises the public update path against the latest release.
+
+## Accepted: Shift+Tab Uses The Baseline Xterm BackTab Sequence
+
+Status: accepted (2026-07-16)
+
+Decision: after explicit workspace-chord resolution, neutral `BackTab` and
+Shift+Tab input encode to `ESC [ Z` for the focused child. BackTab normalizes
+to Shift+Tab during chord comparison so crossterm's representation still
+matches a configured route such as `ctrl+shift+tab`. Mandatum does not claim
+modifyOtherKeys, CSI-u, or another enhanced keyboard protocol without an
+explicit capability and conformance contract.
+
+Context: the terminal frontend already translated crossterm Shift+Tab events
+to neutral BackTab input, but the child-byte encoder had no BackTab arm. The
+event therefore became `Noop`, preventing terminal agents such as Codex and
+Claude from receiving a common mode-cycling command. Frontend adapters can
+also reasonably represent the same physical key as Tab with the Shift bit.
+
+Rationale: L5 requires ordinary terminal input to reach the focused child.
+Both neutral representations should produce the `xterm-256color` baseline
+sequence that Mandatum advertises to child processes, while an explicitly
+configured workspace control must retain precedence. Limiting the change to a
+standard sequence avoids pretending richer modifier combinations work before
+keyboard-protocol negotiation exists.
+
+Consequences: Shift+Tab works in child TUIs and agent CLIs instead of being
+dropped. Plain Tab remains `HT`. Configured workspace chords remain
+authoritative and BackTab representation differences no longer make them
+unreliable. Other modified special keys remain subject to the current
+baseline encoder and future capability work.
+
+Verification: the L5 input-routing test covers crossterm BackTab with Shift,
+plain neutral BackTab, neutral Tab with Shift, and explicit
+`ctrl+shift+tab` interception. A frontend-boundary test pins crossterm's
+modifier-preserving translation. Run the app test suite, the latency procedure
+in `docs/verification.md`, and `./ci/gate.sh` before completion.
