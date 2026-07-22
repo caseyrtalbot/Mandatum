@@ -11,9 +11,10 @@ green `./ci/gate.sh`:
 1. Constitution and executable gates: five laws, conformance + doc-trace
    scripts, GitHub Actions running the same gate script, Apache-2.0
    (`cdfe04c`).
-2. GPU frontend spike: winit+wgpu window on a live PTY with measured latency
-   (`4687a7d`), then scene-contract binding and the side-by-side against the
-   ratatui frontend (`94c7cd6`). Verdict: terminal frontend stays v1.
+2. GPU feasibility spike completed (not product-shipped): winit+wgpu window on
+   a live PTY with measured latency (`4687a7d`), then scene-contract binding
+   and the side-by-side against the ratatui frontend (`94c7cd6`). Verdict:
+   terminal frontend stays v1.
 3. Renderer-neutral scene contract: `mandatum-scene` owns the WorkspaceScene
    output model and layout math; the renderer became one adapter (`cd457ed`).
 4. Agent runtime: connector contract, session actors, and a real approval
@@ -90,12 +91,16 @@ more useful without pretending the wider vision is finished:
   connectors beyond Claude/Fake plus a scriptable command/control surface for
   projects, sessions, recipes, and approval profiles. Human approval remains
   the default; policy broadening requires its own decision and proof.
-- **GPU adapter, when the conditions arrive.** The wgpu adapter stays warm
-  behind the scene contract. Revisit when the roadmap needs GPU-only
-  capability (per-frame animation, pixel-precise layout, embedded non-text
-  surfaces) or sets sub-20 ms end-to-end latency as a product goal. Known
-  remaining work: full multi-pane/overlay scene binding, grapheme widths,
-  IME, runtime DPI, surface-loss recovery, damage tracking.
+- **Native GPU frontend, admission-gated.** The implementation sequence is
+  specified in
+  [docs/native-gpu-implementation-plan.md](docs/native-gpu-implementation-plan.md):
+  shared host/effect seam, terminal migration, real-state-machine native slice,
+  parity, text/IME, recovery/performance, admission, and opt-in rollout.
+  The capability branch is selected: task/agent-produced PNG artifacts become
+  pixel-native preview panes with a deterministic terminal fallback. Phase 1A's
+  neutral clipboard effect is complete. Production GPU dependencies and
+  release admission remain blocked until the typed artifact scene surface,
+  adapter tests, and later admission decision exist.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.
@@ -104,6 +109,6 @@ more useful without pretending the wider vision is finished:
 - **Minors worth doing.**
   - Cap `approval_history` growth in `AgentPaneIntent` once long-running
     agents make workspace files noticeably large.
-  - Bump ratatui to unblock the open Dependabot `lru` update.
+  - Bump ratatui before updating the transitive `lru` dependency.
   - Idle heartbeat repaints the clock UI (~4 Hz); repaint only when a
     time-derived surface is visible if idle output ever matters.

@@ -12,6 +12,7 @@ mod config;
 mod copy_mode;
 mod events;
 mod frontend;
+mod frontend_effect;
 mod help;
 mod input;
 mod keymap;
@@ -33,6 +34,7 @@ pub use app_state::AppState;
 pub use config::{
     AgentConnectorKind, LoadedConfig, load_config, project_config_file, user_config_file,
 };
+pub use frontend_effect::FrontendEffect;
 pub use input::{RuntimeInput, key_to_input, key_to_input_with_keymap, key_to_terminal_input};
 pub use keymap::{ChordAction, Keymap, format_chord, parse_chord};
 pub use scene_builder::build_workspace_scene;

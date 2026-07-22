@@ -36,10 +36,12 @@ docs/terminal-engine.md     terminal parser/grid/backend strategy
 docs/agent-runtime.md       agent actor model and runtime surface
 docs/interaction-model.md   commands, panes, session map, timeline, input
 docs/workflows.md           end-to-end developer workflows (built vs not yet)
-docs/roadmap.md             executed gates + forward horizon
+docs/native-gpu-implementation-plan.md
+                            admission-gated path to a native GPU frontend
 docs/verification.md        proof commands, scans, and quality gates
 docs/repo-structure.md      current file layout
 docs/decisions.md           decision log (append-only)
+docs/history/               dated evidence and superseded closure records
 ```
 
 ## Crates
@@ -111,6 +113,8 @@ The terminal app runtime:
 - `events.rs`: the unified app event channel (input / PTY / agent)
 - `frontend.rs`: crossterm-to-neutral input translation (the only module
   besides `app_shell.rs` allowed to name crossterm)
+- `frontend_effect.rs`: renderer-neutral platform effects; terminal/native
+  shells provide their concrete clipboard integration
 - `input.rs`: neutral input routing to runtime intents
 - `terminal_runtime.rs` / `task_runtime.rs` / `agent_runtime.rs`: low-level live
   runtime registry Implementations behind `RuntimeEngine` (generation + token

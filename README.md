@@ -292,7 +292,9 @@ The scene contract keeps frontends swappable: the same `WorkspaceScene`
 that drives the ratatui frontend drove a winit+wgpu spike that measured
 key-to-GPU-present p50 21.6 ms. The terminal frontend is v1; the GPU
 adapter stays warm behind the contract. Evidence and verdict:
-[spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md).
+[spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md). The
+admission-gated path from the spike to a real workstation frontend is in the
+[native GPU implementation plan](docs/native-gpu-implementation-plan.md).
 
 ## Development
 
@@ -303,25 +305,26 @@ adapter stays warm behind the contract. Evidence and verdict:
 Local runs and CI execute the same script on the same pinned toolchain.
 The conformance step is where the Constitution lives: dependency scans for
 L1/L2, `[Lx-GATE]`-tagged tests for L3/L4/L5, and a doc-trace gate that
-fails the build if any law loses its documentation or its test. Current
-suite: 453 tests (plus 2 ignored live-connector tests that exercise the
-real Claude CLI).
+fails the build if any law loses its documentation or its test. Two
+live-connector tests that exercise the real Claude CLI remain intentionally
+ignored in the deterministic gate.
 
 Contributions: read [CONTRIBUTING.md](CONTRIBUTING.md) first; the gate and
 the Constitution are the review. Security reports: [SECURITY.md](SECURITY.md).
 
 ## Status
 
-Pre-release, built in verified vertical slices. Everything in
-[the tour](#the-tour) works today behind a green gate; the honest ledger of
-what is real, partial, and deliberately deferred, with per-outcome evidence
-and the red-team record, lives in
-[docs/charter-ledger.md](docs/charter-ledger.md).
+Public pre-1.0 release (`v0.2.0`), with post-release work continuing in
+verified vertical slices. Everything in [the tour](#the-tour) works today
+behind the merge gate. The dated charter close and its red-team evidence are
+preserved in
+[docs/history/charter-closure-2026-07-10.md](docs/history/charter-closure-2026-07-10.md);
+current status and forward work live in [PLAN.md](PLAN.md).
 
 Deliberately deferred: the GPU production adapter (spike proven, terminal
-frontend stays v1), rewrap-on-resize (belongs in the terminal engine), and
-the open `lru` Dependabot update (enters the tree only through the ratatui
-0.29 pin). [PLAN.md](PLAN.md) holds the forward horizon;
+frontend stays v1), rewrap-on-resize (belongs in the terminal engine), and the
+`lru` upgrade currently blocked behind the ratatui 0.29 pin. [PLAN.md](PLAN.md)
+holds the forward horizon;
 [docs/decisions.md](docs/decisions.md) records every judgment call.
 
 ## License

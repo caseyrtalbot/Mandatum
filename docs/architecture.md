@@ -177,6 +177,22 @@ Own rendering and platform input:
 Frontend adapters should draw a scene and emit input/hit-test events. They do
 not own product behavior.
 
+### Planned Shared Frontend Host
+
+The production architecture for a second frontend uses one app-local
+`FrontendHost` around the existing `AppState` and `RuntimeEngine`. It will
+accept neutral input, drain the unified runtime event stream, emit immutable
+scene/theme snapshots plus redraw/deadline metadata, and return typed platform
+effects such as raw clipboard text. The terminal shell migrates to this seam
+before a native product crate is admitted.
+
+A native shell may own a window, platform wake handle, DPI/IME state,
+clipboard integration, GPU surface/device resources, glyph caches, and paint
+scheduling. It may not own a second PTY/parser path, command router, approval
+model, persistence model, or recovery policy. The full contingent sequence and
+its stop/go gate are in
+[native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
+
 ### `workflows`
 
 Owns developer-workflow definitions and cross-actor handoff policy. Built

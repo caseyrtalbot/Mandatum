@@ -1992,11 +1992,14 @@ fn pointer_drag_selects_cells_and_copy_selection_copies_them() {
     );
     assert!(!state.copy_mode_active());
 
-    // Copy Selection stages the OSC 52 payload with the selected text.
+    // Copy Selection stages renderer-neutral clipboard text.
     state.dispatch(CommandId::CopySelection);
     assert_eq!(state.last_copied(), Some("SELECT_ME"));
-    let payload = state.take_clipboard_payload().expect("payload staged");
-    assert!(payload.starts_with(b"\x1b]52;c;"));
+    assert_eq!(
+        state.take_frontend_effects(),
+        vec![FrontendEffect::SetClipboard("SELECT_ME".to_owned())]
+    );
+    assert!(state.take_frontend_effects().is_empty());
     assert!(state.pane_view_state(&pane_id).selection.is_none());
 
     state.shutdown();
@@ -2131,7 +2134,9 @@ fn restore_spawns_fresh_live_runtime_and_clears_runtime_presentation_state() {
         .controller
         .process_id();
     state.dispatch(CommandId::EnterCopyMode);
-    state.clipboard_payload = Some(b"pending-clipboard".to_vec());
+    state
+        .frontend_effects
+        .push(FrontendEffect::SetClipboard("pending-clipboard".to_owned()));
     state.last_copied = Some("copied text".to_owned());
 
     state.dispatch(CommandId::RestoreWorkspace);
@@ -2146,7 +2151,7 @@ fn restore_spawns_fresh_live_runtime_and_clears_runtime_presentation_state() {
         .process_id();
     assert_ne!(before_pid, after_pid);
     assert!(!state.copy_mode_active());
-    assert!(state.take_clipboard_payload().is_none());
+    assert!(state.take_frontend_effects().is_empty());
     assert!(state.last_copied().is_none());
 
     state.shutdown();
@@ -2280,20 +2285,41 @@ fn copy_mode_enters_selects_and_copies_to_clipboard() {
     state.dispatch(CommandId::EnterCopyMode);
     assert!(state.copy_mode_active());
 
-    // Start a selection and copy it; copy mode exits and stages an OSC 52
-    // clipboard payload for the run loop to write.
+    // Start a selection and copy it; copy mode exits and stages raw clipboard
+    // text for whichever frontend owns the platform integration.
     state.handle_key(key(KeyCode::Char('v')));
     state.handle_key(key(KeyCode::Char('y')));
     assert!(!state.copy_mode_active());
     assert!(state.last_copied().is_some());
 
-    let payload = state
-        .take_clipboard_payload()
-        .expect("clipboard payload staged");
-    assert_eq!(payload.first(), Some(&0x1b));
-    assert!(payload.starts_with(b"\x1b]52;c;"));
+    let effects = state.take_frontend_effects();
+    assert_eq!(effects.len(), 1);
+    let effect = effects.into_iter().next().expect("frontend effect staged");
+    let FrontendEffect::SetClipboard(text) = effect;
+    assert_eq!(state.last_copied(), Some(text.as_str()));
+    assert!(state.take_frontend_effects().is_empty());
 
     state.shutdown();
+}
+
+#[test]
+fn frontend_effects_preserve_fifo_order_and_drain_once() {
+    let mut state = state();
+    state
+        .frontend_effects
+        .push(FrontendEffect::SetClipboard("first".to_owned()));
+    state
+        .frontend_effects
+        .push(FrontendEffect::SetClipboard("second".to_owned()));
+
+    assert_eq!(
+        state.take_frontend_effects(),
+        vec![
+            FrontendEffect::SetClipboard("first".to_owned()),
+            FrontendEffect::SetClipboard("second".to_owned()),
+        ]
+    );
+    assert!(state.take_frontend_effects().is_empty());
 }
 
 #[test]

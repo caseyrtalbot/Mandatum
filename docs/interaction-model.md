@@ -90,7 +90,7 @@ returns. No splash theater.
 
 ## Pane Interaction
 
-Required pane actions:
+Current pane actions:
 
 - focus
 - split right/down
@@ -103,8 +103,10 @@ Required pane actions:
 - restart terminal runtime
 - rerun task runtime
 - stop task runtime
-- pin agent pane
 - inspect status
+
+Pin Agent Pane remains aspirational; see
+[agent-runtime.md](agent-runtime.md#not-yet-built-aspirational).
 
 Pointer support should include:
 
@@ -339,10 +341,11 @@ host terminal and therefore inherits its font, size, and zoom; scale text
 with your terminal's own controls (this is also why there is no `[ui]
 font_scale` key: it could not do anything here, and a silently inert
 setting is worse than the loud unknown-key warning the config boundary
-gives today). A GPU frontend owns its glyph rendering and will define its
-scaling contract when it lands (see "GPU Frontend Spike Verdict" in
-docs/decisions.md); the spike already renders from the same scene, so no
-product behavior needs to change for it.
+gives today). A native GPU frontend owns its glyph rendering and therefore
+needs an explicit font, scale, DPI, and IME contract. Renderer-neutral product
+behavior remains authoritative, but the shared host/effect and text-input
+seams still require staged work; see the
+[native GPU implementation plan](native-gpu-implementation-plan.md).
 
 Still planned: descriptive labels for non-terminal surfaces beyond the
 current title flags, and platform accessibility hooks in native

@@ -123,9 +123,11 @@ For agent work, prove:
 - failed-task investigation launches through the ordinary connector and
   approval seam, then restores as unknown intent rather than a live session;
   adversarial task text cannot forge its evidence framing
-- verification results attach to the agent actor (not yet built: the
-  checks surface is aspirational; see docs/agent-runtime.md "Not Yet Built")
 - restore keeps agent intent without inventing live runtime state
+
+Future acceptance gate: when the checks surface is implemented, verification
+results must attach to the agent actor. It is currently aspirational; see
+[agent-runtime.md](agent-runtime.md#not-yet-built-aspirational).
 
 ## Distribution Check
 
@@ -205,6 +207,11 @@ p95 13.56 ms / max 17.84 ms, 100 samples with zero misses. Idle CPU advanced
 every `tui_probe` result, this stops at app-output bytes and excludes
 host-terminal paint; it is not an end-to-end input-to-photon measurement.
 
+Dated Phase 1A refresh (2026-07-21, after the renderer-neutral frontend-effect
+seam): p50 11.58 ms / p95 13.35 ms / max 16.14 ms, 100 samples with zero
+misses. The endpoint remains key-to-app-output bytes with host-terminal paint
+excluded.
+
 Regression bar: p50 must stay well under 25 ms. A p50 drifting back toward
 40 ms means something reintroduced interval polling into the wake path.
 The floor is the shell echo round-trip plus the ~8 ms redraw-cap window,
@@ -232,6 +239,16 @@ member before an accepted decision has either a typed pixel-native scene
 surface with executable adapter tests, or a sub-20 ms key-to-present product
 target with symmetric end-to-end evidence. The list is a tripwire for known
 stacks, not an exhaustive taxonomy of GPU libraries.
+
+Selecting the Artifact Preview capability in Phase 0 is not GPU-admission
+evidence. Future production admission still requires the named typed artifact
+scene contract, executable terminal-fallback and excluded-GPU adapter tests,
+and a separate Phase 6 decision accepting that evidence.
+
+Dated maintenance run (2026-07-21): after refreshing the excluded lock's four
+workspace path packages from `0.1.0` to `0.2.0`, `./ci/gpu-spike.sh` passed
+four tests and the renderer-boundary scan. This run did not open a native
+window or collect performance samples.
 
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the

@@ -72,9 +72,10 @@ for name in ENGINE_SIDE:
         )
 
 # ---- fail-closed production GPU admission --------------------------------
-# A GPU frontend remains an isolated spike until a new accepted decision is
-# backed by either a typed pixel-native scene surface plus adapter tests, or a
-# sub-20 ms key-to-present product target plus symmetric end-to-end evidence.
+# A GPU frontend remains an isolated spike until a production-admission
+# decision is backed by either a typed pixel-native scene surface plus adapter
+# tests, or a sub-20 ms key-to-present product target plus symmetric end-to-end
+# evidence. Selecting a product-trigger branch alone is not admission.
 # Windowing alone is not GPU admission, so winit is deliberately absent. This
 # known-stack list is a tripwire, not a claim to enumerate every GPU library.
 GPU_FRONTEND_DEPS = {
@@ -89,9 +90,9 @@ for pkg_id in meta["workspace_members"]:
         failures.append(
             f"[GPU-ADMISSION-GATE] {pkg['name']} transitively depends on GPU "
             f"frontend crates: {sorted(hit)}. Keep listed GPU dependencies spike-only "
-            "until an accepted decision proves a typed pixel-native scene surface "
-            "with executable adapter tests, or a sub-20 ms key-to-present product "
-            "target with symmetric end-to-end evidence."
+            "until a production-admission decision proves a typed pixel-native "
+            "scene surface with executable adapter tests, or a sub-20 ms "
+            "key-to-present product target with symmetric end-to-end evidence."
         )
 
 # An excluded manifest is intentionally absent from workspace metadata. Keep

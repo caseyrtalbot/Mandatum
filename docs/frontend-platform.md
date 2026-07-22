@@ -103,7 +103,7 @@ maintenance check runs spike-local format, locked all-target tests, and the
 renderer dependency-boundary proof after scene-contract or spike changes. The
 paint path is a separate spike-local crate that cannot depend on the PTY or
 terminal parser. Full evidence:
-`spikes/frontend-wgpu/RESULTS.md`.
+[`spikes/frontend-wgpu/RESULTS.md`](../spikes/frontend-wgpu/RESULTS.md).
 
 ### Measured numbers (from RESULTS.md)
 
@@ -121,13 +121,15 @@ TUI (its number stops before the host terminal paints), so the measured
 ~2x gap understates the true end-to-end gap. Under a sustained scroll flood
 the spike held ~40 fps (frame time p50 25.0 ms, p95 25.8 ms over 94 frames),
 a floor set by an intentionally naive per-frame rebuild, not a ceiling. The
-spike renders purely through the `mandatum-scene` contract (its renderer
-module imports zero parser types), so it is a second conforming frontend,
-not a parallel path.
+spike's renderer consumes only the `mandatum-scene` contract and imports zero
+parser types. That paint boundary is conforming; the enclosing spike host is
+still a parallel feasibility path with its own PTY/parser/input behavior and
+must not be promoted as product architecture.
 
 ### Verdict: the terminal frontend stays v1
 
-Recorded in docs/decisions.md ("GPU Frontend Spike Verdict"). The spike
+Recorded in [`docs/decisions.md`](decisions.md#accepted-gpu-frontend-spike-verdict--terminal-frontend-stays-v1).
+The spike
 succeeded (a real, measured latency win and a clean adapter), but a large
 share of the measured gap was the product's own 40 ms input poll loop, and
 a production GPU adapter still owes substantial work the spike skipped
@@ -141,15 +143,32 @@ Redraw Cap"), the same external probe measured the terminal frontend at
 and before/after table: docs/verification.md, "Input Latency Regression
 Check"; addendum in RESULTS.md).
 
-A 2026-07-14 live refresh measured **p50 11.30 ms / p95 13.08 ms**, also
-key-to-bytes-out with host-terminal paint excluded. It therefore does not prove
-sub-20 ms end-to-end latency. Scene-contract compile drift in the excluded spike
-was repaired the same day and its opt-in maintenance check passed.
+A 2026-07-14 live refresh measured **p50 11.71 ms / p95 13.56 ms / max
+17.84 ms**, also key-to-bytes-out with host-terminal paint excluded. It
+therefore does not prove sub-20 ms end-to-end latency. The authoritative dated
+run and procedure live in [verification.md](verification.md).
 
 The wgpu adapter stays warm behind the scene contract, with its probe
 (`spikes/frontend-wgpu/src/bin/tui_probe.rs`) kept as the product's standing
 latency-regression harness. Revisit when the roadmap needs GPU-only
 capability (true GPU visuals, per-frame animation, pixel-precise layout,
 embedded non-text surfaces) or sets sub-20 ms end-to-end latency as a
-product goal. Neither trigger is currently met, so the adapter remains
-unshipped and excluded from the product workspace/build/release.
+product goal.
+
+The capability branch is now selected: an Artifact Preview Pane will display a
+task- or agent-produced PNG as a typed pixel-native scene surface, while the
+terminal frontend renders a deterministic labeled fallback card. The latency
+branch is not selected. This product-trigger decision is not production
+admission: the scene type and executable terminal/GPU adapter tests do not
+exist yet, so the adapter remains unshipped and excluded from the product
+workspace/build/release.
+
+## Implementation Plan
+
+The native frontend has a durable, admission-gated implementation sequence in
+[native-gpu-implementation-plan.md](native-gpu-implementation-plan.md). It
+keeps one `AppState`/`RuntimeEngine`, extracts a shared frontend host and typed
+platform effects, migrates the terminal shell first, and only then connects the
+excluded native adapter to real workstation state. Phase 1A's raw clipboard
+effect is complete. Selecting the capability branch does not weaken the
+production conformance gate.

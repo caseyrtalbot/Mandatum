@@ -2,8 +2,9 @@
 
 Mandatum is a development workstation with a terminal soul: shells, tasks,
 servers, agents, approvals, and recovery in one spatial session surface.
-Reason from the code on disk and the current doc set; docs describe current
-state only.
+Reason from the code on disk and the current doc set. Active specs describe
+current state; `docs/decisions.md` and `docs/history/` preserve dated rationale
+and evidence.
 
 ## The gate
 

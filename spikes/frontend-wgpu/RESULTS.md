@@ -5,20 +5,25 @@ renders a live shell session on the GPU, with keyboard input, paste, resize,
 scrollback, mouse selection/copy, a status strip, and self-instrumenting
 latency and frame-time collection.
 
-This is a frontend adapter only. It path-depends on the engine crates
+This is an isolated feasibility frontend. It path-depends on the engine crates
 `mandatum-pty` (PTY runtime) and `mandatum-terminal-vt` (VT parser + grid) and
-copies no product behavior. It lives outside the Cargo workspace (the root
-`Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
-never joins the product workspace, build, release artifacts, or merge gate.
+contains spike-local PTY/parser/input orchestration rather than the product
+`AppState`/`RuntimeEngine`. Its renderer consumes only `mandatum-scene`. It
+lives outside the Cargo workspace (the root `Cargo.toml` excludes
+`spikes/frontend-wgpu`), so its heavy GPU dependency tree never joins the
+product workspace, build, release artifacts, or merge gate.
 `./ci/gpu-spike.sh` is the explicit, opt-in maintenance check: it runs the
 spike-local format, locked all-target tests, and renderer-boundary checks after
 scene contract or spike changes without promoting these dependencies into
 production.
 
-Maintenance status (2026-07-14): scene-contract compile drift was repaired and
-the opt-in maintenance check passed. The adapter remains unshipped. Neither
-production trigger is met: the roadmap requires no GPU-only/pixel-native surface,
-and sub-20 ms end-to-end latency is not a product goal.
+Maintenance status (2026-07-21): the excluded lock was refreshed for the
+workspace's `0.2.0` path packages and `./ci/gpu-spike.sh` passed all four
+headless tests plus the renderer-boundary scan. No displayed native-window
+smoke or benchmark was run in this maintenance pass. The later Artifact Preview
+capability decision selects the capability branch, but this spike did not
+implement or prove that typed surface. The adapter remains unshipped, and
+sub-20 ms end-to-end latency is not a product goal.
 
 ## Verdict (read this first)
 
@@ -125,7 +130,8 @@ p95 ~15 ms / max ~18 ms**. The standing regression procedure and the
 before/after table live in `docs/verification.md`.
 
 **Maintenance refresh (2026-07-14):** the live terminal probe measured
-**p50 11.30 ms / p95 13.08 ms**. This remains key-to-app-output-bytes only;
+**p50 11.71 ms / p95 13.56 ms / max 17.84 ms**. This remains
+key-to-app-output-bytes only;
 host-terminal paint is excluded, so it is not evidence of sub-20 ms end-to-end
 latency and does not trigger GPU productization.
 
@@ -329,9 +335,10 @@ multi-pane/overlay/header binding, correct grapheme width, IME and composition,
 runtime DPI, full style mapping, surface-loss recovery, and damage tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
-a sub-20 ms end-to-end target. Neither trigger is currently met; the 2026-07-14
-terminal result is p50 11.30 ms to bytes-out and remains incomparable to
-key-to-present.
+a sub-20 ms end-to-end target. The later Artifact Preview decision selects the
+capability branch; this dated spike still does not prove that surface or admit
+production GPU dependencies. The 2026-07-14 terminal result is p50 11.71 ms to
+bytes-out and remains incomparable to key-to-present.
 
 
 ## Correction note (2026-07-10)

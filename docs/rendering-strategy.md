@@ -85,17 +85,17 @@ The renderer should support:
 
 ## Performance Targets
 
-Met and held by standing checks:
+Current bars and boundedness contracts:
 
-- typing latency: key-to-bytes-out p50 13.30 ms on the event-driven loop,
-  regression bar p50 < 25 ms (procedure and numbers:
-  docs/verification.md, "Input Latency Regression Check")
+- typing latency: key-to-bytes-out p50 < 25 ms (the dated measurements and
+  procedure live in
+  [verification.md](verification.md#input-latency-regression-check))
 - bounded memory and responsiveness under a PTY flood: flow-credit
   backpressure caps in-flight bytes at 256 KiB per pane; the quit chord
   works during a `yes` flood (test
   `pty_flood_stays_bounded_responsive_and_quittable`)
 - bounded scrollback memory (2000-row grid limit)
-- low idle CPU: ~0.1% over 30 s idle (docs/verification.md)
+- no busy-spin idle loop (measure using the standing verification procedure)
 
 Ongoing targets without a standing check: no visible freeze during pane
 resize, recoverable parser or render failures.
@@ -109,6 +109,9 @@ Advanced targets (GPU-frontend territory, not yet product goals):
 - efficient glyph caching
 - minimized redraw regions
 - large-output stress stability
+
+The gated path for turning these into product commitments is in
+[native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 
 ## Frontend Adapter Expectations
 

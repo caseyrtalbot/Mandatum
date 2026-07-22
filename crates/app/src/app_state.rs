@@ -34,10 +34,10 @@ use mandatum_workflows::TaskFailureHandoff;
 use crate::{
     agent_runtime::{AgentRuntimeEvent, connector_for_kind},
     app_shell::AppConfig,
-    clipboard::osc52_sequence,
     config::{AgentConnectorKind, effective_runtime_settings, load_config, project_config_file},
     copy_mode::CopyModeState,
     events::AppEvent,
+    frontend_effect::FrontendEffect,
     help::{HelpViewState, filter_help_rows, help_route, help_rows, welcome_entries},
     input::{RuntimeInput, key_to_input_with_keymap},
     keymap::{ChordAction, Keymap, format_chord},
@@ -119,7 +119,7 @@ pub struct AppState {
     debug_status: bool,
     user_config_file: Option<PathBuf>,
     copy_mode: Option<CopyModeState>,
-    clipboard_payload: Option<Vec<u8>>,
+    frontend_effects: Vec<FrontendEffect>,
     last_copied: Option<String>,
     // --- Pointer state (runtime presentation only, never serialized) ------
     /// Hit targets of the last built scene; pointer events resolve against
@@ -185,7 +185,7 @@ impl AppState {
             debug_status: config.debug_status,
             user_config_file: config.user_config_file,
             copy_mode: None,
-            clipboard_payload: None,
+            frontend_effects: Vec::new(),
             last_copied: None,
             hit_targets: Vec::new(),
             pointer_drag: None,
@@ -254,10 +254,10 @@ impl AppState {
         self.last_copied.as_deref()
     }
 
-    /// Take the pending OSC 52 clipboard payload, if any, so the run loop can
-    /// write it to the host terminal. Clears it so it is written once.
-    pub fn take_clipboard_payload(&mut self) -> Option<Vec<u8>> {
-        self.clipboard_payload.take()
+    /// Take all pending platform effects in request order. Clears the queue so
+    /// the active frontend applies each effect exactly once.
+    pub fn take_frontend_effects(&mut self) -> Vec<FrontendEffect> {
+        std::mem::take(&mut self.frontend_effects)
     }
 
     /// The active theme, resolved from config, for the frontend adapter.
@@ -1098,7 +1098,7 @@ impl AppState {
         self.session_map = None;
         self.help_view = None;
         self.objective_prompt = None;
-        self.clipboard_payload = None;
+        self.frontend_effects.clear();
         self.last_copied = None;
         self.pointer_view = None;
         self.pointer_drag = None;
@@ -2612,7 +2612,7 @@ impl AppState {
     }
 
     /// Copy the pointer selection through the copy-mode extraction model and
-    /// the OSC 52 clipboard path.
+    /// request that the active frontend update its clipboard.
     fn copy_pointer_selection(&mut self) {
         let Some((pane_id, (anchor, cursor))) = self
             .pointer_view
@@ -2635,7 +2635,8 @@ impl AppState {
             anchor: Some(anchor),
         };
         let text = extractor.selected_text(grid);
-        self.clipboard_payload = Some(osc52_sequence(&text));
+        self.frontend_effects
+            .push(FrontendEffect::SetClipboard(text.clone()));
         let count = text.chars().count();
         self.last_copied = Some(text);
         let mut drop_view = false;
@@ -3716,7 +3717,8 @@ impl AppState {
             return;
         };
 
-        self.clipboard_payload = Some(osc52_sequence(&text));
+        self.frontend_effects
+            .push(FrontendEffect::SetClipboard(text.clone()));
         let count = text.chars().count();
         self.last_copied = Some(text);
         self.copy_mode = None;

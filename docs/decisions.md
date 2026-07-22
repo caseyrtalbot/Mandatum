@@ -1168,3 +1168,65 @@ plain neutral BackTab, neutral Tab with Shift, and explicit
 `ctrl+shift+tab` interception. A frontend-boundary test pins crossterm's
 modifier-preserving translation. Run the app test suite, the latency procedure
 in `docs/verification.md`, and `./ci/gate.sh` before completion.
+
+## Accepted: Native GPU Capability Branch Is Selected; Production Admission Remains Gated
+
+Status: accepted (2026-07-21)
+
+Decision: select the capability branch, not the latency branch. The first
+pixel-native capability is an Artifact Preview Pane: a task- or agent-produced
+PNG screenshot, diagram, chart, or visual diff can become a reviewable
+workspace pane without leaving Mandatum. The planned renderer-neutral contract
+persists a project-relative `ArtifactPaneIntent`, keeps bounded decoded image
+state in the app, and carries typed loading/ready/failed artifact content plus
+an RGBA8 sRGB raster surface in `WorkspaceScene`. The terminal renderer must
+provide a deterministic labeled fallback; the native renderer may upload the
+same surface as a texture.
+
+Context: the intended product is richer and may eventually operate without a
+terminal pane. Artifact previews are a concrete non-text workstation capability
+for UI-test screenshots, browser automation, diagrams, generated charts, and
+visual diffs. They justify pixel-native rendering without using vague polish or
+an asymmetric latency comparison as the reason. `RuntimeEngine` and
+`WorkspaceScene` remain the product-state and paint boundaries; the old spike
+still duplicates PTY/parser/input behavior and does not prove this capability.
+
+Rationale: a typed artifact surface advances the workstation beyond character
+cells while keeping every frontend behind the same state and scene contracts.
+The terminal fallback preserves SSH/headless usefulness. Separating product
+trigger selection from production dependency admission lets renderer-neutral
+host and scene work proceed without silently authorizing wgpu or a release
+change.
+
+Consequences: Phase 0 product-trigger selection is complete, and Phase 1 host
+extraction is authorized without native/GPU dependencies. Phase 1A now emits
+FIFO `FrontendEffect::SetClipboard(String)` values from `AppState` and confines
+OSC 52 encoding to `app_shell.rs`. The first artifact slice is PNG-only,
+project-relative, contain-fit, bounded to 16 MiB encoded, 4096×4096 pixels, and
+64 MiB decoded; path escapes, remote/active formats, malformed input, and
+oversized input fail visibly. macOS arm64 is the first displayed development
+reference. Native stays explicit opt-in, and terminal stays default on all four
+current release targets. Fallback occurs only before live runtime creation; no
+transparent mid-session process switch is promised.
+
+Production GPU admission remains unproven. No artifact scene type, fallback
+test, or excluded-GPU render-plan test exists yet; `ci/conformance.sh` and all
+release allowlists remain fail-closed. A later Phase 6 decision must review
+that evidence before any production GPU dependency enters. This supersedes
+only the earlier “neither trigger is met” current-status addendum, not the
+historical spike verdict or measurements.
+
+Evidence correction: `docs/verification.md` owns the 2026-07-14 terminal
+refresh at p50 11.71 ms / p95 13.56 ms / max 17.84 ms, 100 samples with zero
+misses. Earlier 11.30/13.08 mentions in this append-only log were not the
+authoritative recorded refresh. All terminal probe figures exclude host paint
+and cannot satisfy the GPU admission gate.
+
+Verification: Phase 1A tests must prove FIFO/drain-once effects, both copy
+paths, restore clearing, and terminal-boundary OSC 52 encoding. `./ci/gate.sh`
+remains the merge gate. The typed artifact surface later requires persistence
+without bytes/resources, path/size/decode failure coverage, `WorkspaceScene`
+sufficiency, a terminal fallback test, an excluded-GPU render-plan test, and
+`./ci/gpu-spike.sh`. The Phase 1A release probe measured p50 11.58 ms / p95
+13.35 ms / max 16.14 ms over 100 samples with zero misses, still at the
+key-to-app-output endpoint. The terminal latency branch remains unselected.

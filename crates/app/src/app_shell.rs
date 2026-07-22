@@ -25,12 +25,14 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use crate::{
     app_state::AppState,
+    clipboard::osc52_sequence,
     config::{
         AgentConnectorKind, default_task_command, effective_runtime_settings, load_config,
         project_config_file, user_config_file,
     },
     events::AppEvent,
     frontend::translate_event,
+    frontend_effect::FrontendEffect,
     keymap::Keymap,
 };
 
@@ -105,8 +107,12 @@ fn event_loop(
         draw(terminal, app)?;
         let last_draw = Instant::now();
 
-        if let Some(payload) = app.take_clipboard_payload() {
-            write_clipboard_payload(&payload)?;
+        let frontend_effects = app.take_frontend_effects();
+        if !frontend_effects.is_empty() {
+            let mut stdout = io::stdout();
+            for effect in frontend_effects {
+                write_frontend_effect(&mut stdout, effect)?;
+            }
         }
 
         if app.wait_event(HEARTBEAT) {
@@ -460,12 +466,16 @@ fn draw(terminal: &mut TerminalGuard, app: &mut AppState) -> io::Result<()> {
     Ok(())
 }
 
-fn write_clipboard_payload(payload: &[u8]) -> io::Result<()> {
-    // OSC 52 is processed by the host terminal regardless of the alternate
-    // screen, so writing it straight to stdout does not disturb the rendered UI.
-    let mut stdout = io::stdout();
-    stdout.write_all(payload)?;
-    stdout.flush()
+fn write_frontend_effect(writer: &mut dyn Write, effect: FrontendEffect) -> io::Result<()> {
+    match effect {
+        FrontendEffect::SetClipboard(text) => {
+            // OSC 52 is processed by the host terminal regardless of the
+            // alternate screen, so writing it straight to stdout does not
+            // disturb the rendered UI.
+            writer.write_all(&osc52_sequence(&text))?;
+        }
+    }
+    writer.flush()
 }
 
 fn default_agent_objective() -> String {
@@ -477,6 +487,16 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    #[test]
+    fn terminal_frontend_encodes_clipboard_effect_as_osc52() {
+        let mut payload = Vec::new();
+        write_frontend_effect(&mut payload, FrontendEffect::SetClipboard("hi".to_owned())).unwrap();
+
+        assert!(payload.starts_with(b"\x1b]52;c;"));
+        assert_eq!(payload.last(), Some(&0x07));
+        assert!(String::from_utf8(payload).unwrap().contains("aGk="));
+    }
 
     #[test]
     fn input_failure_shuts_runtimes_stops_reader_restores_and_keeps_primary_error() {

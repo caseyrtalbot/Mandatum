@@ -1,4 +1,10 @@
-# Charter Closing Ledger
+# Charter Closure — 2026-07-10
+
+> Historical evidence record. This file preserves the state observed at the
+> charter close; it is not a current roadmap or defect ledger. See
+> [`PLAN.md`](../../PLAN.md) for forward work and
+> [`verification.md`](../verification.md) for current procedures and dated
+> measurements.
 
 The honest accounting the mission ends on. Every verification claim below
 traces to evidence that was actually read: the six workflow result records
