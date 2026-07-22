@@ -142,6 +142,11 @@ queue accounting makes the last receive and next enqueue one race-safe state
 transition. PTY readers remain bounded by flow-credit backpressure (256 KiB in
 flight per pane).
 
+The excluded native shell binds that neutral callback to
+`EventLoopProxy<UserEvent>`. The proxy is a disposable platform notification;
+the unified channel remains event truth, and the native shell drains it through
+`FrontendHost` rather than owning a parallel runtime path.
+
 Live runtime state is never serialized as durable truth.
 
 ### Scene Layer (`mandatum-scene`)
@@ -173,9 +178,9 @@ Own rendering and platform input:
 - terminal frontend (`mandatum-renderer`: the ratatui adapter over
   `mandatum-scene`; computes no layout, no direct terminal-engine
   dependency; shipped, v1)
-- GPU-backed frontend (proven as the `spikes/frontend-wgpu` adapter, held
-  warm; see docs/frontend-platform.md)
-- native window / platform-specific frontends (options, not built)
+- excluded native/GPU frontend (`spikes/frontend-wgpu`): a working winit shell
+  over the real `FrontendHost`, with a scene-only GPU renderer; not shipped
+- production native or platform-specific frontends (not admitted)
 
 Frontend adapters should draw a scene and emit input/hit-test events. They do
 not own product behavior.
@@ -206,12 +211,21 @@ and agent forwarders all use clones of one crate-private `AppEventSender`; no
 raw sender escapes. The callback coalesces while events remain queued and the
 channel stays authoritative. No platform waker type exists in the app layer.
 
+The excluded winit shell is the second exercised consumer of this boundary. It
+binds the callback to `EventLoopProxy<UserEvent>`, translates platform events to
+neutral `InputEvent` values, and paints the host's real scene header, terminal
+pane, status strip, and command palette. Its former `TerminalSession`, direct
+parser/input path, and `scene_bridge` are removed; its window, platform-input
+translation, GPU, and paint-scheduling state remain frontend-local.
+
 A native shell may own a window, platform wake handle, DPI/IME state,
 clipboard integration, GPU surface/device resources, glyph caches, and paint
 scheduling. It may not own a second PTY/parser path, command router, approval
 model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
+Restore handling and broader scene/input parity remain Phase 3 work. Artifact
+Preview and production GPU admission remain later, separately gated decisions.
 
 ### `workflows`
 

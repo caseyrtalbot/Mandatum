@@ -1,29 +1,30 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **builds, runs, and produces measured numbers.** A native macOS window
-renders a live shell session on the GPU, with keyboard input, paste, resize,
-scrollback, mouse selection/copy, a status strip, and self-instrumenting
-latency and frame-time collection.
+Status: **Phase 2 complete; builds, runs, and exercises the real workstation
+host.** A native macOS window drives `mandatum_app::FrontendHost` and its real
+`RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
+renders the host's real header, one terminal pane, status strip, and command
+palette on the GPU. Typed clipboard effects return to the native shell.
 
-This is an isolated feasibility frontend. It path-depends on the engine crates
-`mandatum-pty` (PTY runtime) and `mandatum-terminal-vt` (VT parser + grid) and
-contains spike-local PTY/parser/input orchestration rather than the product
-`AppState`/`RuntimeEngine`. Its renderer consumes only `mandatum-scene`. It
-lives outside the Cargo workspace (the root `Cargo.toml` excludes
-`spikes/frontend-wgpu`), so its heavy GPU dependency tree never joins the
-product workspace, build, release artifacts, or merge gate.
-`./ci/gpu-spike.sh` is the explicit, opt-in maintenance check: it runs the
-spike-local format, locked all-target tests, and renderer-boundary checks after
-scene contract or spike changes without promoting these dependencies into
-production.
+This remains an isolated frontend outside the Cargo workspace (the root
+`Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
+never joins the product workspace, build, release artifacts, or merge gate. The
+displayed adapter depends on `mandatum-app`; it no longer owns a
+`TerminalSession`, parser, grid-to-scene bridge, key-to-byte encoder, or
+`AtomicBool` wake coalescer, and it has no direct `mandatum-terminal-vt`
+dependency. The separate `tui_probe` binary still uses `mandatum-pty` as an
+external terminal latency harness. The isolated renderer consumes only
+`mandatum-scene` plus paint/window crates.
 
-Maintenance status (2026-07-21): the excluded lock was refreshed for the
-workspace's `0.2.0` path packages and `./ci/gpu-spike.sh` passed all four
-headless tests plus the renderer-boundary scan. No displayed native-window
-smoke or benchmark was run in this maintenance pass. The later Artifact Preview
-capability decision selects the capability branch, but this spike did not
-implement or prove that typed surface. The adapter remains unshipped, and
-sub-20 ms end-to-end latency is not a product goal.
+Phase 2 verification (2026-07-22): the focused real-host wake test passed once;
+`./ci/gpu-spike.sh` passed six tests plus the renderer-boundary scan;
+`cargo test -p mandatum-app --lib` passed 248 tests; and the full
+`./ci/gate.sh` was green. A displayed macOS smoke typed `printf GPU_HOST_OK`,
+opened the real palette with Ctrl+P, closed it with Escape, quit with Ctrl+Q,
+and left no native-spike or child-shell process. The fresh terminal probe
+measured p50 11.39 ms / p95 12.56 ms / max 13.69 ms over 100 samples with zero
+misses. Restore and broader parity remain Phase 3; Artifact Preview and
+production GPU admission remain pending.
 
 ## Verdict (read this first)
 
@@ -46,36 +47,36 @@ not a ceiling.
 The honest caveat, detailed in the side-by-side section: a large part of that gap
 is the product's **40 ms input poll loop**, not "ratatui vs wgpu" as renderers.
 A lower poll interval would shrink the TUI's bytes-out latency. The GPU
-frontend's durable, non-replicable wins are event-driven + vsync-timed frame
-pacing, GPU-rasterized text, and owning the pixel pipeline end to end. The blunt
+frontend's durable, non-replicable wins are vsync-timed frame pacing,
+GPU-rasterized text, and owning the pixel pipeline end to end. The blunt
 production call is in [Final spike verdict](#final-spike-verdict) at the bottom.
 
 ## Clean-adapter conformance (scene binding)
 
-The renderer no longer reads the terminal grid. It consumes only the
-`mandatum-scene` contract that every Mandatum frontend consumes, with the
-grid -> scene conversion isolated in one module, exactly as the product app
-splits `scene_builder.rs` from its ratatui renderer.
+The renderer does not read a terminal grid. It consumes the `WorkspaceScene`
+and `Theme` from the real host's `FrameSnapshot`; the product app alone performs
+grid-to-scene conversion in `crates/app/src/scene_builder.rs`.
 
-How the boundary is enforced in the spike's module structure:
+How the Phase 2 boundary is enforced:
 
-| Module | Imports `mandatum-terminal-vt`? | Role |
-|--------|:---:|------|
-| `src/terminal.rs` | yes | owns the PTY + VT parser + grid |
-| `src/scene_bridge.rs` | yes | the ONLY grid -> scene seam; builds a `WorkspaceScene` each frame |
-| `gpu-renderer` + `src/gpu.rs` | **cannot** | separate crate; paints from `WorkspaceScene` / `TerminalSurface` / `SceneCell` / `SceneColor` only |
-| `src/main.rs` | no | builds the scene via `scene_bridge`, hands `&WorkspaceScene` to the renderer |
+| Module | Product/runtime role |
+|--------|----------------------|
+| `mandatum-app::FrontendHost` | owns the only `AppState`, `RuntimeEngine`, PTY/parser path, command routing, recovery, and scene construction |
+| `src/main.rs` | owns winit translation, `EventLoopProxy` wake binding, clipboard integration, heartbeat/redraw scheduling, and instrumentation |
+| `gpu-renderer` + `src/gpu.rs` | paints only `WorkspaceScene` + `Theme`; its normal dependency tree cannot contain PTY or parser packages |
+| `src/bin/tui_probe.rs` | external terminal latency harness; not workstation state |
 
-Verified structurally: `gpu-renderer` is a separate spike-local crate whose
-normal dependency tree contains `mandatum-scene` and the GPU paint stack but no
-PTY or parser package. Each frame `scene_bridge::build_scene`
-windows the grid into a `TerminalSurface` (the same `terminal_surface` logic as
-`crates/app/src/scene_builder.rs`: `rows` windowed to the viewport, `first_row`
-absolute, cursor/selection in absolute coordinates), wraps it in a single-pane
-`WorkspaceScene`, and the renderer uses the surface's own `selection_contains`
-and `cursor_at` helpers to place highlight and cursor quads. Copy-mode selection
-was also made inclusive-end in `text_in_range` to match the scene contract's
-inclusive selection span, so copied text agrees with the highlight.
+`prepare_scene` is the window/GPU-free renderer seam used by the controlled
+integration test and by the displayed renderer. It accepts the real header,
+one terminal pane, status, theme, and optional palette while explicitly
+rejecting Phase 3 shapes. The displayed renderer uses the scene's pane-inner
+geometry, chrome, terminal surface, status, and palette data rather than
+deriving product presentation itself.
+
+The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
+relevant only to the historical 2026-07-09 benchmark evidence below. Both files
+were deleted in Phase 2 along with the direct VT-parser dependency and duplicate
+input/wake state.
 
 Re-measured after the binding, there is **no regression**: typing-bench came back
 p50 21.6 ms / p95 22.2 ms (identical to the pre-binding p50 21.6 ms), and the
@@ -135,6 +136,12 @@ key-to-app-output-bytes only;
 host-terminal paint is excluded, so it is not evidence of sub-20 ms end-to-end
 latency and does not trigger GPU productization.
 
+**Phase 2 refresh (2026-07-22):** after the excluded native adapter moved onto
+the real host, the live terminal probe measured **p50 11.39 ms / p95 12.56 ms /
+max 13.69 ms** over 100 samples with zero misses. This is still the terminal
+frontend's key-to-app-output endpoint, excludes host-terminal paint, and is not
+a native key-to-present or production-admission measurement.
+
 ## Text stack chosen
 
 | Crate | Version | Role |
@@ -164,9 +171,10 @@ does not: per-cell background colors, the block cursor, the selection highlight,
 and the status strip. Backgrounds/cursor/selection are solid quads under the
 text; the glyphs composite on top with alpha blending.
 
-## Measured numbers
+## Historical measured numbers (2026-07-09)
 
-Instrumentation method (also embedded in each JSON `notes` field): input is
+The following results preserve the original duplicate-host feasibility run.
+Its instrumentation method (also embedded in each JSON `notes` field): input is
 timestamped at winit event receipt (real key, or the synthetic bench injection,
 through the *same* input path); present is timestamped immediately after
 `queue.submit` + `queue.present`. One pending input is correlated per PTY-driven
@@ -209,7 +217,8 @@ time while ~1.28 MB streams and scrolls:
   falls behind, back-pressuring the shell exactly like a real terminal instead
   of buffering the whole flood instantly), plus a per-frame byte cap on the
   parser feed (so one pump does not race the reader and swallow the entire flood
-  in a single repaint). Both live in `src/terminal.rs`.
+  in a single repaint). Both lived in the now-deleted `src/terminal.rs`; this
+  paragraph is historical evidence, not the Phase 2 architecture.
 
 ### 3. Plain interactive: `--exit-after 6`
 Live shell prompt, no bench: renders the prompt, sits idle, exits cleanly at the
@@ -218,27 +227,28 @@ panic, exit 0).
 
 ## What works
 
-- Live shell (`$SHELL`, zsh here) spawned via `mandatum-pty`, output parsed by
-  `mandatum-terminal-vt` into grid snapshots rendered every frame.
-- Keyboard input: printable text, Enter/Backspace/Tab/Esc, arrows, Home/End/Del,
-  Ctrl+letter control codes, all encoded to PTY bytes through one shared path
-  used by both real and synthetic input.
-- Paste via Cmd+V (arboard clipboard read), copy via Cmd+C from a mouse
-  selection.
-- Smooth window resize: PTY + parser grid resize together on the fly, grid
-  columns/rows recomputed from measured monospace cell metrics; no tearing or
-  panics observed across the runs.
-- Scrollback: mouse-wheel and PageUp/PageDown scroll through history via the
-  grid's `history_cell(absolute_row, column)` API, with the viewport staying
-  anchored as new output pushes lines into scrollback.
-- Mouse selection: click-drag highlights cells (reading-order selection in
-  absolute grid coordinates, so it survives scrolling), Cmd+C copies the text.
-- Status strip: shell name, grid size, live/scroll state, fps, and live latency
-  p50/p95, one line at the bottom over its own quad background.
+- A real shell is spawned and owned by the host's existing `RuntimeEngine`;
+  output reaches the GPU only through real runtime events and a real
+  `FrameSnapshot` terminal surface.
+- The host's coalesced callback wakes winit through `EventLoopProxy<UserEvent>`;
+  the spike has no second wake latch and does not interval-poll for PTY output.
+- Keyboard, pointer, wheel, resize, focus, and paste input cross into the host as
+  neutral `InputEvent` values. Product key-to-byte encoding, scrollback,
+  selection, command routing, and quit behavior remain behind the host.
+- Cmd+V reads arboard into `InputEvent::Paste`; typed
+  `FrontendEffect::SetClipboard` values are drained back to arboard.
+- The real scene header, focused terminal pane and chrome, status strip, and
+  Ctrl+P command palette render from scene/theme data. Escape closes the real
+  palette and Ctrl+Q performs the real host quit path.
+- Window resize and scale changes recompute scene cell dimensions and send a
+  neutral resize to the host; the app/runtime owns PTY and parser resizing.
 - ANSI color: 16-color, 256-color cube, grayscale ramp, and direct RGB, plus
   inverse (fg/bg swap). Rendered as GPU quad backgrounds + colored glyph runs.
 - Deterministic instrumentation with `--typing-bench`, `--flood`, and
   `--exit-after N` (JSON summary to stdout).
+- A headless integration test starts a real PTY through `FrontendHost`, blocks
+  on the injected wake callback, drains runtime events, and prepares the real
+  terminal scene through the renderer boundary.
 - No-display / wedge safety: `EventLoop::new()`, window creation, and GPU
   adapter/device requests each fail to a clean JSON error line and a non-zero
   exit rather than hanging, and a watchdog thread hard-exits if the event loop
@@ -259,24 +269,24 @@ panic, exit 0).
   cosmic-text line layout. It holds for standard monospace ASCII; wide
   characters (CJK, emoji) and zero-width/combining marks are not width-corrected,
   so a line mixing widths can drift from the background quad grid.
-- **No IME / dead keys / composition.** Input uses `KeyEvent.text` and named
-  keys directly; there is no `Ime` event handling.
-- **Latency correlation is heuristic.** One pending input per PTY-driven present
-  under a FIFO-echo assumption. At 30/sec with sub-frame echo this is effectively
-  1:1, but batched echoes could misattribute a sample. Honest for a spike, not a
-  profiler.
-- **No true-headless verification.** The clean-error paths for a display-less
-  environment are implemented but untested in this display-having session.
+- **No IME / dead keys / composition.** Input uses `KeyEvent.logical_key` and
+  named keys directly; there is no `Ime` event handling.
+- **Latency correlation is heuristic.** One pending input is correlated per
+  runtime-driven present under a FIFO-echo assumption. At 30/sec with sub-frame
+  echo this is effectively 1:1, but non-PTY runtime events or batched echoes
+  could misattribute a sample. Honest for a spike, not a profiler.
+- **No headless GPU presentation.** The real host-to-render-plan path is covered
+  without a window, but device/surface acquisition and present still require the
+  displayed smoke.
 - **Bold/dim/italic/underline are mostly ignored** in rendering (the style bits
   are read; only inverse is honored). Colors and inverse render; weight/slant do
   not yet map to font attributes.
 
 ## What a production adapter would still need
 
-- **Complete the scene binding.** The GPU renderer already consumes only
-  `mandatum-scene`; `scene_bridge` is the isolated grid-to-scene seam. The spike
-  deliberately constructs one terminal pane, so production still needs full
-  multi-pane, header, task/agent, hit-target, and overlay handling.
+- **Complete broader scene parity.** Header, one terminal pane, status, theme,
+  and command palette are bound. Production still needs restore, multiple panes,
+  task/agent content, hit-target parity, and the remaining overlay variants.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
@@ -292,27 +302,25 @@ panic, exit 0).
   and strikethrough via glyphon decorations (the style bits are already carried
   through from the parser).
 - **Robustness**: surface-lost/outdated reconfigure loop (currently skips the
-  frame), GPU device-loss recovery, and a real backpressure policy tied to the
-  engine's `BackpressureState` rather than a fixed queue depth.
+  frame), GPU device-loss recovery, and native scheduling policy under mixed
+  runtime-event floods.
 
 ## Reproduce
 
 ```sh
-cd spikes/frontend-wgpu
-cargo build --release
-cargo run --release -- --exit-after 12 --typing-bench   # latency
-cargo run --release -- --exit-after 14 --flood           # frame time under scroll
-cargo run --release -- --exit-after 6                     # plain interactive
+cargo test --manifest-path spikes/frontend-wgpu/Cargo.toml --test host_wake
+./ci/gpu-spike.sh
+cargo build --release --manifest-path spikes/frontend-wgpu/Cargo.toml \
+  --bin mandatum-frontend-wgpu-spike
+spikes/frontend-wgpu/target/release/mandatum-frontend-wgpu-spike --exit-after 120
 ```
 
-A native window appears for the duration of each run and closes at the deadline;
-the JSON summary prints to stdout on exit. Source modules:
-`src/terminal.rs` (PTY + parser adapter, backpressure, scroll/selection),
-`src/scene_bridge.rs` (grid -> `mandatum-scene` conversion, the only parser/scene
-seam), `gpu-renderer` + `src/gpu.rs` (structurally isolated wgpu surface, quad
-pipeline, glyphon text, paints from the scene), `src/stats.rs` (percentiles),
-`src/main.rs` (event loop, input encoding,
-bench, instrumentation, JSON summary), `src/bin/tui_probe.rs` (external ratatui
+For the displayed Phase 2 smoke, type `printf GPU_HOST_OK`, open the palette with
+Ctrl+P, close it with Escape, and quit with Ctrl+Q; confirm no native-spike or
+child-shell process remains. Source modules: `src/main.rs` (winit translation,
+host ownership, wake/effect/heartbeat/redraw scheduling, instrumentation),
+`gpu-renderer` + `src/gpu.rs` (structurally isolated scene/theme-to-GPU paint),
+`src/stats.rs` (percentiles), and `src/bin/tui_probe.rs` (external terminal
 latency probe).
 
 ## Final spike verdict
@@ -330,15 +338,18 @@ the shared adapter boundary.
 
 The comparison also exposed why the adapter did not ship. Much of the gap came
 from the terminal frontend's then-current 40 ms poll loop, which was later
-removed without GPU work. A production wgpu adapter still needs full
-multi-pane/overlay/header binding, correct grapheme width, IME and composition,
-runtime DPI, full style mapping, surface-loss recovery, and damage tracking.
+removed without GPU work. Phase 2 subsequently replaced the duplicate spike
+host with the real `FrontendHost` and completed the header, one-terminal,
+status, palette, neutral-input, wake, and typed-effect slice. A production wgpu
+adapter still needs restore, multi-pane and broader scene parity, correct
+grapheme width, IME and composition, runtime DPI, full style mapping,
+surface-loss recovery, and damage tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selects the
-capability branch; this dated spike still does not prove that surface or admit
-production GPU dependencies. The 2026-07-14 terminal result is p50 11.71 ms to
-bytes-out and remains incomparable to key-to-present.
+capability branch; Phase 2 still does not prove that surface or admit production
+GPU dependencies. The Phase 2 terminal refresh is p50 11.39 ms to bytes-out and
+remains incomparable to key-to-present.
 
 
 ## Correction note (2026-07-10)

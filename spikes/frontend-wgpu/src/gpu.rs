@@ -10,10 +10,12 @@ use glyphon::{
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 // The renderer consumes ONLY the scene contract. It never imports
-// mandatum-terminal-vt: the grid -> scene conversion lives in scene_bridge.rs,
-// so no parser type crosses into the paint path. This is the clean-adapter
-// boundary the spike is proving.
-use mandatum_scene::{PaneContent, PaneScene, SceneColor, TerminalSurface, WorkspaceScene};
+// mandatum-terminal-vt: the real app host converts its grids before the
+// snapshot reaches this crate, so no parser type crosses into paint.
+use mandatum_scene::{
+    OverlayScene, PaletteOverlay, PaneContent, PaneScene, SceneColor, TerminalSurface, Theme,
+    WorkspaceScene, layout,
+};
 use winit::window::Window;
 
 const DEFAULT_FG: [u8; 3] = [220, 220, 224];
@@ -26,7 +28,7 @@ const BASE_FONT_PT: f32 = 15.0;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum UnsupportedScene {
-    Overlay,
+    Overlay(&'static str),
     PaneCount(usize),
     PaneContent(&'static str),
 }
@@ -34,7 +36,7 @@ pub enum UnsupportedScene {
 impl std::fmt::Display for UnsupportedScene {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Overlay => write!(f, "overlays are not implemented"),
+            Self::Overlay(kind) => write!(f, "{kind} overlays are not implemented"),
             Self::PaneCount(count) => {
                 write!(f, "expected exactly one pane, received {count}")
             }
@@ -46,23 +48,71 @@ impl std::fmt::Display for UnsupportedScene {
 /// Validate the deliberately narrow spike boundary without touching a GPU.
 /// Production-only scene shapes fail explicitly instead of being silently
 /// ignored while the renderer paints whichever terminal pane appears first.
-fn supported_terminal_scene(
-    scene: &WorkspaceScene,
-) -> Result<(&PaneScene, &TerminalSurface), UnsupportedScene> {
-    if scene.overlay.is_some() {
-        return Err(UnsupportedScene::Overlay);
+#[derive(Debug)]
+pub struct PreparedScene<'a> {
+    scene: &'a WorkspaceScene,
+    theme: &'a Theme,
+    pane: &'a PaneScene,
+    terminal: &'a TerminalSurface,
+    palette: Option<&'a PaletteOverlay>,
+}
+
+impl PreparedScene<'_> {
+    pub fn header_text(&self) -> &str {
+        &self.scene.header.text
     }
+
+    pub fn pane_title(&self) -> &str {
+        &self.pane.title
+    }
+
+    pub fn theme_name(&self) -> &str {
+        &self.theme.name
+    }
+
+    pub fn has_palette(&self) -> bool {
+        self.palette.is_some()
+    }
+}
+
+/// Prepare the deliberately narrow Phase 2 paint plan without a window or
+/// GPU. The displayed renderer consumes this same value, so the excluded
+/// integration test exercises the real host-to-renderer boundary headlessly.
+pub fn prepare_scene<'a>(
+    scene: &'a WorkspaceScene,
+    theme: &'a Theme,
+) -> Result<PreparedScene<'a>, UnsupportedScene> {
     if scene.panes.len() != 1 {
         return Err(UnsupportedScene::PaneCount(scene.panes.len()));
     }
 
     let pane = &scene.panes[0];
-    match &pane.content {
-        PaneContent::Terminal(surface) => Ok((pane, surface)),
-        PaneContent::Task(_) => Err(UnsupportedScene::PaneContent("task")),
-        PaneContent::Agent(_) => Err(UnsupportedScene::PaneContent("agent")),
-        PaneContent::Empty(_) => Err(UnsupportedScene::PaneContent("empty")),
-    }
+    let terminal = match &pane.content {
+        PaneContent::Terminal(surface) => surface,
+        PaneContent::Task(_) => return Err(UnsupportedScene::PaneContent("task")),
+        PaneContent::Agent(_) => return Err(UnsupportedScene::PaneContent("agent")),
+        PaneContent::Empty(_) => return Err(UnsupportedScene::PaneContent("empty")),
+    };
+    let palette = match &scene.overlay {
+        Some(OverlayScene::Palette(palette)) => Some(palette),
+        Some(OverlayScene::ContextMenu(_)) => {
+            return Err(UnsupportedScene::Overlay("context menu"));
+        }
+        Some(OverlayScene::Timeline(_)) => return Err(UnsupportedScene::Overlay("timeline")),
+        Some(OverlayScene::SessionMap(_)) => return Err(UnsupportedScene::Overlay("session map")),
+        Some(OverlayScene::Prompt(_)) => return Err(UnsupportedScene::Overlay("prompt")),
+        Some(OverlayScene::Search(_)) => return Err(UnsupportedScene::Overlay("search")),
+        Some(OverlayScene::Help(_)) => return Err(UnsupportedScene::Overlay("help")),
+        Some(OverlayScene::Welcome(_)) => return Err(UnsupportedScene::Overlay("welcome")),
+        None => None,
+    };
+    Ok(PreparedScene {
+        scene,
+        theme,
+        pane,
+        terminal,
+        palette,
+    })
 }
 
 pub struct GpuText {
@@ -87,8 +137,11 @@ pub struct GpuText {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
+    header_buffer: Buffer,
+    title_buffer: Buffer,
     text_buffer: Buffer,
     status_buffer: Buffer,
+    overlay_buffer: Buffer,
 
     scale: f32,
     font_size: f32,
@@ -251,8 +304,11 @@ impl GpuText {
         let font_size = (BASE_FONT_PT * scale).round();
         let line_height = (font_size * 1.3).round();
         let metrics = Metrics::new(font_size, line_height);
+        let header_buffer = Buffer::new(&mut font_system, metrics);
+        let title_buffer = Buffer::new(&mut font_system, metrics);
         let text_buffer = Buffer::new(&mut font_system, metrics);
         let status_buffer = Buffer::new(&mut font_system, metrics);
+        let overlay_buffer = Buffer::new(&mut font_system, metrics);
         let cell_w = measure_cell_width(&mut font_system, metrics);
         let cell_h = line_height;
 
@@ -273,8 +329,11 @@ impl GpuText {
             viewport,
             atlas,
             text_renderer,
+            header_buffer,
+            title_buffer,
             text_buffer,
             status_buffer,
+            overlay_buffer,
             scale,
             font_size,
             cell_w,
@@ -308,8 +367,11 @@ impl GpuText {
         self.font_size = (BASE_FONT_PT * scale).round();
         let line_height = (self.font_size * 1.3).round();
         let metrics = Metrics::new(self.font_size, line_height);
+        self.header_buffer.set_metrics(metrics);
+        self.title_buffer.set_metrics(metrics);
         self.text_buffer.set_metrics(metrics);
         self.status_buffer.set_metrics(metrics);
+        self.overlay_buffer.set_metrics(metrics);
         self.cell_w = measure_cell_width(&mut self.font_system, metrics);
         self.cell_h = line_height;
     }
@@ -320,16 +382,65 @@ impl GpuText {
     /// `present()` for input-to-present measurement. `Ok(None)` means the
     /// swapchain frame could not be acquired; unsupported scene shapes return
     /// a visible adapter error instead of being skipped or panicking.
-    pub fn render(&mut self, scene: &WorkspaceScene) -> Result<Option<Instant>, UnsupportedScene> {
-        let (pane, surface) = supported_terminal_scene(scene)?;
-        let origin_x = pane.area.x as f32 * self.cell_w;
-        let origin_y = pane.area.y as f32 * self.cell_h;
+    pub fn render(
+        &mut self,
+        scene: &WorkspaceScene,
+        theme: &Theme,
+    ) -> Result<Option<Instant>, UnsupportedScene> {
+        let prepared = prepare_scene(scene, theme)?;
+        let pane = prepared.pane;
+        let surface = prepared.terminal;
+        let inner = layout::pane_inner_rect(pane.area);
+        let origin_x = inner.x as f32 * self.cell_w;
+        let origin_y = inner.y as f32 * self.cell_h;
 
         // Assemble foreground text (rich-text color runs) and background quads,
         // painting straight from the scene surface.
         let mut screen_text = String::new();
         let mut runs: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
         let mut quads: Vec<f32> = Vec::with_capacity(1024);
+
+        let header_background = resolve(theme.header_background, DEFAULT_BG);
+        push_quad(
+            &mut quads,
+            scene.header.area.x as f32 * self.cell_w,
+            scene.header.area.y as f32 * self.cell_h,
+            scene.header.area.width as f32 * self.cell_w,
+            scene.header.area.height as f32 * self.cell_h,
+            [
+                header_background[0],
+                header_background[1],
+                header_background[2],
+                255,
+            ],
+        );
+
+        let border = resolve(theme.pane_border, DEFAULT_FG);
+        let border_rgba = [border[0], border[1], border[2], 255];
+        let pane_x = pane.area.x as f32 * self.cell_w;
+        let pane_y = pane.area.y as f32 * self.cell_h;
+        let pane_width = pane.area.width as f32 * self.cell_w;
+        let pane_height = pane.area.height as f32 * self.cell_h;
+        if pane.area.width > 0 && pane.area.height > 0 {
+            push_quad(&mut quads, pane_x, pane_y, pane_width, 1.0, border_rgba);
+            push_quad(
+                &mut quads,
+                pane_x,
+                pane_y + pane_height - 1.0,
+                pane_width,
+                1.0,
+                border_rgba,
+            );
+            push_quad(&mut quads, pane_x, pane_y, 1.0, pane_height, border_rgba);
+            push_quad(
+                &mut quads,
+                pane_x + pane_width - 1.0,
+                pane_y,
+                1.0,
+                pane_height,
+                border_rgba,
+            );
+        }
 
         for (y, row) in surface.rows.iter().enumerate() {
             let abs = surface.first_row + y;
@@ -381,11 +492,56 @@ impl GpuText {
             screen_text.push('\n');
         }
 
-        // Status geometry and text are carried by the current scene contract.
+        // Header, pane title, status, and optional palette all come from the
+        // real scene contract; the native shell derives no product chrome.
+        let header_x = scene.header.area.x as f32 * self.cell_w;
+        let header_y = scene.header.area.y as f32 * self.cell_h;
+        let header_fg = resolve(theme.header, DEFAULT_FG);
+        self.header_buffer
+            .set_size(Some(self.config.width as f32), Some(self.cell_h));
+        self.header_buffer.set_text(
+            &scene.header.text,
+            &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                header_fg[0],
+                header_fg[1],
+                header_fg[2],
+            )),
+            Shaping::Advanced,
+            None,
+        );
+        self.header_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        let title_x = (pane.area.x.saturating_add(1)) as f32 * self.cell_w;
+        let title_y = pane.area.y as f32 * self.cell_h;
+        let title_fg = resolve(
+            if pane.focused {
+                theme.focus_title
+            } else {
+                theme.pane_title
+            },
+            DEFAULT_FG,
+        );
+        self.title_buffer
+            .set_size(Some(pane_width.max(1.0)), Some(self.cell_h));
+        self.title_buffer.set_text(
+            &pane.title,
+            &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                title_fg[0],
+                title_fg[1],
+                title_fg[2],
+            )),
+            Shaping::Advanced,
+            None,
+        );
+        self.title_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
         let status_x = scene.status.area.x as f32 * self.cell_w;
         let status_y = scene.status.area.y as f32 * self.cell_h;
         let status_width = scene.status.area.width as f32 * self.cell_w;
         let status = scene.status.text.as_str();
+        let status_fg = resolve(theme.status, STATUS_FG);
         push_quad(
             &mut quads,
             status_x,
@@ -415,15 +571,85 @@ impl GpuText {
         self.status_buffer.set_text(
             status,
             &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                STATUS_FG[0],
-                STATUS_FG[1],
-                STATUS_FG[2],
+                status_fg[0],
+                status_fg[1],
+                status_fg[2],
             )),
             Shaping::Advanced,
             None,
         );
         self.status_buffer
             .shape_until_scroll(&mut self.font_system, false);
+
+        let mut overlay_position = None;
+        if let Some(palette) = prepared.palette {
+            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
+            push_quad(
+                &mut quads,
+                palette.area.x as f32 * self.cell_w,
+                palette.area.y as f32 * self.cell_h,
+                palette.area.width as f32 * self.cell_w,
+                palette.area.height as f32 * self.cell_h,
+                [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255],
+            );
+            let palette_inner = layout::pane_inner_rect(palette.area);
+            let window =
+                layout::palette_item_window(palette_inner, palette.items.len(), palette.selected);
+            let mut lines = vec![String::new(); usize::from(palette.area.height)];
+            if !lines.is_empty() {
+                lines[0] = " Command Palette ".to_owned();
+            }
+            if lines.len() > 1 {
+                lines[1] = format!("> {}_", palette.query);
+            }
+            for (row, index) in window.clone().enumerate() {
+                let item = &palette.items[index];
+                let hint = item
+                    .key_hint
+                    .as_deref()
+                    .map_or(String::new(), |hint| format!("  {hint}"));
+                let line = format!(" {}{hint}  {}", item.label, item.detail);
+                if let Some(slot) = lines.get_mut(row + 2) {
+                    *slot = line;
+                }
+                if palette.selected == Some(index) {
+                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
+                    push_quad(
+                        &mut quads,
+                        palette_inner.x as f32 * self.cell_w,
+                        (palette_inner.y + 1 + row as u16) as f32 * self.cell_h,
+                        palette_inner.width as f32 * self.cell_w,
+                        self.cell_h,
+                        [selection[0], selection[1], selection[2], 190],
+                    );
+                }
+            }
+            if let Some(last) = lines.last_mut() {
+                *last = palette.footer.clone();
+            }
+            let overlay_text = lines.join("\n");
+            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            self.overlay_buffer.set_size(
+                Some(palette.area.width as f32 * self.cell_w),
+                Some(palette.area.height as f32 * self.cell_h),
+            );
+            self.overlay_buffer.set_text(
+                &overlay_text,
+                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                    overlay_fg[0],
+                    overlay_fg[1],
+                    overlay_fg[2],
+                )),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            overlay_position = Some((
+                palette.area.x as f32 * self.cell_w,
+                palette.area.y as f32 * self.cell_h,
+            ));
+        }
 
         // Upload quad instances (grow buffer if needed).
         if quads.len() > self.inst_capacity_floats {
@@ -460,6 +686,57 @@ impl GpuText {
             right: self.config.width as i32,
             bottom: self.config.height as i32,
         };
+        let mut text_areas = vec![
+            TextArea {
+                buffer: &self.header_buffer,
+                left: header_x,
+                top: header_y,
+                scale: 1.0,
+                bounds: full,
+                default_color: GColor::rgb(header_fg[0], header_fg[1], header_fg[2]),
+                custom_glyphs: &[],
+            },
+            TextArea {
+                buffer: &self.title_buffer,
+                left: title_x,
+                top: title_y,
+                scale: 1.0,
+                bounds: full,
+                default_color: GColor::rgb(title_fg[0], title_fg[1], title_fg[2]),
+                custom_glyphs: &[],
+            },
+            TextArea {
+                buffer: &self.text_buffer,
+                left: origin_x,
+                top: origin_y,
+                scale: 1.0,
+                bounds: full,
+                default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
+                custom_glyphs: &[],
+            },
+            TextArea {
+                buffer: &self.status_buffer,
+                left: status_x + 6.0,
+                top: status_y,
+                scale: 1.0,
+                bounds: full,
+                default_color: GColor::rgb(status_fg[0], status_fg[1], status_fg[2]),
+                custom_glyphs: &[],
+            },
+        ];
+        if let Some((left, top)) = overlay_position {
+            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            text_areas.push(TextArea {
+                buffer: &self.overlay_buffer,
+                left,
+                top,
+                scale: 1.0,
+                bounds: full,
+                default_color: GColor::rgb(overlay_fg[0], overlay_fg[1], overlay_fg[2]),
+                custom_glyphs: &[],
+            });
+        }
+
         if self
             .text_renderer
             .prepare(
@@ -468,26 +745,7 @@ impl GpuText {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [
-                    TextArea {
-                        buffer: &self.text_buffer,
-                        left: 0.0,
-                        top: 0.0,
-                        scale: 1.0,
-                        bounds: full,
-                        default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
-                        custom_glyphs: &[],
-                    },
-                    TextArea {
-                        buffer: &self.status_buffer,
-                        left: status_x + 6.0,
-                        top: status_y,
-                        scale: 1.0,
-                        bounds: full,
-                        default_color: GColor::rgb(STATUS_FG[0], STATUS_FG[1], STATUS_FG[2]),
-                        custom_glyphs: &[],
-                    },
-                ],
+                text_areas,
                 &mut self.swash_cache,
             )
             .is_err()
@@ -719,10 +977,11 @@ mod tests {
     #[test]
     fn current_single_terminal_scene_is_supported_headlessly() {
         let scene = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
-        let (selected_pane, surface) = supported_terminal_scene(&scene).unwrap();
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
 
-        assert_eq!(selected_pane.id, PaneId::new("pane-1"));
-        assert_eq!(surface.rows.len(), 1);
+        assert_eq!(prepared.pane.id, PaneId::new("pane-1"));
+        assert_eq!(prepared.terminal.rows.len(), 1);
         assert_eq!(scene.status.text, "test status");
     }
 
@@ -736,8 +995,8 @@ mod tests {
             dismissal: "dismiss".to_owned(),
         }));
         assert_eq!(
-            supported_terminal_scene(&with_overlay).unwrap_err(),
-            UnsupportedScene::Overlay
+            prepare_scene(&with_overlay, &Theme::default()).unwrap_err(),
+            UnsupportedScene::Overlay("welcome")
         );
 
         let multiple = scene(vec![
@@ -745,7 +1004,7 @@ mod tests {
             pane(PaneSceneKind::Terminal, terminal_content()),
         ]);
         assert_eq!(
-            supported_terminal_scene(&multiple).unwrap_err(),
+            prepare_scene(&multiple, &Theme::default()).unwrap_err(),
             UnsupportedScene::PaneCount(2)
         );
     }
@@ -786,7 +1045,7 @@ mod tests {
         ] {
             let scene = scene(vec![pane(kind, content)]);
             assert_eq!(
-                supported_terminal_scene(&scene).unwrap_err(),
+                prepare_scene(&scene, &Theme::default()).unwrap_err(),
                 UnsupportedScene::PaneContent(expected)
             );
         }

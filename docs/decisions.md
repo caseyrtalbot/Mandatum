@@ -1358,3 +1358,59 @@ ms / max 13.38 ms over 100 samples with zero misses; as before, this is
 key-to-app-output evidence and excludes host-terminal paint. `./ci/gate.sh`
 passed 467 tests with 2 intentionally ignored live-Claude-CLI tests, plus
 formatting, Clippy with warnings denied, build, conformance, and doc trace.
+
+## Accepted: The Excluded Native Adapter Exercises The Real Workstation Host
+
+Status: accepted (2026-07-22)
+
+Decision: Phase 2 is complete. The excluded winit/wgpu adapter owns platform
+windowing, GPU resources, clipboard access, event translation, paint scheduling,
+heartbeat cadence, and latency instrumentation, while one
+`FrontendHost`/`RuntimeEngine` owns workstation behavior. The host's coalesced
+wake callback sends `UserEvent::Wake` through `EventLoopProxy`; winit keyboard,
+pointer, paste, resize, and focus events cross the boundary only as neutral
+`mandatum_scene::input::InputEvent` values. The renderer consumes the real
+`FrameSnapshot` scene and theme and paints the real header, one terminal pane,
+status strip, and command-palette overlay. Typed `FrontendEffect` values return
+clipboard writes to the native shell.
+
+Context: the feasibility spike had a parallel `TerminalSession`, a direct VT
+parser dependency, a spike-local grid-to-scene bridge, duplicate terminal-byte
+input encoding, and a separate `AtomicBool` wake coalescer. That architecture
+proved GPU feasibility but could not prove that a native shell could operate the
+real workstation state machine or share its wake, runtime, recovery, command,
+and scene boundaries.
+
+Rationale: binding the excluded adapter to the public host proves the smallest
+real native workstation slice without admitting GUI dependencies into product
+crates or copying product behavior into the spike. Queue-transition truth stays
+inside `AppEventSender`; `EventLoopProxy` is only a disposable platform wake.
+The native renderer receives product-composed chrome and palette data rather
+than deriving workstation presentation from PTY state.
+
+Consequences: `TerminalSession`, `scene_bridge`, the direct
+`mandatum-terminal-vt` dependency, the duplicate key-to-byte encoder, and the
+duplicate `AtomicBool` wake latch are removed. The standalone `tui_probe` keeps
+its direct `mandatum-pty` dependency as a terminal latency harness; the displayed
+native workstation path does not own a PTY or parser. Startup restore is
+deliberately disabled for this one-terminal proof. Restore, multiple panes,
+task/agent content, remaining overlays, and broader input parity stay in Phase
+3. The spike remains excluded from the workspace and release artifacts.
+Artifact Preview is still unbuilt, and this decision does not admit production
+GPU dependencies.
+
+Verification: the focused
+`cargo test --manifest-path spikes/frontend-wgpu/Cargo.toml --test host_wake`
+run passed one test proving a real host PTY wakes the callback without interval
+polling and reaches a real terminal `FrameSnapshot`. `./ci/gpu-spike.sh` passed
+six tests plus the renderer dependency-boundary scan. `cargo test -p
+mandatum-app --lib` passed 248 tests, and the full `./ci/gate.sh` was green. The
+displayed macOS smoke built with
+`cargo build --release --manifest-path spikes/frontend-wgpu/Cargo.toml --bin mandatum-frontend-wgpu-spike`
+and ran
+`spikes/frontend-wgpu/target/release/mandatum-frontend-wgpu-spike --exit-after 120`;
+`printf GPU_HOST_OK`, Ctrl+P, Escape, and Ctrl+Q exercised terminal output,
+palette open/close, and clean quit, after which no native-spike or child-shell
+process remained. The fresh `tui_probe` measured p50 11.39 ms / p95 12.56 ms /
+max 13.69 ms over 100 samples with zero misses; that endpoint remains
+key-to-app-output bytes and excludes host-terminal paint.

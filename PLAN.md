@@ -110,11 +110,14 @@ more useful without pretending the wider vision is finished:
   pixel-native preview panes with a deterministic terminal fallback. Phase
   1 is complete: neutral effects, the shared host, the coalesced wake-aware
   sender, and shipped-terminal adoption all exercise one state machine. Phase
-  2 is next and remains confined to the excluded spike: replace its duplicate
-  runtime/input path with `FrontendHost` before adding Artifact Preview types.
-  Production GPU dependencies and release admission remain blocked until the
-  typed artifact scene surface, adapter tests, and later admission decision
-  exist.
+  2 is also complete inside the excluded spike: its winit shell now drives the
+  real `FrontendHost`, wakes through `EventLoopProxy`, translates neutral input,
+  and paints the real header, terminal pane, status strip, and command palette
+  without its former duplicate PTY/parser state machine. Phase 3 scene and input
+  parity is next, beginning narrowly with real task and agent pane content.
+  Restore remains parity work. Production GPU dependencies and release
+  admission remain blocked until the typed artifact scene surface, adapter
+  tests, and later admission decision exist; Artifact Preview remains unbuilt.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.

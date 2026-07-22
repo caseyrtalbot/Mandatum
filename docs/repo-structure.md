@@ -101,7 +101,7 @@ no layout and has no terminal-engine dependency (banned by the L1 gate).
 
 ### `crates/app`
 
-The terminal app runtime:
+The shared workstation runtime and shipped terminal shell:
 
 - `app_shell.rs`: crossterm/terminal lifecycle, input-reader lifecycle,
   heartbeat/redraw scheduling, renderer handoff, and terminal effect encoding;
@@ -109,7 +109,8 @@ The terminal app runtime:
 - `frontend_host.rs`: exported frontend-neutral owner of one private
   `AppState`; blocking/bounded event consumption, heartbeat work, owned
   `FrameSnapshot` scene/theme/revision values, FIFO effects, quit, and
-  idempotent shutdown; optional neutral wake-callback installation
+  idempotent shutdown; optional neutral wake-callback installation used by the
+  excluded winit shell
 - `app_state.rs`: command dispatch plus durable workspace, timeline, status,
   and presentation folds over typed runtime effects
 - `app_state/tests.rs`: private app-state unit and live-PTY tests
@@ -153,9 +154,11 @@ history (see docs/workflows.md for what remains unbuilt here).
 ## Spikes And Examples
 
 ```text
-spikes/frontend-wgpu/   winit+wgpu GPU frontend spike + tui_probe latency
-                        harness; its gpu-renderer/ member is a scene-only paint
-                        crate; RESULTS.md is the evidence record
+spikes/frontend-wgpu/   excluded winit shell over mandatum-app FrontendHost,
+                        neutral input translation, GPU presentation, and the
+                        tui_probe latency harness; its gpu-renderer/ member is
+                        a scene-only paint crate; RESULTS.md is the evidence
+                        record
 examples/live-slice/    driven demo workspace for the stranger test
 ```
 

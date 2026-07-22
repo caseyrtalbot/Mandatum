@@ -280,18 +280,20 @@ crates/app            the workstation: deep RuntimeEngine over terminal/task/
                       agent registries, event loop, scene builder, timeline,
                       search, config, transactional save/restore
 spikes/               experiments outside the Cargo workspace; they may depend
-                      on engine crates, but their heavy dependency trees never
-                      join the product build, release, or merge gate; the GPU
-                      spike has an opt-in maintenance check
+                      on product or engine crates, but their heavy dependency
+                      trees never join the product build, release, or merge
+                      gate; the GPU spike has an opt-in maintenance check
   frontend-wgpu/gpu-renderer/
-                      scene-only GPU paint crate, structurally unable to import
-                      the spike's PTY/parser modules
+                      scene-only GPU paint crate with no app/runtime dependency
 ```
 
 The scene contract keeps frontends swappable: the same `WorkspaceScene`
 that drives the ratatui frontend drove a winit+wgpu spike that measured
 key-to-GPU-present p50 21.6 ms. The terminal frontend is v1; the GPU
-adapter stays warm behind the contract. Evidence and verdict:
+adapter stays excluded, but its native shell now drives the real
+`FrontendHost`, translates winit input to neutral events, and paints real
+workstation scenes without a duplicate PTY/parser state machine. Evidence and
+verdict:
 [spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md). The
 admission-gated path from the spike to a real workstation frontend is in the
 [native GPU implementation plan](docs/native-gpu-implementation-plan.md).

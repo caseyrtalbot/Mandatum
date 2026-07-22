@@ -127,6 +127,14 @@ For scene/frontend work, prove:
 - an optional fake-frontend callback fires when the unified queue changes from
   empty to non-empty, coalesces a queued burst without dropping FIFO events,
   and cannot strand an enqueue racing the final receive
+- the excluded winit shell binds that callback to `EventLoopProxy` while the
+  app channel remains event truth and no interval PTY polling is reintroduced
+- winit key, pointer, paste, resize, and focus events become neutral
+  `InputEvent` values before reaching the real host
+- the real host's header, one terminal pane, status, theme, and command palette
+  pass through the scene-only GPU renderer's headless preparation seam
+- the displayed native smoke paints those same surfaces, exercises real
+  `RuntimeEngine` output and palette input, and leaves no child process on quit
 
 Dated Phase 1B host verification (2026-07-22): all 6 focused host tests and
 all 244 `mandatum-app` library tests passed. The full `./ci/gate.sh` passed 463
@@ -254,6 +262,12 @@ moved behind `AppEventSender`): p50 10.60 ms / p95 12.06 ms / max 13.38 ms,
 endpoint remains key-to-app-output bytes with host-terminal paint excluded; it
 is not native presentation or input-to-photon evidence.
 
+Dated Phase 2 refresh (2026-07-22, after the excluded native adapter moved onto
+the real `FrontendHost`): p50 11.39 ms / p95 12.56 ms / max 13.69 ms, 100
+samples with zero misses. The endpoint remains key-to-app-output bytes with
+host-terminal paint excluded; it is not native presentation, symmetric
+input-to-photon evidence, or production-admission evidence.
+
 Regression bar: p50 must stay well under 25 ms. A p50 drifting back toward
 40 ms means something reintroduced interval polling into the wake path.
 The floor is the shell echo round-trip plus the ~8 ms redraw-cap window,
@@ -291,6 +305,31 @@ Dated maintenance run (2026-07-21): after refreshing the excluded lock's four
 workspace path packages from `0.1.0` to `0.2.0`, `./ci/gpu-spike.sh` passed
 four tests and the renderer-boundary scan. This run did not open a native
 window or collect performance samples.
+
+Dated Phase 2 run (2026-07-22):
+
+- `cargo test --manifest-path spikes/frontend-wgpu/Cargo.toml --test host_wake`
+  passed its one controlled test. A real `FrontendHost` started `/bin/cat`
+  through `RuntimeEngine`; PTY output invoked the injected wake callback without
+  interval polling; draining the host produced a `FrameSnapshot` whose terminal
+  surface contained the echoed input.
+- `./ci/gpu-spike.sh` passed six tests and the renderer-boundary scan. The
+  isolated renderer still has `mandatum-scene` and the GPU stack, but no PTY or
+  terminal-parser package in its normal dependency tree.
+- `cargo test -p mandatum-app --lib` passed all 248 tests, and the full
+  `./ci/gate.sh` was green.
+- The displayed macOS smoke built with
+  `cargo build --release --manifest-path spikes/frontend-wgpu/Cargo.toml --bin mandatum-frontend-wgpu-spike`
+  and ran
+  `spikes/frontend-wgpu/target/release/mandatum-frontend-wgpu-spike --exit-after 120`.
+  Typing `printf GPU_HOST_OK`, opening the real command palette with Ctrl+P,
+  closing it with Escape, and quitting with Ctrl+Q all succeeded. After exit,
+  no native-spike or child-shell process remained.
+
+This proves the excluded adapter's one-terminal Phase 2 route through the real
+host, runtime, wake callback, neutral input, typed clipboard effects, and real
+scene snapshots. Restore and broader scene/input parity remain Phase 3.
+Artifact Preview and production GPU admission remain pending.
 
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the

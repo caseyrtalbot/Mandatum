@@ -15,13 +15,11 @@ resolver = "3"
 name = "mandatum-frontend-wgpu-spike"
 path = "src/main.rs"
 
-# Engine crates the spike is allowed to path-depend on. The spike is a frontend
-# adapter only: it reads their public APIs and never copies product behavior.
+# The native shell consumes the real shared host. mandatum-pty remains a
+# direct dependency only for the standalone tui_probe binary.
 [dependencies]
+mandatum-app = { path = "../../crates/app" }
 mandatum-pty = { path = "../../crates/pty" }
-mandatum-terminal-vt = { path = "../../crates/terminal-vt" }
-# The frontend contract. The terminal-vt -> scene conversion is isolated in
-# src/scene_bridge.rs, mirroring the product app's scene builder.
 mandatum-scene = { path = "../../crates/scene" }
 mandatum-gpu-renderer-spike = { path = "gpu-renderer" }
 

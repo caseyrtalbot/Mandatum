@@ -32,9 +32,10 @@ Requirements:
 
 ### Native/GPU Frontend (proven option, not shipped)
 
-A working wgpu adapter exists as a spike (`spikes/frontend-wgpu`); it is
-held warm behind the scene contract, not shipped (see the platform decision
-below).
+A working wgpu adapter exists as an excluded spike (`spikes/frontend-wgpu`).
+It now drives the real `FrontendHost`/`RuntimeEngine` and paints real scene
+snapshots, but remains held outside the product workspace and release surfaces
+(see the platform decision below).
 
 Use for:
 
@@ -93,16 +94,22 @@ Evaluate frontend options against:
 
 ## The Spike (Done) And The Platform Decision
 
-The required spike ran and completed (2026-07-09). A winit + wgpu + glyphon
-frontend at `spikes/frontend-wgpu` delivered the full vertical slice: a native
-window rendering a live PTY-backed terminal grid, typing and paste, resize,
-scrollback, mouse selection and copy, a status strip, and self-instrumenting
-latency/frame-time measurement. It remains outside the Cargo workspace, product
-build, release artifacts, and merge gate. The opt-in `./ci/gpu-spike.sh`
-maintenance check runs spike-local format, locked all-target tests, and the
-renderer dependency-boundary proof after scene-contract or spike changes. The
-paint path is a separate spike-local crate that cannot depend on the PTY or
-terminal parser. Full evidence:
+The required feasibility spike ran and completed (2026-07-09). It initially
+delivered a native window rendering a live PTY-backed terminal grid, typing and
+paste, resize, scrollback, mouse selection and copy, a status strip, and
+self-instrumenting latency/frame-time measurement. Phase 2 then replaced that
+spike-local PTY/parser/input state machine with the product's real
+`FrontendHost`: winit emits neutral `InputEvent` values, the host's coalesced
+wake callback drives `EventLoopProxy`, typed clipboard effects return to the
+native shell, and the GPU renderer paints the real header, one terminal pane,
+status strip, and command palette from `FrameSnapshot` scene/theme data.
+
+The adapter remains outside the Cargo workspace, product build, release
+artifacts, and merge gate. The opt-in `./ci/gpu-spike.sh` maintenance check runs
+spike-local format, locked all-target tests, and the renderer
+dependency-boundary proof after scene-contract or spike changes. The paint path
+is a separate spike-local crate that cannot depend on the PTY or terminal
+parser. Full evidence:
 [`spikes/frontend-wgpu/RESULTS.md`](../spikes/frontend-wgpu/RESULTS.md).
 
 ### Measured numbers (from RESULTS.md)
@@ -122,9 +129,11 @@ TUI (its number stops before the host terminal paints), so the measured
 the spike held ~40 fps (frame time p50 25.0 ms, p95 25.8 ms over 94 frames),
 a floor set by an intentionally naive per-frame rebuild, not a ceiling. The
 spike's renderer consumes only the `mandatum-scene` contract and imports zero
-parser types. That paint boundary is conforming; the enclosing spike host is
-still a parallel feasibility path with its own PTY/parser/input behavior and
-must not be promoted as product architecture.
+parser types. That paint boundary remained conforming through Phase 2, while
+the enclosing native shell stopped owning PTY, parser, command-routing, or
+product input behavior. The deleted `TerminalSession`, `scene_bridge`, duplicate
+key encoder, and duplicate `AtomicBool` wake latch are now historical spike
+implementation rather than current architecture.
 
 ### Verdict: the terminal frontend stays v1
 
@@ -133,7 +142,7 @@ The spike
 succeeded (a real, measured latency win and a clean adapter), but a large
 share of the measured gap was the product's own 40 ms input poll loop, and
 a production GPU adapter still owes substantial work the spike skipped
-(multi-pane/overlay scene binding, grapheme widths, IME, runtime DPI,
+(multi-pane and broader-overlay scene binding, grapheme widths, IME, runtime DPI,
 surface-loss recovery, damage tracking).
 
 The poll-loop prediction was then confirmed: after the run loop became
@@ -153,12 +162,18 @@ moved behind the coalesced app-owned sender, measured **p50 10.60 ms / p95
 12.06 ms / max 13.38 ms** over 100 samples with zero misses. It has the same
 key-to-app-output endpoint and therefore does not change the admission verdict.
 
+The 2026-07-22 Phase 2 refresh, after the excluded native adapter moved onto the
+real host, measured **p50 11.39 ms / p95 12.56 ms / max 13.69 ms** over 100
+samples with zero misses. This remains the terminal frontend's
+key-to-app-output measurement, excludes host-terminal paint, and is neither a
+native input-to-photon result nor production-admission evidence.
+
 The wgpu adapter stays warm behind the scene contract, with its probe
 (`spikes/frontend-wgpu/src/bin/tui_probe.rs`) kept as the product's standing
-latency-regression harness. Revisit when the roadmap needs GPU-only
-capability (true GPU visuals, per-frame animation, pixel-precise layout,
-embedded non-text surfaces) or sets sub-20 ms end-to-end latency as a
-product goal.
+latency-regression harness. Production admission remains gated on the selected
+pixel-native capability (Artifact Preview), or on a separately accepted
+sub-20 ms symmetric end-to-end latency goal; Phase 2 host integration alone is
+not admission evidence.
 
 The capability branch is now selected: an Artifact Preview Pane will display a
 task- or agent-produced PNG as a typed pixel-native scene surface, while the
@@ -174,8 +189,9 @@ The native frontend has a durable, admission-gated implementation sequence in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md). It
 keeps one `AppState`/`RuntimeEngine`, extracts a shared frontend host and typed
 platform effects, migrates the terminal shell first, and only then connects the
-excluded native adapter to real workstation state. Phase 1 is complete: the
-neutral clipboard effect, shared host, app-owned coalesced sender, and terminal
-adoption all exercise the real state machine. Phase 2's excluded-spike host
-integration is next. Selecting the capability branch does not weaken the
-production conformance gate, and Artifact Preview remains unbuilt.
+excluded native adapter to real workstation state. Phases 1 and 2 are complete:
+the terminal and excluded native shells now exercise the same host, runtime,
+neutral input, scene, wake, and typed-effect boundaries. Restore and broader
+scene/input parity remain Phase 3 work. Selecting the capability branch does
+not weaken the production conformance gate, and Artifact Preview remains
+unbuilt.

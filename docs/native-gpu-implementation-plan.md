@@ -1,7 +1,7 @@
 # Native GPU Frontend Implementation Plan
 
-Status: capability branch accepted; Phase 1 complete; Phase 2 and production
-GPU admission pending (2026-07-22).
+Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 and
+production GPU admission pending (2026-07-22).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -32,11 +32,11 @@ parallel product model.
 |---|---|---|
 | Product state | `RuntimeEngine` owns all live terminal, task, and agent state; `AppState` folds durable and presentation state. | Reuse this state machine unchanged. |
 | Renderer contract | `WorkspaceScene` carries layout, pane surfaces, overlays, themes, and hit targets. | Extend the contract only for an admitted product capability, never for a renderer convenience. |
-| Terminal frontend | `app_shell.rs` drives `FrontendHost` while retaining the crossterm lifecycle, input reader, 250 ms heartbeat schedule, 8 ms redraw cap, rendering, and terminal effect encoding. | Keep this shipped fallback unchanged while Phase 2 replaces the excluded spike's duplicate host path. |
-| GPU spike | The excluded winit/wgpu spike proves window creation, GPU presentation, glyph paint, a live PTY, and scene-only renderer boundaries. It supports only a narrow terminal scene and duplicates runtime/input behavior. | Reuse the evidence and paint techniques; do not promote the spike's app, PTY, parser, input encoder, or scene bridge. |
+| Terminal frontend | `app_shell.rs` drives `FrontendHost` while retaining the crossterm lifecycle, input reader, 250 ms heartbeat schedule, 8 ms redraw cap, rendering, and terminal effect encoding. | Keep this shipped fallback unchanged while the excluded native adapter advances through parity work. |
+| GPU spike | The excluded winit/wgpu shell now drives the real `FrontendHost`, translates winit input to neutral `InputEvent` values, and paints real `WorkspaceScene` snapshots through its scene-only renderer. Its duplicate `TerminalSession`, parser, input encoder, and scene bridge are gone. | Continue parity work against the shared host and scene contracts; do not add a second product state machine or promote the excluded dependency tree. |
 | Clipboard | `AppState` emits FIFO `FrontendEffect::SetClipboard(String)` values; `app_shell.rs` alone maps them to OSC 52. | Phase 1A is complete and proves the first renderer-neutral platform effect. |
-| Wake path | `AppEventSender` is the only send side for input, PTY, restore-preserved input, and agent events. The channel remains truth; an optional callback coalesces notifications while the queue is non-empty. | Phase 2 may bind that neutral callback to its winit event-loop proxy without moving a GUI type into app state. |
-| Performance evidence | The spike measured key-to-GPU-present p50 21.6 ms / p95 22.2 ms. The terminal's 2026-07-22 Phase 1C refresh measured key-to-app-output p50 10.60 ms / p95 12.06 ms / max 13.38 ms. | These endpoints are asymmetric and do not prove a native product win or sub-20 ms input-to-present performance. |
+| Wake path | `AppEventSender` is the only send side for input, PTY, restore-preserved input, and agent events. The channel remains truth; an optional callback coalesces notifications while the queue is non-empty. | The excluded native shell binds that callback to `EventLoopProxy<UserEvent>` without moving a GUI type into app state. |
+| Performance evidence | The spike measured key-to-GPU-present p50 21.6 ms / p95 22.2 ms. The terminal's 2026-07-22 Phase 2 refresh measured key-to-app-output p50 11.39 ms / p95 12.56 ms / max 13.69 ms. | These endpoints are asymmetric and do not prove a native product win or sub-20 ms input-to-present performance. |
 | Admission | The Artifact Preview capability branch is selected, but its typed scene surface and adapter tests do not exist yet. | Production GPU dependencies remain rejected until the later admission evidence and decision. |
 
 The detailed evidence and standing procedures live in
@@ -219,18 +219,18 @@ intentionally ignored live-Claude-CLI tests, plus format, Clippy with warnings
 denied, build, conformance, and doc trace. No native/GPU production dependency
 was added.
 
-## Phase 2 — Prove One Real Native Workstation Slice
+## Phase 2 — Prove One Real Native Workstation Slice — COMPLETE (2026-07-22)
 
 Dependency: Phase 1. Keep this work in `spikes/frontend-wgpu` and outside
 product release surfaces.
 
-- Instantiate `FrontendHost` instead of the spike's `TerminalSession`.
-- Translate winit input directly to neutral `InputEvent` values.
-- Wake the event loop through the host's wake-aware sender.
-- Render the real scene header, one real terminal pane, status strip, and
+- Instantiated `FrontendHost` instead of the spike's `TerminalSession`.
+- Translated winit input directly to neutral `InputEvent` values.
+- Bound the host's coalesced wake callback to `EventLoopProxy<UserEvent>`.
+- Rendered the real scene header, one real terminal pane, status strip, and
   command-palette overlay.
-- Remove the duplicate spike PTY/parser/input path after the real host path is
-  proven.
+- Removed the duplicate spike PTY/parser/input path and `scene_bridge` after the
+  real host path was proven.
 
 User-visible proof:
 
@@ -246,6 +246,16 @@ Exit gate:
 - A headless test paints a real host scene through the GPU renderer.
 - A displayed native-window smoke passes on the reference Mac.
 - The spike remains excluded from workspace and release artifacts.
+
+Phase 2 evidence: the focused real-host wake test passed; `./ci/gpu-spike.sh`
+passed six tests plus the renderer-boundary scan; all 248 `mandatum-app` library
+tests passed; and the displayed macOS smoke showed `GPU_HOST_OK`, opened and
+closed the real command palette, and quit cleanly with `Ctrl+Q`. The fresh
+release terminal probe measured p50 11.39 ms / p95 12.56 ms / max 13.69 ms over
+100 samples with zero misses; its endpoint remains key-to-app-output bytes and
+excludes host-terminal paint. The final `./ci/gate.sh` passed. The native shell
+remains an excluded spike, Artifact Preview remains unbuilt, and production GPU
+admission remains pending.
 
 ## Phase 3 — Complete Scene And Input Parity
 
@@ -386,11 +396,8 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Begin Phase 2 inside `spikes/frontend-wgpu` only: instantiate the real
-`FrontendHost`, bind its neutral wake callback to the spike event loop, and
-translate winit input to `mandatum_scene::input::InputEvent`. First write a
-controlled excluded-spike test proving a PTY event from the real
-`RuntimeEngine` reaches the event loop without interval polling. Do not add a
-production workspace member or dependency, do not add Artifact Preview types,
-and do not keep the spike's duplicate PTY/parser/input/state-machine path once
-the real host path is proven.
+Begin Phase 3 inside `spikes/frontend-wgpu` only: add scene-only GPU render-plan
+support and headless tests for the real task-pane and agent-pane `PaneContent`
+variants emitted by `FrontendHost`. Keep the existing header, terminal, status,
+and palette slice working. Do not broaden this slice into restore, full input
+parity, Artifact Preview, a production workspace member, or GPU admission.

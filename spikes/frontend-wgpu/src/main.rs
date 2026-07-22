@@ -1,33 +1,37 @@
-//! mandatum-frontend-wgpu-spike
+//! Excluded native/GPU frontend over Mandatum's real workstation host.
 //!
-//! A GPU terminal frontend spike over the Mandatum engine crates. It spawns the
-//! user's shell through `mandatum-pty`, parses output with
-//! `mandatum-terminal-vt`, and renders the grid with wgpu + glyphon. The point
-//! is measurement: it instruments input-to-present latency and scroll frame
-//! time and prints a JSON summary so the GPU path can be judged on numbers, not
-//! vibes.
+//! The spike owns winit, wgpu, clipboard integration, paint scheduling, and
+//! latency instrumentation. Product state, PTYs, parsing, commands, recovery,
+//! and persistence stay behind `mandatum_app::FrontendHost`.
 
-mod scene_bridge;
 mod stats;
-mod terminal;
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
-use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowId};
-
+use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
 use mandatum_gpu_renderer_spike::{GpuText, UnsupportedScene};
+use mandatum_scene::{
+    SceneSize,
+    input::{
+        InputEvent, Key as InputKey, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind,
+    },
+};
 use stats::Samples;
-use terminal::{Selection, TerminalSession};
+use winit::{
+    application::ApplicationHandler,
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    keyboard::{Key, ModifiersState, NamedKey},
+    window::{Window, WindowId},
+};
 
 const INJECT_TOTAL: u32 = 300;
-const INJECT_INTERVAL: Duration = Duration::from_micros(33_333); // 30/sec
+const INJECT_INTERVAL: Duration = Duration::from_micros(33_333);
+const HEARTBEAT: Duration = Duration::from_millis(250);
+const EVENT_DRAIN_BUDGET: usize = 256;
 const IDLE_FRAME_CUTOFF_MS: f64 = 250.0;
 
 #[derive(Clone)]
@@ -38,7 +42,7 @@ struct Config {
 }
 
 fn parse_config() -> Config {
-    let mut cfg = Config {
+    let mut config = Config {
         exit_after: None,
         typing_bench: false,
         flood: false,
@@ -47,14 +51,14 @@ fn parse_config() -> Config {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--exit-after" => {
-                cfg.exit_after = args.next().and_then(|v| v.parse().ok());
+                config.exit_after = args.next().and_then(|value| value.parse().ok());
             }
-            "--typing-bench" => cfg.typing_bench = true,
-            "--flood" => cfg.flood = true,
+            "--typing-bench" => config.typing_bench = true,
+            "--flood" => config.flood = true,
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
-    cfg
+    config
 }
 
 #[derive(Debug)]
@@ -62,82 +66,71 @@ enum UserEvent {
     Wake,
 }
 
-/// One decoded keyboard action in the shared input path.
-enum KeyAction {
-    Bytes(Vec<u8>),
+enum PlatformAction {
+    Input(InputEvent),
     Paste,
-    Copy,
-    Scroll(isize),
     Ignore,
 }
 
 struct App {
     config: Config,
-    proxy: EventLoopProxy<UserEvent>,
+    host: FrontendHost,
     window: Option<std::sync::Arc<Window>>,
     gpu: Option<GpuText>,
-    session: Option<TerminalSession>,
     clipboard: Option<arboard::Clipboard>,
 
-    // Instrumentation.
     input_to_present: Samples,
     frame_ms: Samples,
     pending_inputs: VecDeque<Instant>,
-    dirty_from_pty: bool,
+    dirty_from_runtime: bool,
     last_present: Option<Instant>,
     dropped_correlations: u32,
 
-    // Lifecycle.
     start: Instant,
     deadline: Option<Instant>,
+    next_heartbeat: Instant,
     summary_printed: bool,
     fatal_error: Option<String>,
 
-    // Bench + input state.
     injected: u32,
     next_inject: Instant,
     inject_letter: u8,
     modifiers: ModifiersState,
-    mouse_px: (f64, f64),
-    selecting: bool,
-    sel_anchor: Option<(isize, u16)>,
-    selection: Option<Selection>,
-    live_latency_ms: f64,
-    /// Coalesces reader-thread wakes: set by the reader, cleared on `user_event`.
-    /// Prevents a byte flood from drowning the loop in proxy events.
-    wake_pending: Arc<AtomicBool>,
+    mouse_cell: (u16, u16),
 }
 
 impl App {
-    fn new(config: Config, proxy: EventLoopProxy<UserEvent>) -> Self {
+    fn new(config: Config, proxy: EventLoopProxy<UserEvent>, mut app_config: AppConfig) -> Self {
+        // Phase 2 proves one fresh terminal slice. Full restore/overlay parity
+        // remains a Phase 3 concern, but the real host still owns the policy.
+        app_config.restore_on_startup = false;
+        let wake_proxy = proxy.clone();
+        let host = FrontendHost::new_with_wake_callback(app_config, move || {
+            let _ = wake_proxy.send_event(UserEvent::Wake);
+        });
         let now = Instant::now();
-        App {
+        Self {
             config,
-            proxy,
+            host,
             window: None,
             gpu: None,
-            session: None,
             clipboard: arboard::Clipboard::new().ok(),
             input_to_present: Samples::new(),
             frame_ms: Samples::new(),
             pending_inputs: VecDeque::new(),
-            dirty_from_pty: false,
+            dirty_from_runtime: false,
             last_present: None,
             dropped_correlations: 0,
             start: now,
             deadline: None,
+            next_heartbeat: now + HEARTBEAT,
             summary_printed: false,
             fatal_error: None,
             injected: 0,
             next_inject: now,
             inject_letter: b'a',
             modifiers: ModifiersState::empty(),
-            mouse_px: (0.0, 0.0),
-            selecting: false,
-            sel_anchor: None,
-            selection: None,
-            live_latency_ms: 0.0,
-            wake_pending: Arc::new(AtomicBool::new(false)),
+            mouse_cell: (0, 0),
         }
     }
 
@@ -147,9 +140,22 @@ impl App {
         }
     }
 
-    /// Send bytes to the shell. When `measured`, stamp the receipt time so the
-    /// next PTY-driven present can be correlated for latency.
-    fn send_input(&mut self, bytes: &[u8], measured: bool, at: Instant) {
+    fn scene_size(&self) -> Option<SceneSize> {
+        let gpu = self.gpu.as_ref()?;
+        let (width, height) = gpu.surface_size();
+        Some(SceneSize::new(
+            ((width as f32 / gpu.cell_w()).floor() as u16).max(1),
+            ((height as f32 / gpu.cell_h()).floor() as u16).max(1),
+        ))
+    }
+
+    fn resize_host(&mut self) {
+        if let Some(size) = self.scene_size() {
+            self.host.handle_input(InputEvent::Resize(size));
+        }
+    }
+
+    fn send_input(&mut self, input: InputEvent, measured: bool, at: Instant) {
         if measured {
             if self.pending_inputs.len() < 64 {
                 self.pending_inputs.push_back(at);
@@ -157,87 +163,54 @@ impl App {
                 self.dropped_correlations += 1;
             }
         }
-        if let Some(session) = &mut self.session {
-            session.write_input(bytes);
+        self.host.handle_input(input);
+        self.apply_effects();
+        self.request_redraw();
+    }
+
+    fn apply_effects(&mut self) {
+        for effect in self.host.take_effects() {
+            match effect {
+                FrontendEffect::SetClipboard(text) => {
+                    if let Some(clipboard) = &mut self.clipboard {
+                        let _ = clipboard.set_text(text);
+                    }
+                }
+            }
         }
     }
 
-    fn pixel_to_cell(&self, px: f64, py: f64) -> (isize, u16) {
-        let (gpu, session) = match (&self.gpu, &self.session) {
-            (Some(g), Some(s)) => (g, s),
-            _ => return (0, 0),
-        };
-        let col =
-            ((px / gpu.cell_w() as f64).floor() as i64).clamp(0, session.cols() as i64 - 1) as u16;
-        let screen_row = (py / gpu.cell_h() as f64).floor() as isize;
-        let abs = session.top_absolute_row() + screen_row;
-        (abs, col)
-    }
-
-    fn status_line(&self) -> String {
-        let session = self.session.as_ref().unwrap();
-        let scroll = if session.scroll_offset() == 0 {
-            "live".to_string()
-        } else {
-            format!("-{} rows", session.scroll_offset())
-        };
-        let fps = self.frame_ms.percentile(50.0);
-        let fps = if fps > 0.0 { 1000.0 / fps } else { 0.0 };
-        format!(
-            "{}  {}x{}  {}  fps~{:.0}  lat p50 {:.1}ms p95 {:.1}ms  [scroll:wheel  copy:Cmd+C  paste:Cmd+V]",
-            session.shell_name(),
-            session.cols(),
-            session.rows(),
-            scroll,
-            fps,
-            self.input_to_present.percentile(50.0),
-            self.input_to_present.percentile(95.0),
-        )
-    }
-
-    fn recompute_grid_and_resize(&mut self) {
-        let (gpu, session) = match (&mut self.gpu, &mut self.session) {
-            (Some(g), Some(s)) => (g, s),
-            _ => return,
-        };
-        let (w, h) = gpu.surface_size();
-        let cols = ((w as f32 / gpu.cell_w()).floor() as u16).max(1);
-        // Reserve one line for the status strip.
-        let rows = ((h as f32 / gpu.cell_h()).floor() as u16)
-            .saturating_sub(1)
-            .max(1);
-        session.resize(cols, rows);
+    fn drain_runtime(&mut self) -> bool {
+        let drained = self.host.drain_runtime();
+        if drained > 0 {
+            self.dirty_from_runtime = true;
+        }
+        self.apply_effects();
+        drained == EVENT_DRAIN_BUDGET
     }
 
     fn render_frame(&mut self) -> Result<(), UnsupportedScene> {
-        if self.session.is_none() || self.gpu.is_none() {
+        let Some(size) = self.scene_size() else {
             return Ok(());
-        }
-        let status = self.status_line();
-        let selection = self.selection;
-        // Build the frontend-neutral scene, then paint from it. The renderer
-        // never sees the session or grid: grid -> scene lives in scene_bridge.
-        let scene = {
-            let session = self.session.as_ref().unwrap();
-            scene_bridge::build_scene(session, selection, &status)
         };
-        let gpu = self.gpu.as_mut().unwrap();
-        if let Some(present) = gpu.render(&scene)? {
+        let snapshot = self.host.frame(size);
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Ok(());
+        };
+        if let Some(present) = gpu.render(&snapshot.scene, &snapshot.theme)? {
             if let Some(last) = self.last_present {
-                let d = present.duration_since(last).as_secs_f64() * 1000.0;
-                if d < IDLE_FRAME_CUTOFF_MS {
-                    self.frame_ms.push(d);
+                let frame_ms = present.duration_since(last).as_secs_f64() * 1000.0;
+                if frame_ms < IDLE_FRAME_CUTOFF_MS {
+                    self.frame_ms.push(frame_ms);
                 }
             }
             self.last_present = Some(present);
-
-            if self.dirty_from_pty {
-                if let Some(t_in) = self.pending_inputs.pop_front() {
-                    let latency = present.duration_since(t_in).as_secs_f64() * 1000.0;
-                    self.input_to_present.push(latency);
-                    self.live_latency_ms = latency;
+            if self.dirty_from_runtime {
+                if let Some(input) = self.pending_inputs.pop_front() {
+                    self.input_to_present
+                        .push(present.duration_since(input).as_secs_f64() * 1000.0);
                 }
-                self.dirty_from_pty = false;
+                self.dirty_from_runtime = false;
             }
         }
         Ok(())
@@ -248,14 +221,16 @@ impl App {
             return;
         }
         while self.injected < INJECT_TOTAL && now >= self.next_inject {
-            // Every 40 chars, clear the input line (Ctrl+U) so it never wraps;
-            // this keeps echo local and the latency measurement clean.
-            if self.injected > 0 && self.injected % 40 == 0 {
-                self.send_input(&[0x15], false, now);
+            if self.injected > 0 && self.injected.is_multiple_of(40) {
+                self.send_input(InputEvent::Key(InputKey::ctrl('u')), false, now);
             }
             let letter = self.inject_letter;
             self.inject_letter = if letter >= b'z' { b'a' } else { letter + 1 };
-            self.send_input(&[letter], true, now);
+            self.send_input(
+                InputEvent::Key(InputKey::plain(KeyCode::Char(char::from(letter)))),
+                true,
+                now,
+            );
             self.injected += 1;
             self.next_inject += INJECT_INTERVAL;
         }
@@ -266,21 +241,15 @@ impl App {
             return;
         }
         self.summary_printed = true;
-
-        if let Some(err) = &self.fatal_error {
+        if let Some(error) = &self.fatal_error {
             println!(
                 "{{\"error\":{:?},\"notes\":\"run failed; measurements are incomplete\"}}",
-                err
+                error
             );
             return;
         }
-
         let mut notes = format!(
-            "shell={} present=Fifo(vsync) typing_bench={} flood={} input_samples={} frame_samples={}",
-            self.session
-                .as_ref()
-                .map(|s| s.shell_name().to_string())
-                .unwrap_or_else(|| "?".into()),
+            "host=FrontendHost present=Fifo(vsync) typing_bench={} flood={} input_samples={} frame_samples={}",
             self.config.typing_bench,
             self.config.flood,
             self.input_to_present.len(),
@@ -293,9 +262,8 @@ impl App {
             ));
         }
         notes.push_str(
-            " method: input stamped at event receipt (real or synthetic), present timestamped after queue.submit+present; one pending input correlated per PTY-driven present (FIFO echo assumption); frame_ms is present-to-present interval filtered <250ms.",
+            " method: neutral input stamped at winit receipt, present timestamped after queue.submit+present; one pending input correlated per runtime-wake-driven present; frame_ms filters idle gaps >=250ms.",
         );
-
         println!(
             "{{\"input_to_present_ms\":{{\"p50\":{:.2},\"p95\":{:.2},\"max\":{:.2}}},\"frame_ms\":{{\"p50\":{:.2},\"p95\":{:.2}}},\"frames\":{},\"notes\":{:?}}}",
             self.input_to_present.percentile(50.0),
@@ -307,6 +275,43 @@ impl App {
             notes,
         );
     }
+
+    fn exit_if_requested(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if !self.host.should_quit() {
+            return false;
+        }
+        self.host.shutdown();
+        self.print_summary();
+        event_loop.exit();
+        true
+    }
+
+    fn update_mouse_cell(&mut self, x: f64, y: f64) {
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let Some(size) = self.scene_size() else {
+            return;
+        };
+        self.mouse_cell = (
+            ((x / f64::from(gpu.cell_w())).floor() as i64)
+                .clamp(0, i64::from(size.width.saturating_sub(1))) as u16,
+            ((y / f64::from(gpu.cell_h())).floor() as i64)
+                .clamp(0, i64::from(size.height.saturating_sub(1))) as u16,
+        );
+    }
+
+    fn pointer_input(&mut self, kind: PointerKind, button: Option<PointerButton>) {
+        let (column, row) = self.mouse_cell;
+        let input = InputEvent::Pointer(PointerEvent {
+            kind,
+            button,
+            column,
+            row,
+            mods: neutral_modifiers(self.modifiers),
+        });
+        self.send_input(input, false, Instant::now());
+    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -315,115 +320,74 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let window = match event_loop
-            .create_window(Window::default_attributes().with_title("mandatum-frontend-wgpu-spike"))
+            .create_window(Window::default_attributes().with_title("Mandatum GPU Host Spike"))
         {
-            Ok(w) => std::sync::Arc::new(w),
-            Err(e) => {
-                self.fatal_error = Some(format!("no window (headless?): {e}"));
+            Ok(window) => std::sync::Arc::new(window),
+            Err(error) => {
+                self.fatal_error = Some(format!("no window (headless?): {error}"));
                 self.print_summary();
                 event_loop.exit();
                 return;
             }
         };
-
         let gpu = match pollster::block_on(GpuText::new(window.clone())) {
-            Ok(g) => g,
-            Err(e) => {
-                self.fatal_error = Some(e);
+            Ok(gpu) => gpu,
+            Err(error) => {
+                self.fatal_error = Some(error);
                 self.print_summary();
                 event_loop.exit();
                 return;
             }
         };
-
-        // Grid size from the physical surface and measured cell metrics.
-        let (w, h) = gpu.surface_size();
-        let cols = ((w as f32 / gpu.cell_w()).floor() as u16).max(1);
-        let rows = ((h as f32 / gpu.cell_h()).floor() as u16)
-            .saturating_sub(1)
-            .max(1);
-
-        let proxy = self.proxy.clone();
-        let wake_pending = self.wake_pending.clone();
-        let session = match TerminalSession::spawn(cols, rows, move || {
-            // Coalesce: only send a proxy event on a false->true transition, so a
-            // byte flood produces at most one outstanding wake at a time.
-            if !wake_pending.swap(true, Ordering::AcqRel) {
-                let _ = proxy.send_event(UserEvent::Wake);
-            }
-        }) {
-            Ok(s) => s,
-            Err(e) => {
-                self.fatal_error = Some(format!("pty spawn failed: {e}"));
-                self.print_summary();
-                event_loop.exit();
-                return;
-            }
-        };
-
         self.window = Some(window);
         self.gpu = Some(gpu);
-        self.session = Some(session);
+        self.resize_host();
 
-        // Establish the run deadline.
         self.start = Instant::now();
-        self.next_inject = self.start + Duration::from_millis(400); // let the prompt settle
+        self.next_heartbeat = self.start + HEARTBEAT;
+        self.next_inject = self.start + Duration::from_millis(400);
         self.deadline = self
             .config
             .exit_after
-            .map(|s| self.start + Duration::from_secs_f64(s));
+            .map(|seconds| self.start + Duration::from_secs_f64(seconds));
         if self.deadline.is_none() && self.config.typing_bench {
             self.deadline =
                 Some(self.next_inject + INJECT_INTERVAL * INJECT_TOTAL + Duration::from_secs(2));
         }
-
         if self.config.flood {
-            // Programmatic scroll-flood scenario.
-            if let Some(session) = &mut self.session {
-                session.write_input(b"seq 1 200000\n");
-            }
+            self.send_input(
+                InputEvent::Paste("seq 1 200000\n".to_owned()),
+                false,
+                Instant::now(),
+            );
         }
-
         self.request_redraw();
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: UserEvent) {
-        // A wake means the reader has new bytes. Clear the coalescing latch and
-        // schedule a redraw; the actual pump+render happens at vsync in
-        // RedrawRequested, which keeps rendering paced to the display.
-        self.wake_pending.store(false, Ordering::Release);
         self.request_redraw();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
+                self.host.shutdown();
                 self.print_summary();
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                // Drain all PTY bytes accumulated since the last frame, then
-                // render once. While output keeps streaming, re-arm the redraw so
-                // the loop runs at the display's refresh rate (one present per
-                // vsync coalescing all data for that frame).
-                let outcome =
-                    self.session
-                        .as_mut()
-                        .map(|s| s.pump())
-                        .unwrap_or(terminal::PumpOutcome {
-                            screen_changed: false,
-                            more_pending: false,
-                        });
-                if outcome.screen_changed {
-                    self.dirty_from_pty = true;
+                let more_pending = self.drain_runtime();
+                if self.exit_if_requested(event_loop) {
+                    return;
                 }
                 if let Err(error) = self.render_frame() {
                     self.fatal_error = Some(format!("unsupported GPU spike scene: {error}"));
+                    self.host.shutdown();
                     self.print_summary();
                     event_loop.exit();
                     return;
                 }
-                if outcome.more_pending {
+                if more_pending {
                     self.request_redraw();
                 }
             }
@@ -431,95 +395,76 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize_surface(size.width, size.height);
                 }
-                self.recompute_grid_and_resize();
+                self.resize_host();
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.set_scale(scale_factor as f32);
                 }
-                self.recompute_grid_and_resize();
+                self.resize_host();
                 self.request_redraw();
             }
-            WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
-                    return;
-                }
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let now = Instant::now();
-                match encode_key(&event, self.modifiers) {
-                    KeyAction::Bytes(bytes) => {
-                        let measured = is_printable(&bytes);
-                        self.selection = None;
-                        self.send_input(&bytes, measured, now);
+                match translate_key(&event.logical_key, self.modifiers) {
+                    PlatformAction::Input(input) => {
+                        let measured = matches!(
+                            input,
+                            InputEvent::Key(InputKey {
+                                code: KeyCode::Char(_),
+                                mods: Modifiers {
+                                    control: false,
+                                    alt: false,
+                                    super_key: false,
+                                    ..
+                                },
+                            })
+                        );
+                        self.send_input(input, measured, now);
                     }
-                    KeyAction::Scroll(delta) => {
-                        if let Some(session) = &mut self.session {
-                            session.scroll(delta);
+                    PlatformAction::Paste => {
+                        if let Some(clipboard) = &mut self.clipboard
+                            && let Ok(text) = clipboard.get_text()
+                        {
+                            self.send_input(InputEvent::Paste(text), false, now);
                         }
-                        self.request_redraw();
                     }
-                    KeyAction::Copy => {
-                        self.copy_selection();
-                    }
-                    KeyAction::Paste => {
-                        if let Some(clip) = &mut self.clipboard {
-                            if let Ok(text) = clip.get_text() {
-                                let bytes = text.into_bytes();
-                                self.send_input(&bytes, false, now);
-                            }
-                        }
-                    }
-                    KeyAction::Ignore => {}
+                    PlatformAction::Ignore => {}
                 }
+                self.exit_if_requested(event_loop);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_px = (position.x, position.y);
-                if self.selecting {
-                    let focus = self.pixel_to_cell(position.x, position.y);
-                    if let Some(anchor) = self.sel_anchor {
-                        self.selection = Some(Selection {
-                            start_row: anchor.0,
-                            start_col: anchor.1,
-                            end_row: focus.0,
-                            end_col: focus.1,
-                        });
-                        self.request_redraw();
-                    }
-                }
+                self.update_mouse_cell(position.x, position.y);
+                self.pointer_input(PointerKind::Move, None);
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == MouseButton::Left {
-                    match state {
-                        ElementState::Pressed => {
-                            let anchor = self.pixel_to_cell(self.mouse_px.0, self.mouse_px.1);
-                            self.sel_anchor = Some(anchor);
-                            self.selecting = true;
-                            self.selection = None;
-                            self.request_redraw();
-                        }
-                        ElementState::Released => {
-                            self.selecting = false;
-                        }
-                    }
+                if let Some(button) = neutral_button(button) {
+                    let kind = match state {
+                        ElementState::Pressed => PointerKind::Down,
+                        ElementState::Released => PointerKind::Up,
+                    };
+                    self.pointer_input(kind, Some(button));
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let rows = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
-                    MouseScrollDelta::PixelDelta(pos) => {
-                        let ch = self.gpu.as_ref().map(|g| g.cell_h()).unwrap_or(16.0) as f64;
-                        (pos.y / ch).round() as isize
+                let dy = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -(y * 3.0).round() as i16,
+                    MouseScrollDelta::PixelDelta(position) => {
+                        let cell_height = self.gpu.as_ref().map_or(16.0, |gpu| gpu.cell_h());
+                        -(position.y / f64::from(cell_height)).round() as i16
                     }
                 };
-                if rows != 0 {
-                    if let Some(session) = &mut self.session {
-                        session.scroll(rows);
-                    }
-                    self.request_redraw();
+                if dy != 0 {
+                    self.pointer_input(PointerKind::Wheel { dx: 0, dy }, None);
                 }
+            }
+            WindowEvent::Focused(true) => {
+                self.send_input(InputEvent::FocusGained, false, Instant::now());
+            }
+            WindowEvent::Focused(false) => {
+                self.send_input(InputEvent::FocusLost, false, Instant::now());
             }
             _ => {}
         }
@@ -527,106 +472,102 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        if let Some(deadline) = self.deadline {
-            if now >= deadline {
-                self.print_summary();
-                event_loop.exit();
-                return;
-            }
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.host.shutdown();
+            self.print_summary();
+            event_loop.exit();
+            return;
+        }
+        if now >= self.next_heartbeat {
+            self.host.heartbeat();
+            self.next_heartbeat = now + HEARTBEAT;
+            self.request_redraw();
         }
         self.maybe_inject(now);
 
-        // Wake at the next scheduled moment (bench tick or deadline).
-        let mut next: Option<Instant> = self.deadline;
+        let mut next = self.deadline.map_or(self.next_heartbeat, |deadline| {
+            deadline.min(self.next_heartbeat)
+        });
         if self.config.typing_bench && self.injected < INJECT_TOTAL {
-            next = Some(match next {
-                Some(d) => d.min(self.next_inject),
-                None => self.next_inject,
-            });
+            next = next.min(self.next_inject);
         }
-        match next {
-            Some(t) => event_loop.set_control_flow(ControlFlow::WaitUntil(t)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
-        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.host.shutdown();
         self.print_summary();
     }
 }
 
-impl App {
-    fn copy_selection(&mut self) {
-        let text = match (self.selection, &self.session) {
-            (Some(sel), Some(session)) => {
-                session.text_in_range(sel.start_row, sel.start_col, sel.end_row, sel.end_col)
-            }
-            _ => return,
-        };
-        if let Some(clip) = &mut self.clipboard {
-            let _ = clip.set_text(text);
-        }
+fn neutral_modifiers(modifiers: ModifiersState) -> Modifiers {
+    Modifiers {
+        shift: modifiers.shift_key(),
+        control: modifiers.control_key(),
+        alt: modifiers.alt_key(),
+        super_key: modifiers.super_key(),
     }
 }
 
-fn is_printable(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && bytes.iter().all(|&b| (0x20..0x7f).contains(&b))
+fn neutral_button(button: MouseButton) -> Option<PointerButton> {
+    match button {
+        MouseButton::Left => Some(PointerButton::Left),
+        MouseButton::Right => Some(PointerButton::Right),
+        MouseButton::Middle => Some(PointerButton::Middle),
+        MouseButton::Back | MouseButton::Forward | MouseButton::Other(_) => None,
+    }
 }
 
-/// Translate a winit key event into a terminal action using the same path for
-/// real and synthetic input.
-fn encode_key(event: &winit::event::KeyEvent, mods: ModifiersState) -> KeyAction {
-    let sup = mods.super_key();
-    let ctrl = mods.control_key();
-
-    if sup {
-        if let Key::Character(s) = &event.logical_key {
-            match s.as_str() {
-                "v" | "V" => return KeyAction::Paste,
-                "c" | "C" => return KeyAction::Copy,
-                _ => return KeyAction::Ignore,
-            }
-        }
-        return KeyAction::Ignore;
+fn translate_key(key: &Key, modifiers: ModifiersState) -> PlatformAction {
+    let mods = neutral_modifiers(modifiers);
+    if mods.super_key && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("v")) {
+        return PlatformAction::Paste;
+    }
+    if mods.super_key && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("c")) {
+        return PlatformAction::Ignore;
     }
 
-    match &event.logical_key {
-        Key::Named(named) => match named {
-            NamedKey::Enter => KeyAction::Bytes(vec![b'\r']),
-            NamedKey::Backspace => KeyAction::Bytes(vec![0x7f]),
-            NamedKey::Tab => KeyAction::Bytes(vec![b'\t']),
-            NamedKey::Escape => KeyAction::Bytes(vec![0x1b]),
-            NamedKey::Space => KeyAction::Bytes(vec![b' ']),
-            NamedKey::ArrowUp => KeyAction::Bytes(vec![0x1b, b'[', b'A']),
-            NamedKey::ArrowDown => KeyAction::Bytes(vec![0x1b, b'[', b'B']),
-            NamedKey::ArrowRight => KeyAction::Bytes(vec![0x1b, b'[', b'C']),
-            NamedKey::ArrowLeft => KeyAction::Bytes(vec![0x1b, b'[', b'D']),
-            NamedKey::Home => KeyAction::Bytes(vec![0x1b, b'[', b'H']),
-            NamedKey::End => KeyAction::Bytes(vec![0x1b, b'[', b'F']),
-            NamedKey::Delete => KeyAction::Bytes(vec![0x1b, b'[', b'3', b'~']),
-            NamedKey::PageUp => KeyAction::Scroll(10),
-            NamedKey::PageDown => KeyAction::Scroll(-10),
-            _ => KeyAction::Ignore,
-        },
-        Key::Character(s) => {
-            if ctrl {
-                if let Some(c) = s.chars().next() {
-                    if c.is_ascii_alphabetic() {
-                        return KeyAction::Bytes(vec![(c.to_ascii_uppercase() as u8) & 0x1f]);
-                    }
-                }
-                return KeyAction::Ignore;
-            }
-            match &event.text {
-                Some(text) => KeyAction::Bytes(text.as_bytes().to_vec()),
-                None => KeyAction::Bytes(s.as_bytes().to_vec()),
-            }
-        }
-        _ => match &event.text {
-            Some(text) => KeyAction::Bytes(text.as_bytes().to_vec()),
-            None => KeyAction::Ignore,
-        },
-    }
+    let code = match key {
+        Key::Named(named) => named_key_code(*named, mods.shift),
+        Key::Character(value) => value.chars().next().map(KeyCode::Char),
+        _ => None,
+    };
+    code.map_or(PlatformAction::Ignore, |code| {
+        PlatformAction::Input(InputEvent::Key(InputKey::new(code, mods)))
+    })
+}
+
+fn named_key_code(key: NamedKey, shift: bool) -> Option<KeyCode> {
+    Some(match key {
+        NamedKey::Enter => KeyCode::Enter,
+        NamedKey::Escape => KeyCode::Escape,
+        NamedKey::Backspace => KeyCode::Backspace,
+        NamedKey::Tab if shift => KeyCode::BackTab,
+        NamedKey::Tab => KeyCode::Tab,
+        NamedKey::ArrowUp => KeyCode::Up,
+        NamedKey::ArrowDown => KeyCode::Down,
+        NamedKey::ArrowLeft => KeyCode::Left,
+        NamedKey::ArrowRight => KeyCode::Right,
+        NamedKey::Home => KeyCode::Home,
+        NamedKey::End => KeyCode::End,
+        NamedKey::PageUp => KeyCode::PageUp,
+        NamedKey::PageDown => KeyCode::PageDown,
+        NamedKey::Insert => KeyCode::Insert,
+        NamedKey::Delete => KeyCode::Delete,
+        NamedKey::F1 => KeyCode::Function(1),
+        NamedKey::F2 => KeyCode::Function(2),
+        NamedKey::F3 => KeyCode::Function(3),
+        NamedKey::F4 => KeyCode::Function(4),
+        NamedKey::F5 => KeyCode::Function(5),
+        NamedKey::F6 => KeyCode::Function(6),
+        NamedKey::F7 => KeyCode::Function(7),
+        NamedKey::F8 => KeyCode::Function(8),
+        NamedKey::F9 => KeyCode::Function(9),
+        NamedKey::F10 => KeyCode::Function(10),
+        NamedKey::F11 => KeyCode::Function(11),
+        NamedKey::F12 => KeyCode::Function(12),
+        _ => return None,
+    })
 }
 
 fn run_exit_code(fatal_error: Option<&str>) -> i32 {
@@ -635,13 +576,11 @@ fn run_exit_code(fatal_error: Option<&str>) -> i32 {
 
 fn main() {
     let config = parse_config();
-
-    // Watchdog: guarantee the process never hangs a no-display or wedged run.
-    if let Some(secs) = config.exit_after {
+    if let Some(seconds) = config.exit_after {
         std::thread::Builder::new()
             .name("watchdog".into())
             .spawn(move || {
-                std::thread::sleep(Duration::from_secs_f64(secs + 8.0));
+                std::thread::sleep(Duration::from_secs_f64(seconds + 8.0));
                 println!(
                     "{{\"error\":\"watchdog fired\",\"notes\":\"event loop did not exit within budget\"}}"
                 );
@@ -651,20 +590,30 @@ fn main() {
     }
 
     let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
-        Ok(el) => el,
-        Err(e) => {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
             println!(
                 "{{\"error\":{:?},\"notes\":\"no event loop (headless environment)\"}}",
-                e.to_string()
+                error.to_string()
+            );
+            std::process::exit(2);
+        }
+    };
+    let app_config = match AppConfig::from_current_dir() {
+        Ok(config) => config,
+        Err(error) => {
+            println!(
+                "{{\"error\":{:?},\"notes\":\"could not construct the real workstation host\"}}",
+                error.to_string()
             );
             std::process::exit(2);
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let mut app = App::new(config, proxy);
-    if let Err(e) = event_loop.run_app(&mut app) {
-        app.fatal_error = Some(format!("event loop error: {e}"));
+    let mut app = App::new(config, proxy, app_config);
+    if let Err(error) = event_loop.run_app(&mut app) {
+        app.fatal_error = Some(format!("event loop error: {error}"));
     }
     app.print_summary();
     let exit_code = run_exit_code(app.fatal_error.as_deref());
@@ -675,7 +624,22 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::run_exit_code;
+    use super::{run_exit_code, translate_key};
+    use mandatum_scene::input::{InputEvent, Key as InputKey, KeyCode, Modifiers};
+    use winit::keyboard::{Key, ModifiersState};
+
+    #[test]
+    fn winit_key_is_neutral_before_it_reaches_the_host() {
+        let key = Key::Character("p".into());
+        let modifiers = ModifiersState::CONTROL;
+        let super::PlatformAction::Input(input) = translate_key(&key, modifiers) else {
+            panic!("control key did not become neutral input");
+        };
+        assert_eq!(
+            input,
+            InputEvent::Key(InputKey::new(KeyCode::Char('p'), Modifiers::CTRL))
+        );
+    }
 
     #[test]
     fn fatal_runs_return_nonzero_and_clean_runs_return_zero() {
