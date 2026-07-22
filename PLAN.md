@@ -113,9 +113,11 @@ more useful without pretending the wider vision is finished:
   2 is also complete inside the excluded spike: its winit shell now drives the
   real `FrontendHost`, wakes through `EventLoopProxy`, translates neutral input,
   and paints the real header, terminal pane, status strip, and command palette
-  without its former duplicate PTY/parser state machine. Phase 3 scene and input
-  parity is next, beginning narrowly with real task and agent pane content.
-  Restore remains parity work. Production GPU dependencies and release
+  without its former duplicate PTY/parser state machine. Phase 3 is underway:
+  its first narrow increment paints real one-pane task and agent content,
+  including live task output, from the existing scene data. Empty pane content
+  is the next scene-only increment; multi-pane layouts, remaining overlays,
+  broader input, and restore remain parity work. Production GPU dependencies and release
   admission remain blocked until the typed artifact scene surface, adapter
   tests, and later admission decision exist; Artifact Preview remains unbuilt.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at

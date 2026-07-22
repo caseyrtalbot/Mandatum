@@ -1414,3 +1414,45 @@ palette open/close, and clean quit, after which no native-spike or child-shell
 process remained. The fresh `tui_probe` measured p50 11.39 ms / p95 12.56 ms /
 max 13.69 ms over 100 samples with zero misses; that endpoint remains
 key-to-app-output bytes and excludes host-terminal paint.
+
+## Accepted: The Excluded Native Render Plan Covers Real Task And Agent Pane Content
+
+Status: accepted (2026-07-22)
+
+Decision: Phase 3 is underway. Its first narrow increment extends only the
+excluded `spikes/frontend-wgpu` render plan to accept and paint real one-pane
+`PaneContent::Task` and `PaneContent::Agent` scenes emitted by `FrontendHost`.
+Task detail entries keep a one-row, tail-preserving fit and optional live output
+uses the remaining scene-budgeted rows. Agent detail text wraps inside the pane
+body. Header, terminal, one-pane geometry, status, theme, and command-palette
+behavior remain covered.
+
+Context: Phase 2 proved one fresh terminal slice on the shared host but rejected
+task and agent content as `UnsupportedScene`. The existing scene contract
+already carries the required task command/cwd/runtime/output data and agent
+objective/status/action/approval/changed-file detail through
+`PaneScene::detail_lines`; reaching back into app/runtime state or expanding the
+scene contract would have duplicated product behavior for renderer convenience.
+
+Rationale: preparing all three supported pane bodies from `WorkspaceScene` plus
+`Theme` keeps the GPU adapter scene-only. Content-specific shaping preserves the
+terminal frontend's semantics: terminal surfaces and task rows do not wrap,
+task metadata retains its load-bearing tail, task output remains aligned to its
+cell quads, and agent prose may wrap. Pane-body clipping and explicit row/column
+bounds prevent text or surface quads from crossing chrome or status.
+
+Consequences: no app, runtime, scene, workspace, production dependency,
+allowlist, installer, default command, or release surface changes. Empty pane
+content, multiple panes and broader layouts, remaining overlays, full
+input/theme/style parity, restore, Artifact Preview, and production GPU
+admission remain unsupported and separately gated. The next slice is Empty
+content only.
+
+Verification: real-host tests recorded the initial task and agent
+`UnsupportedScene::PaneContent` failures, then passed with live task output and
+agent detail retained by the prepared plan. `./ci/gpu-spike.sh` passed ten tests
+plus the renderer dependency-boundary scan, and `cargo test -p mandatum-app
+--lib` passed all 248 tests. Displayed release smokes showed the real task
+metadata/live output and real agent state, then quit cleanly without a native or
+task child process. The final merge-gate result is recorded in
+`docs/verification.md`.

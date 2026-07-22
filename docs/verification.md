@@ -131,9 +131,10 @@ For scene/frontend work, prove:
   app channel remains event truth and no interval PTY polling is reintroduced
 - winit key, pointer, paste, resize, and focus events become neutral
   `InputEvent` values before reaching the real host
-- the real host's header, one terminal pane, status, theme, and command palette
-  pass through the scene-only GPU renderer's headless preparation seam
-- the displayed native smoke paints those same surfaces, exercises real
+- the real host's header, one terminal, task, or agent pane, status, theme, and
+  command palette pass through the scene-only GPU renderer's headless
+  preparation seam
+- the displayed native smoke paints the covered pane variants, exercises real
   `RuntimeEngine` output and palette input, and leaves no child process on quit
 
 Dated Phase 1B host verification (2026-07-22): all 6 focused host tests and
@@ -330,6 +331,40 @@ This proves the excluded adapter's one-terminal Phase 2 route through the real
 host, runtime, wake callback, neutral input, typed clipboard effects, and real
 scene snapshots. Restore and broader scene/input parity remain Phase 3.
 Artifact Preview and production GPU admission remain pending.
+
+Dated Phase 3 task/agent increment (2026-07-22):
+
+- Test-first real-host scenes produced the expected initial failures:
+  `UnsupportedScene::PaneContent("task")`, followed by
+  `UnsupportedScene::PaneContent("agent")` after the task tracer bullet was
+  green. Both tests drive only neutral input through `FrontendHost` and keep the
+  focused product scene to one pane through the real zoom command.
+- The final task test starts `printf TASK_PLAN_OK` through the real
+  `RuntimeEngine`, waits on the injected wake callback, drains runtime events,
+  and proves both the snapshot's `PaneContent::Task` output surface and the
+  prepared GPU plan retain the live output. The agent test proves the configured
+  objective and scene-composed detail lines reach the same plan. Renderer tests retain
+  terminal/palette support, explicit Empty/multi-pane/overlay rejection,
+  tail-preserving one-row task metadata, task-output row budgeting, and wrapped
+  agent detail text.
+- `./ci/gpu-spike.sh` passed ten tests (two native-shell tests, three real-host
+  integration tests, and five isolated-renderer tests) plus the renderer
+  dependency-boundary scan. `cargo test -p mandatum-app --lib` passed all 248
+  tests.
+- The displayed release build ran two fresh macOS smokes. Batched neutral key
+  events created and zoomed the pane before redraw because multi-pane paint is
+  deliberately still unsupported. The task window showed its command, cwd,
+  running status, and live `cargo test` output; the agent window showed its
+  objective, draft status, action, approval count, and changed-files summary.
+  Both quit through Ctrl+Q with no native-spike, task, or approval-bridge
+  process left.
+- The spike remains excluded from the product workspace/build/release, and the
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Empty content, multi-pane layouts, remaining overlays,
+  broader input, restore, Artifact Preview, and production admission remain.
+- The final `./ci/gate.sh` passed formatting, Clippy with warnings denied,
+  build, all workspace tests, conformance, and documentation trace checks after
+  the synchronized documentation edits.
 
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the

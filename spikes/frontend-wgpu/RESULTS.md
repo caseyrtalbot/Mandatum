@@ -1,10 +1,11 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 2 complete; builds, runs, and exercises the real workstation
-host.** A native macOS window drives `mandatum_app::FrontendHost` and its real
+Status: **Phase 3 underway; the first task/agent scene increment is complete.**
+A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
-renders the host's real header, one terminal pane, status strip, and command
-palette on the GPU. Typed clipboard effects return to the native shell.
+renders the host's real header, one terminal, task, or agent pane, status strip,
+and command palette on the GPU. Typed clipboard effects return to the native
+shell.
 
 This remains an isolated frontend outside the Cargo workspace (the root
 `Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
@@ -25,6 +26,18 @@ and left no native-spike or child-shell process. The fresh terminal probe
 measured p50 11.39 ms / p95 12.56 ms / max 13.69 ms over 100 samples with zero
 misses. Restore and broader parity remain Phase 3; Artifact Preview and
 production GPU admission remain pending.
+
+Phase 3 task/agent verification (2026-07-22): real-host tracer bullets first
+failed with `PaneContent("task")` and `PaneContent("agent")`, then passed through
+the same `prepare_scene` plan the displayed renderer consumes. The task path
+proves live `RuntimeEngine` output below one-row fitted metadata; the agent path
+preserves wrapped scene detail. `./ci/gpu-spike.sh` passed ten tests plus the
+renderer-boundary scan, and all 248 app library tests passed. Displayed release
+smokes showed the real task metadata/live output and the real agent objective
+and state, then quit without a native or task child process. Empty content,
+multi-pane layouts, remaining overlays, restore, broader input, Artifact
+Preview, and production admission remain pending. The final `./ci/gate.sh`
+passed after these synchronized documentation edits.
 
 ## Verdict (read this first)
 
@@ -57,7 +70,7 @@ The renderer does not read a terminal grid. It consumes the `WorkspaceScene`
 and `Theme` from the real host's `FrameSnapshot`; the product app alone performs
 grid-to-scene conversion in `crates/app/src/scene_builder.rs`.
 
-How the Phase 2 boundary is enforced:
+How the current boundary is enforced:
 
 | Module | Product/runtime role |
 |--------|----------------------|
@@ -68,9 +81,10 @@ How the Phase 2 boundary is enforced:
 
 `prepare_scene` is the window/GPU-free renderer seam used by the controlled
 integration test and by the displayed renderer. It accepts the real header,
-one terminal pane, status, theme, and optional palette while explicitly
-rejecting Phase 3 shapes. The displayed renderer uses the scene's pane-inner
-geometry, chrome, terminal surface, status, and palette data rather than
+one terminal, task, or agent pane, status, theme, and optional palette while
+explicitly rejecting Empty, multiple panes, and unsupported overlays. The
+displayed renderer uses the scene's pane-inner geometry, chrome, terminal/task
+surface, scene-composed detail lines, status, and palette data rather than
 deriving product presentation itself.
 
 The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
@@ -240,6 +254,10 @@ panic, exit 0).
 - The real scene header, focused terminal pane and chrome, status strip, and
   Ctrl+P command palette render from scene/theme data. Escape closes the real
   palette and Ctrl+Q performs the real host quit path.
+- Real one-pane task scenes render scene-composed command/cwd/runtime metadata
+  with tail-preserving one-row fitting plus the live task output surface below;
+  real one-pane agent scenes render wrapped objective/status/action/approval/
+  changed-file detail from the same scene contract.
 - Window resize and scale changes recompute scene cell dimensions and send a
   neutral resize to the host; the app/runtime owns PTY and parser resizing.
 - ANSI color: 16-color, 256-color cube, grayscale ramp, and direct RGB, plus
@@ -284,9 +302,10 @@ panic, exit 0).
 
 ## What a production adapter would still need
 
-- **Complete broader scene parity.** Header, one terminal pane, status, theme,
-  and command palette are bound. Production still needs restore, multiple panes,
-  task/agent content, hit-target parity, and the remaining overlay variants.
+- **Complete broader scene parity.** Header, one terminal/task/agent pane,
+  status, theme, and command palette are bound. Production still needs Empty
+  content, restore, multiple panes, hit-target parity, and the remaining overlay
+  variants.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
@@ -315,9 +334,11 @@ cargo build --release --manifest-path spikes/frontend-wgpu/Cargo.toml \
 spikes/frontend-wgpu/target/release/mandatum-frontend-wgpu-spike --exit-after 120
 ```
 
-For the displayed Phase 2 smoke, type `printf GPU_HOST_OK`, open the palette with
-Ctrl+P, close it with Escape, and quit with Ctrl+Q; confirm no native-spike or
-child-shell process remains. Source modules: `src/main.rs` (winit translation,
+For the displayed Phase 3 task/agent smoke, use neutral palette input to create
+the task (`b`) or agent (`a`) pane and zoom it (`z`) before the next redraw;
+multi-pane paint remains deliberately unsupported. Confirm the task shows live
+output, the agent shows its objective/state detail, and Ctrl+Q leaves no
+native-spike or child process. Source modules: `src/main.rs` (winit translation,
 host ownership, wake/effect/heartbeat/redraw scheduling, instrumentation),
 `gpu-renderer` + `src/gpu.rs` (structurally isolated scene/theme-to-GPU paint),
 `src/stats.rs` (percentiles), and `src/bin/tui_probe.rs` (external terminal
@@ -340,8 +361,10 @@ The comparison also exposed why the adapter did not ship. Much of the gap came
 from the terminal frontend's then-current 40 ms poll loop, which was later
 removed without GPU work. Phase 2 subsequently replaced the duplicate spike
 host with the real `FrontendHost` and completed the header, one-terminal,
-status, palette, neutral-input, wake, and typed-effect slice. A production wgpu
-adapter still needs restore, multi-pane and broader scene parity, correct
+status, palette, neutral-input, wake, and typed-effect slice. Phase 3 is now
+underway: its first increment adds real one-pane task metadata/live output and
+agent detail without changing the scene or host contract. A production wgpu
+adapter still needs Empty content, restore, multi-pane and broader scene parity, correct
 grapheme width, IME and composition, runtime DPI, full style mapping,
 surface-loss recovery, and damage tracking.
 Those costs become decisive only when the product needs true GPU visuals,

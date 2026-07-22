@@ -1,6 +1,6 @@
 # Native GPU Frontend Implementation Plan
 
-Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 and
+Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
 production GPU admission pending (2026-07-22).
 
 This document is the durable implementation plan for a native window and
@@ -261,6 +261,16 @@ admission remains pending.
 
 Dependency: Phase 2.
 
+First narrow increment complete (2026-07-22): the excluded scene-only render
+plan now accepts real one-pane task and agent scenes emitted by
+`FrontendHost`. Task metadata retains the terminal adapter's one-row,
+tail-preserving fit; live task output remains below those rows; agent detail
+text wraps within the pane body. Header, one-pane geometry, terminal content,
+status, theme, and command-palette behavior remain intact. `PaneContent::Empty`,
+multiple panes and broader layouts, other overlays, restore, and the remaining
+input/theme/style parity are still explicitly unsupported. Artifact Preview
+and production GPU admission remain unbuilt and blocked.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -396,8 +406,10 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Begin Phase 3 inside `spikes/frontend-wgpu` only: add scene-only GPU render-plan
-support and headless tests for the real task-pane and agent-pane `PaneContent`
-variants emitted by `FrontendHost`. Keep the existing header, terminal, status,
-and palette slice working. Do not broaden this slice into restore, full input
-parity, Artifact Preview, a production workspace member, or GPU admission.
+Continue Phase 3 inside `spikes/frontend-wgpu` with one scene-only increment:
+add a failing real-`FrontendHost` headless test for a product-generated
+`PaneContent::Empty` scene, then extend `prepare_scene` and displayed GPU paint
+to render that existing `EmptyContent`/detail-line data. Preserve
+terminal/task/agent, header, one-pane geometry, status, and palette behavior.
+Stop before multi-pane layout, additional overlays, broader input, restore,
+Artifact Preview, or production admission.

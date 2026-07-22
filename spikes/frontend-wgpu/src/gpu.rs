@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
 // The renderer consumes ONLY the scene contract. It never imports
 // mandatum-terminal-vt: the real app host converts its grids before the
@@ -53,7 +53,10 @@ pub struct PreparedScene<'a> {
     scene: &'a WorkspaceScene,
     theme: &'a Theme,
     pane: &'a PaneScene,
-    terminal: &'a TerminalSurface,
+    terminal: Option<&'a TerminalSurface>,
+    pane_text: String,
+    pane_text_rows: usize,
+    body_wrap: Wrap,
     palette: Option<&'a PaletteOverlay>,
 }
 
@@ -66,6 +69,14 @@ impl PreparedScene<'_> {
         &self.pane.title
     }
 
+    pub fn pane_text(&self) -> &str {
+        &self.pane_text
+    }
+
+    pub fn pane_surface(&self) -> Option<&TerminalSurface> {
+        self.terminal
+    }
+
     pub fn theme_name(&self) -> &str {
         &self.theme.name
     }
@@ -75,7 +86,7 @@ impl PreparedScene<'_> {
     }
 }
 
-/// Prepare the deliberately narrow Phase 2 paint plan without a window or
+/// Prepare the deliberately narrow paint plan without a window or
 /// GPU. The displayed renderer consumes this same value, so the excluded
 /// integration test exercises the real host-to-renderer boundary headlessly.
 pub fn prepare_scene<'a>(
@@ -87,10 +98,27 @@ pub fn prepare_scene<'a>(
     }
 
     let pane = &scene.panes[0];
-    let terminal = match &pane.content {
-        PaneContent::Terminal(surface) => surface,
-        PaneContent::Task(_) => return Err(UnsupportedScene::PaneContent("task")),
-        PaneContent::Agent(_) => return Err(UnsupportedScene::PaneContent("agent")),
+    let inner_width = layout::pane_inner_rect(pane.area).width;
+    let (terminal, pane_text, pane_text_rows, body_wrap) = match &pane.content {
+        PaneContent::Terminal(surface) => (Some(surface), String::new(), 0, Wrap::None),
+        PaneContent::Task(task) => {
+            // Task output owns the rows below metadata, so each scene detail
+            // entry must remain exactly one GPU row. Match the terminal
+            // adapter's tail-preserving fit instead of allowing shaping to
+            // wrap or embedded newlines to consume unbudgeted rows.
+            let lines = pane
+                .detail_lines()
+                .into_iter()
+                .map(|line| fit_cell_line(&normalize_cell_line(&line), inner_width))
+                .collect::<Vec<_>>();
+            let rows = lines.len();
+            (task.output.as_ref(), lines.join("\n"), rows, Wrap::None)
+        }
+        PaneContent::Agent(_) => {
+            let lines = pane.detail_lines();
+            let rows = lines.len();
+            (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
+        }
         PaneContent::Empty(_) => return Err(UnsupportedScene::PaneContent("empty")),
     };
     let palette = match &scene.overlay {
@@ -111,8 +139,42 @@ pub fn prepare_scene<'a>(
         theme,
         pane,
         terminal,
+        pane_text,
+        pane_text_rows,
+        body_wrap,
         palette,
     })
+}
+
+fn normalize_cell_line(line: &str) -> String {
+    line.chars()
+        .map(|character| match character {
+            '\r' | '\n' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
+/// Fit one logical task row to the scene's cell width while retaining both
+/// the label and the load-bearing tail (exit code, flag, or filename).
+fn fit_cell_line(line: &str, width: u16) -> String {
+    let width = usize::from(width);
+    let characters = line.chars().collect::<Vec<_>>();
+    if characters.len() <= width {
+        return line.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+    let tail_len = (width - 1) / 2;
+    let head_len = width - 1 - tail_len;
+    let mut fitted = characters[..head_len].iter().collect::<String>();
+    fitted.push('…');
+    fitted.extend(&characters[characters.len() - tail_len..]);
+    fitted
 }
 
 pub struct GpuText {
@@ -400,6 +462,16 @@ impl GpuText {
         let mut runs: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
         let mut quads: Vec<f32> = Vec::with_capacity(1024);
 
+        if !prepared.pane_text.is_empty() {
+            let start = screen_text.len();
+            screen_text.push_str(&prepared.pane_text);
+            screen_text.push('\n');
+            runs.push((
+                start..screen_text.len(),
+                GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
+            ));
+        }
+
         let header_background = resolve(theme.header_background, DEFAULT_BG);
         push_quad(
             &mut quads,
@@ -442,54 +514,70 @@ impl GpuText {
             );
         }
 
-        for (y, row) in surface.rows.iter().enumerate() {
-            let abs = surface.first_row + y;
-            let py = origin_y + y as f32 * self.cell_h;
-            let mut run_start = screen_text.len();
-            let mut run_color: Option<GColor> = None;
-            for (x, cell) in row.iter().enumerate() {
-                let style = cell.style;
-                let (mut fg, mut bg) = (
-                    resolve(style.foreground, DEFAULT_FG),
-                    resolve(style.background, DEFAULT_BG),
-                );
-                if style.inverse {
-                    std::mem::swap(&mut fg, &mut bg);
+        if let Some(surface) = surface {
+            let row_offset = prepared.pane_text_rows;
+            for (y, row) in surface.rows.iter().enumerate() {
+                if row_offset + y >= usize::from(inner.height) {
+                    break;
                 }
-
-                let column = x as u16;
-                let px = origin_x + x as f32 * self.cell_w;
-                if bg != DEFAULT_BG {
-                    push_quad(
-                        &mut quads,
-                        px,
-                        py,
-                        self.cell_w,
-                        self.cell_h,
-                        [bg[0], bg[1], bg[2], 255],
+                let abs = surface.first_row + y;
+                let py = origin_y + (row_offset + y) as f32 * self.cell_h;
+                let mut run_start = screen_text.len();
+                let mut run_color: Option<GColor> = None;
+                for (x, cell) in row.iter().take(usize::from(inner.width)).enumerate() {
+                    let style = cell.style;
+                    let (mut fg, mut bg) = (
+                        resolve(style.foreground, DEFAULT_FG),
+                        resolve(style.background, DEFAULT_BG),
                     );
-                }
-                if surface.selection_contains(abs, column) {
-                    push_quad(&mut quads, px, py, self.cell_w, self.cell_h, SELECTION_BG);
-                }
-                if surface.cursor_at(abs, column) {
-                    push_quad(&mut quads, px, py, self.cell_w, self.cell_h, CURSOR_BG);
-                }
-
-                let gc = GColor::rgb(fg[0], fg[1], fg[2]);
-                if run_color != Some(gc) {
-                    if let Some(prev) = run_color.take() {
-                        runs.push((run_start..screen_text.len(), prev));
+                    if style.inverse {
+                        std::mem::swap(&mut fg, &mut bg);
                     }
-                    run_start = screen_text.len();
-                    run_color = Some(gc);
+
+                    let column = x as u16;
+                    let px = origin_x + x as f32 * self.cell_w;
+                    if bg != DEFAULT_BG {
+                        push_quad(
+                            &mut quads,
+                            px,
+                            py,
+                            self.cell_w,
+                            self.cell_h,
+                            [bg[0], bg[1], bg[2], 255],
+                        );
+                    }
+                    if surface.selection_contains(abs, column) {
+                        push_quad(&mut quads, px, py, self.cell_w, self.cell_h, SELECTION_BG);
+                    }
+                    if surface.cursor_at(abs, column) {
+                        push_quad(&mut quads, px, py, self.cell_w, self.cell_h, CURSOR_BG);
+                    }
+
+                    let gc = GColor::rgb(fg[0], fg[1], fg[2]);
+                    if run_color != Some(gc) {
+                        if let Some(prev) = run_color.take() {
+                            runs.push((run_start..screen_text.len(), prev));
+                        }
+                        run_start = screen_text.len();
+                        run_color = Some(gc);
+                    }
+                    screen_text.push(cell.character);
                 }
-                screen_text.push(cell.character);
+                if let Some(prev) = run_color.take() {
+                    runs.push((run_start..screen_text.len(), prev));
+                }
+                let newline = screen_text.len();
+                screen_text.push('\n');
+                if let Some((range, _)) = runs.last_mut().filter(|(range, _)| range.end == newline)
+                {
+                    range.end = screen_text.len();
+                } else {
+                    runs.push((
+                        newline..screen_text.len(),
+                        GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
+                    ));
+                }
             }
-            if let Some(prev) = run_color.take() {
-                runs.push((run_start..screen_text.len(), prev));
-            }
-            screen_text.push('\n');
         }
 
         // Header, pane title, status, and optional palette all come from the
@@ -559,8 +647,11 @@ impl GpuText {
                 Attrs::new().family(Family::Monospace).color(*color),
             )
         });
+        let content_width = inner.width as f32 * self.cell_w;
+        let content_height = inner.height as f32 * self.cell_h;
+        self.text_buffer.set_wrap(prepared.body_wrap);
         self.text_buffer
-            .set_size(Some(self.config.width as f32), Some(status_y.max(1.0)));
+            .set_size(Some(content_width.max(1.0)), Some(content_height.max(1.0)));
         self.text_buffer
             .set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         self.text_buffer
@@ -686,6 +777,12 @@ impl GpuText {
             right: self.config.width as i32,
             bottom: self.config.height as i32,
         };
+        let content_bounds = TextBounds {
+            left: origin_x.floor() as i32,
+            top: origin_y.floor() as i32,
+            right: (origin_x + content_width).ceil() as i32,
+            bottom: (origin_y + content_height).ceil() as i32,
+        };
         let mut text_areas = vec![
             TextArea {
                 buffer: &self.header_buffer,
@@ -710,7 +807,7 @@ impl GpuText {
                 left: origin_x,
                 top: origin_y,
                 scale: 1.0,
-                bounds: full,
+                bounds: content_bounds,
                 default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
                 custom_glyphs: &[],
             },
@@ -981,8 +1078,71 @@ mod tests {
         let prepared = prepare_scene(&scene, &theme).unwrap();
 
         assert_eq!(prepared.pane.id, PaneId::new("pane-1"));
-        assert_eq!(prepared.terminal.rows.len(), 1);
+        assert_eq!(prepared.terminal.unwrap().rows.len(), 1);
         assert_eq!(scene.status.text, "test status");
+    }
+
+    #[test]
+    fn task_plan_fits_each_detail_entry_to_one_row_and_keeps_output() {
+        let output = TerminalSurface {
+            rows: vec![vec![SceneCell::default(); 2]],
+            ..TerminalSurface::default()
+        };
+        let mut task = pane(
+            PaneSceneKind::Task,
+            PaneContent::Task(TaskContent {
+                command: "printf FIRST\nSECOND --verbose".to_owned(),
+                cwd_label: "/tmp".to_owned(),
+                recipe_label: None,
+                status_label: Some("running".to_owned()),
+                rerun_hint: None,
+                output: Some(output),
+            }),
+        );
+        task.area = SceneRect::new(0, 0, 24, 10);
+        let expected_rows = task.detail_lines().len();
+        let scene = scene(vec![task]);
+        let theme = Theme::default();
+
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let lines = prepared.pane_text().lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), expected_rows);
+        assert!(lines[0].starts_with("command:"), "{:?}", lines[0]);
+        assert!(lines[0].ends_with("--verbose"), "{:?}", lines[0]);
+        assert_eq!(prepared.pane_text_rows, expected_rows);
+        assert_eq!(prepared.body_wrap, Wrap::None);
+        assert!(prepared.pane_surface().is_some());
+    }
+
+    #[test]
+    fn agent_plan_preserves_wrapping_for_long_scene_detail() {
+        let mut agent = pane(
+            PaneSceneKind::Agent,
+            PaneContent::Agent(AgentContent {
+                objective: "inspect a deliberately long objective that needs wrapping".to_owned(),
+                status_label: "draft".to_owned(),
+                status_role: AgentStatus::Draft,
+                pending_approvals: 0,
+                changed_file_count: 0,
+                changed_files: Vec::new(),
+                latest_summary: None,
+                current_action: None,
+                last_error: None,
+                relaunch_hint: None,
+                pending_approval: None,
+                output_tail: Vec::new(),
+            }),
+        );
+        agent.area = SceneRect::new(0, 0, 20, 10);
+        let scene = scene(vec![agent]);
+        let theme = Theme::default();
+
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+
+        assert!(prepared.pane_text().contains("deliberately long objective"));
+        assert_eq!(prepared.body_wrap, Wrap::WordOrGlyph);
+        assert!(prepared.pane_surface().is_none());
     }
 
     #[test]
@@ -1010,44 +1170,16 @@ mod tests {
     }
 
     #[test]
-    fn task_agent_and_empty_content_fail_explicitly() {
-        let task = PaneContent::Task(TaskContent {
-            command: "cargo test".to_owned(),
-            cwd_label: "/tmp".to_owned(),
-            recipe_label: None,
-            status_label: None,
-            rerun_hint: None,
-            output: None,
-        });
-        let agent = PaneContent::Agent(AgentContent {
-            objective: "test".to_owned(),
-            status_label: "running".to_owned(),
-            status_role: AgentStatus::Running,
-            pending_approvals: 0,
-            changed_file_count: 0,
-            changed_files: Vec::new(),
-            latest_summary: None,
-            current_action: None,
-            last_error: None,
-            relaunch_hint: None,
-            pending_approval: None,
-            output_tail: Vec::new(),
-        });
+    fn empty_content_fails_explicitly() {
         let empty = PaneContent::Empty(EmptyContent {
             cwd_label: "/tmp".to_owned(),
             restart_generation: 0,
         });
+        let scene = scene(vec![pane(PaneSceneKind::StatusLog, empty)]);
 
-        for (kind, content, expected) in [
-            (PaneSceneKind::Task, task, "task"),
-            (PaneSceneKind::Agent, agent, "agent"),
-            (PaneSceneKind::StatusLog, empty, "empty"),
-        ] {
-            let scene = scene(vec![pane(kind, content)]);
-            assert_eq!(
-                prepare_scene(&scene, &Theme::default()).unwrap_err(),
-                UnsupportedScene::PaneContent(expected)
-            );
-        }
+        assert_eq!(
+            prepare_scene(&scene, &Theme::default()).unwrap_err(),
+            UnsupportedScene::PaneContent("empty")
+        );
     }
 }
