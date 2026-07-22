@@ -1,11 +1,11 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 underway; the first task/agent scene increment is complete.**
+Status: **Phase 3 underway; task, agent, and Empty one-pane content are covered.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
-renders the host's real header, one terminal, task, or agent pane, status strip,
-and command palette on the GPU. Typed clipboard effects return to the native
-shell.
+renders the host's real header, one terminal, task, agent, or Empty pane, status
+strip, and command palette on the GPU. Typed clipboard effects return to the
+native shell.
 
 This remains an isolated frontend outside the Cargo workspace (the root
 `Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
@@ -38,6 +38,19 @@ and state, then quit without a native or task child process. Empty content,
 multi-pane layouts, remaining overlays, restore, broader input, Artifact
 Preview, and production admission remain pending. The final `./ci/gate.sh`
 passed after these synchronized documentation edits.
+
+Phase 3 Empty verification (2026-07-22): the fresh real-host tracer bullet first
+failed with `PaneContent("empty")`, then passed through the same `prepare_scene`
+plan the displayed renderer consumes. The plan retains the scene-composed cwd,
+restart generation, and no-live-grid detail with pane-body wrapping.
+`./ci/gpu-spike.sh` passed eleven tests plus the renderer-boundary scan, and all
+248 app library tests passed. A displayed release smoke used an intentionally
+missing shell in a disposable project to produce the real Empty fallback; all
+three detail lines, existing header, pane geometry, status, and theme painted,
+then Ctrl+Q exited with no native-spike or missing-shell process left. Multiple
+panes, remaining overlays, restore, broader input, Artifact Preview, and
+production admission remain pending. The final `./ci/gate.sh` passed after
+these synchronized documentation edits.
 
 ## Verdict (read this first)
 
@@ -81,8 +94,8 @@ How the current boundary is enforced:
 
 `prepare_scene` is the window/GPU-free renderer seam used by the controlled
 integration test and by the displayed renderer. It accepts the real header,
-one terminal, task, or agent pane, status, theme, and optional palette while
-explicitly rejecting Empty, multiple panes, and unsupported overlays. The
+one terminal, task, agent, or Empty pane, status, theme, and optional palette
+while explicitly rejecting multiple panes and unsupported overlays. The
 displayed renderer uses the scene's pane-inner geometry, chrome, terminal/task
 surface, scene-composed detail lines, status, and palette data rather than
 deriving product presentation itself.
@@ -303,8 +316,8 @@ panic, exit 0).
 ## What a production adapter would still need
 
 - **Complete broader scene parity.** Header, one terminal/task/agent pane,
-  status, theme, and command palette are bound. Production still needs Empty
-  content, restore, multiple panes, hit-target parity, and the remaining overlay
+  Empty fallback, status, theme, and command palette are bound. Production still
+  needs restore, multiple panes, hit-target parity, and the remaining overlay
   variants.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
@@ -344,6 +357,13 @@ host ownership, wake/effect/heartbeat/redraw scheduling, instrumentation),
 `src/stats.rs` (percentiles), and `src/bin/tui_probe.rs` (external terminal
 latency probe).
 
+For the displayed Empty smoke, launch the release binary from a disposable
+project with `SHELL` set to a nonexistent absolute path and `XDG_CONFIG_HOME`
+set to an empty disposable directory. The real host's failed initial PTY spawn
+must leave the one terminal intent visible as Empty content with cwd, restart
+generation, and no-live-grid detail. Confirm Ctrl+Q leaves no native-spike or
+attempted-shell process.
+
 ## Final spike verdict
 
 **The 2026-07-09 GPU run proved a real, measured, user-visible latency win and a
@@ -362,11 +382,11 @@ from the terminal frontend's then-current 40 ms poll loop, which was later
 removed without GPU work. Phase 2 subsequently replaced the duplicate spike
 host with the real `FrontendHost` and completed the header, one-terminal,
 status, palette, neutral-input, wake, and typed-effect slice. Phase 3 is now
-underway: its first increment adds real one-pane task metadata/live output and
-agent detail without changing the scene or host contract. A production wgpu
-adapter still needs Empty content, restore, multi-pane and broader scene parity, correct
-grapheme width, IME and composition, runtime DPI, full style mapping,
-surface-loss recovery, and damage tracking.
+underway: its first increments add real one-pane task metadata/live output,
+agent detail, and the Empty fallback without changing the scene or host
+contract. A production wgpu adapter still needs restore, multi-pane and broader
+scene parity, correct grapheme width, IME and composition, runtime DPI, full
+style mapping, surface-loss recovery, and damage tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selects the

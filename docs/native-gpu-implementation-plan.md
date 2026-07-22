@@ -1,7 +1,8 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-production GPU admission pending (2026-07-22).
+the Empty-pane scene increment is complete; production GPU admission pending
+(2026-07-22).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -266,10 +267,17 @@ plan now accepts real one-pane task and agent scenes emitted by
 `FrontendHost`. Task metadata retains the terminal adapter's one-row,
 tail-preserving fit; live task output remains below those rows; agent detail
 text wraps within the pane body. Header, one-pane geometry, terminal content,
-status, theme, and command-palette behavior remain intact. `PaneContent::Empty`,
-multiple panes and broader layouts, other overlays, restore, and the remaining
-input/theme/style parity are still explicitly unsupported. Artifact Preview
-and production GPU admission remain unbuilt and blocked.
+status, theme, and command-palette behavior remain intact.
+
+Second narrow increment complete (2026-07-22): a fresh real `FrontendHost`
+with PTY spawning disabled produces the existing one-pane
+`PaneContent::Empty` fallback, and the excluded render plan now paints its cwd,
+restart generation, and no-live-grid detail lines with pane-body wrapping. The
+displayed macOS smoke reproduced that same product state by deliberately
+failing PTY spawn in a disposable project. Multiple panes and broader layouts,
+other overlays, restore, and the remaining input/theme/style parity are still
+explicitly unsupported. Artifact Preview and production GPU admission remain
+unbuilt and blocked.
 
 Render every current scene:
 
@@ -408,8 +416,9 @@ the date, environment, command, endpoint, and result.
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one scene-only increment:
 add a failing real-`FrontendHost` headless test for a product-generated
-`PaneContent::Empty` scene, then extend `prepare_scene` and displayed GPU paint
-to render that existing `EmptyContent`/detail-line data. Preserve
-terminal/task/agent, header, one-pane geometry, status, and palette behavior.
-Stop before multi-pane layout, additional overlays, broader input, restore,
-Artifact Preview, or production admission.
+`OverlayScene::ContextMenu` over one supported pane, then extend
+`prepare_scene` and displayed GPU paint to render only the existing context-menu
+scene data and geometry. Preserve terminal/task/agent/Empty, header, one-pane
+geometry, status, theme, and palette behavior. Stop before multi-pane layout,
+additional overlay variants, broader input, restore, Artifact Preview, or
+production admission.

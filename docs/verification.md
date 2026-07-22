@@ -366,6 +366,33 @@ Dated Phase 3 task/agent increment (2026-07-22):
   build, all workspace tests, conformance, and documentation trace checks after
   the synchronized documentation edits.
 
+Dated Phase 3 Empty increment (2026-07-22):
+
+- The required real-host tracer bullet constructed a fresh `FrontendHost` with
+  PTY spawning disabled, proved its one pane was `PaneContent::Empty`, and first
+  failed in `prepare_scene` with `PaneContent("empty")`.
+- The final real-host test proves that same product frame reaches the prepared
+  GPU plan. Its renderer test proves the scene-composed cwd, restart generation,
+  and no-live-grid detail are retained with word-or-glyph wrapping and no
+  terminal surface.
+- `./ci/gpu-spike.sh` passed eleven tests (two native-shell tests, four real-host
+  integration tests, and five isolated-renderer tests) plus the renderer
+  dependency-boundary scan. `cargo test -p mandatum-app --lib` passed all 248
+  tests.
+- The displayed release build ran on macOS from a disposable project with
+  `SHELL` set to a nonexistent absolute path and an empty `XDG_CONFIG_HOME`.
+  The failed initial PTY spawn produced the real Empty fallback; the window
+  showed its cwd, `restart generation: 0`, and no-live-grid detail with the
+  existing header, one-pane geometry, status strip, and theme. Ctrl+Q exited
+  cleanly, and no native-spike or attempted-shell process remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Multiple panes, remaining overlays, broader input,
+  restore, Artifact Preview, and production admission remain separately gated.
+- The final `./ci/gate.sh` passed formatting, Clippy with warnings denied,
+  build, all workspace tests, conformance, and documentation trace checks after
+  the synchronized documentation edits.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

@@ -215,9 +215,11 @@ The excluded winit shell is the second exercised consumer of this boundary. It
 binds the callback to `EventLoopProxy<UserEvent>`, translates platform events to
 neutral `InputEvent` values, and paints the host's real scene header, terminal
 pane, task pane with optional live output, agent pane, status strip, and command
-palette. Its former `TerminalSession`, direct parser/input path, and
-`scene_bridge` are removed; its window, platform-input translation, GPU, and
-paint-scheduling state remain frontend-local.
+palette. It also paints the product's Empty fallback from its scene-composed
+cwd, restart-generation, and no-live-grid detail lines. Its former
+`TerminalSession`, direct parser/input path, and `scene_bridge` are removed; its
+window, platform-input translation, GPU, and paint-scheduling state remain
+frontend-local.
 
 A native shell may own a window, platform wake handle, DPI/IME state,
 clipboard integration, GPU surface/device resources, glyph caches, and paint
@@ -225,9 +227,10 @@ scheduling. It may not own a second PTY/parser path, command router, approval
 model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
-Phase 3 is underway. Empty pane content, restore handling, multi-pane layouts,
-remaining overlays, and broader scene/input parity remain. Artifact Preview and
-production GPU admission remain later, separately gated decisions.
+Phase 3 is underway. Terminal, task, agent, and Empty one-pane content are now
+covered. Restore handling, multi-pane layouts, remaining overlays, and broader
+scene/input parity remain. Artifact Preview and production GPU admission remain
+later, separately gated decisions.
 
 ### `workflows`
 

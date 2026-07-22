@@ -1456,3 +1456,43 @@ plus the renderer dependency-boundary scan, and `cargo test -p mandatum-app
 metadata/live output and real agent state, then quit cleanly without a native or
 task child process. The final merge-gate result is recorded in
 `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers The Product Empty Fallback
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one scene-only increment that accepts and paints
+a real one-pane `PaneContent::Empty` scene emitted by `FrontendHost`. The
+renderer uses only `PaneScene::detail_lines` for the existing cwd, restart
+generation, and no-live-PTY message, with word-or-glyph wrapping inside the
+pane body. Terminal, task, agent, header, one-pane geometry, status, theme, and
+command-palette behavior remain covered.
+
+Context: the shared scene builder already emits Empty content whenever a
+terminal intent has no live runtime grid, including a fresh host with PTY
+spawning disabled or a product-path PTY spawn failure. The excluded renderer
+still rejected that valid product scene even though every displayed fact and
+its geometry were already present in `WorkspaceScene`.
+
+Rationale: consuming the existing detail-line contract keeps the increment at
+the renderer boundary and makes the same prepared value drive headless proof
+and displayed paint. No Empty-specific app query, runtime handle, parser type,
+or replacement presentation model is needed. Wrapping matches other
+scene-composed prose and the established pane-body bounds keep it inside
+product-owned geometry.
+
+Consequences: no app, runtime, scene, workspace, production dependency,
+allowlist, installer, default command, or release surface changes. Multiple
+panes and broader layouts, remaining overlays, full input/theme/style parity,
+restore, Artifact Preview, and production GPU admission remain unsupported and
+separately gated. The next slice is the existing one-pane context-menu overlay
+only.
+
+Verification: the real-host test recorded the initial
+`UnsupportedScene::PaneContent("empty")` failure, then passed with the product
+Empty detail retained by the prepared plan. `./ci/gpu-spike.sh` passed eleven
+tests plus the renderer dependency-boundary scan, and `cargo test -p
+mandatum-app --lib` passed all 248 tests. A displayed release smoke showed the
+real failed-PTY Empty state and all three detail lines, then quit cleanly with
+no native or attempted-shell process. The final `./ci/gate.sh` passed after
+these synchronized documentation edits.

@@ -119,7 +119,11 @@ pub fn prepare_scene<'a>(
             let rows = lines.len();
             (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
         }
-        PaneContent::Empty(_) => return Err(UnsupportedScene::PaneContent("empty")),
+        PaneContent::Empty(_) => {
+            let lines = pane.detail_lines();
+            let rows = lines.len();
+            (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
+        }
     };
     let palette = match &scene.overlay {
         Some(OverlayScene::Palette(palette)) => Some(palette),
@@ -1170,16 +1174,26 @@ mod tests {
     }
 
     #[test]
-    fn empty_content_fails_explicitly() {
+    fn empty_plan_preserves_wrapping_for_scene_detail() {
         let empty = PaneContent::Empty(EmptyContent {
             cwd_label: "/tmp".to_owned(),
-            restart_generation: 0,
+            restart_generation: 7,
         });
-        let scene = scene(vec![pane(PaneSceneKind::StatusLog, empty)]);
+        let mut empty_pane = pane(PaneSceneKind::StatusLog, empty);
+        empty_pane.area = SceneRect::new(0, 0, 20, 10);
+        let scene = scene(vec![empty_pane]);
+        let theme = Theme::default();
 
-        assert_eq!(
-            prepare_scene(&scene, &Theme::default()).unwrap_err(),
-            UnsupportedScene::PaneContent("empty")
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+
+        assert!(prepared.pane_text().contains("cwd: /tmp"));
+        assert!(prepared.pane_text().contains("restart generation: 7"));
+        assert!(
+            prepared
+                .pane_text()
+                .contains("no live PTY grid is attached to this pane")
         );
+        assert_eq!(prepared.body_wrap, Wrap::WordOrGlyph);
+        assert!(prepared.pane_surface().is_none());
     }
 }

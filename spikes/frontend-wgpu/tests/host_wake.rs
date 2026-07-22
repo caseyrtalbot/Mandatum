@@ -16,6 +16,37 @@ fn dispatch_palette_command(host: &mut FrontendHost, key: char) {
 }
 
 #[test]
+fn real_host_empty_pane_reaches_the_gpu_render_plan() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+
+    let snapshot = host.frame(frame_size);
+    let empty = snapshot
+        .scene
+        .panes
+        .iter()
+        .find_map(|pane| match &pane.content {
+            PaneContent::Empty(empty) => Some(empty),
+            _ => None,
+        })
+        .expect("fresh real host frame did not contain an empty pane");
+    assert_eq!(empty.restart_generation, 0);
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real empty pane");
+    assert!(
+        prepared
+            .pane_text()
+            .contains("no live PTY grid is attached"),
+        "prepared empty plan did not retain the real scene display data"
+    );
+}
+
+#[test]
 fn real_host_pty_output_wakes_without_polling_and_reaches_a_frame() {
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
     let config = AppConfig {
