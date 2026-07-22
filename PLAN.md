@@ -68,6 +68,11 @@ more useful without pretending the wider vision is finished:
   scene/theme/revision snapshots plus FIFO platform effects. The shipped
   terminal frontend exercises this seam while retaining crossterm, terminal
   lifecycle, heartbeat/redraw scheduling, rendering, and OSC 52 encoding.
+- The unified input/PTY/agent channel now has one app-owned `AppEventSender`.
+  It keeps `std::sync::mpsc` as event truth and can notify a frontend through
+  a coalesced, renderer-neutral callback when the queue changes from empty to
+  non-empty; sender/receiver accounting prevents a concurrent final drain and
+  enqueue from losing the next wake.
 - focus now normally accents only the pane title (bright blue in the default dark
   theme) while the full perimeter stays calm; the explicit `focused` label
   preserves a non-color signal, with a one-cell corner fallback when a pane is
@@ -103,10 +108,12 @@ more useful without pretending the wider vision is finished:
   parity, text/IME, recovery/performance, admission, and opt-in rollout.
   The capability branch is selected: task/agent-produced PNG artifacts become
   pixel-native preview panes with a deterministic terminal fallback. Phase
-  1A's neutral clipboard effect, Phase 1B's shared host, and the terminal
-  adoption portion of Phase 1D are complete. Phase 1C's wake-aware sender is
-  next. Production GPU dependencies and release admission remain blocked until
-  the typed artifact scene surface, adapter tests, and later admission decision
+  1 is complete: neutral effects, the shared host, the coalesced wake-aware
+  sender, and shipped-terminal adoption all exercise one state machine. Phase
+  2 is next and remains confined to the excluded spike: replace its duplicate
+  runtime/input path with `FrontendHost` before adding Artifact Preview types.
+  Production GPU dependencies and release admission remain blocked until the
+  typed artifact scene surface, adapter tests, and later admission decision
   exist.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the

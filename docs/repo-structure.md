@@ -109,14 +109,16 @@ The terminal app runtime:
 - `frontend_host.rs`: exported frontend-neutral owner of one private
   `AppState`; blocking/bounded event consumption, heartbeat work, owned
   `FrameSnapshot` scene/theme/revision values, FIFO effects, quit, and
-  idempotent shutdown
+  idempotent shutdown; optional neutral wake-callback installation
 - `app_state.rs`: command dispatch plus durable workspace, timeline, status,
   and presentation folds over typed runtime effects
 - `app_state/tests.rs`: private app-state unit and live-PTY tests
 - `runtime_engine.rs`: deep live-runtime Module over terminal, task, and agent
   registries; owns the event channel, identity, reconciliation, replacement,
   approval control, shutdown, and transactional restore lifecycle facts
-- `events.rs`: the unified app event channel (input / PTY / agent)
+- `events.rs`: the unified app event channel (input / PTY / agent) plus the
+  app-owned sender that coalesces optional frontend wakes without replacing
+  channel truth
 - `frontend.rs`: crossterm-to-neutral input translation (the only module
   besides `app_shell.rs` allowed to name crossterm)
 - `frontend_effect.rs`: renderer-neutral platform effects; terminal/native

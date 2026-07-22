@@ -2,15 +2,18 @@
 //!
 //! Platform shells translate input and own paint scheduling, but they reach
 //! workstation behavior only through this host. The terminal shell keeps the
-//! raw unified sender temporarily; Phase 1C replaces it with a wake-aware
-//! app-owned sender without changing the channel as the source of event truth.
+//! app-owned unified sender without changing the channel as the source of
+//! event truth.
 
-use std::{sync::mpsc::Sender, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use mandatum_scene::{SceneSize, Theme, WorkspaceScene, input::InputEvent};
 
 use crate::{
-    app_shell::AppConfig, app_state::AppState, events::AppEvent, frontend_effect::FrontendEffect,
+    app_shell::AppConfig,
+    app_state::AppState,
+    events::{AppEventSender, WakeCallback},
+    frontend_effect::FrontendEffect,
 };
 
 /// One owned paint input from the shared workstation state machine.
@@ -34,8 +37,21 @@ pub struct FrontendHost {
 
 impl FrontendHost {
     pub fn new(config: AppConfig) -> Self {
+        Self::with_optional_wake_callback(config, None)
+    }
+
+    /// Build a host whose asynchronous producers notify a platform event loop
+    /// when the unified queue changes from empty to non-empty.
+    pub fn new_with_wake_callback(
+        config: AppConfig,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_optional_wake_callback(config, Some(Arc::new(wake)))
+    }
+
+    fn with_optional_wake_callback(config: AppConfig, wake: Option<WakeCallback>) -> Self {
         Self {
-            app: AppState::new(config),
+            app: AppState::new_with_frontend_wake(config, wake),
             frame_revision: 0,
             shutdown_complete: false,
         }
@@ -109,9 +125,8 @@ impl FrontendHost {
         true
     }
 
-    /// Temporary terminal-only access to the unified channel. Phase 1C wraps
-    /// this in an app-owned sender with an optional coalesced wake callback.
-    pub(crate) fn event_sender(&self) -> Sender<AppEvent> {
+    /// Terminal input uses the same app-owned sender as PTY and agent workers.
+    pub(crate) fn event_sender(&self) -> AppEventSender {
         self.app.event_sender()
     }
 }
@@ -124,7 +139,14 @@ impl Drop for FrontendHost {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::Duration,
+    };
 
     use mandatum_scene::{
         HitTargetKind, SceneSize,
@@ -173,8 +195,12 @@ mod tests {
     }
 
     #[test]
-    fn blocking_wait_applies_neutral_input_from_the_unified_channel() {
-        let mut host = FrontendHost::new(AppConfig::default());
+    fn configured_wake_callback_and_blocking_wait_share_unified_input() {
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let callback_count = Arc::clone(&wake_count);
+        let mut host = FrontendHost::new_with_wake_callback(AppConfig::default(), move || {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        });
         let sender = host.event_sender();
         let input = thread::spawn(move || {
             thread::sleep(Duration::from_millis(10));
@@ -186,6 +212,7 @@ mod tests {
         assert!(host.wait_event(Duration::from_secs(1)));
         assert!(host.should_quit());
         input.join().unwrap();
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]

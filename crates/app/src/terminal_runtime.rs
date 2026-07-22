@@ -1,10 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    fmt,
-    path::PathBuf,
-    sync::{Arc, mpsc::Sender},
-    thread::JoinHandle,
-};
+use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc, thread::JoinHandle};
 
 use mandatum_core::{PaneId, PaneSpec, Workspace};
 use mandatum_pty::{
@@ -14,7 +8,7 @@ use mandatum_pty::{
 use mandatum_terminal_vt::{TerminalParser, TerminalSize};
 
 use crate::{
-    events::AppEvent,
+    events::AppEventSender,
     process_events::{PtyFlowControl, spawn_reader_thread},
 };
 
@@ -152,7 +146,7 @@ pub(crate) struct PendingTerminalPaneRuntime {
 }
 
 impl PendingTerminalPaneRuntime {
-    pub(crate) fn activate(self, pane_id: PaneId, tx: Sender<AppEvent>) -> TerminalPaneRuntime {
+    pub(crate) fn activate(self, pane_id: PaneId, tx: AppEventSender) -> TerminalPaneRuntime {
         let Self {
             reader,
             controller,

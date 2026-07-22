@@ -135,9 +135,12 @@ Supporting Implementations remain in `events`, `process_events`,
 `terminal_runtime`, `task_runtime`, and `agent_runtime`; `app_shell`,
 `frontend`, `input`, and `persistence` remain adjacent orchestration Modules
 (full module map: docs/repo-structure.md). The run loop is event-driven: one
-unified channel (`AppEvent::Input | Pty | Agent`), a 250 ms heartbeat, and an
-8 ms redraw cap; PTY readers are bounded by flow-credit backpressure (256 KiB
-in flight per pane).
+unified channel (`AppEvent::Input | Pty | Agent`) behind app-owned
+`AppEventSender`, a 250 ms heartbeat, and an 8 ms redraw cap. The sender can
+invoke one frontend-neutral callback per non-empty queue interval; shared
+queue accounting makes the last receive and next enqueue one race-safe state
+transition. PTY readers remain bounded by flow-credit backpressure (256 KiB in
+flight per pane).
 
 Live runtime state is never serialized as durable truth.
 
@@ -197,9 +200,11 @@ scene's hit targets in `AppState`, and the terminal requests and renders that
 same snapshot inside its draw callback, so pointer input resolves against the
 most recently painted frame.
 
-The existing raw sender remains crate-private and is used only by the terminal
-input reader. Phase 1C will replace that temporary access with an app-owned,
-wake-aware sender; no platform waker exists yet.
+`FrontendHost::new_with_wake_callback` optionally installs a renderer-neutral
+notification callback. Terminal input, PTY readers, restore-preserved input,
+and agent forwarders all use clones of one crate-private `AppEventSender`; no
+raw sender escapes. The callback coalesces while events remain queued and the
+channel stays authoritative. No platform waker type exists in the app layer.
 
 A native shell may own a window, platform wake handle, DPI/IME state,
 clipboard integration, GPU surface/device resources, glyph caches, and paint

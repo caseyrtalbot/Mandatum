@@ -9,7 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     time::Duration,
 };
 
@@ -22,7 +22,7 @@ use mandatum_terminal_vt::{MouseMode, TerminalGrid};
 
 use crate::{
     agent_runtime::{AgentRuntimeEvent, AgentRuntimeRegistry, activate_agent_session},
-    events::AppEvent,
+    events::{AppEvent, AppEventSender, WakeCallback},
     process_events::PtyRuntimeEvent,
     task_runtime::{
         TaskInvestigationFailure, TaskPaneRuntime, TaskRuntimeRegistry, prepare_task_pane_runtime,
@@ -264,7 +264,7 @@ pub(crate) struct RuntimeEngine {
     terminals: TerminalRuntimeRegistry,
     tasks: TaskRuntimeRegistry,
     agents: AgentRuntimeRegistry,
-    event_tx: Sender<AppEvent>,
+    event_tx: AppEventSender,
     event_rx: Receiver<AppEvent>,
     next_runtime_token: u64,
     next_lifecycle_epoch: u64,
@@ -273,7 +273,19 @@ pub(crate) struct RuntimeEngine {
 
 impl RuntimeEngine {
     pub(crate) fn new() -> Self {
-        let (event_tx, event_rx) = mpsc::channel();
+        Self::new_with_event_sender(None)
+    }
+
+    pub(crate) fn with_wake_callback(wake: WakeCallback) -> Self {
+        Self::new_with_event_sender(Some(wake))
+    }
+
+    fn new_with_event_sender(wake: Option<WakeCallback>) -> Self {
+        let (raw_event_tx, event_rx) = mpsc::channel();
+        let event_tx = match wake {
+            Some(wake) => AppEventSender::with_shared_wake_callback(raw_event_tx, wake),
+            None => AppEventSender::new(raw_event_tx),
+        };
         Self {
             terminals: TerminalRuntimeRegistry::new(),
             tasks: TaskRuntimeRegistry::new(),
@@ -286,7 +298,7 @@ impl RuntimeEngine {
         }
     }
 
-    pub(crate) fn event_sender(&self) -> Sender<AppEvent> {
+    pub(crate) fn event_sender(&self) -> AppEventSender {
         self.event_tx.clone()
     }
 
@@ -294,11 +306,11 @@ impl RuntimeEngine {
         &self,
         timeout: Duration,
     ) -> Result<AppEvent, RecvTimeoutError> {
-        self.event_rx.recv_timeout(timeout)
+        self.event_tx.recv_timeout(&self.event_rx, timeout)
     }
 
     pub(crate) fn try_recv_event(&self) -> Result<AppEvent, TryRecvError> {
-        self.event_rx.try_recv()
+        self.event_tx.try_recv(&self.event_rx)
     }
 
     /// Raw registry inspection is test-only. Production callers use the
@@ -953,7 +965,10 @@ impl RuntimeEngine {
     }
 
     pub(crate) fn discard_pending_runtime_events(&mut self) {
-        let pending: Vec<AppEvent> = std::iter::from_fn(|| self.event_rx.try_recv().ok()).collect();
+        let mut pending = Vec::new();
+        while let Ok(event) = self.try_recv_event() {
+            pending.push(event);
+        }
         for event in pending {
             if matches!(event, AppEvent::Input(_)) {
                 let _ = self.event_tx.send(event);

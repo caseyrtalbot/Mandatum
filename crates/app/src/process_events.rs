@@ -1,13 +1,13 @@
 use std::{
     fmt,
-    sync::{Arc, Condvar, Mutex, mpsc::Sender},
+    sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
 };
 
 use mandatum_core::PaneId;
 use mandatum_pty::{NativePtyReader, PtyEvent};
 
-use crate::events::AppEvent;
+use crate::events::{AppEvent, AppEventSender};
 
 const PTY_READ_CHUNK_BYTES: usize = 8192;
 
@@ -134,7 +134,7 @@ pub(crate) fn spawn_reader_thread(
     restart_generation: u64,
     runtime_token: u64,
     mut reader: NativePtyReader,
-    tx: Sender<AppEvent>,
+    tx: AppEventSender,
     flow: Arc<PtyFlowControl>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {

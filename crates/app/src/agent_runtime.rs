@@ -14,7 +14,7 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::mpsc::{Receiver, Sender},
+    sync::mpsc::Receiver,
     thread::{self, JoinHandle},
 };
 
@@ -25,7 +25,7 @@ use mandatum_agent_runtime::{
 };
 use mandatum_core::{AgentStatus, PaneId};
 
-use crate::events::AppEvent;
+use crate::events::{AppEvent, AppEventSender};
 
 /// How many trailing output lines the live view retains per agent pane.
 pub(crate) const AGENT_OUTPUT_TAIL_LINES: usize = 200;
@@ -47,7 +47,7 @@ pub(crate) fn spawn_agent_forwarder_thread(
     restart_generation: u64,
     runtime_token: u64,
     events: Receiver<AgentSessionEvent>,
-    tx: Sender<AppEvent>,
+    tx: AppEventSender,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         while let Ok(event) = events.recv() {
@@ -157,7 +157,7 @@ pub(crate) fn activate_agent_session(
     restart_generation: u64,
     runtime_token: u64,
     session: AgentSession,
-    tx: Sender<AppEvent>,
+    tx: AppEventSender,
 ) -> AgentPaneRuntime {
     let AgentSession { events, control } = session;
     let forwarder_thread =

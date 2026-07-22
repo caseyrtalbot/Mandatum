@@ -1,7 +1,7 @@
 # Native GPU Frontend Implementation Plan
 
-Status: capability branch accepted; Phases 1A and 1B plus terminal adoption in
-1D complete; Phase 1C and production GPU admission pending (2026-07-22).
+Status: capability branch accepted; Phase 1 complete; Phase 2 and production
+GPU admission pending (2026-07-22).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -32,11 +32,11 @@ parallel product model.
 |---|---|---|
 | Product state | `RuntimeEngine` owns all live terminal, task, and agent state; `AppState` folds durable and presentation state. | Reuse this state machine unchanged. |
 | Renderer contract | `WorkspaceScene` carries layout, pane surfaces, overlays, themes, and hit targets. | Extend the contract only for an admitted product capability, never for a renderer convenience. |
-| Terminal frontend | `app_shell.rs` drives `FrontendHost` while retaining the crossterm lifecycle, input reader, 250 ms heartbeat schedule, 8 ms redraw cap, rendering, and terminal effect encoding. | Add the wake-aware sender next; do not add a native product crate yet. |
+| Terminal frontend | `app_shell.rs` drives `FrontendHost` while retaining the crossterm lifecycle, input reader, 250 ms heartbeat schedule, 8 ms redraw cap, rendering, and terminal effect encoding. | Keep this shipped fallback unchanged while Phase 2 replaces the excluded spike's duplicate host path. |
 | GPU spike | The excluded winit/wgpu spike proves window creation, GPU presentation, glyph paint, a live PTY, and scene-only renderer boundaries. It supports only a narrow terminal scene and duplicates runtime/input behavior. | Reuse the evidence and paint techniques; do not promote the spike's app, PTY, parser, input encoder, or scene bridge. |
 | Clipboard | `AppState` emits FIFO `FrontendEffect::SetClipboard(String)` values; `app_shell.rs` alone maps them to OSC 52. | Phase 1A is complete and proves the first renderer-neutral platform effect. |
-| Wake path | Runtime events wake the terminal loop through the unified channel; winit needs a platform wake signal. | Preserve `std::sync::mpsc` and add a coalesced frontend wake hook rather than an async runtime or polling loop. |
-| Performance evidence | The spike measured key-to-GPU-present p50 21.6 ms / p95 22.2 ms. The terminal's 2026-07-14 refresh measured key-to-app-output p50 11.71 ms / p95 13.56 ms / max 17.84 ms. | These endpoints are asymmetric and do not prove a native product win or sub-20 ms input-to-present performance. |
+| Wake path | `AppEventSender` is the only send side for input, PTY, restore-preserved input, and agent events. The channel remains truth; an optional callback coalesces notifications while the queue is non-empty. | Phase 2 may bind that neutral callback to its winit event-loop proxy without moving a GUI type into app state. |
+| Performance evidence | The spike measured key-to-GPU-present p50 21.6 ms / p95 22.2 ms. The terminal's 2026-07-22 Phase 1C refresh measured key-to-app-output p50 10.60 ms / p95 12.06 ms / max 13.38 ms. | These endpoints are asymmetric and do not prove a native product win or sub-20 ms input-to-present performance. |
 | Admission | The Artifact Preview capability branch is selected, but its typed scene surface and adapter tests do not exist yet. | Production GPU dependencies remain rejected until the later admission evidence and decision. |
 
 The detailed evidence and standing procedures live in
@@ -78,6 +78,10 @@ pub struct FrameSnapshot {
 }
 
 impl FrontendHost {
+    pub fn new_with_wake_callback(
+        config: AppConfig,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self;
     pub fn handle_input(&mut self, input: InputEvent);
     pub fn wait_event(&mut self, timeout: Duration) -> bool;
     pub fn drain_runtime(&mut self) -> usize;
@@ -98,10 +102,13 @@ unchanged. This slice deliberately adds no semantic dirty detector,
 `FrontendUpdate`, redraw flag, or deadline metadata; terminal scheduling stays
 in `app_shell.rs`.
 
-The terminal input reader temporarily receives the existing crate-private raw
-sender from the host. Phase 1C replaces that access with an app-owned sender
-that can optionally invoke a coalesced platform waker after enqueueing. A waker
-will be a notification only; the channel remains the source of event truth.
+The terminal input reader, PTY readers, restore-preserved input, and agent
+forwarders all receive clones of one crate-private `AppEventSender`. A frontend
+may install a neutral callback through `FrontendHost::new_with_wake_callback`.
+The callback fires only when the queue changes from empty to non-empty; shared
+queue accounting serializes the last receive against the next send so a racing
+enqueue cannot lose its wake. The callback remains notification only and the
+`std::sync::mpsc` channel remains the source of event truth.
 
 ## Phase 0 — Select And Record The Product Trigger
 
@@ -172,14 +179,17 @@ other native/GPU production dependency.
 - Kept hit targets tied to the exact scene snapshot requested for paint.
 - Kept concrete runtime registries and `AppEvent` out of the public surface.
 
-### 1C. Wake-aware event sender
+### 1C. Wake-aware event sender — COMPLETE (2026-07-22)
 
-- Wrap the unified app sender in an app-owned sender type.
-- Preserve the current `std::sync::mpsc` event stream and runtime stamps.
-- Add an optional coalesced wake callback suitable for winit's event-loop
-  proxy.
-- Prove PTY, agent, and input events wake a fake frontend without polling or
-  lost wakeups.
+- Wrapped the unified app sender in app-owned `AppEventSender` and routed input,
+  PTY, restore-preserved input, and agent producers through it.
+- Preserved `std::sync::mpsc`, runtime stamps, flow credits, the 256-event drain
+  budget, and terminal-loop timing.
+- Added an optional frontend-neutral callback that coalesces notifications for
+  every non-empty queue interval.
+- Added controlled tests for input/channel truth, burst coalescing with FIFO
+  preservation, concurrent drain/enqueue wake safety, real PTY plus agent
+  producer routing, and `FrontendHost` callback injection.
 
 ### 1D. Terminal migration — TERMINAL ADOPTION COMPLETE (2026-07-22)
 
@@ -199,14 +209,15 @@ Phase 1 exit gate:
   quit, and error shutdown.
 - No native or GPU dependency enters a production workspace member.
 
-Current Phase 1B/terminal-adoption evidence proves neutral and queued input,
-bounded drain, snapshot revision, exact-prior-frame hit targets, FIFO effects,
-quit, idempotent shutdown, and the existing terminal error-cleanup order. The
-2026-07-22 release probe measured p50 11.14 ms / p95 12.58 ms / max
-13.05 ms over 100 samples with zero misses, and `./ci/gate.sh` passed 463
-tests with 2 intentionally ignored live-Claude-CLI tests. Phase 1 is not
-complete: the app-owned sender plus fake input/PTY/agent wake and lost-wakeup
-coverage remain Phase 1C work.
+Phase 1 evidence proves neutral and queued input, bounded drain, snapshot
+revision, exact-prior-frame hit targets, FIFO effects, quit, idempotent
+shutdown, the existing terminal error-cleanup order, coalesced callback wakes,
+and no lost wake across concurrent drain/enqueue. The 2026-07-22 Phase 1C
+fresh-release probe measured p50 10.60 ms / p95 12.06 ms / max 13.38 ms over
+100 samples with zero misses. `./ci/gate.sh` passed 467 tests with 2
+intentionally ignored live-Claude-CLI tests, plus format, Clippy with warnings
+denied, build, conformance, and doc trace. No native/GPU production dependency
+was added.
 
 ## Phase 2 — Prove One Real Native Workstation Slice
 
@@ -375,9 +386,11 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Implement Phase 1C only: wrap the existing unified sender in an app-owned type
-with an optional coalesced wake callback while keeping `std::sync::mpsc` as the
-source of event truth. Prove input, PTY, and agent events wake a fake frontend
-without polling, lost wakeups, or duplicate wake storms. Do not add winit,
-wgpu, glyphon, a native window, Artifact Preview scene types, or another
-native/GPU dependency in that slice.
+Begin Phase 2 inside `spikes/frontend-wgpu` only: instantiate the real
+`FrontendHost`, bind its neutral wake callback to the spike event loop, and
+translate winit input to `mandatum_scene::input::InputEvent`. First write a
+controlled excluded-spike test proving a PTY event from the real
+`RuntimeEngine` reaches the event loop without interval polling. Do not add a
+production workspace member or dependency, do not add Artifact Preview types,
+and do not keep the spike's duplicate PTY/parser/input/state-machine path once
+the real host path is proven.

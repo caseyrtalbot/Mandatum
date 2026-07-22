@@ -122,11 +122,25 @@ For scene/frontend work, prove:
   exposing `AppState`
 - pointer input resolves against hit targets from the exact prior snapshot,
   including when product state changes before the next frame
+- input, PTY, restore-preserved input, and agent producers all use the same
+  app-owned sender; no raw producer or receiver bypasses its accounting
+- an optional fake-frontend callback fires when the unified queue changes from
+  empty to non-empty, coalesces a queued burst without dropping FIFO events,
+  and cannot strand an enqueue racing the final receive
 
 Dated Phase 1B host verification (2026-07-22): all 6 focused host tests and
 all 244 `mandatum-app` library tests passed. The full `./ci/gate.sh` passed 463
 tests with 2 intentionally ignored live-Claude-CLI tests, including formatting,
 Clippy with warnings denied, build, conformance, and doc trace.
+
+Dated Phase 1C wake verification (2026-07-22): controlled sender tests proved
+input callback plus channel truth, one callback across a 64-event FIFO burst,
+4,096 concurrent send/drain events without a stranded wake, and real PTY plus
+agent forwarders sharing the sender. The host callback-injection test passed;
+all 248 `mandatum-app` library tests passed. The full `./ci/gate.sh` passed 467
+tests with 2 intentionally ignored live-Claude-CLI tests, including formatting,
+Clippy with warnings denied, build, conformance, and doc trace. No production
+native/GPU dependency was added.
 
 ## Agent Runtime Checks
 
@@ -230,6 +244,12 @@ excluded.
 
 Dated Phase 1B/terminal-adoption refresh (2026-07-22, after the shipped loop
 moved behind `FrontendHost`): p50 11.14 ms / p95 12.58 ms / max 13.05 ms,
+100 samples with zero misses. This was run after a fresh release build. The
+endpoint remains key-to-app-output bytes with host-terminal paint excluded; it
+is not native presentation or input-to-photon evidence.
+
+Dated Phase 1C refresh (2026-07-22, after all input, PTY, and agent producers
+moved behind `AppEventSender`): p50 10.60 ms / p95 12.06 ms / max 13.38 ms,
 100 samples with zero misses. This was run after a fresh release build. The
 endpoint remains key-to-app-output bytes with host-terminal paint excluded; it
 is not native presentation or input-to-photon evidence.

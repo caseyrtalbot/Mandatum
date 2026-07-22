@@ -5,7 +5,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, Sender, TryRecvError},
+        mpsc::{self, Receiver, TryRecvError},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -29,7 +29,7 @@ use crate::{
         AgentConnectorKind, default_task_command, effective_runtime_settings, load_config,
         project_config_file, user_config_file,
     },
-    events::AppEvent,
+    events::{AppEvent, AppEventSender},
     frontend::translate_event,
     frontend_effect::FrontendEffect,
     frontend_host::FrontendHost,
@@ -168,7 +168,7 @@ enum InputThreadOutcome {
 }
 
 impl InputThread {
-    fn spawn(tx: Sender<AppEvent>) -> Self {
+    fn spawn(tx: AppEventSender) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
         let (outcome_tx, outcome_rx) = mpsc::channel();

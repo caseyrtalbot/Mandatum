@@ -148,6 +148,11 @@ A 2026-07-14 live refresh measured **p50 11.71 ms / p95 13.56 ms / max
 therefore does not prove sub-20 ms end-to-end latency. The authoritative dated
 run and procedure live in [verification.md](verification.md).
 
+The 2026-07-22 Phase 1C refresh, after all input, PTY, and agent producers
+moved behind the coalesced app-owned sender, measured **p50 10.60 ms / p95
+12.06 ms / max 13.38 ms** over 100 samples with zero misses. It has the same
+key-to-app-output endpoint and therefore does not change the admission verdict.
+
 The wgpu adapter stays warm behind the scene contract, with its probe
 (`spikes/frontend-wgpu/src/bin/tui_probe.rs`) kept as the product's standing
 latency-regression harness. Revisit when the roadmap needs GPU-only
@@ -169,7 +174,8 @@ The native frontend has a durable, admission-gated implementation sequence in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md). It
 keeps one `AppState`/`RuntimeEngine`, extracts a shared frontend host and typed
 platform effects, migrates the terminal shell first, and only then connects the
-excluded native adapter to real workstation state. Phase 1A's raw clipboard
-effect, Phase 1B's host, and terminal adoption in Phase 1D are complete;
-Phase 1C's wake-aware sender is next. Selecting the capability branch does not
-weaken the production conformance gate, and Artifact Preview remains unbuilt.
+excluded native adapter to real workstation state. Phase 1 is complete: the
+neutral clipboard effect, shared host, app-owned coalesced sender, and terminal
+adoption all exercise the real state machine. Phase 2's excluded-spike host
+integration is next. Selecting the capability branch does not weaken the
+production conformance gate, and Artifact Preview remains unbuilt.

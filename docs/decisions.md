@@ -1309,3 +1309,52 @@ actually ran; the gate is rerun after the final repo documentation edits.
 Verification impact: every phase completion checks `./ci/gate.sh`,
 `git diff --check`, `git status --short`, the current handoff, and the resulting
 commit identity before reporting completion.
+
+## Accepted: Unified Events Use One Coalesced Wake-Aware Sender
+
+Status: accepted (2026-07-22)
+
+Decision: `AppEventSender` is the sole send side for terminal input, PTY
+readers, restore-preserved input, and agent forwarders. It preserves the one
+`std::sync::mpsc` event stream as product truth and may invoke a
+frontend-neutral callback when the queue changes from empty to non-empty.
+Clones share queued-event and pending-wake accounting; receives pass through
+the same state so consuming the final queued event and enqueueing the next one
+are serialized. `FrontendHost::new_with_wake_callback` is the public injection
+point. No GUI event type enters app or runtime state.
+
+Context: the terminal loop already blocks on the unified channel, but a winit
+event loop cannot block on that receiver. Exposing the raw sender or giving
+each runtime source its own platform callback would either leak private event
+types or create independent wake races. A plain atomic pending flag also has a
+lost-wakeup window when a producer observes `pending = true` immediately
+before the consumer clears it after an empty drain. The 256-event drain budget
+adds another boundary: a batch ending exactly at the cap must not leave the
+next enqueue silently coalesced forever.
+
+Rationale: queue-transition accounting keeps the callback a disposable
+notification while the channel owns ordering, payloads, flow credits, and
+runtime generation/token stamps. One small shared lock spans channel send or
+receive plus the queue count transition, closing the clear/enqueue race without
+polling, an async runtime, platform dependencies, or changes to terminal-loop
+timing.
+
+Consequences: all existing producer signatures take `AppEventSender`; raw
+receiver access was also removed from restore cleanup so sender accounting
+cannot drift. A burst receives one wake while non-empty, every event remains
+FIFO on the channel, and the next event after a full drain can wake again.
+The terminal frontend still uses channel blocking and supplies no callback.
+Phase 2 may bind the neutral callback to the excluded spike's event-loop proxy.
+No winit, wgpu, glyphon, Artifact Preview type, production dependency, runtime
+stamp, PTY flow-credit, drain-budget, heartbeat, or redraw-policy change is
+accepted here.
+
+Verification: controlled tests cover input callback plus channel truth, a
+64-event burst with one callback and every FIFO event, 4,096 concurrent
+send/drain events with no stranded wake, real PTY and agent producers sharing
+one sender, and callback injection through `FrontendHost`. All 248 app library
+tests passed. The fresh-release `tui_probe` measured p50 10.60 ms / p95 12.06
+ms / max 13.38 ms over 100 samples with zero misses; as before, this is
+key-to-app-output evidence and excludes host-terminal paint. `./ci/gate.sh`
+passed 467 tests with 2 intentionally ignored live-Claude-CLI tests, plus
+formatting, Clippy with warnings denied, build, conformance, and doc trace.

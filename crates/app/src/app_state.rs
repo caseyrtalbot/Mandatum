@@ -2,7 +2,6 @@ use std::{
     collections::BTreeSet,
     io,
     path::{Path, PathBuf},
-    sync::mpsc::Sender,
     time::{Duration, Instant},
 };
 
@@ -141,6 +140,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
+        Self::new_with_frontend_wake(config, None)
+    }
+
+    pub(crate) fn new_with_frontend_wake(
+        config: AppConfig,
+        wake: Option<crate::events::WakeCallback>,
+    ) -> Self {
         let command_context =
             CommandContext::for_project(config.workspace_name.clone(), config.project_path.clone());
         let workspace = Workspace::new(config.workspace_name, config.project_path);
@@ -167,7 +173,10 @@ impl AppState {
             status: "ready".to_owned(),
             preserve_status_on_next_resize: false,
             last_redraw: Instant::now(),
-            runtime: RuntimeEngine::new(),
+            runtime: match wake {
+                Some(wake) => RuntimeEngine::with_wake_callback(wake),
+                None => RuntimeEngine::new(),
+            },
             agent_connector: connector_for_kind(config.agent_connector),
             agent_connector_label: connector_kind_label(config.agent_connector),
             agent_objective: config.agent_objective,
@@ -938,7 +947,7 @@ impl AppState {
 
     /// A clone of the unified event channel's send side, for the frontend's
     /// input thread.
-    pub(crate) fn event_sender(&self) -> Sender<AppEvent> {
+    pub(crate) fn event_sender(&self) -> crate::events::AppEventSender {
         self.runtime.event_sender()
     }
 
