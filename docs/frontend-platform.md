@@ -170,5 +170,6 @@ The native frontend has a durable, admission-gated implementation sequence in
 keeps one `AppState`/`RuntimeEngine`, extracts a shared frontend host and typed
 platform effects, migrates the terminal shell first, and only then connects the
 excluded native adapter to real workstation state. Phase 1A's raw clipboard
-effect is complete. Selecting the capability branch does not weaken the
-production conformance gate.
+effect, Phase 1B's host, and terminal adoption in Phase 1D are complete;
+Phase 1C's wake-aware sender is next. Selecting the capability branch does not
+weaken the production conformance gate, and Artifact Preview remains unbuilt.

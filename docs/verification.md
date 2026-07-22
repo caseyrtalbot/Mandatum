@@ -111,6 +111,22 @@ For scene/frontend work, prove:
 - resize preserves layout semantics
 - drawing code does not own product behavior
 - terminal frontend and any native frontend consume the same scene contract
+- `FrontendHost` owns one private `AppState` and exposes no runtime registry
+- direct and unified-channel neutral input reach the shared state machine
+- blocking wait applies at most one event and nonblocking drain stays within
+  its per-call budget
+- each owned `FrameSnapshot` carries scene, theme, and a revision that advances
+  by snapshot order rather than claiming semantic dirty state
+- effects preserve FIFO order and drain exactly once through the host
+- quit state and behaviorally idempotent shutdown are available without
+  exposing `AppState`
+- pointer input resolves against hit targets from the exact prior snapshot,
+  including when product state changes before the next frame
+
+Dated Phase 1B host verification (2026-07-22): all 6 focused host tests and
+all 244 `mandatum-app` library tests passed. The full `./ci/gate.sh` passed 463
+tests with 2 intentionally ignored live-Claude-CLI tests, including formatting,
+Clippy with warnings denied, build, conformance, and doc trace.
 
 ## Agent Runtime Checks
 
@@ -211,6 +227,12 @@ Dated Phase 1A refresh (2026-07-21, after the renderer-neutral frontend-effect
 seam): p50 11.58 ms / p95 13.35 ms / max 16.14 ms, 100 samples with zero
 misses. The endpoint remains key-to-app-output bytes with host-terminal paint
 excluded.
+
+Dated Phase 1B/terminal-adoption refresh (2026-07-22, after the shipped loop
+moved behind `FrontendHost`): p50 11.14 ms / p95 12.58 ms / max 13.05 ms,
+100 samples with zero misses. This was run after a fresh release build. The
+endpoint remains key-to-app-output bytes with host-terminal paint excluded; it
+is not native presentation or input-to-photon evidence.
 
 Regression bar: p50 must stay well under 25 ms. A p50 drifting back toward
 40 ms means something reintroduced interval polling into the wake path.

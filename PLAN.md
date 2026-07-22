@@ -63,6 +63,11 @@ more useful without pretending the wider vision is finished:
   transactional restore. `AppState` receives typed effects and lifecycle
   facts while durable workspace and presentation state remain outside the
   live engine.
+- `FrontendHost` now owns the terminal run's one private `AppState`, exposes
+  neutral input and bounded event consumption, and returns owned
+  scene/theme/revision snapshots plus FIFO platform effects. The shipped
+  terminal frontend exercises this seam while retaining crossterm, terminal
+  lifecycle, heartbeat/redraw scheduling, rendering, and OSC 52 encoding.
 - focus now normally accents only the pane title (bright blue in the default dark
   theme) while the full perimeter stays calm; the explicit `focused` label
   preserves a non-color signal, with a one-cell corner fallback when a pane is
@@ -97,10 +102,12 @@ more useful without pretending the wider vision is finished:
   shared host/effect seam, terminal migration, real-state-machine native slice,
   parity, text/IME, recovery/performance, admission, and opt-in rollout.
   The capability branch is selected: task/agent-produced PNG artifacts become
-  pixel-native preview panes with a deterministic terminal fallback. Phase 1A's
-  neutral clipboard effect is complete. Production GPU dependencies and
-  release admission remain blocked until the typed artifact scene surface,
-  adapter tests, and later admission decision exist.
+  pixel-native preview panes with a deterministic terminal fallback. Phase
+  1A's neutral clipboard effect, Phase 1B's shared host, and the terminal
+  adoption portion of Phase 1D are complete. Phase 1C's wake-aware sender is
+  next. Production GPU dependencies and release admission remain blocked until
+  the typed artifact scene surface, adapter tests, and later admission decision
+  exist.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.

@@ -260,6 +260,11 @@ impl AppState {
         std::mem::take(&mut self.frontend_effects)
     }
 
+    #[cfg(test)]
+    pub(crate) fn stage_frontend_effect_for_test(&mut self, effect: FrontendEffect) {
+        self.frontend_effects.push(effect);
+    }
+
     /// The active theme, resolved from config, for the frontend adapter.
     pub fn theme(&self) -> &Theme {
         &self.theme
@@ -957,16 +962,21 @@ impl AppState {
     /// producer that outruns the consumer (a `yes`/`cat` flood) from pinning
     /// the loop in here forever: the shell always gets back to draw() and
     /// the redraw-cap check between drains.
-    pub(crate) fn drain_events(&mut self) {
+    pub(crate) fn drain_events(&mut self) -> usize {
+        let mut drained = 0;
         for _ in 0..DRAIN_EVENT_BUDGET {
             if self.should_quit {
                 break;
             }
             match self.runtime.try_recv_event() {
-                Ok(event) => self.apply_app_event(event),
+                Ok(event) => {
+                    self.apply_app_event(event);
+                    drained += 1;
+                }
                 Err(_) => break,
             }
         }
+        drained
     }
 
     fn apply_app_event(&mut self, event: AppEvent) {

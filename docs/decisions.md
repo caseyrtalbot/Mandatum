@@ -1230,3 +1230,82 @@ sufficiency, a terminal fallback test, an excluded-GPU render-plan test, and
 `./ci/gpu-spike.sh`. The Phase 1A release probe measured p50 11.58 ms / p95
 13.35 ms / max 16.14 ms over 100 samples with zero misses, still at the
 key-to-app-output endpoint. The terminal latency branch remains unselected.
+
+## Accepted: The Shipped Terminal Frontend Exercises The Shared Host
+
+Status: accepted (2026-07-22)
+
+Decision: `FrontendHost` is the frontend-neutral owner of exactly one private
+`AppState` and its `RuntimeEngine`. It accepts neutral input, exposes a blocking
+unified-event wait and bounded nonblocking drain, performs heartbeat work when
+the platform shell schedules it, returns owned `FrameSnapshot` values, drains
+typed effects in FIFO order, exposes quit, and makes shutdown behaviorally
+idempotent. `FrameSnapshot` carries `WorkspaceScene`, `Theme`, and a monotonic
+revision that identifies snapshot production order, not semantic dirtiness.
+The shipped terminal loop now uses this host for all covered state, input,
+frame, effect, quit, event-drain, heartbeat, and shutdown behavior.
+
+Context: Phase 1A proved a renderer-neutral platform effect, but
+`app_shell.rs` still constructed and drove `AppState` directly. A facade used
+only by tests would not prove that a second frontend can share the real state
+machine. The loop also has no honest semantic dirty detector: it redraws after
+event wakes and heartbeats, so a content-change revision would overclaim what
+the implementation knows.
+
+Rationale: migrating the shipped path first forces the host to carry the real
+lifecycle without duplicating PTYs, parsers, commands, approvals, persistence,
+or recovery. Snapshot-order revisions are sufficient to identify frames and
+stay honest until profiling and a native event loop justify richer
+invalidation. `FrontendHost::frame` uses `AppState::build_scene`; the terminal
+requests and renders that same snapshot inside its draw callback, preserving
+the exact-painted-frame hit-target rule.
+
+Consequences: `app_shell.rs` retains crossterm, terminal guard and input-reader
+lifecycle, the 250 ms heartbeat schedule, 8 ms redraw cap, ratatui rendering,
+terminal effect encoding, reader join, restoration, and primary-error
+precedence. Concrete runtime registries do not escape. The existing raw event
+sender remains crate-private for the terminal reader only. Phase 1C must wrap
+it in an app-owned sender with an optional coalesced wake callback and prove
+input, PTY, and agent wake behavior. No platform waker, Artifact Preview scene
+type, native window, native/GPU production dependency, or release-surface
+change is admitted by this decision.
+
+Verification: focused host tests cover owned frames and revision order,
+FIFO effects, unified-channel input, the 256-event drain bound, exact-prior-
+frame hit testing, and idempotent shutdown. Existing shell tests retain error
+cleanup ordering and primary-error precedence. All 6 focused host tests and all
+244 app library tests passed. The 2026-07-22 fresh-release `tui_probe` measured
+p50 11.14 ms / p95 12.58 ms / max 13.05 ms over 100 samples with zero misses;
+it remains key-to-app-output evidence only. `./ci/gate.sh` passed 463 tests with
+2 intentionally ignored live-Claude-CLI tests, plus formatting, Clippy with
+warnings denied, build, conformance, and doc trace.
+
+## Accepted: Phase Completion Requires Synchronized Docs, Handoff, And Commit
+
+Status: accepted (2026-07-22)
+
+Decision: active-document drift is a defect. A phase or implementation slice
+is complete only after its required tests pass, every affected source-of-truth
+document is updated with verified facts, the project handoff records the
+verified stop point and one exact next task, the final repo documentation has
+passed `./ci/gate.sh`, diff/status hygiene has been inspected, and the code,
+tests, and synchronized repo documentation are committed together.
+
+Context: implementation, verification, plans, decisions, and the next-agent
+handoff are one operational state. Allowing any of them to lag makes a green
+build misleading and forces the next session to reconstruct which claims are
+current.
+
+Rationale: Mandatum's architecture and admission gates depend on precise
+boundaries and dated evidence. Keeping documentation and handoffs inside the
+same completion transaction makes the repository self-describing and prevents
+completed work from being left as an ambiguous dirty worktree.
+
+Consequences: `AGENTS.md` is the canonical operating rule. Doc sync and the
+handoff are not optional follow-up tasks, and a completed slice does not stop
+before its commit. Verification claims must still describe only commands that
+actually ran; the gate is rerun after the final repo documentation edits.
+
+Verification impact: every phase completion checks `./ci/gate.sh`,
+`git diff --check`, `git status --short`, the current handoff, and the resulting
+commit identity before reporting completion.

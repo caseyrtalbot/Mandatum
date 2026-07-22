@@ -1,0 +1,251 @@
+//! Frontend-neutral ownership seam around the Mandatum state machine.
+//!
+//! Platform shells translate input and own paint scheduling, but they reach
+//! workstation behavior only through this host. The terminal shell keeps the
+//! raw unified sender temporarily; Phase 1C replaces it with a wake-aware
+//! app-owned sender without changing the channel as the source of event truth.
+
+use std::{sync::mpsc::Sender, time::Duration};
+
+use mandatum_scene::{SceneSize, Theme, WorkspaceScene, input::InputEvent};
+
+use crate::{
+    app_shell::AppConfig, app_state::AppState, events::AppEvent, frontend_effect::FrontendEffect,
+};
+
+/// One owned paint input from the shared workstation state machine.
+///
+/// `revision` identifies snapshot production order, not semantic dirtiness:
+/// every call to [`FrontendHost::frame`] advances it, even when the scene is
+/// unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameSnapshot {
+    pub scene: WorkspaceScene,
+    pub theme: Theme,
+    pub revision: u64,
+}
+
+/// The sole owner of app/runtime state for one frontend run.
+pub struct FrontendHost {
+    app: AppState,
+    frame_revision: u64,
+    shutdown_complete: bool,
+}
+
+impl FrontendHost {
+    pub fn new(config: AppConfig) -> Self {
+        Self {
+            app: AppState::new(config),
+            frame_revision: 0,
+            shutdown_complete: false,
+        }
+    }
+
+    /// Apply one already-neutral platform input synchronously.
+    pub fn handle_input(&mut self, input: InputEvent) {
+        if !self.shutdown_complete {
+            self.app.handle_event(input);
+        }
+    }
+
+    /// Block until one unified input/runtime event is applied or the timeout
+    /// expires. A shut-down host never blocks or applies queued work.
+    pub fn wait_event(&mut self, timeout: Duration) -> bool {
+        !self.shutdown_complete && self.app.wait_event(timeout)
+    }
+
+    /// Apply at most the app's bounded per-call event budget without blocking.
+    pub fn drain_runtime(&mut self) -> usize {
+        if self.shutdown_complete {
+            0
+        } else {
+            self.app.drain_events()
+        }
+    }
+
+    /// Perform child-exit polling; the active platform shell owns its cadence.
+    pub fn heartbeat(&mut self) {
+        if !self.shutdown_complete {
+            self.app.poll_child_exits();
+        }
+    }
+
+    /// Build the exact owned scene/theme pair an adapter should paint.
+    ///
+    /// `AppState::build_scene` also retains this scene's hit targets, so later
+    /// pointer input resolves against the most recently requested frame rather
+    /// than a speculative rebuild.
+    pub fn frame(&mut self, size: SceneSize) -> FrameSnapshot {
+        let revision = self
+            .frame_revision
+            .checked_add(1)
+            .expect("frontend frame revision overflowed");
+        let scene = self.app.build_scene(size);
+        let theme = self.app.theme().clone();
+        self.frame_revision = revision;
+        FrameSnapshot {
+            scene,
+            theme,
+            revision,
+        }
+    }
+
+    /// Take all pending platform effects in request order, exactly once.
+    pub fn take_effects(&mut self) -> Vec<FrontendEffect> {
+        self.app.take_frontend_effects()
+    }
+
+    pub fn should_quit(&self) -> bool {
+        self.app.should_quit()
+    }
+
+    /// Shut live work down once. Returns whether this call performed shutdown.
+    pub fn shutdown(&mut self) -> bool {
+        if self.shutdown_complete {
+            return false;
+        }
+        self.shutdown_complete = true;
+        self.app.shutdown();
+        true
+    }
+
+    /// Temporary terminal-only access to the unified channel. Phase 1C wraps
+    /// this in an app-owned sender with an optional coalesced wake callback.
+    pub(crate) fn event_sender(&self) -> Sender<AppEvent> {
+        self.app.event_sender()
+    }
+}
+
+impl Drop for FrontendHost {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{thread, time::Duration};
+
+    use mandatum_scene::{
+        HitTargetKind, SceneSize,
+        input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
+    };
+
+    use super::*;
+    use crate::{AppConfig, events::AppEvent, frontend_effect::FrontendEffect};
+
+    const FRAME_SIZE: SceneSize = SceneSize {
+        width: 100,
+        height: 30,
+    };
+
+    #[test]
+    fn frame_snapshot_is_owned_and_revisions_follow_snapshot_order() {
+        let mut host = FrontendHost::new(AppConfig::default());
+
+        let first = host.frame(FRAME_SIZE);
+        host.handle_input(InputEvent::FocusGained);
+        let second = host.frame(FRAME_SIZE);
+
+        assert_eq!(first.revision, 1);
+        assert_eq!(second.revision, 2);
+        assert_eq!(first.scene.size, FRAME_SIZE);
+        assert_eq!(first.theme.name, "mandatum-dark");
+        assert_eq!(first.scene.panes.len(), 1);
+    }
+
+    #[test]
+    fn frontend_effects_preserve_fifo_order_and_drain_once_through_host() {
+        let mut host = FrontendHost::new(AppConfig::default());
+        host.app
+            .stage_frontend_effect_for_test(FrontendEffect::SetClipboard("first".to_owned()));
+        host.app
+            .stage_frontend_effect_for_test(FrontendEffect::SetClipboard("second".to_owned()));
+
+        assert_eq!(
+            host.take_effects(),
+            vec![
+                FrontendEffect::SetClipboard("first".to_owned()),
+                FrontendEffect::SetClipboard("second".to_owned()),
+            ]
+        );
+        assert!(host.take_effects().is_empty());
+    }
+
+    #[test]
+    fn blocking_wait_applies_neutral_input_from_the_unified_channel() {
+        let mut host = FrontendHost::new(AppConfig::default());
+        let sender = host.event_sender();
+        let input = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            sender
+                .send(AppEvent::Input(InputEvent::Key(Key::ctrl('q'))))
+                .unwrap();
+        });
+
+        assert!(host.wait_event(Duration::from_secs(1)));
+        assert!(host.should_quit());
+        input.join().unwrap();
+    }
+
+    #[test]
+    fn runtime_drain_is_bounded_per_call() {
+        let mut host = FrontendHost::new(AppConfig::default());
+        let sender = host.event_sender();
+        for _ in 0..256 {
+            sender
+                .send(AppEvent::Input(InputEvent::FocusGained))
+                .unwrap();
+        }
+        sender
+            .send(AppEvent::Input(InputEvent::Key(Key::ctrl('q'))))
+            .unwrap();
+
+        assert_eq!(host.drain_runtime(), 256);
+        assert!(!host.should_quit());
+        assert!(host.wait_event(Duration::ZERO));
+        assert!(host.should_quit());
+    }
+
+    #[test]
+    fn pointer_input_uses_hit_targets_from_the_exact_prior_snapshot() {
+        let mut host = FrontendHost::new(AppConfig::default());
+        let first = host.frame(FRAME_SIZE);
+        assert!(first.scene.hit_targets.iter().any(|target| {
+            matches!(&target.kind, HitTargetKind::PaneBody(pane_id) if pane_id.as_str() == "pane-1")
+                && target.rect.contains(75, 5)
+        }));
+
+        host.handle_input(InputEvent::Key(Key::ctrl('p')));
+        host.handle_input(InputEvent::Key(Key::plain(KeyCode::Char('v'))));
+        assert_eq!(
+            host.app
+                .workspace()
+                .active_session()
+                .focused_pane_id()
+                .as_str(),
+            "pane-2"
+        );
+
+        host.handle_input(InputEvent::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            button: Some(PointerButton::Left),
+            column: 75,
+            row: 5,
+            mods: Modifiers::NONE,
+        }));
+        let next = host.frame(FRAME_SIZE);
+
+        assert_eq!(next.scene.panes.len(), 2);
+        assert_eq!(next.scene.focused_pane.as_str(), "pane-1");
+    }
+
+    #[test]
+    fn shutdown_is_idempotent() {
+        let mut host = FrontendHost::new(AppConfig::default());
+
+        assert!(host.shutdown());
+        assert!(!host.shutdown());
+        assert!(host.shutdown_complete);
+    }
+}

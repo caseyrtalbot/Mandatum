@@ -103,7 +103,13 @@ no layout and has no terminal-engine dependency (banned by the L1 gate).
 
 The terminal app runtime:
 
-- `app_shell.rs`: terminal lifecycle, event-driven run loop, renderer handoff
+- `app_shell.rs`: crossterm/terminal lifecycle, input-reader lifecycle,
+  heartbeat/redraw scheduling, renderer handoff, and terminal effect encoding;
+  drives `FrontendHost` for workstation behavior
+- `frontend_host.rs`: exported frontend-neutral owner of one private
+  `AppState`; blocking/bounded event consumption, heartbeat work, owned
+  `FrameSnapshot` scene/theme/revision values, FIFO effects, quit, and
+  idempotent shutdown
 - `app_state.rs`: command dispatch plus durable workspace, timeline, status,
   and presentation folds over typed runtime effects
 - `app_state/tests.rs`: private app-state unit and live-PTY tests

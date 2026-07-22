@@ -20,11 +20,10 @@ use crossterm::{
 };
 use mandatum_commands::CommandError;
 use mandatum_renderer::render;
-use mandatum_scene::{SceneSize, Theme};
+use mandatum_scene::{SceneSize, Theme, input::InputEvent};
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use crate::{
-    app_state::AppState,
     clipboard::osc52_sequence,
     config::{
         AgentConnectorKind, default_task_command, effective_runtime_settings, load_config,
@@ -33,6 +32,7 @@ use crate::{
     events::AppEvent,
     frontend::translate_event,
     frontend_effect::FrontendEffect,
+    frontend_host::FrontendHost,
     keymap::Keymap,
 };
 
@@ -51,16 +51,18 @@ pub fn run() -> Result<(), AppError> {
 }
 
 pub fn run_with_config(config: AppConfig) -> Result<(), AppError> {
-    let mut app = AppState::new(config);
+    let mut host = FrontendHost::new(config);
     let mut terminal = TerminalGuard::enter()?;
     let size = terminal.size()?;
-    app.handle_terminal_resize(size.width, size.height);
+    host.handle_input(InputEvent::Resize(SceneSize::new(size.width, size.height)));
 
-    let input_thread = InputThread::spawn(app.event_sender());
-    let result = event_loop(&mut terminal, &mut app, &input_thread);
+    let input_thread = InputThread::spawn(host.event_sender());
+    let result = event_loop(&mut terminal, &mut host, &input_thread);
     finalize_run(
         result,
-        || app.shutdown(),
+        || {
+            host.shutdown();
+        },
         || input_thread.stop_and_join(),
         || terminal.restore(),
     )
@@ -96,18 +98,19 @@ fn finalize_run(
 /// a keystroke wakes the loop the moment the input thread forwards it.
 fn event_loop(
     terminal: &mut TerminalGuard,
-    app: &mut AppState,
+    host: &mut FrontendHost,
     input_thread: &InputThread,
 ) -> Result<(), AppError> {
     let mut last_child_poll = Instant::now();
-    app.tick_runtime();
+    host.drain_runtime();
+    host.heartbeat();
 
-    while !app.should_quit() {
+    while !host.should_quit() {
         input_thread.propagate_outcome()?;
-        draw(terminal, app)?;
+        draw(terminal, host)?;
         let last_draw = Instant::now();
 
-        let frontend_effects = app.take_frontend_effects();
+        let frontend_effects = host.take_effects();
         if !frontend_effects.is_empty() {
             let mut stdout = io::stdout();
             for effect in frontend_effects {
@@ -115,34 +118,34 @@ fn event_loop(
             }
         }
 
-        if app.wait_event(HEARTBEAT) {
+        if host.wait_event(HEARTBEAT) {
             // Burst drain for drag/flood responsiveness, then coalesce
             // further arrivals until the redraw window opens so a flood
             // repaints at the cap instead of per event. Blocking between
             // arrivals keeps this idle-free (no busy spin).
-            app.drain_events();
+            host.drain_runtime();
             loop {
                 let elapsed = last_draw.elapsed();
-                if app.should_quit() || elapsed >= MIN_REDRAW_INTERVAL {
+                if host.should_quit() || elapsed >= MIN_REDRAW_INTERVAL {
                     break;
                 }
-                if !app.wait_event(MIN_REDRAW_INTERVAL - elapsed) {
+                if !host.wait_event(MIN_REDRAW_INTERVAL - elapsed) {
                     break;
                 }
-                app.drain_events();
+                host.drain_runtime();
             }
         }
 
         // Child exits surface on the heartbeat cadence, not per event.
         if last_child_poll.elapsed() >= HEARTBEAT {
-            app.poll_child_exits();
+            host.heartbeat();
             last_child_poll = Instant::now();
         }
         input_thread.propagate_outcome()?;
     }
 
-    app.shutdown();
-    draw(terminal, app)?;
+    host.shutdown();
+    draw(terminal, host)?;
     Ok(())
 }
 
@@ -455,13 +458,13 @@ impl From<CommandError> for AppError {
     }
 }
 
-fn draw(terminal: &mut TerminalGuard, app: &mut AppState) -> io::Result<()> {
+fn draw(terminal: &mut TerminalGuard, host: &mut FrontendHost) -> io::Result<()> {
     terminal.terminal.draw(|frame| {
         let area = frame.area();
-        // `build_scene` retains the frame's hit targets, so pointer events
-        // resolve against exactly what is on screen.
-        let scene = app.build_scene(SceneSize::new(area.width, area.height));
-        render(frame, &scene, app.theme());
+        // `FrontendHost::frame` retains this snapshot's hit targets, so
+        // pointer events resolve against exactly what is painted here.
+        let snapshot = host.frame(SceneSize::new(area.width, area.height));
+        render(frame, &snapshot.scene, &snapshot.theme);
     })?;
     Ok(())
 }

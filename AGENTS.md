@@ -88,6 +88,10 @@ loses its documentation or its gate.
 
 ## Doc-sync duty
 
+- Treat active-document drift as a defect. Update source-of-truth docs in the
+  same work slice as the code or decision they describe; never knowingly leave
+  the repo with stale implementation status, paths, interfaces, verification
+  claims, or next-step guidance.
 - Every judgment call lands as an entry in `docs/decisions.md` (status,
   decision, context, rationale, consequences, verification).
 - `PLAN.md` points forward; `docs/decisions.md` points backward. Update both
@@ -97,8 +101,24 @@ loses its documentation or its gate.
 - Update `README.md` and `docs/repo-structure.md` when crates or the doc set
   change. Remove references to files that no longer exist.
 
+## Phase completion protocol
+
+When a phase or implementation slice reaches its stop point and its required
+tests are green:
+
+1. update every affected source-of-truth document with only verified facts;
+2. create or replace the project handoff with the verified stop point, any
+   remaining unknowns, and one exact next task;
+3. rerun `./ci/gate.sh` after the final repo documentation changes;
+4. inspect `git diff --check` and `git status --short`; and
+5. commit the code, tests, and synchronized repo documentation together.
+
+A phase is not complete while its docs or handoff are stale. Do not defer doc
+sync or the handoff to a later phase or commit.
+
 ## Done means
 
 The artifact exists on disk, `./ci/gate.sh` is green (or the skipped steps
-are explicitly scoped out), source-of-truth docs match the artifact, and
-remaining risks are named. Never claim a verification that did not happen.
+are explicitly scoped out), source-of-truth docs match the artifact, the next
+handoff is current, remaining risks are named, and the completed slice is
+committed. Never claim a verification that did not happen.

@@ -177,14 +177,29 @@ Own rendering and platform input:
 Frontend adapters should draw a scene and emit input/hit-test events. They do
 not own product behavior.
 
-### Planned Shared Frontend Host
+The shipped terminal shell drives `FrontendHost` for workstation behavior. It
+retains crossterm ownership, the terminal guard, input-reader lifecycle,
+heartbeat and redraw scheduling, ratatui rendering, and OSC 52 encoding.
 
-The production architecture for a second frontend uses one app-local
-`FrontendHost` around the existing `AppState` and `RuntimeEngine`. It will
-accept neutral input, drain the unified runtime event stream, emit immutable
-scene/theme snapshots plus redraw/deadline metadata, and return typed platform
-effects such as raw clipboard text. The terminal shell migrates to this seam
-before a native product crate is admitted.
+### Shared Frontend Host
+
+`crates/app/src/frontend_host.rs` owns exactly one private `AppState` and its
+`RuntimeEngine`. It accepts neutral input, exposes one blocking unified-event
+wait plus a bounded nonblocking drain, performs child-exit heartbeat work when
+the shell schedules it, and returns owned `FrameSnapshot` values containing
+`WorkspaceScene`, `Theme`, and a monotonic snapshot-order revision. It also
+drains typed effects in FIFO order, exposes quit state, and makes shutdown
+behaviorally idempotent. It exposes no concrete runtime registry.
+
+Snapshot revisions identify frame production order rather than semantic dirty
+state: every frame call advances the revision. `frame()` retains the returned
+scene's hit targets in `AppState`, and the terminal requests and renders that
+same snapshot inside its draw callback, so pointer input resolves against the
+most recently painted frame.
+
+The existing raw sender remains crate-private and is used only by the terminal
+input reader. Phase 1C will replace that temporary access with an app-owned,
+wake-aware sender; no platform waker exists yet.
 
 A native shell may own a window, platform wake handle, DPI/IME state,
 clipboard integration, GPU surface/device resources, glyph caches, and paint

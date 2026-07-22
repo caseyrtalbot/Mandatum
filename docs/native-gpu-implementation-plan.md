@@ -1,7 +1,7 @@
 # Native GPU Frontend Implementation Plan
 
-Status: capability branch accepted; Phase 1A complete; production GPU
-admission pending (2026-07-21).
+Status: capability branch accepted; Phases 1A and 1B plus terminal adoption in
+1D complete; Phase 1C and production GPU admission pending (2026-07-22).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -32,12 +32,12 @@ parallel product model.
 |---|---|---|
 | Product state | `RuntimeEngine` owns all live terminal, task, and agent state; `AppState` folds durable and presentation state. | Reuse this state machine unchanged. |
 | Renderer contract | `WorkspaceScene` carries layout, pane surfaces, overlays, themes, and hit targets. | Extend the contract only for an admitted product capability, never for a renderer convenience. |
-| Terminal frontend | `app_shell.rs` owns the crossterm lifecycle, input reader, event-driven wait loop, 250 ms heartbeat, and 8 ms redraw cap. | Extract a shared host seam and migrate the terminal frontend before adding a native product crate. |
+| Terminal frontend | `app_shell.rs` drives `FrontendHost` while retaining the crossterm lifecycle, input reader, 250 ms heartbeat schedule, 8 ms redraw cap, rendering, and terminal effect encoding. | Add the wake-aware sender next; do not add a native product crate yet. |
 | GPU spike | The excluded winit/wgpu spike proves window creation, GPU presentation, glyph paint, a live PTY, and scene-only renderer boundaries. It supports only a narrow terminal scene and duplicates runtime/input behavior. | Reuse the evidence and paint techniques; do not promote the spike's app, PTY, parser, input encoder, or scene bridge. |
 | Clipboard | `AppState` emits FIFO `FrontendEffect::SetClipboard(String)` values; `app_shell.rs` alone maps them to OSC 52. | Phase 1A is complete and proves the first renderer-neutral platform effect. |
 | Wake path | Runtime events wake the terminal loop through the unified channel; winit needs a platform wake signal. | Preserve `std::sync::mpsc` and add a coalesced frontend wake hook rather than an async runtime or polling loop. |
 | Performance evidence | The spike measured key-to-GPU-present p50 21.6 ms / p95 22.2 ms. The terminal's 2026-07-14 refresh measured key-to-app-output p50 11.71 ms / p95 13.56 ms / max 17.84 ms. | These endpoints are asymmetric and do not prove a native product win or sub-20 ms input-to-present performance. |
-| Admission | The Artifact Preview capability branch is selected, but its typed scene surface and adapter tests do not exist yet. | Host extraction may proceed; production GPU dependencies remain rejected until the later admission evidence and decision. |
+| Admission | The Artifact Preview capability branch is selected, but its typed scene surface and adapter tests do not exist yet. | Production GPU dependencies remain rejected until the later admission evidence and decision. |
 
 The detailed evidence and standing procedures live in
 [frontend-platform.md](frontend-platform.md),
@@ -64,39 +64,44 @@ The detailed evidence and standing procedures live in
 8. No production GPU dependency or release allowlist changes until the Phase 6
    production-admission decision and its evidence are accepted.
 
-## Proposed Host Interface
+## Shared Host Interface
 
-The exact Rust spelling may sharpen during test-first extraction, but the
-responsibility boundary is fixed:
+`crates/app/src/frontend_host.rs` now implements this boundary:
 
 ```rust
-struct FrontendHost {
-    app: AppState,
+pub struct FrontendHost { /* owns one private AppState */ }
+
+pub struct FrameSnapshot {
+    pub scene: WorkspaceScene,
+    pub theme: Theme,
+    pub revision: u64,
 }
 
-struct FrontendUpdate {
-    revision: u64,
-    redraw: bool,
-    quit: bool,
-    next_deadline: Option<Instant>,
-}
-
-struct FrameSnapshot {
-    scene: WorkspaceScene,
-    theme: Theme,
-    revision: u64,
-}
-
-enum FrontendEffect {
-    SetClipboard(String),
+impl FrontendHost {
+    pub fn handle_input(&mut self, input: InputEvent);
+    pub fn wait_event(&mut self, timeout: Duration) -> bool;
+    pub fn drain_runtime(&mut self) -> usize;
+    pub fn heartbeat(&mut self);
+    pub fn frame(&mut self, size: SceneSize) -> FrameSnapshot;
+    pub fn take_effects(&mut self) -> Vec<FrontendEffect>;
+    pub fn should_quit(&self) -> bool;
+    pub fn shutdown(&mut self) -> bool;
 }
 ```
 
-The host accepts neutral input, drains accepted runtime events, performs the
-heartbeat work, produces immutable frame snapshots, exposes typed effects,
-and shuts down once. An app-owned event sender retains the current channel and
-optionally invokes a coalesced platform waker after enqueueing. A waker is a
-notification only; the channel remains the source of event truth.
+The host accepts neutral input, blocks on and drains the unified event stream,
+performs heartbeat work when its shell schedules it, produces owned frame
+snapshots, drains typed effects in FIFO order, exposes quit state, and makes
+shutdown behaviorally idempotent. A frame revision is snapshot identity only:
+it starts at 1 and advances for every produced snapshot, even when content is
+unchanged. This slice deliberately adds no semantic dirty detector,
+`FrontendUpdate`, redraw flag, or deadline metadata; terminal scheduling stays
+in `app_shell.rs`.
+
+The terminal input reader temporarily receives the existing crate-private raw
+sender from the host. Phase 1C replaces that access with an app-owned sender
+that can optionally invoke a coalesced platform waker after enqueueing. A waker
+will be a notification only; the channel remains the source of event truth.
 
 ## Phase 0 — Select And Record The Product Trigger
 
@@ -156,15 +161,16 @@ other native/GPU production dependency.
 - Tests prove FIFO ordering, drain-once behavior, restore clearing, both copy
   paths, and terminal-boundary encoding.
 
-### 1B. Frame and lifecycle seam
+### 1B. Frame and lifecycle seam — COMPLETE (2026-07-22)
 
-- Add `crates/app/src/frontend_host.rs`.
-- Move public run-loop operations behind product-shaped methods:
+- Added `crates/app/src/frontend_host.rs`, owning one private `AppState`.
+- Moved run-loop operations behind product-shaped methods:
   `handle_input`, `drain_runtime`, `heartbeat`, `frame`, `take_effects`,
-  `should_quit`, and `shutdown`.
-- Return revision/redraw/deadline information so a frontend does not inspect
-  `AppState` internals.
-- Keep hit targets tied to the exact scene snapshot that was painted.
+  `should_quit`, and idempotent `shutdown`, plus the blocking `wait_event`.
+- Added owned `FrameSnapshot` values containing `WorkspaceScene`, `Theme`, and
+  a monotonic snapshot-order revision. No semantic dirty state is claimed.
+- Kept hit targets tied to the exact scene snapshot requested for paint.
+- Kept concrete runtime registries and `AppEvent` out of the public surface.
 
 ### 1C. Wake-aware event sender
 
@@ -175,21 +181,32 @@ other native/GPU production dependency.
 - Prove PTY, agent, and input events wake a fake frontend without polling or
   lost wakeups.
 
-### 1D. Terminal migration
+### 1D. Terminal migration — TERMINAL ADOPTION COMPLETE (2026-07-22)
 
-- Rewrite `app_shell.rs` to drive `FrontendHost`.
-- Preserve the 250 ms heartbeat, 8 ms redraw cap, input failure propagation,
+- Rewrote `app_shell.rs` to drive `FrontendHost` for state, input, frames,
+  effects, quit, runtime drains, heartbeat work, and shutdown.
+- Preserved the 250 ms heartbeat, 8 ms redraw cap, input failure propagation,
   runtime shutdown, reader join, terminal restoration, and primary-error
   precedence.
-- Add fake-host tests before any native frontend consumes the interface.
+- Added controlled host tests before any native frontend consumes the
+  interface.
 
-Exit gate:
+Phase 1 exit gate:
 
 - `./ci/gate.sh` is green.
 - The terminal latency probe remains below its p50 25 ms regression bar.
 - Tests prove input, PTY wake, agent wake, redraw coalescing, clipboard,
   quit, and error shutdown.
 - No native or GPU dependency enters a production workspace member.
+
+Current Phase 1B/terminal-adoption evidence proves neutral and queued input,
+bounded drain, snapshot revision, exact-prior-frame hit targets, FIFO effects,
+quit, idempotent shutdown, and the existing terminal error-cleanup order. The
+2026-07-22 release probe measured p50 11.14 ms / p95 12.58 ms / max
+13.05 ms over 100 samples with zero misses, and `./ci/gate.sh` passed 463
+tests with 2 intentionally ignored live-Claude-CLI tests. Phase 1 is not
+complete: the app-owned sender plus fake input/PTY/agent wake and lost-wakeup
+coverage remain Phase 1C work.
 
 ## Phase 2 — Prove One Real Native Workstation Slice
 
@@ -358,8 +375,9 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Implement Phase 1B only: add `crates/app/src/frontend_host.rs` around the
-existing `AppState` lifecycle and frame operations, then make `app_shell.rs`
-drive that host without changing the unified event channel, heartbeat, redraw
-cap, shutdown ordering, or terminal behavior. Do not add a native dependency,
-window, renderer, or platform waker in that slice.
+Implement Phase 1C only: wrap the existing unified sender in an app-owned type
+with an optional coalesced wake callback while keeping `std::sync::mpsc` as the
+source of event truth. Prove input, PTY, and agent events wake a fake frontend
+without polling, lost wakeups, or duplicate wake storms. Do not add winit,
+wgpu, glyphon, a native window, Artifact Preview scene types, or another
+native/GPU dependency in that slice.
