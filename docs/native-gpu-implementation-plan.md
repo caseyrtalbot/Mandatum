@@ -1,8 +1,8 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the two-horizontal-Empty-pane increment is complete; production GPU admission
-pending (2026-07-22).
+the two-horizontal- and two-vertical-Empty-pane increments are complete;
+production GPU admission pending (2026-07-22).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -370,6 +370,19 @@ smoke showed the same two-pane scene in the native window. Vertical, stacked,
 floating, dense, and three-plus-pane layouts, restore in the excluded native
 shell, and broader input/theme/style parity remain explicitly unsupported.
 
+Eleventh narrow increment complete (2026-07-22): the same real-host path drove
+the generated Ctrl+P then `s` Split pane down route after an 80x24 resize. The
+resulting scene contained exactly two top-to-bottom tiled Empty panes with
+scene-owned 80x11 rectangles, durable titles, focus on the new lower pane, and
+complete Empty detail. The prepared plan now admits this exact vertical shape,
+and the existing scene-order GPU path paints both pane backgrounds, borders,
+titles, and body text from their individual rectangles. Every covered one-pane
+content/overlay path and the two-horizontal-Empty-pane path remain intact. A
+displayed missing-shell release smoke showed the same vertical scene in the
+native window. Stacked, floating, dense, mixed-content, and three-plus-pane
+layouts, restore in the excluded native shell, and broader input/theme/style
+parity remain explicitly unsupported.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -506,12 +519,12 @@ the date, environment, command, endpoint, and result.
 ## Next Implementation Slice
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one layout-only increment:
-add a failing real-`FrontendHost` headless test that uses PTY spawning disabled
-and the generated Ctrl+P then `s` Split pane down route to produce exactly two
-vertically tiled Empty panes. Prove both scene-owned pane rectangles, titles,
-focus, and Empty details before extending the prepared-plan admission and GPU
-paint for only that two-pane vertical layout. Preserve every covered one-pane
-path and the completed two-horizontal-Empty-pane path. Stop before stacked,
-floating, dense, or three-plus-pane layouts; mixed multi-pane content; broader
-input; restore implementation changes; Artifact Preview; or production
-admission.
+support the smallest real two-pane floating Empty layout emitted by a
+`FrontendHost`. Begin with one failing real-host tracer that splits an Empty
+pane, floats the focused pane through the generated product route, and proves
+both scene-owned pane rectangles, durable titles, focus, layout flags, and
+complete Empty detail before extending only the prepared-plan admission and
+GPU paint needed for that exact shape. Preserve every covered one-pane path and
+both completed two-pane tiled paths. Stop before stacked, dense, or
+three-plus-pane layouts; mixed multi-pane content; broader input; restore
+implementation changes; Artifact Preview; or production admission.

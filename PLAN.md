@@ -117,7 +117,9 @@ more useful without pretending the wider vision is finished:
   its scene-only increments now paint real one-pane task and agent content,
   including live task output, the Empty fallback, the context menu, and the
   execution timeline, session map, objective prompt, session-output search, and
-  generated Help and Welcome surfaces from existing scene data. Multi-pane
+  generated Help and Welcome surfaces from existing scene data. The first two
+  exact multi-pane paths now cover two horizontally and two vertically tiled
+  Empty panes. Stacked, floating, dense, mixed-content, and three-plus-pane
   layouts, broader input, and restore remain parity work. Production GPU
   dependencies and release admission remain blocked until the typed artifact
   scene surface, adapter tests, and later admission decision exist; Artifact

@@ -156,11 +156,14 @@ pub fn prepare_scene<'a>(
     theme: &'a Theme,
 ) -> Result<PreparedScene<'a>, UnsupportedScene> {
     match scene.panes.len() {
+        1 if scene.panes[0].stacked => {
+            return Err(UnsupportedScene::Layout("stacked panes"));
+        }
         1 => {}
-        2 if is_two_horizontal_empty_panes(scene) => {}
+        2 if is_two_horizontal_empty_panes(scene) || is_two_vertical_empty_panes(scene) => {}
         2 => {
             return Err(UnsupportedScene::Layout(
-                "only two horizontal tiled Empty panes",
+                "only two horizontal or vertical tiled Empty panes",
             ));
         }
         count => return Err(UnsupportedScene::PaneCount(count)),
@@ -224,6 +227,32 @@ fn is_two_horizontal_empty_panes(scene: &WorkspaceScene) -> bool {
         && second.area.y == workspace.y
         && second.area.right() == workspace.right()
         && second.area.height == workspace.height
+        && !first.floating
+        && !first.stacked
+        && !first.zoomed
+        && !second.floating
+        && !second.stacked
+        && !second.zoomed
+        && matches!(first.content, PaneContent::Empty(_))
+        && matches!(second.content, PaneContent::Empty(_))
+}
+
+fn is_two_vertical_empty_panes(scene: &WorkspaceScene) -> bool {
+    if scene.overlay.is_some() {
+        return false;
+    }
+    let [first, second] = scene.panes.as_slice() else {
+        return false;
+    };
+    let workspace = layout::workspace_scene_area(scene.size);
+    first.area.x == workspace.x
+        && first.area.y == workspace.y
+        && first.area.width == workspace.width
+        && first.area.bottom() == second.area.y
+        && second.area.x == workspace.x
+        && second.area.right() == workspace.right()
+        && second.area.bottom() == workspace.bottom()
+        && second.area.width == workspace.width
         && !first.floating
         && !first.stacked
         && !first.zoomed
@@ -2723,8 +2752,82 @@ mod tests {
         ]);
         assert_eq!(
             prepare_scene(&multiple, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout("only two horizontal tiled Empty panes")
+            UnsupportedScene::Layout("only two horizontal or vertical tiled Empty panes")
         );
+    }
+
+    #[test]
+    fn vertical_empty_admission_rejects_every_unsupported_shape() {
+        let empty = || {
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            })
+        };
+        let mut first = pane(PaneSceneKind::Terminal, empty());
+        first.area = SceneRect::new(0, 1, 80, 11);
+        first.focused = false;
+        let mut second = pane(PaneSceneKind::Terminal, empty());
+        second.id = PaneId::new("pane-2");
+        second.title = "terminal 2".to_owned();
+        second.area = SceneRect::new(0, 12, 80, 11);
+        let mut valid = scene(vec![first, second]);
+        valid.size = SceneSize::new(80, 24);
+
+        let mut cases = Vec::new();
+
+        let mut overlay = valid.clone();
+        overlay.overlay = Some(OverlayScene::Palette(PaletteOverlay {
+            area: SceneRect::new(10, 5, 20, 5),
+            query: String::new(),
+            items: Vec::new(),
+            selected: None,
+            footer: String::new(),
+        }));
+        cases.push(("overlay", overlay));
+
+        for (index, flag) in [
+            (0, "first floating"),
+            (1, "second floating"),
+            (0, "first stacked"),
+            (1, "second stacked"),
+            (0, "first zoomed"),
+            (1, "second zoomed"),
+        ] {
+            let mut flagged = valid.clone();
+            match flag {
+                "first floating" | "second floating" => flagged.panes[index].floating = true,
+                "first stacked" | "second stacked" => flagged.panes[index].stacked = true,
+                "first zoomed" | "second zoomed" => flagged.panes[index].zoomed = true,
+                _ => unreachable!(),
+            }
+            cases.push((flag, flagged));
+        }
+
+        let mut gap = valid.clone();
+        gap.panes[0].area.height = 10;
+        cases.push(("non-adjacent gap", gap));
+
+        let mut overlap = valid.clone();
+        overlap.panes[1].area.y = 11;
+        overlap.panes[1].area.height = 12;
+        cases.push(("non-adjacent overlap", overlap));
+
+        let mut off_workspace = valid.clone();
+        off_workspace.panes[1].area.width = 79;
+        cases.push(("off-workspace edge", off_workspace));
+
+        let mut mixed_content = valid;
+        mixed_content.panes[1].content = terminal_content();
+        cases.push(("mixed content", mixed_content));
+
+        for (label, candidate) in cases {
+            assert_eq!(
+                prepare_scene(&candidate, &Theme::default()).unwrap_err(),
+                UnsupportedScene::Layout("only two horizontal or vertical tiled Empty panes"),
+                "{label}"
+            );
+        }
     }
 
     #[test]

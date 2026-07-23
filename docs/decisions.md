@@ -1853,3 +1853,55 @@ missing-shell release smoke showed the real two-pane horizontal layout, titles,
 focus styling, and Empty detail in the native window; no native process
 remained afterward. The final merge-gate result is recorded in
 `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers Two Vertical Empty Panes
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one layout-only increment that accepts and
+paints exactly two vertically tiled `PaneContent::Empty` panes emitted by a
+real `FrontendHost`. Admission is deliberately limited to two non-floating,
+non-stacked, non-zoomed Empty panes whose adjacent rectangles fill the scene
+workspace and have equal horizontal bounds. The completed one-pane and
+two-horizontal-pane paths remain unchanged.
+
+Context: Ctrl+P then `s` already mutates the product layout and scene builder
+into two resolved top-to-bottom panes. The excluded renderer's scene-order
+per-pane paint path already consumed individual rectangles, but its prepared
+plan rejected the valid vertical product frame solely because admission
+recognized only the horizontal tiled shape. No GPU layout math, product command
+behavior, scene type, runtime behavior, or new paint representation was
+required.
+
+Rationale: retaining each `PaneScene` unchanged keeps rectangles, durable
+titles, focus, flags, and Empty detail app/scene-owned. Shape-based admission
+extends only the product-generated vertical sibling of the proven horizontal
+path and continues to reject overlays, floating, stacked, dense,
+mixed-content, and three-plus-pane scenes.
+
+Consequences: no app, runtime, scene, layout, command table, keymap,
+persistence, production dependency, allowlist, installer, default command, or
+release surface changes. Every covered one-pane content/overlay path and the
+two-horizontal-Empty-pane path remain green. Floating, stacked, dense,
+mixed-content, and three-plus-pane layouts, restore, broader input/theme/style
+parity, Artifact Preview, and production GPU admission remain separately
+gated. The next implementation slice is the smallest still-rejected two-pane
+floating Empty layout.
+
+Verification: the real-host tracer proved the exact 80x24 product scene,
+including `(0, 1, 80, 11)` and `(0, 12, 80, 11)` rectangles, titles, focus,
+flags, and complete Empty details, then first failed with
+`UnsupportedScene::Layout("only two horizontal tiled Empty panes")`. The
+focused GREEN retains both panes unchanged in the prepared plan.
+`./ci/gpu-spike.sh` passed 32 tests (two native-shell, fourteen real-host, and
+sixteen isolated-renderer) plus the renderer dependency-boundary scan, and
+`cargo test -p mandatum-app --lib` passed all 248 tests. A displayed
+missing-shell release smoke showed the real two-pane vertical layout, complete
+details, and lower-pane focus styling in the native window; Ctrl+Q exited and
+no native or attempted-shell process remained. A fresh cold read found that a
+real two-pane stack collapses to one visible `PaneScene` and had bypassed the
+two-pane admission predicates; it now fails explicitly with `Layout("stacked
+panes")`. The isolated negative matrix also proves overlays, every forbidden
+layout flag on either pane, invalid adjacency/workspace geometry, and mixed
+content fail closed. The final merge-gate result is recorded in
+`docs/verification.md`.

@@ -674,6 +674,50 @@ Dated Phase 3 two-horizontal-Empty-pane increment (2026-07-22):
   gate is rerun after recording this result so the committed tree itself is the
   tree proved green.
 
+Dated Phase 3 two-vertical-Empty-pane increment (2026-07-22):
+
+- The required real-host tracer bullet used `AppConfig { spawn_pty: false,
+  .. }`, resized to 80x24, then drove neutral Ctrl+P and `s` input through the
+  generated Split pane down route. It proved the next product frame contained
+  exactly two tiled Empty panes: `pane-1` at `(0, 1, 80, 11)` titled
+  `terminal`, `pane-2` at `(0, 12, 80, 11)` titled `terminal 2`, focus on
+  `pane-2`, all layout flags false, and complete cwd, restart-generation, and
+  no-live-grid detail in both panes. Before implementation, `prepare_scene`
+  failed at runtime with `UnsupportedScene::Layout("only two horizontal tiled
+  Empty panes")`.
+- The focused GREEN proves that exact real-host scene reaches the prepared GPU
+  plan unchanged. The plan retains both pane records and their complete Empty
+  details, carries no terminal surface for either pane, preserves the
+  two-horizontal path, and continues to reject unsupported two-pane content
+  and shapes.
+- `./ci/gpu-spike.sh` passed 32 tests (two native-shell tests, fourteen
+  real-host integration tests, and sixteen isolated-renderer tests) plus the
+  renderer dependency-boundary scan. `cargo test -p mandatum-app --lib` passed
+  all 248 tests.
+- The displayed release smoke launched the excluded native shell from a
+  writable disposable project with an intentionally missing shell, then drove
+  Ctrl+P and `s`. The real window header reported `2 pane(s)`; equal top/bottom
+  panes painted the `terminal` and focused `terminal 2` titles plus the Empty
+  cwd, restart-generation, and no-live-grid detail. Ctrl+Q exited cleanly, and
+  no native-spike or attempted-shell process remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Stacked, floating, dense, mixed-content,
+  three-plus-pane, and two-pane overlay scenes, restore, broader input,
+  Artifact Preview, and production admission remain separately gated.
+- A fresh cold read found that a real two-pane stack emits one visible
+  `PaneScene` and had bypassed the two-pane predicates. The added real-host
+  regression first failed by receiving an accepted `PreparedScene`; the final
+  plan rejects it explicitly with `UnsupportedScene::Layout("stacked panes")`
+  while preserving covered zoomed paths. An isolated negative matrix now proves
+  vertical overlay, per-pane floating/stacked/zoomed flags, gap, overlap,
+  off-workspace bounds, and mixed content all fail with the narrow tiled-Empty
+  layout error.
+- The first post-documentation `./ci/gate.sh` passed formatting, Clippy with
+  warnings denied, build, all workspace tests, conformance, and documentation
+  trace checks. The final gate is rerun after review and this recorded result so
+  the committed tree itself is the tree proved green.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference
