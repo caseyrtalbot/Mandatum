@@ -255,7 +255,8 @@ recognition calls the scene layer's canonical resolver, which applies
 construction; the adapter contains no duplicate default geometry or pane-layout
 calculation. It still validates the exact admitted flags, content, and geometry,
 requires every admitted multi-pane rectangle to be at least 3x3 cells so a
-one-cell border leaves a real interior, and rejects other or degenerate
+one-cell border leaves a real interior, uses checked endpoint arithmetic so
+saturated rectangles cannot appear frame-bound, and rejects other or degenerate
 multi-pane shapes.
 Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling

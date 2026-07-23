@@ -267,12 +267,13 @@ multi-pane rectangle must be at least 3x3 cells. Real-host resize tests accept
 default horizontal at 6x5, vertical at 3x8, and float at 11x9, then reject each
 immediately smaller width or height. The scene-only 6x3 resolver result remains
 `(5, 1, 1, 1)`, but renderer admission correctly rejects it.
-`./ci/gpu-spike.sh` passes 48 tests (two native-shell, twenty real-host, and
-twenty-six isolated-renderer) plus the renderer boundary scan; all 35 scene
-tests and all 248 app library tests pass. A visible 800x632 release smoke drove
-the long-path Palette transition and default float; screenshots showed no
-leakage at the observed scale, Ctrl+Q exited cleanly, and no native or
-attempted-shell process remained.
+`./ci/gpu-spike.sh` passes 50 tests (two native-shell, twenty real-host, and
+twenty-eight isolated-renderer) plus the renderer boundary scan; all 35 scene
+tests and all 248 app library tests pass. Checked maximum-dimension
+right/bottom endpoint regressions reject malformed panes whose true edge would
+overflow `u16`. A visible 800x632 release smoke drove the long-path Palette
+transition and default float; screenshots showed no leakage at the observed
+scale, Ctrl+Q exited cleanly, and no native or attempted-shell process remained.
 
 ## Verdict (read this first)
 

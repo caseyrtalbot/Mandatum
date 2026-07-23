@@ -415,7 +415,9 @@ the one-cell border. Real-host resize coverage accepts the default horizontal
 layout at 6x5, the default vertical layout at 3x8, and the default float at
 11x9, and rejects the immediately smaller width or height. The scene resolver
 still returns `(5, 1, 1, 1)` at 6x3 as a geometry/clamping fact, but the GPU
-adapter rejects that degenerate frame.
+adapter rejects that degenerate frame. Checked right/bottom endpoint arithmetic
+also rejects malformed maximum-dimension panes whose true edge would overflow
+`u16`.
 
 Render every current scene:
 

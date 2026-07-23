@@ -820,12 +820,14 @@ Dated aggregate-review corrections-only slice (2026-07-23):
   resize tests accept the default horizontal layout at 6x5, the default
   vertical layout at 3x8, and the default float at 11x9, then reject 5x5, 6x4,
   2x8, 3x7, 10x9, and 11x8. Isolated larger-frame cases also prove extreme
-  horizontal and vertical splits with sub-3-cell panes are rejected.
+  horizontal and vertical splits with sub-3-cell panes are rejected. Separate
+  `u16::MAX` cases prove checked right/bottom endpoints reject a pane whose true
+  edge would overflow instead of accepting the saturated edge.
 - `mandatum-scene` still resolves the core default float to `(5, 1, 1, 1)` at
   6x3. That remains a correct scene-layout clamping fact; `prepare_scene`
   rejects the resulting degenerate multi-pane frame.
-- `./ci/gpu-spike.sh` passed 48 tests (two native-shell, twenty real-host,
-  and twenty-six isolated-renderer) plus the renderer dependency-boundary
+- `./ci/gpu-spike.sh` passed 50 tests (two native-shell, twenty real-host,
+  and twenty-eight isolated-renderer) plus the renderer dependency-boundary
   scan. `cargo test -p mandatum-scene` passed all 35 tests, and
   `cargo test -p mandatum-app --lib` passed all 248 tests.
 - The final post-review `./ci/gate.sh` passed formatting, Clippy with warnings

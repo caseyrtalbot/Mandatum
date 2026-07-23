@@ -309,12 +309,15 @@ fn is_two_horizontal_empty_pane_geometry(scene: &WorkspaceScene) -> bool {
         return false;
     };
     let workspace = layout::workspace_scene_area(scene.size);
+    let Some(workspace_right) = rect_right_checked(workspace) else {
+        return false;
+    };
     first.area.x == workspace.x
         && first.area.y == workspace.y
         && first.area.height == workspace.height
-        && first.area.right() == second.area.x
+        && rect_right_checked(first.area) == Some(second.area.x)
         && second.area.y == workspace.y
-        && second.area.right() == workspace.right()
+        && rect_right_checked(second.area) == Some(workspace_right)
         && second.area.height == workspace.height
         && pane_has_usable_interior(first.area)
         && pane_has_usable_interior(second.area)
@@ -336,13 +339,16 @@ fn is_two_vertical_empty_panes(scene: &WorkspaceScene) -> bool {
         return false;
     };
     let workspace = layout::workspace_scene_area(scene.size);
+    let Some(workspace_bottom) = rect_bottom_checked(workspace) else {
+        return false;
+    };
     first.area.x == workspace.x
         && first.area.y == workspace.y
         && first.area.width == workspace.width
-        && first.area.bottom() == second.area.y
+        && rect_bottom_checked(first.area) == Some(second.area.y)
         && second.area.x == workspace.x
         && second.area.right() == workspace.right()
-        && second.area.bottom() == workspace.bottom()
+        && rect_bottom_checked(second.area) == Some(workspace_bottom)
         && second.area.width == workspace.width
         && pane_has_usable_interior(first.area)
         && pane_has_usable_interior(second.area)
@@ -382,6 +388,14 @@ fn is_two_floating_empty_panes(scene: &WorkspaceScene) -> bool {
 
 fn pane_has_usable_interior(area: SceneRect) -> bool {
     area.width >= 3 && area.height >= 3
+}
+
+fn rect_right_checked(area: SceneRect) -> Option<u16> {
+    area.x.checked_add(area.width)
+}
+
+fn rect_bottom_checked(area: SceneRect) -> Option<u16> {
+    area.y.checked_add(area.height)
 }
 
 fn prepare_pane(pane: &PaneScene) -> PreparedPane<'_> {
@@ -3314,6 +3328,29 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_admission_rejects_saturating_right_edge_overflow() {
+        let empty = || {
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            })
+        };
+        let mut first = pane(PaneSceneKind::Terminal, empty());
+        first.area = SceneRect::new(0, 1, 32_768, 3);
+        first.focused = false;
+        let mut second = pane(PaneSceneKind::Terminal, empty());
+        second.id = PaneId::new("pane-2");
+        second.area = SceneRect::new(32_768, 1, 32_767, 3);
+        let mut candidate = scene(vec![first, second]);
+        candidate.size = SceneSize::new(u16::MAX, 5);
+
+        assert!(prepare_scene(&candidate, &Theme::default()).is_ok());
+
+        candidate.panes[1].area.width = u16::MAX;
+        assert!(prepare_scene(&candidate, &Theme::default()).is_err());
+    }
+
+    #[test]
     fn vertical_empty_admission_rejects_every_unsupported_shape() {
         let empty = || {
             PaneContent::Empty(EmptyContent {
@@ -3437,6 +3474,29 @@ mod tests {
                 "only two horizontal or vertical tiled, or default floating Empty panes"
             )
         );
+    }
+
+    #[test]
+    fn vertical_admission_rejects_saturating_bottom_edge_overflow() {
+        let empty = || {
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            })
+        };
+        let mut first = pane(PaneSceneKind::Terminal, empty());
+        first.area = SceneRect::new(0, 1, 3, 32_767);
+        first.focused = false;
+        let mut second = pane(PaneSceneKind::Terminal, empty());
+        second.id = PaneId::new("pane-2");
+        second.area = SceneRect::new(0, 32_768, 3, 32_766);
+        let mut candidate = scene(vec![first, second]);
+        candidate.size = SceneSize::new(3, u16::MAX);
+
+        assert!(prepare_scene(&candidate, &Theme::default()).is_ok());
+
+        candidate.panes[1].area.height = u16::MAX;
+        assert!(prepare_scene(&candidate, &Theme::default()).is_err());
     }
 
     #[test]
