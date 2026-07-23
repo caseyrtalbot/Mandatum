@@ -145,6 +145,43 @@ fn real_host_two_horizontal_empty_panes_reach_the_gpu_render_plan() {
 }
 
 #[test]
+fn real_host_horizontal_resize_enforces_usable_pane_interiors_with_palette() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    dispatch_palette_command(&mut host, 'v');
+
+    let minimum = SceneSize::new(6, 5);
+    host.handle_input(InputEvent::Resize(minimum));
+    host.handle_input(InputEvent::Key(Key::ctrl('p')));
+    let minimum_snapshot = host.frame(minimum);
+    assert_eq!(
+        minimum_snapshot.scene.panes[0].area,
+        SceneRect::new(0, 1, 3, 3)
+    );
+    assert_eq!(
+        minimum_snapshot.scene.panes[1].area,
+        SceneRect::new(3, 1, 3, 3)
+    );
+    assert!(matches!(
+        minimum_snapshot.scene.overlay,
+        Some(OverlayScene::Palette(_))
+    ));
+    prepare_scene(&minimum_snapshot.scene, &minimum_snapshot.theme)
+        .expect("GPU renderer rejected the minimum usable horizontal Palette scene");
+
+    for below_minimum in [SceneSize::new(5, 5), SceneSize::new(6, 4)] {
+        host.handle_input(InputEvent::Resize(below_minimum));
+        let below_snapshot = host.frame(below_minimum);
+        assert!(
+            prepare_scene(&below_snapshot.scene, &below_snapshot.theme).is_err(),
+            "GPU renderer admitted an unusable horizontal Palette scene at {below_minimum:?}"
+        );
+    }
+}
+
+#[test]
 fn real_host_two_vertical_empty_panes_reach_the_gpu_render_plan() {
     let mut host = FrontendHost::new(AppConfig {
         spawn_pty: false,
@@ -212,6 +249,38 @@ fn real_host_two_vertical_empty_panes_reach_the_gpu_render_plan() {
             .iter()
             .all(|pane| pane.pane_surface().is_none())
     );
+}
+
+#[test]
+fn real_host_vertical_resize_enforces_usable_pane_interiors() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    dispatch_palette_command(&mut host, 's');
+
+    let minimum = SceneSize::new(3, 8);
+    host.handle_input(InputEvent::Resize(minimum));
+    let minimum_snapshot = host.frame(minimum);
+    assert_eq!(
+        minimum_snapshot.scene.panes[0].area,
+        SceneRect::new(0, 1, 3, 3)
+    );
+    assert_eq!(
+        minimum_snapshot.scene.panes[1].area,
+        SceneRect::new(0, 4, 3, 3)
+    );
+    prepare_scene(&minimum_snapshot.scene, &minimum_snapshot.theme)
+        .expect("GPU renderer rejected the minimum usable vertical scene");
+
+    for below_minimum in [SceneSize::new(2, 8), SceneSize::new(3, 7)] {
+        host.handle_input(InputEvent::Resize(below_minimum));
+        let below_snapshot = host.frame(below_minimum);
+        assert!(
+            prepare_scene(&below_snapshot.scene, &below_snapshot.theme).is_err(),
+            "GPU renderer admitted an unusable vertical scene at {below_minimum:?}"
+        );
+    }
 }
 
 #[test]
@@ -286,6 +355,39 @@ fn real_host_two_pane_floating_empty_layout_reaches_the_gpu_render_plan() {
 }
 
 #[test]
+fn real_host_default_float_resize_enforces_usable_pane_interiors() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    dispatch_palette_command(&mut host, 'v');
+    dispatch_palette_command(&mut host, 'f');
+
+    let minimum = SceneSize::new(11, 9);
+    host.handle_input(InputEvent::Resize(minimum));
+    let minimum_snapshot = host.frame(minimum);
+    assert_eq!(
+        minimum_snapshot.scene.panes[0].area,
+        SceneRect::new(0, 1, 11, 7)
+    );
+    assert_eq!(
+        minimum_snapshot.scene.panes[1].area,
+        SceneRect::new(8, 5, 3, 3)
+    );
+    prepare_scene(&minimum_snapshot.scene, &minimum_snapshot.theme)
+        .expect("GPU renderer rejected the minimum usable default float");
+
+    for below_minimum in [SceneSize::new(10, 9), SceneSize::new(11, 8)] {
+        host.handle_input(InputEvent::Resize(below_minimum));
+        let below_snapshot = host.frame(below_minimum);
+        assert!(
+            prepare_scene(&below_snapshot.scene, &below_snapshot.theme).is_err(),
+            "GPU renderer admitted an unusable default float at {below_minimum:?}"
+        );
+    }
+}
+
+#[test]
 fn real_host_two_horizontal_empty_panes_with_float_palette_reach_the_gpu_render_plan() {
     let mut host = FrontendHost::new(AppConfig {
         spawn_pty: false,
@@ -348,17 +450,23 @@ fn real_host_two_horizontal_empty_palette_clips_long_wrapped_pane_detail() {
         "real Empty detail was not long enough to wrap through the Palette area"
     );
 
+    let cell_width = 9.625;
+    let cell_height = 18.25;
     let visible = prepared
-        .pane_text_visible_areas(0)
-        .expect("first prepared pane should expose its visible body areas");
+        .pane_text_visible_bounds(0, cell_width, cell_height)
+        .expect("first prepared pane should expose its visible pixel bounds");
+    let palette_left = (palette.area.x as f32 * cell_width).floor() as i32;
+    let palette_top = (palette.area.y as f32 * cell_height).floor() as i32;
+    let palette_right = (palette.area.right() as f32 * cell_width).ceil() as i32;
+    let palette_bottom = (palette.area.bottom() as f32 * cell_height).ceil() as i32;
     assert!(
-        visible.iter().all(|area| {
-            area.right() <= palette.area.x
-                || area.bottom() <= palette.area.y
-                || area.x >= palette.area.right()
-                || area.y >= palette.area.bottom()
+        visible.iter().all(|bounds| {
+            bounds.right <= palette_left
+                || bounds.bottom <= palette_top
+                || bounds.left >= palette_right
+                || bounds.top >= palette_bottom
         }),
-        "underlying pane text remains paintable through the Palette: {visible:?}"
+        "underlying pane text remains paintable through the fractional-pixel Palette: {visible:?}"
     );
 }
 

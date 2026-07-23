@@ -1994,12 +1994,64 @@ persistence, production dependency, release allowlist, installer, Artifact
 Preview, or production-admission surface changes.
 
 Verification: focused RED runs first failed because the shared scene resolver
-and Palette-safe pane-text visibility plan did not exist. Focused GREEN proves
-default resolution at 80x24, clamping in a 6x3 viewport, and a real
+and Palette-safe pane-text visibility plan did not exist. Focused GREEN proved
+default resolution at 80x24, clamping geometry in a 6x3 viewport, and a real
 two-horizontal-Empty Palette frame whose deliberately long project path wraps
-through the overlay while every submitted pane-body glyph region remains
-outside it. Cold review added one negative test proving that altering the
-Palette's scene-resolved rectangle fails closed and one small-viewport
-regression proving pane-title glyphs are also removed from the opaque area.
-Full gate and displayed-smoke evidence are recorded in
-`docs/verification.md`.
+through the overlay. That slice proved scene-cell body fragments stayed outside
+the Palette, but the aggregate review later found that independently rounding
+those fragments in pixels could reintroduce a one-pixel overlap. Cold review
+also added one negative test proving that altering the Palette's scene-resolved
+rectangle fails closed and one small-viewport regression proving pane-title
+glyphs are removed from the opaque area. The pixel-space correction and the
+fact that 6x3 is rejected by renderer admission are recorded in the decision
+below and in `docs/verification.md`.
+
+## Accepted: Pixel-First Occlusion And Usable Multi-Pane Interiors
+
+Status: accepted (2026-07-23)
+
+Decision: preserve the already-admitted horizontal, vertical, and
+default-floating topologies while correcting their renderer boundary. Convert
+complete pane title and body rectangles to final pixel `TextBounds` before
+subtracting the outward-rounded bounds of later floats or any current opaque
+overlay. Admit multi-pane scenes only when every pane rectangle is at least 3x3
+cells, leaving one real interior cell after the one-cell border.
+
+Context: the three-slice aggregate review found two defects. Pane bodies were
+subtracted in scene cells and every visible fragment was then rounded outward
+independently, allowing a one-pixel overlap at fractional cell widths. The
+horizontal, vertical, and floating predicates also accepted sub-border pane
+rectangles; the scene helper intentionally returns a clamped `(5, 1, 1, 1)`
+default float at 6x3, whose derived body lies outside that pane and collides
+with status chrome.
+
+Rationale: pixel-first subtraction matches the already-correct pane-title path
+and uses the same conservative outward rounding as the opaque surface. Requiring
+actual pane rectangles to be 3x3 is the narrow fail-closed correction: it
+handles arbitrary split ratios and default-float clamping without adding GPU
+layout policy or broad clipping semantics. A scene resolver may describe
+degenerate geometry; accepting that geometry for paint is a separate adapter
+decision. Header and status text use the same final-pixel overlay subtraction
+because their glyphs share the post-quad text pass.
+
+Consequences: the default 50/50 horizontal path is supported from 6x5, the
+default vertical path from 3x8, and the default float from 11x9. Width or height
+immediately below those boundaries, and any larger frame whose split produces a
+sub-3-cell pane, fail explicitly. The 6x3 scene resolver test remains valid
+layout/clamping evidence but is not a successful GPU render case. No additional
+topology, overlay, product dependency, build, release, Artifact Preview, or
+production-admission surface is admitted.
+
+Verification: focused RED failed because the final-pixel visibility API and
+usable-interior predicates did not exist. Fractional-width isolated regressions
+now prove final body `TextBounds` are disjoint from a later float and every
+current opaque overlay. A 3x3 full-frame overlay regression proves header and
+status glyphs are also removed. Real-host resize tests accept 6x5 horizontal,
+3x8 vertical, and 11x9 default-floating scenes, then reject the immediately
+smaller width or height. The long-path real-host Palette tracer checks the same
+final-pixel seam at a fractional cell width. `./ci/gpu-spike.sh` passes 48 tests
+(two native-shell, twenty real-host, twenty-six isolated-renderer) plus the
+renderer dependency-boundary scan; all 35 scene tests and all 248 app library
+tests pass. Displayed smoke showed no leakage at the observed 800x632 scale,
+Ctrl+Q exited cleanly, and no native or attempted-shell process remained. The
+full merge-gate and review results are recorded in `docs/verification.md`.

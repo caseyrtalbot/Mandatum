@@ -245,12 +245,17 @@ pane beneath one default-position floating Empty pane, including rectangles,
 titles, focus, and details. The prepared GPU plan retains one paint record per
 pane and the adapter paints them in scene order. The exact floating command
 route also admits its intermediate two-horizontal-Empty plus Palette frame.
-The float and Palette are opaque surfaces, and underlying pane glyph bounds are
-clipped around their scene-owned rectangles. Default-float recognition calls
-the scene layer's canonical resolver, which applies `FloatingRect::default()`
-through the same clamping calculation used by scene construction; the adapter
-contains no duplicate default geometry or pane-layout calculation. It still
-validates the exact admitted flags, content, and geometry and rejects other
+The float and every current overlay are opaque surfaces. Pane title and body
+bounds are converted to final pixel `TextBounds` before their outward-rounded
+scene-owned rectangles are subtracted, so fractional cell widths cannot round
+a visible fragment back into an opaque surface. Header and status text are
+clipped around the same overlay bounds before submission. Default-float
+recognition calls the scene layer's canonical resolver, which applies
+`FloatingRect::default()` through the same clamping calculation used by scene
+construction; the adapter contains no duplicate default geometry or pane-layout
+calculation. It still validates the exact admitted flags, content, and geometry,
+requires every admitted multi-pane rectangle to be at least 3x3 cells so a
+one-cell border leaves a real interior, and rejects other or degenerate
 multi-pane shapes.
 Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
@@ -263,12 +268,12 @@ model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 Phase 3 is underway. Terminal, task, agent, and Empty one-pane content plus the
-  palette, context-menu, timeline, session-map, objective-prompt,
-  session-output Search, Help, and Welcome overlays are now covered, along with
-  exactly two horizontally or vertically tiled Empty panes and the smallest
-  default two-pane floating Empty layout. Restore handling in the excluded
-  native shell, stacked, broader floating, dense, mixed-content, and
-  three-plus-pane layouts, and broader scene/input parity remain.
+palette, context-menu, timeline, session-map, objective-prompt, session-output
+Search, Help, and Welcome overlays are now covered, along with exactly two
+horizontally or vertically tiled Empty panes and the default two-pane floating
+Empty topology at verified usable frame sizes. Restore handling in the excluded
+native shell, stacked, broader floating, dense, mixed-content, and
+three-plus-pane layouts, and broader scene/input parity remain.
 Artifact Preview and production GPU admission remain later, separately gated
 decisions.
 

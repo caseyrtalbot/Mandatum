@@ -119,9 +119,14 @@ more useful without pretending the wider vision is finished:
   execution timeline, session map, objective prompt, session-output search, and
   generated Help and Welcome surfaces from existing scene data. The first two
   exact multi-pane paths now cover two horizontally and two vertically tiled
-  Empty panes. The next completed path covers one tiled Empty pane beneath the
-  scene-resolved default floating Empty pane; its real command route narrowly
-  admits the required intermediate two-horizontal-Empty plus Palette frame.
+  Empty panes at usable frame sizes. The next completed path covers one tiled
+  Empty pane beneath the scene-resolved default floating Empty pane at usable
+  frame sizes; its real command route narrowly admits the required intermediate
+  two-horizontal-Empty plus Palette frame. Every admitted multi-pane rectangle
+  must retain a real bordered interior. Pane glyphs are converted to final
+  pixel bounds before subtracting a later float or any current opaque overlay;
+  header and status glyphs use the same overlay clipping path, including at
+  fractional cell widths.
   Stacked, moved/resized or additional floating panes, dense, mixed-content,
   broader two-pane overlays, and three-plus-pane layouts, broader input, and
   restore remain parity work. Production GPU dependencies and release

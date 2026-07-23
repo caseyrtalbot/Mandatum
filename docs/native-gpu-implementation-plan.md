@@ -1,8 +1,9 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the two-horizontal-, two-vertical-, and smallest two-pane-floating Empty
-increments are complete; production GPU admission pending (2026-07-23).
+the two-horizontal-, two-vertical-, and default two-pane-floating Empty
+increments are complete at verified usable frame sizes; production GPU
+admission pending (2026-07-23).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -329,7 +330,7 @@ overlay roles. The tracer bullet deliberately matched the deterministic
 `search-session` timeline event: current Search indexes pane runtime output and
 timeline snapshots, not durable agent-objective text, so no app/search behavior
 changed. The displayed macOS smoke showed grouped results over the real zoomed
-agent without base-pane glyphs leaking through the opaque overlay, then closed
+agent with no base-pane glyph leakage visible at that observed scale, then closed
 with Escape and quit cleanly. Help, welcome, multiple panes, restore, and
 broader input/theme/style parity remain explicitly unsupported.
 
@@ -342,7 +343,8 @@ index, and footer. The excluded render plan retains those scene-owned values and
 paints the opaque overlay surface, palette border and selection roles, live
 block cursor, grouped headings, labels, key hints, and pinned footer. The
 displayed macOS smoke showed that exact filtered Help over the real Empty pane
-without base-pane glyph leakage, then closed with Escape and quit cleanly.
+with no base-pane glyph leakage visible at that observed scale, then closed
+with Escape and quit cleanly.
 Welcome, multiple panes, restore, and broader input/theme/style parity remain
 explicitly unsupported.
 
@@ -399,6 +401,21 @@ surface now clips wrapped underlying pane detail too. Real-host regressions
 cover that exact command transition, and admission remains limited to it.
 Stacked, moved/resized or additional floating panes, dense, mixed-content, and
 three-plus-pane layouts remain explicitly unsupported.
+
+Corrections-only increment complete (2026-07-23): the renderer now converts
+each complete pane title/body rectangle to final pixel `TextBounds` before
+subtracting outward-rounded later-float or current opaque-overlay bounds.
+Fractional-cell-width regressions prove the submitted body bounds do not
+intersect any of those opaque surfaces; the real-host long-path Palette tracer
+exercises the same final-pixel seam. Header and status text are clipped around
+the same overlay bounds; a minimum-frame regression proves a full-frame opaque
+overlay leaves no chrome glyph region to submit. Every admitted multi-pane
+rectangle must also be at least 3x3 cells, leaving one real interior cell inside
+the one-cell border. Real-host resize coverage accepts the default horizontal
+layout at 6x5, the default vertical layout at 3x8, and the default float at
+11x9, and rejects the immediately smaller width or height. The scene resolver
+still returns `(5, 1, 1, 1)` at 6x3 as a geometry/clamping fact, but the GPU
+adapter rejects that degenerate frame.
 
 Render every current scene:
 
@@ -536,7 +553,7 @@ the date, environment, command, endpoint, and result.
 ## Next Implementation Slice
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one layout-only increment:
-support the smallest real two-pane stacked Empty layout emitted by a
+support the lowest-complexity real two-pane stacked Empty topology emitted by a
 `FrontendHost`. Begin with a failing real-host tracer that splits an Empty pane,
 stacks the focused pane through the generated product route, and proves the
 scene's one-visible-pane stacked representation plus the durable two-pane

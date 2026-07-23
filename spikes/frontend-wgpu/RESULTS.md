@@ -1,15 +1,16 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
 Status: **Phase 3 underway; one-pane content, every current one-pane overlay,
-the first two exact tiled two-pane layouts, and the smallest default two-pane
-floating Empty layout are covered.**
+the first two exact tiled two-pane layouts, and the default two-pane floating
+Empty topology at verified usable frame sizes are covered.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, one terminal, task, agent, or Empty pane, status
 strip, command palette, context menu, execution timeline, session map, Set agent
 objective prompt, session-output Search, generated Help, generated Welcome, and
-exactly two horizontally or vertically tiled Empty panes plus the smallest
-default two-pane floating Empty layout on the GPU. Typed clipboard effects
+exactly two horizontally or vertically tiled Empty panes plus the default
+two-pane floating Empty topology at verified usable frame sizes on the GPU.
+Typed clipboard effects
 return to the native shell.
 
 This remains an isolated frontend outside the Cargo workspace (the root
@@ -238,17 +239,40 @@ two-horizontal-Empty Palette transition exposed no testable Palette-safe
 pane-text regions. `mandatum-scene` now resolves `FloatingRect::default()`
 through its existing clamp at both 80x24 and a small 6x3 viewport, and the
 adapter consumes that result. A real-host long-path regression proves Empty
-detail wraps through the Palette rows while all submitted pane-body glyph
-regions stay outside its opaque area. A cold-review negative test proves an
+detail wraps through the Palette rows while all scene-cell pane-body fragments
+stay outside its opaque area. The later aggregate review showed that this did
+not prove final fractional-pixel bounds; the correction below supplies that
+proof. A cold-review negative test proves an
 altered Palette rectangle remains rejected, and a cold-recheck regression at
 9x5 proves pane-title glyphs are also removed from the Palette area.
 `./ci/gpu-spike.sh` passed 39 tests (two native-shell, seventeen real-host, and
 twenty isolated-renderer) plus the boundary scan; all 35 scene tests and all
 248 app library tests passed. A
 displayed 800x632 macOS smoke drove the exact Palette transition and default
-float from the same long-path missing-shell route; both opaque surfaces clipped
-underlying glyphs, Ctrl+Q exited 0, and no native or attempted-shell process
-remained. No additional scene shape or production surface was admitted.
+float from the same long-path missing-shell route; screenshot inspection showed
+no underlying-glyph leakage at that observed scale, Ctrl+Q exited 0, and no
+native or attempted-shell process remained. No additional scene shape or
+production surface was admitted.
+
+Aggregate-review correction verification (2026-07-23): focused RED first
+failed because final fractional-pixel pane-body bounds and usable-interior
+admission did not exist. The renderer now converts the complete pane body to
+pixel `TextBounds`, converts every later-float/current opaque-overlay surface
+with outward rounding, and subtracts in pixel space before submitting glyphs.
+Fractional-cell-width regressions prove every returned body bound is disjoint
+from each opaque surface, including the real-host long-path Palette transition.
+Header and status glyphs use the same overlay subtraction; a 3x3 full-frame
+overlay regression leaves neither chrome region visible. Every admitted
+multi-pane rectangle must be at least 3x3 cells. Real-host resize tests accept
+default horizontal at 6x5, vertical at 3x8, and float at 11x9, then reject each
+immediately smaller width or height. The scene-only 6x3 resolver result remains
+`(5, 1, 1, 1)`, but renderer admission correctly rejects it.
+`./ci/gpu-spike.sh` passes 48 tests (two native-shell, twenty real-host, and
+twenty-six isolated-renderer) plus the renderer boundary scan; all 35 scene
+tests and all 248 app library tests pass. A visible 800x632 release smoke drove
+the long-path Palette transition and default float; screenshots showed no
+leakage at the observed scale, Ctrl+Q exited cleanly, and no native or
+attempted-shell process remained.
 
 ## Verdict (read this first)
 
@@ -296,14 +320,16 @@ one terminal, task, agent, or Empty pane, status, theme, and optional palette,
 context menu, timeline, session map, objective prompt, Search, Help, or Welcome
 plus exact horizontal and vertical two-Empty-pane scenes, the default
 two-pane-floating Empty scene, and the horizontal two-Empty-pane Palette frame
-needed to dispatch Float. Broader multi-pane shapes and overlays still fail
-explicitly. The displayed renderer uses the scene's pane-inner geometry,
-chrome, terminal/task surface, scene-composed detail lines, status, palette,
-context-menu, timeline, session-map, prompt, Search, Help, and Welcome data
-rather than deriving product presentation itself. Its narrow default-float
-recognition consumes `layout::default_floating_pane_rect`, so the core default
-and scene clamping calculation have one owner. Its pane-body paint plan also
-subtracts the opaque Palette area before submitting glyphs.
+needed to dispatch Float at usable frame sizes. Broader multi-pane shapes and
+degenerate multi-pane scenes still fail explicitly. The displayed renderer uses
+the scene's pane-inner geometry, chrome, terminal/task surface, scene-composed
+detail lines, status, palette, context-menu, timeline, session-map, prompt,
+Search, Help, and Welcome data rather than deriving product presentation itself.
+Its narrow default-float recognition consumes
+`layout::default_floating_pane_rect`, so the core default and scene clamping
+calculation have one owner. Its pane-body paint plan converts complete bounds to
+final pixels before subtracting later-float and every current opaque-overlay
+area.
 
 The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
 relevant only to the historical 2026-07-09 benchmark evidence below. Both files
@@ -528,7 +554,8 @@ panic, exit 0).
   Empty fallback, status, theme, command palette, context menu, timeline,
   session map, objective prompt, Search, Help, Welcome, exact horizontal and
   vertical two-Empty-pane layouts, and the default two-pane floating Empty
-  layout are bound. Production still needs restore, broader multi-pane layouts,
+  topology at usable frame sizes are bound. Production still needs restore,
+  broader multi-pane layouts,
   and hit-target parity.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and

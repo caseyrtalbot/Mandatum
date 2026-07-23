@@ -550,9 +550,9 @@ Dated Phase 3 session-output Search increment (2026-07-22):
   `kind:timeline search`. The real zoomed agent remained around a centered
   opaque Search modal; its title, query and block cursor, grouped timeline
   source, selected first result, repeated-source elision, and footer painted
-  inside the border without base-pane glyph leakage. Escape closed Search,
-  Ctrl+Q exited with code 0, and no native-spike or attempted-shell process
-  remained.
+  inside the border with no base-pane glyph leakage visible at that observed
+  scale. Escape closed Search, Ctrl+Q exited with code 0, and no native-spike
+  or attempted-shell process remained.
 - The spike remains excluded from the product workspace/build/release. The
   isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
   PTY/parser dependency. Multiple panes, Help/Welcome and remaining overlays,
@@ -586,9 +586,9 @@ Dated Phase 3 generated Help increment (2026-07-22):
   with an intentionally missing shell. F1 opened Help over the real Empty pane;
   the live filter and block cursor narrowed to the App heading and Search
   session output command with its generated `ctrl+shift+f` route. The selected
-  row and footer painted inside the centered border without base-pane glyph
-  leakage. Escape closed Help, Ctrl+Q exited with code 0, and no native-spike or
-  attempted-shell process remained.
+  row and footer painted inside the centered border with no base-pane glyph
+  leakage visible at that observed scale. Escape closed Help, Ctrl+Q exited
+  with code 0, and no native-spike or attempted-shell process remained.
 - The spike remains excluded from the product workspace/build/release. The
   isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
   PTY/parser dependency. Multiple panes, Welcome, broader input, restore,
@@ -623,9 +623,10 @@ Dated Phase 3 generated Welcome increment (2026-07-22):
   native shell deliberately leaves startup restore disabled. With a writable
   project and missing workspace file, the real Empty pane remained around a
   centered opaque Welcome card; its title, introduction, ordered generated
-  routes/descriptions, dismissal, and border painted without base-pane glyph
-  leakage. Escape dismissed the non-modal note, focused Ctrl+Q exited with code
-  0, and no smoke or native-spike process remained.
+  routes/descriptions, dismissal, and border painted with no base-pane glyph
+  leakage visible at that observed scale. Escape dismissed the non-modal note,
+  focused Ctrl+Q exited with code 0, and no smoke or native-spike process
+  remained.
 - The spike remains excluded from the product workspace/build/release. The
   isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
   PTY/parser dependency. Multiple panes, restore in the excluded native shell,
@@ -789,10 +790,10 @@ Dated overnight-pilot corrective slice 3 (2026-07-23):
 - The displayed release smoke ran from the same long-path disposable project
   with an intentionally missing shell in a visible 800x632 macOS window.
   System Events drove Ctrl+P then `v`, reopened the real Palette, and screenshot
-  inspection showed wrapped base text only outside the opaque Palette.
-  Dispatching `f` produced the focused default float with lower-pane glyphs
-  clipped around it. Ctrl+Q exited 0, and no native-spike or attempted-shell
-  process remained.
+  inspection showed no wrapped-base-text leakage at that observed scale.
+  Dispatching `f` produced the focused default float with no lower-pane-glyph
+  leakage visible at that observed scale. Ctrl+Q exited 0, and no native-spike
+  or attempted-shell process remained.
 - The spike remains excluded from the product workspace/build/release. Stacked,
   moved/resized or additional floating panes, broader two-pane overlays, dense,
   mixed-content, and three-plus-pane scenes remain fail-closed. Artifact
@@ -801,6 +802,44 @@ Dated overnight-pilot corrective slice 3 (2026-07-23):
   the exact transition admission. The cold recheck found a second
   small-viewport title overlap; a focused RED/GREEN regression now proves
   Palette occlusion applies to underlying pane titles as well as pane bodies.
+
+Dated aggregate-review corrections-only slice (2026-07-23):
+
+- Focused RED first failed because `scene_rect_to_text_bounds`,
+  `pane_text_visible_bounds`, the fractional-pixel intersection proof, and the
+  usable-interior admission predicates did not exist.
+- Pane titles and bodies now begin as complete final pixel `TextBounds`.
+  Outward-rounded later-float and every current opaque-overlay bound are
+  subtracted in pixel space before glyph submission. Isolated tests at
+  fractional cell widths prove every visible body bound is disjoint from each
+  surface, and the real-host long-path Palette tracer exercises the same
+  final-pixel path. Header and status text use the same overlay subtraction; a
+  3x3 full-frame overlay regression proves neither chrome region submits glyphs
+  through the opaque surface.
+- Every admitted multi-pane rectangle must be at least 3x3 cells. Real-host
+  resize tests accept the default horizontal layout at 6x5, the default
+  vertical layout at 3x8, and the default float at 11x9, then reject 5x5, 6x4,
+  2x8, 3x7, 10x9, and 11x8. Isolated larger-frame cases also prove extreme
+  horizontal and vertical splits with sub-3-cell panes are rejected.
+- `mandatum-scene` still resolves the core default float to `(5, 1, 1, 1)` at
+  6x3. That remains a correct scene-layout clamping fact; `prepare_scene`
+  rejects the resulting degenerate multi-pane frame.
+- `./ci/gpu-spike.sh` passed 48 tests (two native-shell, twenty real-host,
+  and twenty-six isolated-renderer) plus the renderer dependency-boundary
+  scan. `cargo test -p mandatum-scene` passed all 35 tests, and
+  `cargo test -p mandatum-app --lib` passed all 248 tests.
+- The final post-review `./ci/gate.sh` passed formatting, Clippy with warnings
+  denied, build, every workspace test, conformance, and doc trace, proving the
+  committed tree itself green.
+- A release build drove the long-path missing-shell transition in a visible
+  800x632 macOS window. Screenshot inspection showed no leakage through the
+  Palette or default float at that observed scale. Ctrl+Q exited cleanly and
+  no native-spike or attempted-shell process remained. Fractional-width safety
+  is established by the final-pixel regressions, not inferred from screenshots.
+- The spike remains excluded from the product workspace/build/release.
+  Stacked, moved/resized or additional floating panes, broader two-pane
+  overlays, dense, mixed-content, and three-plus-pane scenes remain
+  fail-closed. Artifact Preview and production GPU admission remain pending.
 
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
