@@ -1710,3 +1710,54 @@ Search modal with a pasted `kind:timeline search` query, selected result,
 repeated-source elision, visible cursor, and bounded footer; Escape and Ctrl+Q
 closed it with exit 0 and no native process left. The final merge-gate result is
 recorded in `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers Generated Help
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one scene-only increment that accepts and
+paints the real `OverlayScene::Help` emitted by `FrontendHost` over a supported
+Empty pane. The prepared plan retains the existing resolved area, live filter,
+ordered heading/entry rows, configured key routes, selected index, and footer.
+Displayed paint adds the existing block-cursor convention, clips base-pane
+glyphs around the opaque Help rectangle, and uses the semantic overlay
+background, palette border, selection, and overlay foreground roles without
+changing the scene contract.
+
+Context: the app already generates Help from the built-in command table, live
+keymap, palette fast-path rules, pointer gestures, and glyph legends. It owns
+filtering, selection, scrolling, footer overflow honesty, centered geometry,
+keyboard editing, toggle/close behavior, and the distinction between headings,
+labels, and key hints. The excluded renderer rejected that complete product
+scene even though no app, command-table, or keymap access was required.
+
+Rationale: retaining `HelpOverlay` in the headless paint plan keeps generated
+content and live route truth in the app and scene layers. The real-host tracer
+bullet filters to the App heading and Search session output entry, proving that
+the configured Ctrl+Shift+F route crosses the renderer boundary instead of
+being copied into the adapter. The same prepared data drives the displayed
+surface, border, query cursor, grouped rows, selected-row highlight, key hints,
+and pinned footer. Scalar-character fitting remains deliberate; grapheme,
+wide-cell, and full style correctness remain Phase 4 work.
+
+Consequences: no app, runtime, scene, command table, keymap, production
+dependency, allowlist, installer, default command, or release surface changes.
+Multiple panes, Welcome, full
+input/theme/style parity, restore, Artifact Preview, and production GPU
+admission remain separately gated. The next slice is the existing one-pane
+first-run Welcome overlay only.
+
+Verification: the real-host test recorded the initial
+`UnsupportedScene::Overlay("help")` failure, then passed with the product Help
+retained unchanged by the prepared plan. The isolated renderer test covers
+geometry, query and cursor, grouped heading/entry indentation, key hints,
+selection/window alignment, footer, the empty-items placeholder, and bounded
+lines.
+`./ci/gpu-spike.sh` passed 26 tests (two native-shell, ten real-host, and
+fourteen isolated-renderer) plus the renderer dependency-boundary scan, and
+`cargo test -p mandatum-app --lib` passed all 248 tests. A displayed release
+smoke showed the real Empty pane around an opaque filtered Help modal with the
+App heading, Search command, live Ctrl+Shift+F route, visible cursor, selection,
+and bounded footer; Escape and Ctrl+Q closed it with exit 0 and no native or
+attempted-shell process left. The final merge-gate result is recorded in
+`docs/verification.md`.

@@ -563,6 +563,42 @@ Dated Phase 3 session-output Search increment (2026-07-22):
   trace checks. The final gate is rerun after recording this result so the
   committed tree itself is the tree proved green.
 
+Dated Phase 3 generated Help increment (2026-07-22):
+
+- The required real-host tracer bullet used a fresh `FrontendHost` with PTY
+  spawning disabled, drove neutral F1 over the supported Empty pane, and typed
+  `search session output`. It proved the next product frame contained
+  `OverlayScene::Help` with `layout::help_overlay_rect`, the exact live query,
+  ordered App heading and Search session output entry, configured
+  `ctrl+shift+f` route, selected index, and footer. Before implementation,
+  `prepare_scene` failed at runtime with `UnsupportedScene::Overlay("help")`.
+- The focused GREEN proves that exact generated Help reaches the prepared GPU
+  plan unchanged. The isolated renderer test covers retained geometry, query
+  and block-cursor cell, grouped heading/entry indentation, key hints,
+  selected/windowed row alignment, pinned footer, the empty-items placeholder,
+  and bounded lines. Help joins Search in pane-text clipping so base glyphs
+  cannot cross the opaque modal.
+- `./ci/gpu-spike.sh` passed 26 tests (two native-shell tests, ten real-host
+  integration tests, and fourteen isolated-renderer tests) plus the renderer
+  dependency-boundary scan. `cargo test -p mandatum-app --lib` passed all 248
+  tests.
+- The displayed release build ran on macOS from a writable disposable project
+  with an intentionally missing shell. F1 opened Help over the real Empty pane;
+  the live filter and block cursor narrowed to the App heading and Search
+  session output command with its generated `ctrl+shift+f` route. The selected
+  row and footer painted inside the centered border without base-pane glyph
+  leakage. Escape closed Help, Ctrl+Q exited with code 0, and no native-spike or
+  attempted-shell process remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Multiple panes, Welcome, broader input, restore,
+  Artifact Preview, and production admission remain
+  separately gated.
+- The first post-documentation `./ci/gate.sh` passed formatting, Clippy with
+  warnings denied, build, all workspace tests, conformance, and documentation
+  trace checks. The final gate is rerun after recording this result so the
+  committed tree itself is the tree proved green.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

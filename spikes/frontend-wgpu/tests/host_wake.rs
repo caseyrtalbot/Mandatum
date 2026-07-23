@@ -290,6 +290,47 @@ fn real_host_search_reaches_the_gpu_render_plan() {
 }
 
 #[test]
+fn real_host_help_reaches_the_gpu_render_plan() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+
+    host.handle_input(InputEvent::Key(Key::plain(KeyCode::Function(1))));
+    for character in "search session output".chars() {
+        host.handle_input(InputEvent::Key(Key::plain(KeyCode::Char(character))));
+    }
+
+    let snapshot = host.frame(frame_size);
+    assert_eq!(snapshot.scene.panes.len(), 1);
+    assert!(matches!(
+        snapshot.scene.panes[0].content,
+        PaneContent::Empty(_)
+    ));
+
+    let Some(OverlayScene::Help(help)) = &snapshot.scene.overlay else {
+        panic!("F1 did not produce the real help scene");
+    };
+    assert_eq!(help.area, layout::help_overlay_rect(frame_size));
+    assert_eq!(help.query, "search session output");
+    assert_eq!(help.selected, Some(0));
+    assert_eq!(help.items.len(), 2);
+    assert!(help.items[0].heading);
+    assert_eq!(help.items[0].label, "App");
+    assert_eq!(help.items[0].keys, "");
+    assert!(!help.items[1].heading);
+    assert_eq!(help.items[1].label, "Search session output");
+    assert_eq!(help.items[1].keys, "ctrl+shift+f");
+    assert_eq!(help.footer, "type to filter · ↑/↓ scroll · esc close");
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real help scene");
+    assert_eq!(prepared.help(), Some(help));
+}
+
+#[test]
 fn real_host_pty_output_wakes_without_polling_and_reaches_a_frame() {
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
     let config = AppConfig {

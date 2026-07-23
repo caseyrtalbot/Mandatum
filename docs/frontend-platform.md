@@ -103,9 +103,10 @@ spike-local PTY/parser/input state machine with the product's real
 wake callback drives `EventLoopProxy`, typed clipboard effects return to the
 native shell, and the GPU renderer paints the real header, one terminal, task,
 agent, or Empty pane, status strip, command palette, context menu, and execution
-timeline plus the session map, objective prompt, and session-output Search from
-`FrameSnapshot` scene/theme data. Phase 3 remains underway; multi-pane layouts,
-remaining overlays, and broader input parity are still explicit gaps.
+timeline plus the session map, objective prompt, session-output Search, and
+generated Help from `FrameSnapshot` scene/theme data. Phase 3 remains underway;
+multi-pane layouts, the Welcome overlay, and broader input parity are still
+explicit gaps.
 
 The adapter remains outside the Cargo workspace, product build, release
 artifacts, and merge gate. The opt-in `./ci/gpu-spike.sh` maintenance check runs
@@ -197,6 +198,7 @@ the terminal and excluded native shells now exercise the same host, runtime,
 neutral input, scene, wake, and typed-effect boundaries. Phase 3 is underway:
 scene-only increments cover real one-pane task and agent content, the Empty
 fallback, context menu, execution timeline, session map, objective prompt, and
-session-output Search. Restore, multi-pane layouts, remaining overlays, and
-broader input parity remain. Selecting the capability branch does not weaken
-the production conformance gate, and Artifact Preview remains unbuilt.
+session-output Search plus generated Help. Restore, multi-pane layouts,
+remaining overlays, and broader input parity remain. Selecting the capability
+branch does not weaken the production conformance gate, and Artifact Preview
+remains unbuilt.

@@ -1,7 +1,7 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the session-output search increment is complete; production GPU admission pending
+the generated Help increment is complete; production GPU admission pending
 (2026-07-22).
 
 This document is the durable implementation plan for a native window and
@@ -333,6 +333,19 @@ agent without base-pane glyphs leaking through the opaque overlay, then closed
 with Escape and quit cleanly. Help, welcome, multiple panes, restore, and
 broader input/theme/style parity remain explicitly unsupported.
 
+Eighth narrow increment complete (2026-07-22): a fresh real `FrontendHost` with
+PTY spawning disabled drove neutral F1 over the supported Empty pane and typed a
+filter retaining the existing Search session output command. The product frame
+contained the existing `OverlayScene::Help` with its resolved area, live query,
+ordered App heading and command entry, configured Ctrl+Shift+F route, selected
+index, and footer. The excluded render plan retains those scene-owned values and
+paints the opaque overlay surface, palette border and selection roles, live
+block cursor, grouped headings, labels, key hints, and pinned footer. The
+displayed macOS smoke showed that exact filtered Help over the real Empty pane
+without base-pane glyph leakage, then closed with Escape and quit cleanly.
+Welcome, multiple panes, restore, and broader input/theme/style parity remain
+explicitly unsupported.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -469,14 +482,13 @@ the date, environment, command, endpoint, and result.
 ## Next Implementation Slice
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one scene-only increment:
-add a failing real-`FrontendHost` headless test for a product-generated
-`OverlayScene::Help` over one supported Empty pane, then extend `prepare_scene`
-and displayed GPU paint to render only the existing help area, live filter and
-cursor, grouped headings, command labels, key hints, selection, and footer.
-Drive neutral F1 and type a filter that retains the Search session output entry;
-prove the product scene's geometry, heading/entry ordering, configured key
-route, selected index, and footer before it reaches the renderer. Preserve
-terminal/task/agent/Empty, header, one-pane geometry, status, theme, palette,
-context-menu, timeline, session-map, objective-prompt, and search behavior. Stop
-before multi-pane layout, Welcome or other overlay variants, broader input,
-restore, Artifact Preview, or production admission.
+add a failing real-`FrontendHost` headless test for the product-generated
+`OverlayScene::Welcome` over one supported Empty pane, using startup restore
+against a missing disposable workspace file to produce the real first-run note.
+Prove the scene-owned resolved area, introduction, ordered generated key routes
+and descriptions, and dismissal text before extending `prepare_scene` and
+displayed GPU paint. Preserve terminal/task/agent/Empty, header, one-pane
+geometry, status, theme, palette, context-menu, timeline, session-map,
+objective-prompt, Search, and Help behavior. Stop before multi-pane layout,
+other overlay variants, broader input, restore implementation changes, Artifact
+Preview, or production admission.

@@ -116,11 +116,12 @@ more useful without pretending the wider vision is finished:
   without its former duplicate PTY/parser state machine. Phase 3 is underway:
   its scene-only increments now paint real one-pane task and agent content,
   including live task output, the Empty fallback, the context menu, and the
-  execution timeline, session map, objective prompt, and session-output search
-  from existing scene data. Multi-pane layouts, remaining overlays, broader
-  input, and restore remain parity work. Production GPU dependencies and release
-  admission remain blocked until the typed artifact scene surface, adapter
-  tests, and later admission decision exist; Artifact Preview remains unbuilt.
+  execution timeline, session map, objective prompt, session-output search, and
+  generated Help from existing scene data. Multi-pane layouts, the Welcome
+  overlay, broader input, and restore remain parity work. Production GPU
+  dependencies and release admission remain blocked until the typed artifact
+  scene surface, adapter tests, and later admission decision exist; Artifact
+  Preview remains unbuilt.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.

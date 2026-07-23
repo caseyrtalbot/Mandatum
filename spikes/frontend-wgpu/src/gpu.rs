@@ -13,10 +13,10 @@ use glyphon::{
 // mandatum-terminal-vt: the real app host converts its grids before the
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
-    ContextMenuEntry, ContextMenuOverlay, OverlayScene, PaletteOverlay, PaneContent, PaneScene,
-    PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneColor, SearchEntry, SearchOverlay,
-    SessionMapOverlay, SessionMapRow, TerminalSurface, Theme, TimelineEntry, TimelineOverlay,
-    WorkspaceScene, layout,
+    ContextMenuEntry, ContextMenuOverlay, HelpEntry, HelpOverlay, OverlayScene, PaletteOverlay,
+    PaneContent, PaneScene, PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneColor, SearchEntry,
+    SearchOverlay, SessionMapOverlay, SessionMapRow, TerminalSurface, Theme, TimelineEntry,
+    TimelineOverlay, WorkspaceScene, layout,
 };
 use winit::window::Window;
 
@@ -65,6 +65,7 @@ pub struct PreparedScene<'a> {
     search: Option<&'a SearchOverlay>,
     session_map: Option<&'a SessionMapOverlay>,
     prompt: Option<&'a PromptOverlay>,
+    help: Option<&'a HelpOverlay>,
 }
 
 impl PreparedScene<'_> {
@@ -111,6 +112,10 @@ impl PreparedScene<'_> {
     pub fn prompt(&self) -> Option<&PromptOverlay> {
         self.prompt
     }
+
+    pub fn help(&self) -> Option<&HelpOverlay> {
+        self.help
+    }
 }
 
 /// Prepare the deliberately narrow paint plan without a window or
@@ -152,16 +157,19 @@ pub fn prepare_scene<'a>(
             (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
         }
     };
-    let (palette, context_menu, timeline, search, session_map, prompt) = match &scene.overlay {
-        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None, None, None, None),
-        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None, None, None, None),
-        Some(OverlayScene::Timeline(timeline)) => (None, None, Some(timeline), None, None, None),
-        Some(OverlayScene::Search(search)) => (None, None, None, Some(search), None, None),
-        Some(OverlayScene::SessionMap(map)) => (None, None, None, None, Some(map), None),
-        Some(OverlayScene::Prompt(prompt)) => (None, None, None, None, None, Some(prompt)),
-        Some(OverlayScene::Help(_)) => return Err(UnsupportedScene::Overlay("help")),
+    let (palette, context_menu, timeline, search, session_map, prompt, help) = match &scene.overlay
+    {
+        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None, None, None, None, None),
+        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None, None, None, None, None),
+        Some(OverlayScene::Timeline(timeline)) => {
+            (None, None, Some(timeline), None, None, None, None)
+        }
+        Some(OverlayScene::Search(search)) => (None, None, None, Some(search), None, None, None),
+        Some(OverlayScene::SessionMap(map)) => (None, None, None, None, Some(map), None, None),
+        Some(OverlayScene::Prompt(prompt)) => (None, None, None, None, None, Some(prompt), None),
+        Some(OverlayScene::Help(help)) => (None, None, None, None, None, None, Some(help)),
         Some(OverlayScene::Welcome(_)) => return Err(UnsupportedScene::Overlay("welcome")),
-        None => (None, None, None, None, None, None),
+        None => (None, None, None, None, None, None, None),
     };
     Ok(PreparedScene {
         scene,
@@ -177,6 +185,7 @@ pub fn prepare_scene<'a>(
         search,
         session_map,
         prompt,
+        help,
     })
 }
 
@@ -326,6 +335,61 @@ fn search_cursor_cell(search: &SearchOverlay) -> Option<(u16, u16)> {
         return None;
     }
     let query_end = 2usize.saturating_add(search.query.chars().count());
+    let column = query_end.min(usize::from(inner.width.saturating_sub(1))) as u16;
+    Some((inner.x.saturating_add(column), inner.y))
+}
+
+fn help_line(item: &HelpEntry, width: u16) -> String {
+    let line = if item.heading {
+        format!(" {}", item.label)
+    } else if item.keys.is_empty() {
+        format!("   {}", item.label)
+    } else {
+        format!("   {}  {}", item.label, item.keys)
+    };
+    fit_cell_line(&line, width)
+}
+
+fn help_outer_line(content: &str, inner_width: u16) -> String {
+    format!(" {}", fit_cell_line(content, inner_width))
+}
+
+fn help_lines(help: &HelpOverlay) -> Vec<String> {
+    let inner = layout::pane_inner_rect(help.area);
+    let window = layout::palette_item_window(inner, help.items.len(), help.selected);
+    let mut lines = vec![String::new(); usize::from(help.area.height)];
+    if !lines.is_empty() {
+        lines[0] = " Help ".to_owned();
+    }
+    if lines.len() > 1 {
+        let input = if help.query.is_empty() {
+            "> type to filter the keymap".to_owned()
+        } else {
+            format!("> {}", help.query)
+        };
+        lines[1] = help_outer_line(&input, inner.width);
+    }
+    if help.items.is_empty() && lines.len() > 2 {
+        lines[2] = help_outer_line(" no matching entries", inner.width);
+    }
+    for (row, index) in window.enumerate() {
+        if let Some(slot) = lines.get_mut(row + 2) {
+            *slot = help_outer_line(&help_line(&help.items[index], inner.width), inner.width);
+        }
+    }
+    if lines.len() > 1 {
+        let footer_row = lines.len() - 2;
+        lines[footer_row] = help_outer_line(&format!(" {}", help.footer), inner.width);
+    }
+    lines
+}
+
+fn help_cursor_cell(help: &HelpOverlay) -> Option<(u16, u16)> {
+    let inner = layout::pane_inner_rect(help.area);
+    if help.query.is_empty() || inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let query_end = 2usize.saturating_add(help.query.chars().count());
     let column = query_end.min(usize::from(inner.width.saturating_sub(1))) as u16;
     Some((inner.x.saturating_add(column), inner.y))
 }
@@ -1279,6 +1343,94 @@ impl GpuText {
                 right: (search_x + search_width).ceil() as i32,
                 bottom: (search_y + search_height).ceil() as i32,
             });
+        } else if let Some(help) = prepared.help {
+            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
+            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
+            let help_x = help.area.x as f32 * self.cell_w;
+            let help_y = help.area.y as f32 * self.cell_h;
+            let help_width = help.area.width as f32 * self.cell_w;
+            let help_height = help.area.height as f32 * self.cell_h;
+            push_quad(
+                &mut quads,
+                help_x,
+                help_y,
+                help_width,
+                help_height,
+                overlay_bg_rgba,
+            );
+            if help.area.width > 0 && help.area.height > 0 {
+                let border = resolve(theme.palette_border, DEFAULT_FG);
+                let border_rgba = [border[0], border[1], border[2], 255];
+                push_quad(&mut quads, help_x, help_y, help_width, 1.0, border_rgba);
+                push_quad(
+                    &mut quads,
+                    help_x,
+                    help_y + help_height - 1.0,
+                    help_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(&mut quads, help_x, help_y, 1.0, help_height, border_rgba);
+                push_quad(
+                    &mut quads,
+                    help_x + help_width - 1.0,
+                    help_y,
+                    1.0,
+                    help_height,
+                    border_rgba,
+                );
+            }
+
+            let inner = layout::pane_inner_rect(help.area);
+            let window = layout::palette_item_window(inner, help.items.len(), help.selected);
+            for (row, index) in window.enumerate() {
+                if help.selected == Some(index) {
+                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
+                    push_quad(
+                        &mut quads,
+                        inner.x as f32 * self.cell_w,
+                        (inner.y + 1 + row as u16) as f32 * self.cell_h,
+                        inner.width as f32 * self.cell_w,
+                        self.cell_h,
+                        [selection[0], selection[1], selection[2], 190],
+                    );
+                }
+            }
+            if let Some((column, row)) = help_cursor_cell(help) {
+                push_quad(
+                    &mut quads,
+                    column as f32 * self.cell_w,
+                    row as f32 * self.cell_h,
+                    self.cell_w,
+                    self.cell_h,
+                    CURSOR_BG,
+                );
+            }
+
+            let overlay_text = help_lines(help).join("\n");
+            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            self.overlay_buffer.set_wrap(Wrap::None);
+            self.overlay_buffer
+                .set_size(Some(help_width.max(1.0)), Some(help_height.max(1.0)));
+            self.overlay_buffer.set_text(
+                &overlay_text,
+                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                    overlay_fg[0],
+                    overlay_fg[1],
+                    overlay_fg[2],
+                )),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            overlay_position = Some((help_x, help_y));
+            overlay_clip = Some(TextBounds {
+                left: help_x.floor() as i32,
+                top: help_y.floor() as i32,
+                right: (help_x + help_width).ceil() as i32,
+                bottom: (help_y + help_height).ceil() as i32,
+            });
         } else if let Some(map) = prepared.session_map {
             let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
             let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
@@ -1506,10 +1658,10 @@ impl GpuText {
                 custom_glyphs: &[],
             },
         ];
-        let pane_text_bounds = if prepared.search.is_some() {
+        let pane_text_bounds = if prepared.search.is_some() || prepared.help.is_some() {
             text_bounds_around_occlusion(
                 content_bounds,
-                overlay_clip.expect("prepared search always sets its clip bounds"),
+                overlay_clip.expect("prepared opaque text overlay always sets its clip bounds"),
             )
         } else {
             vec![content_bounds]
@@ -1730,9 +1882,9 @@ mod tests {
     use super::*;
     use mandatum_scene::{
         AgentContent, AgentStatus, ContextMenuEntry, ContextMenuOverlay, EmptyContent, HeaderScene,
-        OverlayScene, PaneId, PaneSceneKind, PromptOverlay, SceneCell, SceneRect, SceneSize,
-        SearchEntry, SearchOverlay, StatusScene, TaskContent, TimelineEntry, TimelineOverlay,
-        WelcomeOverlay,
+        HelpEntry, HelpOverlay, OverlayScene, PaneId, PaneSceneKind, PromptOverlay, SceneCell,
+        SceneRect, SceneSize, SearchEntry, SearchOverlay, StatusScene, TaskContent, TimelineEntry,
+        TimelineOverlay, WelcomeOverlay,
     };
 
     fn terminal_content() -> PaneContent {
@@ -2124,6 +2276,77 @@ mod tests {
             ),
             vec![content]
         );
+    }
+
+    #[test]
+    fn help_plan_preserves_scene_data_grouping_keys_cursor_selection_and_footer() {
+        let mut with_help = scene(vec![pane(
+            PaneSceneKind::StatusLog,
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            }),
+        )]);
+        let help = HelpOverlay {
+            area: SceneRect::new(3, 4, 56, 8),
+            query: "search".to_owned(),
+            items: vec![
+                HelpEntry {
+                    heading: true,
+                    label: "App".to_owned(),
+                    keys: String::new(),
+                },
+                HelpEntry {
+                    heading: false,
+                    label: "Search session output".to_owned(),
+                    keys: "ctrl+shift+f".to_owned(),
+                },
+            ],
+            selected: Some(1),
+            footer: "type to filter · ↑/↓ scroll · esc close".to_owned(),
+        };
+        with_help.overlay = Some(OverlayScene::Help(help.clone()));
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&with_help, &theme).unwrap();
+        let prepared_help = prepared.help().expect("help scene data was not retained");
+        let lines = help_lines(prepared_help);
+
+        assert_eq!(prepared_help, &help);
+        assert_eq!(lines.len(), usize::from(help.area.height));
+        assert_eq!(lines[0], " Help ");
+        assert_eq!(lines[1], " > search");
+        assert_eq!(lines[2], "  App");
+        assert!(lines[3].starts_with("    Search session output"));
+        assert!(lines[3].ends_with("ctrl+shift+f"));
+        assert_eq!(
+            lines[lines.len() - 2],
+            "  type to filter · ↑/↓ scroll · esc close"
+        );
+        assert!(lines.last().unwrap().is_empty());
+        assert!(lines.iter().skip(1).all(|line| {
+            line.chars().count() <= usize::from(layout::pane_inner_rect(help.area).width) + 1
+        }));
+        assert_eq!(
+            help_cursor_cell(prepared_help),
+            Some((
+                layout::pane_inner_rect(help.area)
+                    .x
+                    .saturating_add(2 + help.query.chars().count() as u16),
+                layout::pane_inner_rect(help.area).y,
+            ))
+        );
+
+        let mut no_matches = help;
+        no_matches.query.clear();
+        no_matches.items.clear();
+        no_matches.selected = None;
+        with_help.overlay = Some(OverlayScene::Help(no_matches.clone()));
+        let prepared = prepare_scene(&with_help, &theme).unwrap();
+        let lines = help_lines(prepared.help().unwrap());
+        assert!(lines[1].contains("type to filter the keymap"));
+        assert_eq!(lines[2], "  no matching entries");
+        assert_eq!(help_cursor_cell(&no_matches), None);
     }
 
     #[test]

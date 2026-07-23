@@ -229,6 +229,11 @@ the same rule: the prepared plan retains the scene's resolved area, live query,
 grouped source labels, matched output text and char indices, selection,
 overflow, footer, and row targets. The GPU adapter clips underlying pane glyphs
 around that opaque modal while leaving the surrounding one-pane scene intact.
+Generated Help follows the same boundary: the scene owns its resolved area,
+live filter, ordered heading/entry rows, live key routes, selection, and footer.
+The adapter paints those values with the existing semantic overlay roles and
+clips base-pane glyphs around the opaque Help modal without consulting the
+command table or keymap.
 Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
 state remain frontend-local.
@@ -240,10 +245,11 @@ model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 Phase 3 is underway. Terminal, task, agent, and Empty one-pane content plus the
-palette, context-menu, timeline, session-map, objective-prompt, and
-session-output Search overlays are now covered. Restore handling, multi-pane
-layouts, remaining overlays, and broader scene/input parity remain. Artifact
-Preview and production GPU admission remain later, separately gated decisions.
+  palette, context-menu, timeline, session-map, objective-prompt,
+  session-output Search, and Help overlays are now covered. Restore handling,
+  multi-pane layouts, remaining overlays, and broader scene/input parity remain.
+Artifact Preview and production GPU admission remain later, separately gated
+decisions.
 
 ### `workflows`
 
