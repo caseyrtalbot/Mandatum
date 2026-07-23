@@ -239,6 +239,11 @@ decides whether the first-run note exists, and the scene carries its resolved
 area, introduction, ordered live key routes and descriptions, and dismissal
 text. The adapter paints and clips that opaque card without reading persistence,
 the keymap, or app state.
+The first multi-pane path remains scene-bound too: the host resolves exactly
+two horizontally tiled Empty pane rectangles, titles, focus, and details, while
+the prepared GPU plan retains one paint record per pane and the adapter paints
+them in scene order. The renderer neither recomputes the split nor admits other
+multi-pane shapes.
 Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
 state remain frontend-local.
@@ -251,9 +256,10 @@ its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 Phase 3 is underway. Terminal, task, agent, and Empty one-pane content plus the
   palette, context-menu, timeline, session-map, objective-prompt,
-  session-output Search, Help, and Welcome overlays are now covered. Restore
-  handling in the excluded native shell, multi-pane layouts, and broader
-  scene/input parity remain.
+  session-output Search, Help, and Welcome overlays are now covered, along with
+  exactly two horizontally tiled Empty panes. Restore handling in the excluded
+  native shell, all other multi-pane layouts, and broader scene/input parity
+  remain.
 Artifact Preview and production GPU admission remain later, separately gated
 decisions.
 

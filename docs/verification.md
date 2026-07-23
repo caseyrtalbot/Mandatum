@@ -632,6 +632,48 @@ Dated Phase 3 generated Welcome increment (2026-07-22):
   broader input, Artifact Preview, and production admission remain separately
   gated.
 
+Dated Phase 3 two-horizontal-Empty-pane increment (2026-07-22):
+
+- The required real-host tracer bullet used `AppConfig { spawn_pty: false,
+  .. }`, resized to 80x24, then drove neutral Ctrl+P and `v` input through the
+  generated Split pane right route. It proved the next product frame contained
+  exactly two tiled Empty panes: `pane-1` at `(0, 1, 40, 22)` titled
+  `terminal`, `pane-2` at `(40, 1, 40, 22)` titled `terminal 2`, focus on
+  `pane-2`, and the existing no-live-grid detail in both. Before
+  implementation, `prepare_scene` failed at runtime with
+  `UnsupportedScene::PaneCount(2)`.
+- The focused GREEN proves that exact real-host scene reaches the prepared GPU
+  plan unchanged. The plan now exposes one prepared record per pane, retains
+  both scene pane values and Empty detail, and carries no terminal surface for
+  either pane. Unsupported two-pane content and all other multi-pane shapes
+  continue to fail explicitly.
+- `./ci/gpu-spike.sh` passed 29 tests (two native-shell tests, twelve real-host
+  integration tests, and fifteen isolated-renderer tests) plus the renderer
+  dependency-boundary scan. `cargo test -p mandatum-app --lib` passed all 248
+  tests.
+- The displayed release smoke launched the excluded native shell from a
+  writable disposable project with an intentionally missing shell, then drove
+  Ctrl+P and `v`. The real window header reported `2 pane(s)`; equal left/right
+  panes painted the `terminal` and focused `terminal 2` titles plus the Empty
+  cwd, restart-generation, and no-live-grid detail. The controlling terminal
+  stopped the disposable process after capture, and no native-spike process
+  remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Vertical, stacked, floating, dense, three-plus-pane,
+  and mixed-content multi-pane scenes, restore, broader input, Artifact
+  Preview, and production admission remain separately gated.
+- The first post-documentation `./ci/gate.sh` passed formatting, Clippy with
+  warnings denied, build, all workspace tests, conformance, and documentation
+  trace checks. A parallel cold read then found that title glyph bounds were
+  still full-frame and the tracer asserted only the last Empty detail row.
+  Title buffers and `TextArea` bounds are now clipped to each pane's usable top
+  row, and both panes assert cwd, restart generation, and the no-live-grid row
+  in the scene and prepared plan. The full GPU spike check, all 248 app tests,
+  and the displayed release smoke passed again after those fixes. The final
+  gate is rerun after recording this result so the committed tree itself is the
+  tree proved green.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

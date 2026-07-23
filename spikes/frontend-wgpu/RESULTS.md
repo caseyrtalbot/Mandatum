@@ -1,12 +1,14 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 underway; one-pane content and every current overlay are covered.**
+Status: **Phase 3 underway; one-pane content, every current overlay, and the
+first exact two-pane layout are covered.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, one terminal, task, agent, or Empty pane, status
 strip, command palette, context menu, execution timeline, session map, Set agent
-objective prompt, session-output Search, generated Help, and generated Welcome
-on the GPU. Typed clipboard effects return to the native shell.
+objective prompt, session-output Search, generated Help, generated Welcome, and
+exactly two horizontally tiled Empty panes on the GPU. Typed clipboard effects
+return to the native shell.
 
 This remains an isolated frontend outside the Cargo workspace (the root
 `Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
@@ -163,6 +165,24 @@ over the Empty pane, Escape dismissed the non-modal note, Ctrl+Q exited 0, and
 no smoke or native-spike process remained. Multiple panes, restore in the
 excluded native shell, broader input, Artifact Preview, and production
 admission remain pending.
+
+Phase 3 two-horizontal-Empty-pane verification (2026-07-22): a real-host tracer
+bullet used PTY spawning disabled, resized to 80x24, and drove neutral Ctrl+P
+then `v` through the product's generated Split pane right route. It proved the
+two scene-owned 40x22 side-by-side rectangles, `terminal` and `terminal 2`
+titles, focus on the right pane, layout flags, and Empty detail before first
+failing with `PaneCount(2)`. The prepared plan now retains an ordered per-pane
+record, and the GPU adapter paints both panes with separate title/body buffers
+while preserving its one-pane API and every covered one-pane content/overlay
+path. Admission remains limited to the exact two-horizontal-Empty shape.
+`./ci/gpu-spike.sh` passed 29 tests (two native-shell, twelve real-host, and
+fifteen isolated-renderer) plus the renderer boundary scan, and all 248 app
+library tests passed. A displayed missing-shell release smoke showed the real
+header reporting `2 pane(s)`, equal left/right panes, both Empty details, and
+focused `terminal 2`; the disposable process was stopped after capture and no
+native process remained. Vertical, stacked, floating, dense, mixed-content,
+and three-plus-pane layouts, restore, broader input, Artifact Preview, and
+production admission remain pending.
 
 ## Verdict (read this first)
 
@@ -538,6 +558,14 @@ descriptions, and dismissal must paint inside the border. Escape must dismiss
 the non-modal note without quitting, and focused Ctrl+Q must exit 0 without
 leaving a harness or native-spike process.
 
+For the displayed two-horizontal-Empty-pane smoke, launch the release native
+shell from a writable disposable project with an intentionally missing shell.
+Press Ctrl+P then `v`. Confirm the header reports `2 pane(s)`, the workspace is
+split into equal left/right panes, both panes show the scene-owned Empty cwd,
+restart generation, and no-live-grid detail, and the right `terminal 2` title
+has focus styling. Stop the disposable process and confirm no native-spike
+process remains.
+
 ## Final spike verdict
 
 **The 2026-07-09 GPU run proved a real, measured, user-visible latency win and a
@@ -559,11 +587,11 @@ status, palette, neutral-input, wake, and typed-effect slice. Phase 3 is now
 underway: its first increments add real one-pane task metadata/live output,
 agent detail, the Empty fallback, the existing context menu, execution timeline,
 session map, objective prompt, session-output Search, generated Help, and
-generated Welcome without changing the scene or host contract. A production
-wgpu adapter still needs
-restore, multi-pane and broader scene parity, correct grapheme width, IME and
-composition, runtime DPI, full style mapping, surface-loss recovery, and damage
-tracking.
+generated Welcome without changing the scene or host contract. The next
+increment adds only the exact real two-horizontal-Empty-pane scene. A production
+wgpu adapter still needs restore, broader multi-pane and scene parity, correct
+grapheme width, IME and composition, runtime DPI, full style mapping,
+surface-loss recovery, and damage tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selects the

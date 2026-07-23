@@ -1,8 +1,8 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the generated Welcome increment is complete; production GPU admission pending
-(2026-07-22).
+the two-horizontal-Empty-pane increment is complete; production GPU admission
+pending (2026-07-22).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -358,6 +358,18 @@ the exact local GPU renderer; the card painted, Escape dismissed the non-modal
 note, and Ctrl+Q quit cleanly. Multiple panes, restore in the excluded native
 shell, and broader input/theme/style parity remain explicitly unsupported.
 
+Tenth narrow increment complete (2026-07-22): a fresh real `FrontendHost` with
+PTY spawning disabled drove the generated Ctrl+P then `v` Split pane right
+route after an 80x24 resize. The resulting scene contained exactly two
+side-by-side tiled Empty panes with scene-owned 40x22 rectangles, durable
+titles, focus on the new right pane, and the existing Empty detail. The
+prepared plan now retains a per-pane paint record, and the GPU path paints both
+pane backgrounds, borders, titles, and body text while preserving every
+covered one-pane content and overlay path. A displayed missing-shell release
+smoke showed the same two-pane scene in the native window. Vertical, stacked,
+floating, dense, and three-plus-pane layouts, restore in the excluded native
+shell, and broader input/theme/style parity remain explicitly unsupported.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -495,10 +507,11 @@ the date, environment, command, endpoint, and result.
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one layout-only increment:
 add a failing real-`FrontendHost` headless test that uses PTY spawning disabled
-and the generated Ctrl+P then `v` Split pane right route to produce exactly two
-tiled Empty panes. Prove both scene-owned pane rectangles, titles, focus, and
-Empty details before replacing the single-pane `PreparedScene` assumption with
-paint for only that two-pane horizontal layout. Preserve every covered
-one-pane content and overlay path. Stop before vertical, stacked, floating,
-dense, or three-plus-pane layouts; broader input; restore implementation
-changes; Artifact Preview; or production admission.
+and the generated Ctrl+P then `s` Split pane down route to produce exactly two
+vertically tiled Empty panes. Prove both scene-owned pane rectangles, titles,
+focus, and Empty details before extending the prepared-plan admission and GPU
+paint for only that two-pane vertical layout. Preserve every covered one-pane
+path and the completed two-horizontal-Empty-pane path. Stop before stacked,
+floating, dense, or three-plus-pane layouts; mixed multi-pane content; broader
+input; restore implementation changes; Artifact Preview; or production
+admission.

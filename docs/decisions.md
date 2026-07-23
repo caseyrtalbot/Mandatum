@@ -1809,3 +1809,47 @@ the exact local host, scene, and renderer showed the real Welcome over Empty
 content without glyph leakage; Escape dismissed it, focused Ctrl+Q exited 0,
 and no smoke or native-spike process remained. The final merge-gate result is
 recorded in `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers Two Horizontal Empty Panes
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one layout-only increment that accepts and
+paints exactly two horizontally tiled `PaneContent::Empty` panes emitted by a
+real `FrontendHost`. `PreparedScene` now owns an ordered collection of
+per-pane paint records, while its existing single-pane accessors preserve the
+covered one-pane test and adapter surface. Admission is deliberately limited
+to two non-floating, non-stacked, non-zoomed Empty panes whose adjacent
+rectangles fill the scene workspace and have equal vertical bounds.
+
+Context: Ctrl+P then `v` already mutates the product layout and scene builder
+into two resolved side-by-side panes. The excluded renderer previously rejected
+that valid product frame solely because its preparation and glyph buffers
+assumed one pane. No layout math, product command behavior, scene type, or
+runtime behavior was missing.
+
+Rationale: retaining each `PaneScene` unchanged keeps rectangles, durable
+titles, focus, flags, and Empty detail app/scene-owned. The GPU adapter needs
+only bounded per-pane title/body buffers and scene-order paint. Narrow
+shape-based admission prevents the per-pane refactor from silently claiming
+vertical, stacked, floating, dense, mixed-content, or three-plus-pane support.
+The one-pane overlay path remains unchanged and two-pane overlays are not
+admitted.
+
+Consequences: no app, runtime, scene, layout, command table, keymap,
+persistence, production dependency, allowlist, installer, default command, or
+release surface changes. Every covered one-pane content and overlay path
+remains green. The next slice is exactly two vertically tiled Empty panes;
+stacked, floating, dense, mixed-content, and three-plus-pane layouts, restore,
+broader input/theme/style parity, Artifact Preview, and production GPU
+admission remain separately gated.
+
+Verification: the real-host tracer proved the exact 80x24 product scene and
+first failed with `UnsupportedScene::PaneCount(2)`. The focused GREEN retains
+both 40x22 rectangles, titles, focus, flags, and Empty details in the prepared
+plan. `./ci/gpu-spike.sh` passed 29 tests plus the renderer boundary scan, and
+`cargo test -p mandatum-app --lib` passed all 248 tests. A displayed
+missing-shell release smoke showed the real two-pane horizontal layout, titles,
+focus styling, and Empty detail in the native window; no native process
+remained afterward. The final merge-gate result is recorded in
+`docs/verification.md`.

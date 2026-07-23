@@ -33,6 +33,7 @@ pub enum UnsupportedScene {
     Overlay(&'static str),
     PaneCount(usize),
     PaneContent(&'static str),
+    Layout(&'static str),
 }
 
 impl std::fmt::Display for UnsupportedScene {
@@ -40,10 +41,34 @@ impl std::fmt::Display for UnsupportedScene {
         match self {
             Self::Overlay(kind) => write!(f, "{kind} overlays are not implemented"),
             Self::PaneCount(count) => {
-                write!(f, "expected exactly one pane, received {count}")
+                write!(f, "unsupported pane count: {count}")
             }
             Self::PaneContent(kind) => write!(f, "{kind} pane content is not implemented"),
+            Self::Layout(kind) => write!(f, "{kind} layout is not implemented"),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct PreparedPane<'a> {
+    pane: &'a PaneScene,
+    terminal: Option<&'a TerminalSurface>,
+    pane_text: String,
+    pane_text_rows: usize,
+    body_wrap: Wrap,
+}
+
+impl PreparedPane<'_> {
+    pub fn scene(&self) -> &PaneScene {
+        self.pane
+    }
+
+    pub fn pane_text(&self) -> &str {
+        &self.pane_text
+    }
+
+    pub fn pane_surface(&self) -> Option<&TerminalSurface> {
+        self.terminal
     }
 }
 
@@ -54,11 +79,7 @@ impl std::fmt::Display for UnsupportedScene {
 pub struct PreparedScene<'a> {
     scene: &'a WorkspaceScene,
     theme: &'a Theme,
-    pane: &'a PaneScene,
-    terminal: Option<&'a TerminalSurface>,
-    pane_text: String,
-    pane_text_rows: usize,
-    body_wrap: Wrap,
+    panes: Vec<PreparedPane<'a>>,
     palette: Option<&'a PaletteOverlay>,
     context_menu: Option<&'a ContextMenuOverlay>,
     timeline: Option<&'a TimelineOverlay>,
@@ -75,15 +96,19 @@ impl PreparedScene<'_> {
     }
 
     pub fn pane_title(&self) -> &str {
-        &self.pane.title
+        &self.panes[0].pane.title
     }
 
     pub fn pane_text(&self) -> &str {
-        &self.pane_text
+        &self.panes[0].pane_text
     }
 
     pub fn pane_surface(&self) -> Option<&TerminalSurface> {
-        self.terminal
+        self.panes[0].terminal
+    }
+
+    pub fn panes(&self) -> &[PreparedPane<'_>] {
+        &self.panes
     }
 
     pub fn theme_name(&self) -> &str {
@@ -130,38 +155,18 @@ pub fn prepare_scene<'a>(
     scene: &'a WorkspaceScene,
     theme: &'a Theme,
 ) -> Result<PreparedScene<'a>, UnsupportedScene> {
-    if scene.panes.len() != 1 {
-        return Err(UnsupportedScene::PaneCount(scene.panes.len()));
+    match scene.panes.len() {
+        1 => {}
+        2 if is_two_horizontal_empty_panes(scene) => {}
+        2 => {
+            return Err(UnsupportedScene::Layout(
+                "only two horizontal tiled Empty panes",
+            ));
+        }
+        count => return Err(UnsupportedScene::PaneCount(count)),
     }
 
-    let pane = &scene.panes[0];
-    let inner_width = layout::pane_inner_rect(pane.area).width;
-    let (terminal, pane_text, pane_text_rows, body_wrap) = match &pane.content {
-        PaneContent::Terminal(surface) => (Some(surface), String::new(), 0, Wrap::None),
-        PaneContent::Task(task) => {
-            // Task output owns the rows below metadata, so each scene detail
-            // entry must remain exactly one GPU row. Match the terminal
-            // adapter's tail-preserving fit instead of allowing shaping to
-            // wrap or embedded newlines to consume unbudgeted rows.
-            let lines = pane
-                .detail_lines()
-                .into_iter()
-                .map(|line| fit_cell_line(&normalize_cell_line(&line), inner_width))
-                .collect::<Vec<_>>();
-            let rows = lines.len();
-            (task.output.as_ref(), lines.join("\n"), rows, Wrap::None)
-        }
-        PaneContent::Agent(_) => {
-            let lines = pane.detail_lines();
-            let rows = lines.len();
-            (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
-        }
-        PaneContent::Empty(_) => {
-            let lines = pane.detail_lines();
-            let rows = lines.len();
-            (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
-        }
-    };
+    let panes = scene.panes.iter().map(prepare_pane).collect::<Vec<_>>();
     let (palette, context_menu, timeline, search, session_map, prompt, help, welcome) = match &scene
         .overlay
     {
@@ -192,11 +197,7 @@ pub fn prepare_scene<'a>(
     Ok(PreparedScene {
         scene,
         theme,
-        pane,
-        terminal,
-        pane_text,
-        pane_text_rows,
-        body_wrap,
+        panes,
         palette,
         context_menu,
         timeline,
@@ -206,6 +207,68 @@ pub fn prepare_scene<'a>(
         help,
         welcome,
     })
+}
+
+fn is_two_horizontal_empty_panes(scene: &WorkspaceScene) -> bool {
+    if scene.overlay.is_some() {
+        return false;
+    }
+    let [first, second] = scene.panes.as_slice() else {
+        return false;
+    };
+    let workspace = layout::workspace_scene_area(scene.size);
+    first.area.x == workspace.x
+        && first.area.y == workspace.y
+        && first.area.height == workspace.height
+        && first.area.right() == second.area.x
+        && second.area.y == workspace.y
+        && second.area.right() == workspace.right()
+        && second.area.height == workspace.height
+        && !first.floating
+        && !first.stacked
+        && !first.zoomed
+        && !second.floating
+        && !second.stacked
+        && !second.zoomed
+        && matches!(first.content, PaneContent::Empty(_))
+        && matches!(second.content, PaneContent::Empty(_))
+}
+
+fn prepare_pane(pane: &PaneScene) -> PreparedPane<'_> {
+    let inner_width = layout::pane_inner_rect(pane.area).width;
+    let (terminal, pane_text, pane_text_rows, body_wrap) = match &pane.content {
+        PaneContent::Terminal(surface) => (Some(surface), String::new(), 0, Wrap::None),
+        PaneContent::Task(task) => {
+            // Task output owns the rows below metadata, so each scene detail
+            // entry must remain exactly one GPU row. Match the terminal
+            // adapter's tail-preserving fit instead of allowing shaping to
+            // wrap or embedded newlines to consume unbudgeted rows.
+            let lines = pane
+                .detail_lines()
+                .into_iter()
+                .map(|line| fit_cell_line(&normalize_cell_line(&line), inner_width))
+                .collect::<Vec<_>>();
+            let rows = lines.len();
+            (task.output.as_ref(), lines.join("\n"), rows, Wrap::None)
+        }
+        PaneContent::Agent(_) => {
+            let lines = pane.detail_lines();
+            let rows = lines.len();
+            (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
+        }
+        PaneContent::Empty(_) => {
+            let lines = pane.detail_lines();
+            let rows = lines.len();
+            (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
+        }
+    };
+    PreparedPane {
+        pane,
+        terminal,
+        pane_text,
+        pane_text_rows,
+        body_wrap,
+    }
 }
 
 fn normalize_cell_line(line: &str) -> String {
@@ -585,8 +648,8 @@ pub struct GpuText {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     header_buffer: Buffer,
-    title_buffer: Buffer,
-    text_buffer: Buffer,
+    title_buffers: Vec<Buffer>,
+    text_buffers: Vec<Buffer>,
     status_buffer: Buffer,
     overlay_buffer: Buffer,
 
@@ -752,8 +815,12 @@ impl GpuText {
         let line_height = (font_size * 1.3).round();
         let metrics = Metrics::new(font_size, line_height);
         let header_buffer = Buffer::new(&mut font_system, metrics);
-        let title_buffer = Buffer::new(&mut font_system, metrics);
-        let text_buffer = Buffer::new(&mut font_system, metrics);
+        let title_buffers = (0..2)
+            .map(|_| Buffer::new(&mut font_system, metrics))
+            .collect();
+        let text_buffers = (0..2)
+            .map(|_| Buffer::new(&mut font_system, metrics))
+            .collect();
         let status_buffer = Buffer::new(&mut font_system, metrics);
         let overlay_buffer = Buffer::new(&mut font_system, metrics);
         let cell_w = measure_cell_width(&mut font_system, metrics);
@@ -777,8 +844,8 @@ impl GpuText {
             atlas,
             text_renderer,
             header_buffer,
-            title_buffer,
-            text_buffer,
+            title_buffers,
+            text_buffers,
             status_buffer,
             overlay_buffer,
             scale,
@@ -815,8 +882,12 @@ impl GpuText {
         let line_height = (self.font_size * 1.3).round();
         let metrics = Metrics::new(self.font_size, line_height);
         self.header_buffer.set_metrics(metrics);
-        self.title_buffer.set_metrics(metrics);
-        self.text_buffer.set_metrics(metrics);
+        for buffer in &mut self.title_buffers {
+            buffer.set_metrics(metrics);
+        }
+        for buffer in &mut self.text_buffers {
+            buffer.set_metrics(metrics);
+        }
         self.status_buffer.set_metrics(metrics);
         self.overlay_buffer.set_metrics(metrics);
         self.cell_w = measure_cell_width(&mut self.font_system, metrics);
@@ -835,27 +906,10 @@ impl GpuText {
         theme: &Theme,
     ) -> Result<Option<Instant>, UnsupportedScene> {
         let prepared = prepare_scene(scene, theme)?;
-        let pane = prepared.pane;
-        let surface = prepared.terminal;
-        let inner = layout::pane_inner_rect(pane.area);
-        let origin_x = inner.x as f32 * self.cell_w;
-        let origin_y = inner.y as f32 * self.cell_h;
 
-        // Assemble foreground text (rich-text color runs) and background quads,
-        // painting straight from the scene surface.
-        let mut screen_text = String::new();
-        let mut runs: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
+        // Assemble foreground text buffers and background quads per pane,
+        // painting straight from the scene-owned draw order and geometry.
         let mut quads: Vec<f32> = Vec::with_capacity(1024);
-
-        if !prepared.pane_text.is_empty() {
-            let start = screen_text.len();
-            screen_text.push_str(&prepared.pane_text);
-            screen_text.push('\n');
-            runs.push((
-                start..screen_text.len(),
-                GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
-            ));
-        }
 
         let header_background = resolve(theme.header_background, DEFAULT_BG);
         push_quad(
@@ -874,98 +928,177 @@ impl GpuText {
 
         let border = resolve(theme.pane_border, DEFAULT_FG);
         let border_rgba = [border[0], border[1], border[2], 255];
-        let pane_x = pane.area.x as f32 * self.cell_w;
-        let pane_y = pane.area.y as f32 * self.cell_h;
-        let pane_width = pane.area.width as f32 * self.cell_w;
-        let pane_height = pane.area.height as f32 * self.cell_h;
-        if pane.area.width > 0 && pane.area.height > 0 {
-            push_quad(&mut quads, pane_x, pane_y, pane_width, 1.0, border_rgba);
-            push_quad(
-                &mut quads,
-                pane_x,
-                pane_y + pane_height - 1.0,
-                pane_width,
-                1.0,
-                border_rgba,
-            );
-            push_quad(&mut quads, pane_x, pane_y, 1.0, pane_height, border_rgba);
-            push_quad(
-                &mut quads,
-                pane_x + pane_width - 1.0,
-                pane_y,
-                1.0,
-                pane_height,
-                border_rgba,
-            );
+        struct PanePaint {
+            origin_x: f32,
+            origin_y: f32,
+            content_width: f32,
+            content_height: f32,
+            title_x: f32,
+            title_y: f32,
+            title_width: f32,
+            title_fg: [u8; 3],
         }
+        let mut pane_paints = Vec::with_capacity(prepared.panes.len());
+        for (index, pane_plan) in prepared.panes.iter().enumerate() {
+            let pane = pane_plan.pane;
+            let inner = layout::pane_inner_rect(pane.area);
+            let origin_x = inner.x as f32 * self.cell_w;
+            let origin_y = inner.y as f32 * self.cell_h;
+            let pane_x = pane.area.x as f32 * self.cell_w;
+            let pane_y = pane.area.y as f32 * self.cell_h;
+            let pane_width = pane.area.width as f32 * self.cell_w;
+            let pane_height = pane.area.height as f32 * self.cell_h;
 
-        if let Some(surface) = surface {
-            let row_offset = prepared.pane_text_rows;
-            for (y, row) in surface.rows.iter().enumerate() {
-                if row_offset + y >= usize::from(inner.height) {
-                    break;
-                }
-                let abs = surface.first_row + y;
-                let py = origin_y + (row_offset + y) as f32 * self.cell_h;
-                let mut run_start = screen_text.len();
-                let mut run_color: Option<GColor> = None;
-                for (x, cell) in row.iter().take(usize::from(inner.width)).enumerate() {
-                    let style = cell.style;
-                    let (mut fg, mut bg) = (
-                        resolve(style.foreground, DEFAULT_FG),
-                        resolve(style.background, DEFAULT_BG),
-                    );
-                    if style.inverse {
-                        std::mem::swap(&mut fg, &mut bg);
-                    }
+            if pane.area.width > 0 && pane.area.height > 0 {
+                push_quad(&mut quads, pane_x, pane_y, pane_width, 1.0, border_rgba);
+                push_quad(
+                    &mut quads,
+                    pane_x,
+                    pane_y + pane_height - 1.0,
+                    pane_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(&mut quads, pane_x, pane_y, 1.0, pane_height, border_rgba);
+                push_quad(
+                    &mut quads,
+                    pane_x + pane_width - 1.0,
+                    pane_y,
+                    1.0,
+                    pane_height,
+                    border_rgba,
+                );
+            }
 
-                    let column = x as u16;
-                    let px = origin_x + x as f32 * self.cell_w;
-                    if bg != DEFAULT_BG {
-                        push_quad(
-                            &mut quads,
-                            px,
-                            py,
-                            self.cell_w,
-                            self.cell_h,
-                            [bg[0], bg[1], bg[2], 255],
-                        );
-                    }
-                    if surface.selection_contains(abs, column) {
-                        push_quad(&mut quads, px, py, self.cell_w, self.cell_h, SELECTION_BG);
-                    }
-                    if surface.cursor_at(abs, column) {
-                        push_quad(&mut quads, px, py, self.cell_w, self.cell_h, CURSOR_BG);
-                    }
-
-                    let gc = GColor::rgb(fg[0], fg[1], fg[2]);
-                    if run_color != Some(gc) {
-                        if let Some(prev) = run_color.take() {
-                            runs.push((run_start..screen_text.len(), prev));
-                        }
-                        run_start = screen_text.len();
-                        run_color = Some(gc);
-                    }
-                    screen_text.push(cell.character);
-                }
-                if let Some(prev) = run_color.take() {
-                    runs.push((run_start..screen_text.len(), prev));
-                }
-                let newline = screen_text.len();
+            let mut screen_text = String::new();
+            let mut runs: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
+            if !pane_plan.pane_text.is_empty() {
+                let start = screen_text.len();
+                screen_text.push_str(&pane_plan.pane_text);
                 screen_text.push('\n');
-                if let Some((range, _)) = runs.last_mut().filter(|(range, _)| range.end == newline)
-                {
-                    range.end = screen_text.len();
-                } else {
-                    runs.push((
-                        newline..screen_text.len(),
-                        GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
-                    ));
+                runs.push((
+                    start..screen_text.len(),
+                    GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
+                ));
+            }
+
+            if let Some(surface) = pane_plan.terminal {
+                let row_offset = pane_plan.pane_text_rows;
+                for (y, row) in surface.rows.iter().enumerate() {
+                    if row_offset + y >= usize::from(inner.height) {
+                        break;
+                    }
+                    let abs = surface.first_row + y;
+                    let py = origin_y + (row_offset + y) as f32 * self.cell_h;
+                    let mut run_start = screen_text.len();
+                    let mut run_color: Option<GColor> = None;
+                    for (x, cell) in row.iter().take(usize::from(inner.width)).enumerate() {
+                        let style = cell.style;
+                        let (mut fg, mut bg) = (
+                            resolve(style.foreground, DEFAULT_FG),
+                            resolve(style.background, DEFAULT_BG),
+                        );
+                        if style.inverse {
+                            std::mem::swap(&mut fg, &mut bg);
+                        }
+
+                        let column = x as u16;
+                        let px = origin_x + x as f32 * self.cell_w;
+                        if bg != DEFAULT_BG {
+                            push_quad(
+                                &mut quads,
+                                px,
+                                py,
+                                self.cell_w,
+                                self.cell_h,
+                                [bg[0], bg[1], bg[2], 255],
+                            );
+                        }
+                        if surface.selection_contains(abs, column) {
+                            push_quad(&mut quads, px, py, self.cell_w, self.cell_h, SELECTION_BG);
+                        }
+                        if surface.cursor_at(abs, column) {
+                            push_quad(&mut quads, px, py, self.cell_w, self.cell_h, CURSOR_BG);
+                        }
+
+                        let gc = GColor::rgb(fg[0], fg[1], fg[2]);
+                        if run_color != Some(gc) {
+                            if let Some(previous) = run_color.take() {
+                                runs.push((run_start..screen_text.len(), previous));
+                            }
+                            run_start = screen_text.len();
+                            run_color = Some(gc);
+                        }
+                        screen_text.push(cell.character);
+                    }
+                    if let Some(previous) = run_color.take() {
+                        runs.push((run_start..screen_text.len(), previous));
+                    }
+                    let newline = screen_text.len();
+                    screen_text.push('\n');
+                    if let Some((range, _)) =
+                        runs.last_mut().filter(|(range, _)| range.end == newline)
+                    {
+                        range.end = screen_text.len();
+                    } else {
+                        runs.push((
+                            newline..screen_text.len(),
+                            GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
+                        ));
+                    }
                 }
             }
+
+            let title_fg = resolve(
+                if pane.focused {
+                    theme.focus_title
+                } else {
+                    theme.pane_title
+                },
+                DEFAULT_FG,
+            );
+            let title_width = pane.area.width.saturating_sub(2) as f32 * self.cell_w;
+            self.title_buffers[index].set_size(Some(title_width.max(1.0)), Some(self.cell_h));
+            self.title_buffers[index].set_text(
+                &pane.title,
+                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                    title_fg[0],
+                    title_fg[1],
+                    title_fg[2],
+                )),
+                Shaping::Advanced,
+                None,
+            );
+            self.title_buffers[index].shape_until_scroll(&mut self.font_system, false);
+
+            let default_attrs = Attrs::new().family(Family::Monospace);
+            let spans = runs.iter().map(|(range, color)| {
+                (
+                    &screen_text[range.clone()],
+                    Attrs::new().family(Family::Monospace).color(*color),
+                )
+            });
+            let content_width = inner.width as f32 * self.cell_w;
+            let content_height = inner.height as f32 * self.cell_h;
+            self.text_buffers[index].set_wrap(pane_plan.body_wrap);
+            self.text_buffers[index]
+                .set_size(Some(content_width.max(1.0)), Some(content_height.max(1.0)));
+            self.text_buffers[index].set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+            self.text_buffers[index].shape_until_scroll(&mut self.font_system, false);
+
+            pane_paints.push(PanePaint {
+                origin_x,
+                origin_y,
+                content_width,
+                content_height,
+                title_x: (pane.area.x.saturating_add(1)) as f32 * self.cell_w,
+                title_y: pane.area.y as f32 * self.cell_h,
+                title_width,
+                title_fg,
+            });
         }
 
-        // Header, pane title, status, and optional palette all come from the
+        // Header, pane titles, status, and optional overlays all come from the
         // real scene contract; the native shell derives no product chrome.
         let header_x = scene.header.area.x as f32 * self.cell_w;
         let header_y = scene.header.area.y as f32 * self.cell_h;
@@ -985,31 +1118,6 @@ impl GpuText {
         self.header_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        let title_x = (pane.area.x.saturating_add(1)) as f32 * self.cell_w;
-        let title_y = pane.area.y as f32 * self.cell_h;
-        let title_fg = resolve(
-            if pane.focused {
-                theme.focus_title
-            } else {
-                theme.pane_title
-            },
-            DEFAULT_FG,
-        );
-        self.title_buffer
-            .set_size(Some(pane_width.max(1.0)), Some(self.cell_h));
-        self.title_buffer.set_text(
-            &pane.title,
-            &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                title_fg[0],
-                title_fg[1],
-                title_fg[2],
-            )),
-            Shaping::Advanced,
-            None,
-        );
-        self.title_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-
         let status_x = scene.status.area.x as f32 * self.cell_w;
         let status_y = scene.status.area.y as f32 * self.cell_h;
         let status_width = scene.status.area.width as f32 * self.cell_w;
@@ -1023,24 +1131,6 @@ impl GpuText {
             self.cell_h,
             [STATUS_BG[0], STATUS_BG[1], STATUS_BG[2], 255],
         );
-
-        // Upload text. `Attrs::color` consumes self, so build fresh per span.
-        let default_attrs = Attrs::new().family(Family::Monospace);
-        let spans = runs.iter().map(|(range, color)| {
-            (
-                &screen_text[range.clone()],
-                Attrs::new().family(Family::Monospace).color(*color),
-            )
-        });
-        let content_width = inner.width as f32 * self.cell_w;
-        let content_height = inner.height as f32 * self.cell_h;
-        self.text_buffer.set_wrap(prepared.body_wrap);
-        self.text_buffer
-            .set_size(Some(content_width.max(1.0)), Some(content_height.max(1.0)));
-        self.text_buffer
-            .set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        self.text_buffer
-            .shape_until_scroll(&mut self.font_system, false);
 
         self.status_buffer
             .set_size(Some(self.config.width as f32), Some(self.cell_h));
@@ -1763,34 +1853,45 @@ impl GpuText {
             right: self.config.width as i32,
             bottom: self.config.height as i32,
         };
-        let content_bounds = TextBounds {
-            left: origin_x.floor() as i32,
-            top: origin_y.floor() as i32,
-            right: (origin_x + content_width).ceil() as i32,
-            bottom: (origin_y + content_height).ceil() as i32,
-        };
-        let mut text_areas = vec![
-            TextArea {
-                buffer: &self.header_buffer,
-                left: header_x,
-                top: header_y,
+        let mut text_areas = vec![TextArea {
+            buffer: &self.header_buffer,
+            left: header_x,
+            top: header_y,
+            scale: 1.0,
+            bounds: full,
+            default_color: GColor::rgb(header_fg[0], header_fg[1], header_fg[2]),
+            custom_glyphs: &[],
+        }];
+        for (index, pane_paint) in pane_paints.iter().enumerate() {
+            let title_bounds = TextBounds {
+                left: pane_paint.title_x.floor() as i32,
+                top: pane_paint.title_y.floor() as i32,
+                right: (pane_paint.title_x + pane_paint.title_width).ceil() as i32,
+                bottom: (pane_paint.title_y + self.cell_h).ceil() as i32,
+            };
+            text_areas.push(TextArea {
+                buffer: &self.title_buffers[index],
+                left: pane_paint.title_x,
+                top: pane_paint.title_y,
                 scale: 1.0,
-                bounds: full,
-                default_color: GColor::rgb(header_fg[0], header_fg[1], header_fg[2]),
+                bounds: title_bounds,
+                default_color: GColor::rgb(
+                    pane_paint.title_fg[0],
+                    pane_paint.title_fg[1],
+                    pane_paint.title_fg[2],
+                ),
                 custom_glyphs: &[],
-            },
-            TextArea {
-                buffer: &self.title_buffer,
-                left: title_x,
-                top: title_y,
-                scale: 1.0,
-                bounds: full,
-                default_color: GColor::rgb(title_fg[0], title_fg[1], title_fg[2]),
-                custom_glyphs: &[],
-            },
-        ];
-        let pane_text_bounds =
-            if prepared.search.is_some() || prepared.help.is_some() || prepared.welcome.is_some() {
+            });
+            let content_bounds = TextBounds {
+                left: pane_paint.origin_x.floor() as i32,
+                top: pane_paint.origin_y.floor() as i32,
+                right: (pane_paint.origin_x + pane_paint.content_width).ceil() as i32,
+                bottom: (pane_paint.origin_y + pane_paint.content_height).ceil() as i32,
+            };
+            let pane_text_bounds = if prepared.search.is_some()
+                || prepared.help.is_some()
+                || prepared.welcome.is_some()
+            {
                 text_bounds_around_occlusion(
                     content_bounds,
                     overlay_clip.expect("prepared opaque text overlay always sets its clip bounds"),
@@ -1798,16 +1899,17 @@ impl GpuText {
             } else {
                 vec![content_bounds]
             };
-        for bounds in pane_text_bounds {
-            text_areas.push(TextArea {
-                buffer: &self.text_buffer,
-                left: origin_x,
-                top: origin_y,
-                scale: 1.0,
-                bounds,
-                default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
-                custom_glyphs: &[],
-            });
+            for bounds in pane_text_bounds {
+                text_areas.push(TextArea {
+                    buffer: &self.text_buffers[index],
+                    left: pane_paint.origin_x,
+                    top: pane_paint.origin_y,
+                    scale: 1.0,
+                    bounds,
+                    default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
+                    custom_glyphs: &[],
+                });
+            }
         }
         text_areas.push(TextArea {
             buffer: &self.status_buffer,
@@ -2076,8 +2178,8 @@ mod tests {
         let theme = Theme::default();
         let prepared = prepare_scene(&scene, &theme).unwrap();
 
-        assert_eq!(prepared.pane.id, PaneId::new("pane-1"));
-        assert_eq!(prepared.terminal.unwrap().rows.len(), 1);
+        assert_eq!(prepared.panes[0].pane.id, PaneId::new("pane-1"));
+        assert_eq!(prepared.panes[0].terminal.unwrap().rows.len(), 1);
         assert_eq!(scene.status.text, "test status");
     }
 
@@ -2109,8 +2211,8 @@ mod tests {
         assert_eq!(lines.len(), expected_rows);
         assert!(lines[0].starts_with("command:"), "{:?}", lines[0]);
         assert!(lines[0].ends_with("--verbose"), "{:?}", lines[0]);
-        assert_eq!(prepared.pane_text_rows, expected_rows);
-        assert_eq!(prepared.body_wrap, Wrap::None);
+        assert_eq!(prepared.panes[0].pane_text_rows, expected_rows);
+        assert_eq!(prepared.panes[0].body_wrap, Wrap::None);
         assert!(prepared.pane_surface().is_some());
     }
 
@@ -2140,7 +2242,7 @@ mod tests {
         let prepared = prepare_scene(&scene, &theme).unwrap();
 
         assert!(prepared.pane_text().contains("deliberately long objective"));
-        assert_eq!(prepared.body_wrap, Wrap::WordOrGlyph);
+        assert_eq!(prepared.panes[0].body_wrap, Wrap::WordOrGlyph);
         assert!(prepared.pane_surface().is_none());
     }
 
@@ -2614,14 +2716,14 @@ mod tests {
     }
 
     #[test]
-    fn multiple_panes_fail_explicitly() {
+    fn unsupported_two_pane_content_fails_explicitly() {
         let multiple = scene(vec![
             pane(PaneSceneKind::Terminal, terminal_content()),
             pane(PaneSceneKind::Terminal, terminal_content()),
         ]);
         assert_eq!(
             prepare_scene(&multiple, &Theme::default()).unwrap_err(),
-            UnsupportedScene::PaneCount(2)
+            UnsupportedScene::Layout("only two horizontal tiled Empty panes")
         );
     }
 
@@ -2645,7 +2747,7 @@ mod tests {
                 .pane_text()
                 .contains("no live PTY grid is attached to this pane")
         );
-        assert_eq!(prepared.body_wrap, Wrap::WordOrGlyph);
+        assert_eq!(prepared.panes[0].body_wrap, Wrap::WordOrGlyph);
         assert!(prepared.pane_surface().is_none());
     }
 }
