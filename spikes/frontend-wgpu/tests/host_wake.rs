@@ -9,7 +9,7 @@ use std::{
 use mandatum_app::{AppConfig, FrontendHost};
 use mandatum_gpu_renderer_spike::prepare_scene;
 use mandatum_scene::{
-    HitTargetKind, OverlayScene, PaneContent, SceneSize,
+    HitTargetKind, OverlayScene, PaneContent, SceneRect, SceneSize,
     input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
     layout,
 };
@@ -223,6 +223,70 @@ fn real_host_objective_prompt_reaches_the_gpu_render_plan() {
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real objective-prompt scene");
     assert_eq!(prepared.prompt(), Some(prompt));
+}
+
+#[test]
+fn real_host_search_reaches_the_gpu_render_plan() {
+    let project = DisposableProject::new("search");
+    let configured_objective = "Inspect SEARCH_PLAN_AGENT_OK";
+    let mut host = FrontendHost::new(AppConfig {
+        project_path: project.path.clone(),
+        workspace_file: project.path.join(".mandatum").join("workspace.json"),
+        agent_objective: configured_objective.to_owned(),
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+
+    dispatch_palette_command(&mut host, 'a');
+    dispatch_palette_command(&mut host, 'z');
+    host.handle_input(InputEvent::Key(Key::new(
+        KeyCode::Char('f'),
+        Modifiers {
+            control: true,
+            shift: true,
+            ..Modifiers::NONE
+        },
+    )));
+    for character in "kind:timeline search".chars() {
+        host.handle_input(InputEvent::Key(Key::plain(KeyCode::Char(character))));
+    }
+
+    let snapshot = host.frame(frame_size);
+    assert_eq!(snapshot.scene.panes.len(), 1);
+    let agent_pane = &snapshot.scene.panes[0];
+    assert!(agent_pane.focused);
+    assert!(agent_pane.zoomed);
+    let PaneContent::Agent(agent) = &agent_pane.content else {
+        panic!("search did not retain the real zoomed agent pane");
+    };
+    assert_eq!(agent.objective, configured_objective);
+
+    let Some(OverlayScene::Search(search)) = &snapshot.scene.overlay else {
+        panic!("Ctrl+Shift+F did not produce the real search scene");
+    };
+    assert_eq!(search.area, layout::search_overlay_rect(frame_size));
+    assert_eq!(search.query, "kind:timeline search");
+    assert_eq!(search.selected, Some(0));
+    assert_eq!(search.overflow, 0);
+    assert_eq!(search.items.len(), 1);
+    assert_eq!(search.items[0].source, "timeline");
+    assert!(search.items[0].text.contains("dispatched search-session"));
+    assert!(!search.items[0].match_indices.is_empty());
+    assert_eq!(search.items[0].pane, None);
+    assert!(search.footer.contains("type to search"));
+    assert!(search.footer.contains("enter jump"));
+    assert!(search.footer.contains("esc close"));
+    let inner = layout::pane_inner_rect(search.area);
+    assert!(snapshot.scene.hit_targets.iter().any(|target| {
+        target.kind == HitTargetKind::SearchItem(0)
+            && target.rect == SceneRect::new(inner.x, inner.y + 1, inner.width, 1)
+    }));
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real search scene");
+    assert_eq!(prepared.search(), Some(search));
 }
 
 #[test]

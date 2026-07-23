@@ -1659,3 +1659,54 @@ test -p mandatum-app --lib` passed all 248 tests. A displayed release smoke
 showed the real zoomed agent objective prompt, block cursor, and bounded footer,
 then Escape and Ctrl+Q closed it and the process cleanly. The final merge-gate
 result is recorded in `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers Session-Output Search
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one scene-only increment that accepts and
+paints the real `OverlayScene::Search` emitted by `FrontendHost` over a
+supported zoomed agent pane. The prepared plan retains the existing resolved
+area, live query, grouped source labels, matched output text and char indices,
+selected index, overflow, footer, and row alignment. Displayed paint adds the
+existing block-cursor convention, clips base pane glyphs around the opaque
+Search rectangle, and uses the semantic overlay background, palette border,
+selection, and overlay foreground roles without changing the scene contract.
+
+Context: the app already owns open-time snapshot construction, query parsing,
+source grouping, match indices, result cap and overflow honesty, selection,
+activation, footer, centered geometry, keyboard editing, and row hit targets.
+The excluded renderer rejected that complete product scene even though no app,
+runtime, Search model, or command-table access was required. Search indexes
+terminal/task grids, agent runtime output tails, and timeline events; it does
+not index durable agent-objective text.
+
+Rationale: retaining `SearchOverlay` in the headless paint plan keeps Search
+content and behavior in the app and scene layers. The real-host tracer bullet
+uses the deterministic `search-session` timeline event beneath a zoomed agent
+rather than expanding product Search semantics to satisfy an incorrect handoff
+assumption about objective text. The same prepared data drives the displayed
+surface, border, title, query cursor, grouped result rows, selected-row
+highlight, and pinned footer. Scalar-character fitting remains deliberate;
+grapheme, wide-cell, and full style correctness remain Phase 4 work.
+
+Consequences: no app, runtime, scene, Search behavior, agent behavior,
+production dependency, allowlist, installer, default command, or release
+surface changes. Multiple panes, Help/Welcome and other remaining overlay
+variants, full input/theme/style parity, restore, Artifact Preview, and
+production GPU admission remain separately gated. The next slice is the
+existing one-pane Help overlay only.
+
+Verification: the real-host test recorded the initial
+`UnsupportedScene::Overlay("search")` failure, then passed with the product
+Search retained unchanged by the prepared plan. Isolated renderer tests cover
+geometry, query and cursor, grouped-source elision, result text and match
+indices, selection, overflow/footer state, empty states, bounded lines, and
+Search-only pane-text occlusion. `./ci/gpu-spike.sh` passed 24 tests (two
+native-shell, nine real-host, and thirteen isolated-renderer) plus the renderer
+dependency-boundary scan, and `cargo test -p mandatum-app --lib` passed all 248
+tests. A displayed release smoke showed the real zoomed agent around an opaque
+Search modal with a pasted `kind:timeline search` query, selected result,
+repeated-source elision, visible cursor, and bounded footer; Escape and Ctrl+Q
+closed it with exit 0 and no native process left. The final merge-gate result is
+recorded in `docs/verification.md`.

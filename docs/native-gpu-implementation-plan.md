@@ -1,7 +1,7 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the session-map overlay increment is complete; production GPU admission pending
+the session-output search increment is complete; production GPU admission pending
 (2026-07-22).
 
 This document is the durable implementation plan for a native window and
@@ -319,6 +319,20 @@ same objective prompt over the real zoomed agent scene, closed with Escape, and
 quit cleanly. Additional overlays, multi-pane layouts, restore, and broader
 input/theme/style parity remain explicitly unsupported.
 
+Seventh narrow increment complete (2026-07-22): a fresh real `FrontendHost`
+with PTY spawning disabled created and zoomed an agent pane, then drove the
+neutral Ctrl+Shift+F route and produced the existing `OverlayScene::Search`.
+The excluded render plan retains and paints the resolved area, live query and
+block cursor, grouped source labels, matched output text and char indices,
+selection, overflow/footer state, and row alignment with the existing semantic
+overlay roles. The tracer bullet deliberately matched the deterministic
+`search-session` timeline event: current Search indexes pane runtime output and
+timeline snapshots, not durable agent-objective text, so no app/search behavior
+changed. The displayed macOS smoke showed grouped results over the real zoomed
+agent without base-pane glyphs leaking through the opaque overlay, then closed
+with Escape and quit cleanly. Help, welcome, multiple panes, restore, and
+broader input/theme/style parity remain explicitly unsupported.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -456,12 +470,13 @@ the date, environment, command, endpoint, and result.
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one scene-only increment:
 add a failing real-`FrontendHost` headless test for a product-generated
-`OverlayScene::Search` over one supported zoomed agent pane, then extend
-`prepare_scene` and displayed GPU paint to render only the existing search
-area, query/cursor, grouped source labels, matched text, selection, overflow,
-and footer. Create and zoom an agent with a distinctive objective before
-driving the neutral Ctrl+Shift+F route and typing a matching query. Preserve
+`OverlayScene::Help` over one supported Empty pane, then extend `prepare_scene`
+and displayed GPU paint to render only the existing help area, live filter and
+cursor, grouped headings, command labels, key hints, selection, and footer.
+Drive neutral F1 and type a filter that retains the Search session output entry;
+prove the product scene's geometry, heading/entry ordering, configured key
+route, selected index, and footer before it reaches the renderer. Preserve
 terminal/task/agent/Empty, header, one-pane geometry, status, theme, palette,
-context-menu, timeline, session-map, and objective-prompt behavior. Stop before
-multi-pane layout, additional overlay variants, broader input, restore,
-Artifact Preview, or production admission.
+context-menu, timeline, session-map, objective-prompt, and search behavior. Stop
+before multi-pane layout, Welcome or other overlay variants, broader input,
+restore, Artifact Preview, or production admission.

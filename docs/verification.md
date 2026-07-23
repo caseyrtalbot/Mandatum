@@ -517,6 +517,52 @@ Dated Phase 3 objective-prompt increment (2026-07-22):
   denied, build, all workspace tests, conformance, and documentation trace
   checks.
 
+Dated Phase 3 session-output Search increment (2026-07-22):
+
+- The required real-host tracer bullet used a fresh `FrontendHost` with PTY
+  spawning disabled in a writable disposable project, created and zoomed an
+  agent, drove neutral Ctrl+Shift+F, and typed `kind:timeline search`. It proved
+  the next product frame contained `OverlayScene::Search` over the real focused
+  zoomed agent pane with `layout::search_overlay_rect`, the live query,
+  deterministic `search-session` timeline result, nonempty char match indices,
+  selected index, overflow/footer state, and aligned `SearchItem(0)` hit target.
+  Before implementation, `prepare_scene` failed at runtime with
+  `UnsupportedScene::Overlay("search")`.
+- The tracer bullet intentionally used the timeline result rather than the
+  configured agent objective. Current Search snapshots terminal/task grids,
+  agent runtime output tails, and timeline events; a newly created draft
+  agent's durable objective is not an output row. Keeping the increment
+  scene-only preserved that accepted product behavior.
+- The focused GREEN proves that exact product Search reaches the prepared GPU
+  plan unchanged. Isolated renderer tests cover retained geometry, query and
+  block-cursor cell, grouped source elision, result text and match indices,
+  selected row, overflow/footer state, empty-query/no-match states, bounded
+  lines, and the pane-text clipping that prevents base glyphs from crossing an
+  opaque Search modal.
+- `./ci/gpu-spike.sh` passed 24 tests (two native-shell tests, nine real-host
+  integration tests, and thirteen isolated-renderer tests) plus the renderer
+  dependency-boundary scan. `cargo test -p mandatum-app --lib` passed all 248
+  tests.
+- The displayed release build ran on macOS from a writable disposable project
+  with an intentionally missing shell. Process-targeted events queued
+  create-agent and zoom before the next redraw, preserving the deliberate
+  multi-pane rejection. Ctrl+Shift+F opened Search and Cmd+V atomically pasted
+  `kind:timeline search`. The real zoomed agent remained around a centered
+  opaque Search modal; its title, query and block cursor, grouped timeline
+  source, selected first result, repeated-source elision, and footer painted
+  inside the border without base-pane glyph leakage. Escape closed Search,
+  Ctrl+Q exited with code 0, and no native-spike or attempted-shell process
+  remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Multiple panes, Help/Welcome and remaining overlays,
+  broader input, restore, Artifact Preview, and production admission remain
+  separately gated.
+- The first post-documentation `./ci/gate.sh` passed formatting, Clippy with
+  warnings denied, build, all workspace tests, conformance, and documentation
+  trace checks. The final gate is rerun after recording this result so the
+  committed tree itself is the tree proved green.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

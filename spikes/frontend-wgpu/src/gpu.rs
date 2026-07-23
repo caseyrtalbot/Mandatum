@@ -14,8 +14,9 @@ use glyphon::{
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, OverlayScene, PaletteOverlay, PaneContent, PaneScene,
-    PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneColor, SessionMapOverlay, SessionMapRow,
-    TerminalSurface, Theme, TimelineEntry, TimelineOverlay, WorkspaceScene, layout,
+    PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneColor, SearchEntry, SearchOverlay,
+    SessionMapOverlay, SessionMapRow, TerminalSurface, Theme, TimelineEntry, TimelineOverlay,
+    WorkspaceScene, layout,
 };
 use winit::window::Window;
 
@@ -61,6 +62,7 @@ pub struct PreparedScene<'a> {
     palette: Option<&'a PaletteOverlay>,
     context_menu: Option<&'a ContextMenuOverlay>,
     timeline: Option<&'a TimelineOverlay>,
+    search: Option<&'a SearchOverlay>,
     session_map: Option<&'a SessionMapOverlay>,
     prompt: Option<&'a PromptOverlay>,
 }
@@ -96,6 +98,10 @@ impl PreparedScene<'_> {
 
     pub fn timeline(&self) -> Option<&TimelineOverlay> {
         self.timeline
+    }
+
+    pub fn search(&self) -> Option<&SearchOverlay> {
+        self.search
     }
 
     pub fn session_map(&self) -> Option<&SessionMapOverlay> {
@@ -146,16 +152,16 @@ pub fn prepare_scene<'a>(
             (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
         }
     };
-    let (palette, context_menu, timeline, session_map, prompt) = match &scene.overlay {
-        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None, None, None),
-        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None, None, None),
-        Some(OverlayScene::Timeline(timeline)) => (None, None, Some(timeline), None, None),
-        Some(OverlayScene::SessionMap(map)) => (None, None, None, Some(map), None),
-        Some(OverlayScene::Prompt(prompt)) => (None, None, None, None, Some(prompt)),
-        Some(OverlayScene::Search(_)) => return Err(UnsupportedScene::Overlay("search")),
+    let (palette, context_menu, timeline, search, session_map, prompt) = match &scene.overlay {
+        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None, None, None, None),
+        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None, None, None, None),
+        Some(OverlayScene::Timeline(timeline)) => (None, None, Some(timeline), None, None, None),
+        Some(OverlayScene::Search(search)) => (None, None, None, Some(search), None, None),
+        Some(OverlayScene::SessionMap(map)) => (None, None, None, None, Some(map), None),
+        Some(OverlayScene::Prompt(prompt)) => (None, None, None, None, None, Some(prompt)),
         Some(OverlayScene::Help(_)) => return Err(UnsupportedScene::Overlay("help")),
         Some(OverlayScene::Welcome(_)) => return Err(UnsupportedScene::Overlay("welcome")),
-        None => (None, None, None, None, None),
+        None => (None, None, None, None, None, None),
     };
     Ok(PreparedScene {
         scene,
@@ -168,6 +174,7 @@ pub fn prepare_scene<'a>(
         palette,
         context_menu,
         timeline,
+        search,
         session_map,
         prompt,
     })
@@ -260,6 +267,108 @@ fn timeline_lines(timeline: &TimelineOverlay) -> Vec<String> {
         lines[footer_row] = timeline_outer_line(&format!(" {}", timeline.footer), inner.width);
     }
     lines
+}
+
+fn search_line(item: &SearchEntry, source: &str, width: u16) -> String {
+    fit_cell_line(&format!("{source}  {}", item.text), width)
+}
+
+fn search_outer_line(content: &str, inner_width: u16) -> String {
+    format!(" {}", fit_cell_line(content, inner_width))
+}
+
+fn search_lines(search: &SearchOverlay) -> Vec<String> {
+    let inner = layout::pane_inner_rect(search.area);
+    let window = layout::palette_item_window(inner, search.items.len(), search.selected);
+    let mut lines = vec![String::new(); usize::from(search.area.height)];
+    if !lines.is_empty() {
+        lines[0] = " Search Session Output ".to_owned();
+    }
+    if lines.len() > 1 {
+        let input = if search.query.is_empty() {
+            "> type to search output · pane:<title> kind:<terminal|task|agent|timeline>".to_owned()
+        } else {
+            format!("> {}", search.query)
+        };
+        lines[1] = search_outer_line(&input, inner.width);
+    }
+    if search.items.is_empty() && lines.len() > 2 {
+        let calm = if search.query.trim().is_empty() {
+            " searching this session's pane output and timeline (snapshot)"
+        } else {
+            " no matches"
+        };
+        lines[2] = search_outer_line(calm, inner.width);
+    }
+    let mut previous_source: Option<&str> = None;
+    for (row, index) in window.enumerate() {
+        let item = &search.items[index];
+        let source = if previous_source == Some(item.source.as_str()) {
+            " ".repeat(item.source.chars().count())
+        } else {
+            item.source.clone()
+        };
+        previous_source = Some(item.source.as_str());
+        if let Some(slot) = lines.get_mut(row + 2) {
+            *slot = search_outer_line(&search_line(item, &source, inner.width), inner.width);
+        }
+    }
+    if lines.len() > 1 {
+        let footer_row = lines.len() - 2;
+        lines[footer_row] = search_outer_line(&format!(" {}", search.footer), inner.width);
+    }
+    lines
+}
+
+fn search_cursor_cell(search: &SearchOverlay) -> Option<(u16, u16)> {
+    let inner = layout::pane_inner_rect(search.area);
+    if search.query.is_empty() || inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let query_end = 2usize.saturating_add(search.query.chars().count());
+    let column = query_end.min(usize::from(inner.width.saturating_sub(1))) as u16;
+    Some((inner.x.saturating_add(column), inner.y))
+}
+
+fn text_bounds_around_occlusion(bounds: TextBounds, occlusion: TextBounds) -> Vec<TextBounds> {
+    let left = bounds.left.max(occlusion.left);
+    let top = bounds.top.max(occlusion.top);
+    let right = bounds.right.min(occlusion.right);
+    let bottom = bounds.bottom.min(occlusion.bottom);
+    if left >= right || top >= bottom {
+        return vec![bounds];
+    }
+
+    let mut visible = Vec::with_capacity(4);
+    if bounds.top < top {
+        visible.push(TextBounds {
+            bottom: top,
+            ..bounds
+        });
+    }
+    if bottom < bounds.bottom {
+        visible.push(TextBounds {
+            top: bottom,
+            ..bounds
+        });
+    }
+    if bounds.left < left {
+        visible.push(TextBounds {
+            top,
+            right: left,
+            bottom,
+            ..bounds
+        });
+    }
+    if right < bounds.right {
+        visible.push(TextBounds {
+            left: right,
+            top,
+            bottom,
+            ..bounds
+        });
+    }
+    visible
 }
 
 fn session_map_line(row: &SessionMapRow, width: u16) -> String {
@@ -1068,6 +1177,108 @@ impl GpuText {
                 right: (timeline_x + timeline_width).ceil() as i32,
                 bottom: (timeline_y + timeline_height).ceil() as i32,
             });
+        } else if let Some(search) = prepared.search {
+            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
+            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
+            let search_x = search.area.x as f32 * self.cell_w;
+            let search_y = search.area.y as f32 * self.cell_h;
+            let search_width = search.area.width as f32 * self.cell_w;
+            let search_height = search.area.height as f32 * self.cell_h;
+            push_quad(
+                &mut quads,
+                search_x,
+                search_y,
+                search_width,
+                search_height,
+                overlay_bg_rgba,
+            );
+            if search.area.width > 0 && search.area.height > 0 {
+                let border = resolve(theme.palette_border, DEFAULT_FG);
+                let border_rgba = [border[0], border[1], border[2], 255];
+                push_quad(
+                    &mut quads,
+                    search_x,
+                    search_y,
+                    search_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    search_x,
+                    search_y + search_height - 1.0,
+                    search_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    search_x,
+                    search_y,
+                    1.0,
+                    search_height,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    search_x + search_width - 1.0,
+                    search_y,
+                    1.0,
+                    search_height,
+                    border_rgba,
+                );
+            }
+
+            let inner = layout::pane_inner_rect(search.area);
+            let window = layout::palette_item_window(inner, search.items.len(), search.selected);
+            for (row, index) in window.enumerate() {
+                if search.selected == Some(index) {
+                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
+                    push_quad(
+                        &mut quads,
+                        inner.x as f32 * self.cell_w,
+                        (inner.y + 1 + row as u16) as f32 * self.cell_h,
+                        inner.width as f32 * self.cell_w,
+                        self.cell_h,
+                        [selection[0], selection[1], selection[2], 190],
+                    );
+                }
+            }
+            if let Some((column, row)) = search_cursor_cell(search) {
+                push_quad(
+                    &mut quads,
+                    column as f32 * self.cell_w,
+                    row as f32 * self.cell_h,
+                    self.cell_w,
+                    self.cell_h,
+                    CURSOR_BG,
+                );
+            }
+
+            let overlay_text = search_lines(search).join("\n");
+            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            self.overlay_buffer.set_wrap(Wrap::None);
+            self.overlay_buffer
+                .set_size(Some(search_width.max(1.0)), Some(search_height.max(1.0)));
+            self.overlay_buffer.set_text(
+                &overlay_text,
+                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                    overlay_fg[0],
+                    overlay_fg[1],
+                    overlay_fg[2],
+                )),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            overlay_position = Some((search_x, search_y));
+            overlay_clip = Some(TextBounds {
+                left: search_x.floor() as i32,
+                top: search_y.floor() as i32,
+                right: (search_x + search_width).ceil() as i32,
+                bottom: (search_y + search_height).ceil() as i32,
+            });
         } else if let Some(map) = prepared.session_map {
             let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
             let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
@@ -1294,25 +1505,35 @@ impl GpuText {
                 default_color: GColor::rgb(title_fg[0], title_fg[1], title_fg[2]),
                 custom_glyphs: &[],
             },
-            TextArea {
+        ];
+        let pane_text_bounds = if prepared.search.is_some() {
+            text_bounds_around_occlusion(
+                content_bounds,
+                overlay_clip.expect("prepared search always sets its clip bounds"),
+            )
+        } else {
+            vec![content_bounds]
+        };
+        for bounds in pane_text_bounds {
+            text_areas.push(TextArea {
                 buffer: &self.text_buffer,
                 left: origin_x,
                 top: origin_y,
                 scale: 1.0,
-                bounds: content_bounds,
+                bounds,
                 default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
                 custom_glyphs: &[],
-            },
-            TextArea {
-                buffer: &self.status_buffer,
-                left: status_x + 6.0,
-                top: status_y,
-                scale: 1.0,
-                bounds: full,
-                default_color: GColor::rgb(status_fg[0], status_fg[1], status_fg[2]),
-                custom_glyphs: &[],
-            },
-        ];
+            });
+        }
+        text_areas.push(TextArea {
+            buffer: &self.status_buffer,
+            left: status_x + 6.0,
+            top: status_y,
+            scale: 1.0,
+            bounds: full,
+            default_color: GColor::rgb(status_fg[0], status_fg[1], status_fg[2]),
+            custom_glyphs: &[],
+        });
         if let Some((left, top)) = overlay_position {
             let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
             text_areas.push(TextArea {
@@ -1510,7 +1731,8 @@ mod tests {
     use mandatum_scene::{
         AgentContent, AgentStatus, ContextMenuEntry, ContextMenuOverlay, EmptyContent, HeaderScene,
         OverlayScene, PaneId, PaneSceneKind, PromptOverlay, SceneCell, SceneRect, SceneSize,
-        StatusScene, TaskContent, TimelineEntry, TimelineOverlay, WelcomeOverlay,
+        SearchEntry, SearchOverlay, StatusScene, TaskContent, TimelineEntry, TimelineOverlay,
+        WelcomeOverlay,
     };
 
     fn terminal_content() -> PaneContent {
@@ -1746,6 +1968,162 @@ mod tests {
                 .all(|line| line.chars().count() <= inner_width + 1)
         );
         assert!(lines.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_plan_preserves_scene_data_grouping_matches_cursor_and_footer() {
+        let mut with_search = scene(vec![pane(PaneSceneKind::Agent, terminal_content())]);
+        let search = SearchOverlay {
+            area: SceneRect::new(3, 4, 64, 8),
+            query: "fail".to_owned(),
+            items: vec![
+                SearchEntry {
+                    source: "agent · pane-2 (agent)".to_owned(),
+                    text: "first failing check".to_owned(),
+                    match_indices: vec![6, 7, 8, 9],
+                    pane: Some(PaneId::new("pane-2")),
+                },
+                SearchEntry {
+                    source: "agent · pane-2 (agent)".to_owned(),
+                    text: "FAILED tests::search".to_owned(),
+                    match_indices: vec![0, 1, 2, 3],
+                    pane: Some(PaneId::new("pane-2")),
+                },
+                SearchEntry {
+                    source: "timeline".to_owned(),
+                    text: "task pane-3 failed: exit 3".to_owned(),
+                    match_indices: vec![12, 13, 14, 15],
+                    pane: None,
+                },
+            ],
+            selected: Some(1),
+            overflow: 3,
+            footer: "+3 beyond cap (narrow the query) · enter jump · esc close".to_owned(),
+        };
+        with_search.overlay = Some(OverlayScene::Search(search.clone()));
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&with_search, &theme).unwrap();
+        let prepared_search = prepared
+            .search()
+            .expect("search scene data was not retained");
+        let lines = search_lines(prepared_search);
+
+        assert_eq!(prepared_search, &search);
+        assert_eq!(prepared_search.items[1].match_indices, vec![0, 1, 2, 3]);
+        assert_eq!(lines.len(), usize::from(search.area.height));
+        assert_eq!(lines[0], " Search Session Output ");
+        assert_eq!(lines[1], " > fail");
+        assert!(lines[2].contains("agent · pane-2 (agent)"));
+        assert!(lines[2].contains("first failing check"));
+        assert!(lines[3].contains("FAILED tests::search"));
+        assert!(!lines[3].contains("agent · pane-2 (agent)"));
+        assert!(lines[4].contains("timeline"));
+        assert!(lines[4].contains("failed: exit 3"));
+        assert!(lines[lines.len() - 2].contains("+3 beyond cap"));
+        assert!(lines[lines.len() - 2].contains("enter jump"));
+        assert!(lines.last().unwrap().is_empty());
+        assert!(lines.iter().skip(1).all(|line| {
+            line.chars().count() <= usize::from(layout::pane_inner_rect(search.area).width) + 1
+        }));
+        assert_eq!(
+            search_cursor_cell(prepared_search),
+            Some((
+                layout::pane_inner_rect(search.area)
+                    .x
+                    .saturating_add(2 + search.query.chars().count() as u16),
+                layout::pane_inner_rect(search.area).y,
+            ))
+        );
+    }
+
+    #[test]
+    fn search_plan_paints_empty_states_inside_the_inner_bounds() {
+        let mut with_search = scene(vec![pane(PaneSceneKind::Agent, terminal_content())]);
+        let search = SearchOverlay {
+            area: SceneRect::new(3, 4, 96, 7),
+            query: "missing".to_owned(),
+            items: Vec::new(),
+            selected: None,
+            overflow: 0,
+            footer: "type to search · enter jump · esc close".to_owned(),
+        };
+        with_search.overlay = Some(OverlayScene::Search(search.clone()));
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&with_search, &theme).unwrap();
+        let lines = search_lines(prepared.search().unwrap());
+        let inner_width = usize::from(layout::pane_inner_rect(search.area).width);
+
+        assert_eq!(lines[1], " > missing");
+        assert_eq!(lines[2], "  no matches");
+        assert!(lines[lines.len() - 2].starts_with(' '));
+        assert!(
+            lines
+                .iter()
+                .skip(1)
+                .all(|line| line.chars().count() <= inner_width + 1)
+        );
+
+        let mut empty_query = search;
+        empty_query.query.clear();
+        with_search.overlay = Some(OverlayScene::Search(empty_query.clone()));
+        let prepared = prepare_scene(&with_search, &theme).unwrap();
+        let lines = search_lines(prepared.search().unwrap());
+        assert!(lines[1].contains("type to search output"));
+        assert!(lines[2].contains("searching this session"));
+        assert_eq!(search_cursor_cell(&empty_query), None);
+    }
+
+    #[test]
+    fn search_occlusion_keeps_base_text_outside_the_overlay_only() {
+        let content = TextBounds {
+            left: 0,
+            top: 10,
+            right: 100,
+            bottom: 90,
+        };
+        let search = TextBounds {
+            left: 20,
+            top: 30,
+            right: 80,
+            bottom: 70,
+        };
+
+        assert_eq!(
+            text_bounds_around_occlusion(content, search),
+            vec![
+                TextBounds {
+                    bottom: 30,
+                    ..content
+                },
+                TextBounds { top: 70, ..content },
+                TextBounds {
+                    top: 30,
+                    right: 20,
+                    bottom: 70,
+                    ..content
+                },
+                TextBounds {
+                    left: 80,
+                    top: 30,
+                    bottom: 70,
+                    ..content
+                },
+            ]
+        );
+        assert_eq!(
+            text_bounds_around_occlusion(
+                content,
+                TextBounds {
+                    left: 110,
+                    top: 10,
+                    right: 120,
+                    bottom: 20,
+                }
+            ),
+            vec![content]
+        );
     }
 
     #[test]
