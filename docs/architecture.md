@@ -234,6 +234,11 @@ live filter, ordered heading/entry rows, live key routes, selection, and footer.
 The adapter paints those values with the existing semantic overlay roles and
 clips base-pane glyphs around the opaque Help modal without consulting the
 command table or keymap.
+Generated Welcome is scene-bound as well: startup restore policy in the host
+decides whether the first-run note exists, and the scene carries its resolved
+area, introduction, ordered live key routes and descriptions, and dismissal
+text. The adapter paints and clips that opaque card without reading persistence,
+the keymap, or app state.
 Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
 state remain frontend-local.
@@ -246,8 +251,9 @@ its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 Phase 3 is underway. Terminal, task, agent, and Empty one-pane content plus the
   palette, context-menu, timeline, session-map, objective-prompt,
-  session-output Search, and Help overlays are now covered. Restore handling,
-  multi-pane layouts, remaining overlays, and broader scene/input parity remain.
+  session-output Search, Help, and Welcome overlays are now covered. Restore
+  handling in the excluded native shell, multi-pane layouts, and broader
+  scene/input parity remain.
 Artifact Preview and production GPU admission remain later, separately gated
 decisions.
 

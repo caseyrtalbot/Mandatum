@@ -1,12 +1,12 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 underway; one-pane content, context menu, timeline, session map, objective prompt, session-output Search, and Help are covered.**
+Status: **Phase 3 underway; one-pane content and every current overlay are covered.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, one terminal, task, agent, or Empty pane, status
 strip, command palette, context menu, execution timeline, session map, Set agent
-objective prompt, session-output Search, and generated Help on the GPU. Typed
-clipboard effects return to the native shell.
+objective prompt, session-output Search, generated Help, and generated Welcome
+on the GPU. Typed clipboard effects return to the native shell.
 
 This remains an isolated frontend outside the Cargo workspace (the root
 `Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
@@ -145,6 +145,25 @@ exit 0 and no native or attempted-shell process left. Multiple panes, Welcome,
 restore, broader input, Artifact Preview, and production admission remain
 pending.
 
+Phase 3 Welcome verification (2026-07-22): a real-host tracer bullet used a
+writable disposable project with no workspace file, startup restore enabled,
+and PTY spawning disabled. A neutral resize preserved the real first-run note
+over the Empty pane and proved its resolved area, introduction, ordered
+generated `ctrl+p`, right-click, F1, and Ctrl+Q routes and descriptions, and
+dismissal text before first failing with `Overlay("welcome")`. The final plan
+retains that exact scene data, aligns and bounds the route rows, and paints the
+semantic opaque surface, palette border, introduction, entries, and dismissal;
+Welcome joins Search and Help in pane-text occlusion. `./ci/gpu-spike.sh` passed
+28 tests (two native-shell, eleven real-host, and fifteen isolated-renderer)
+plus the renderer boundary scan, and all 248 app library tests passed. Because
+the excluded native shell deliberately keeps startup restore disabled, the
+displayed smoke used a disposable harness compiled against the exact local
+`FrontendHost`, scene contract, and GPU renderer. It showed the real Welcome
+over the Empty pane, Escape dismissed the non-modal note, Ctrl+Q exited 0, and
+no smoke or native-spike process remained. Multiple panes, restore in the
+excluded native shell, broader input, Artifact Preview, and production
+admission remain pending.
+
 ## Verdict (read this first)
 
 The 2026-07-09 GPU run showed a **measured, roughly 2x latency advantage** over
@@ -188,11 +207,11 @@ How the current boundary is enforced:
 `prepare_scene` is the window/GPU-free renderer seam used by the controlled
 integration test and by the displayed renderer. It accepts the real header,
 one terminal, task, agent, or Empty pane, status, theme, and optional palette,
-context menu, timeline, session map, objective prompt, Search, or Help while
-explicitly rejecting multiple panes and unsupported overlays. The displayed
+context menu, timeline, session map, objective prompt, Search, Help, or Welcome
+while explicitly rejecting multiple panes. The displayed
 renderer uses the scene's pane-inner geometry, chrome, terminal/task surface,
 scene-composed detail lines, status, palette, context-menu, timeline,
-session-map, prompt, Search, and Help data rather than deriving product
+session-map, prompt, Search, Help, and Welcome data rather than deriving product
 presentation itself.
 
 The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
@@ -361,8 +380,9 @@ panic, exit 0).
   `FrontendEffect::SetClipboard` values are drained back to arboard.
 - The real scene header, focused pane and chrome, status strip, Ctrl+P command
   palette, context menu, execution timeline, session map, objective prompt,
-  session-output Search, and Help render from scene/theme data. Escape closes
-  the real overlays and Ctrl+Q performs the real host quit path.
+  session-output Search, Help, and Welcome render from scene/theme data. Escape
+  closes modal overlays, dismisses the non-modal Welcome note, and Ctrl+Q
+  performs the real host quit path.
 - Real one-pane task scenes render scene-composed command/cwd/runtime metadata
   with tail-preserving one-row fitting plus the live task output surface below;
   real one-pane agent scenes render wrapped objective/status/action/approval/
@@ -415,8 +435,8 @@ panic, exit 0).
 
 - **Complete broader scene parity.** Header, one terminal/task/agent pane,
   Empty fallback, status, theme, command palette, context menu, timeline,
-  session map, objective prompt, Search, and Help are bound. Production still
-  needs restore, multiple panes, hit-target parity, and the Welcome overlay.
+  session map, objective prompt, Search, Help, and Welcome are bound. Production
+  still needs restore, multiple panes, and hit-target parity.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
@@ -509,6 +529,15 @@ Search command label, configured `ctrl+shift+f` route, selected row, and footer
 must remain inside the border. Escape must close Help, and Ctrl+Q must exit 0
 without leaving a native-spike or attempted-shell process.
 
+For the displayed Welcome smoke, use a writable disposable project with no
+workspace file and a harness that enables startup restore on the real
+`FrontendHost` while consuming the exact local GPU renderer. Confirm the real
+Empty pane remains around the centered opaque Welcome card without base-pane
+glyph leakage. The title, introduction, ordered generated key routes and
+descriptions, and dismissal must paint inside the border. Escape must dismiss
+the non-modal note without quitting, and focused Ctrl+Q must exit 0 without
+leaving a harness or native-spike process.
+
 ## Final spike verdict
 
 **The 2026-07-09 GPU run proved a real, measured, user-visible latency win and a
@@ -529,8 +558,9 @@ host with the real `FrontendHost` and completed the header, one-terminal,
 status, palette, neutral-input, wake, and typed-effect slice. Phase 3 is now
 underway: its first increments add real one-pane task metadata/live output,
 agent detail, the Empty fallback, the existing context menu, execution timeline,
-session map, objective prompt, session-output Search, and generated Help without
-changing the scene or host contract. A production wgpu adapter still needs
+session map, objective prompt, session-output Search, generated Help, and
+generated Welcome without changing the scene or host contract. A production
+wgpu adapter still needs
 restore, multi-pane and broader scene parity, correct grapheme width, IME and
 composition, runtime DPI, full style mapping, surface-loss recovery, and damage
 tracking.

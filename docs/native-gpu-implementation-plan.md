@@ -1,7 +1,7 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the generated Help increment is complete; production GPU admission pending
+the generated Welcome increment is complete; production GPU admission pending
 (2026-07-22).
 
 This document is the durable implementation plan for a native window and
@@ -346,6 +346,18 @@ without base-pane glyph leakage, then closed with Escape and quit cleanly.
 Welcome, multiple panes, restore, and broader input/theme/style parity remain
 explicitly unsupported.
 
+Ninth narrow increment complete (2026-07-22): startup restore against a missing
+workspace file in a writable disposable project produced the real first-run
+`OverlayScene::Welcome` over the supported Empty pane without synthetic product
+state. The excluded render plan retains the scene's resolved area,
+introduction, ordered generated key routes and descriptions, and dismissal
+text. Displayed paint adds the semantic opaque overlay surface and palette
+border, aligns and bounds the route rows, and clips base-pane glyphs around the
+card. A displayed disposable harness joined that exact local app/scene path to
+the exact local GPU renderer; the card painted, Escape dismissed the non-modal
+note, and Ctrl+Q quit cleanly. Multiple panes, restore in the excluded native
+shell, and broader input/theme/style parity remain explicitly unsupported.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -481,14 +493,12 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Continue Phase 3 inside `spikes/frontend-wgpu` with one scene-only increment:
-add a failing real-`FrontendHost` headless test for the product-generated
-`OverlayScene::Welcome` over one supported Empty pane, using startup restore
-against a missing disposable workspace file to produce the real first-run note.
-Prove the scene-owned resolved area, introduction, ordered generated key routes
-and descriptions, and dismissal text before extending `prepare_scene` and
-displayed GPU paint. Preserve terminal/task/agent/Empty, header, one-pane
-geometry, status, theme, palette, context-menu, timeline, session-map,
-objective-prompt, Search, and Help behavior. Stop before multi-pane layout,
-other overlay variants, broader input, restore implementation changes, Artifact
-Preview, or production admission.
+Continue Phase 3 inside `spikes/frontend-wgpu` with one layout-only increment:
+add a failing real-`FrontendHost` headless test that uses PTY spawning disabled
+and the generated Ctrl+P then `v` Split pane right route to produce exactly two
+tiled Empty panes. Prove both scene-owned pane rectangles, titles, focus, and
+Empty details before replacing the single-pane `PreparedScene` assumption with
+paint for only that two-pane horizontal layout. Preserve every covered
+one-pane content and overlay path. Stop before vertical, stacked, floating,
+dense, or three-plus-pane layouts; broader input; restore implementation
+changes; Artifact Preview; or production admission.

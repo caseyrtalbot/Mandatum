@@ -117,8 +117,8 @@ more useful without pretending the wider vision is finished:
   its scene-only increments now paint real one-pane task and agent content,
   including live task output, the Empty fallback, the context menu, and the
   execution timeline, session map, objective prompt, session-output search, and
-  generated Help from existing scene data. Multi-pane layouts, the Welcome
-  overlay, broader input, and restore remain parity work. Production GPU
+  generated Help and Welcome surfaces from existing scene data. Multi-pane
+  layouts, broader input, and restore remain parity work. Production GPU
   dependencies and release admission remain blocked until the typed artifact
   scene surface, adapter tests, and later admission decision exist; Artifact
   Preview remains unbuilt.

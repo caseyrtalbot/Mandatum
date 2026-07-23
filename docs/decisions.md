@@ -1761,3 +1761,51 @@ App heading, Search command, live Ctrl+Shift+F route, visible cursor, selection,
 and bounded footer; Escape and Ctrl+Q closed it with exit 0 and no native or
 attempted-shell process left. The final merge-gate result is recorded in
 `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers Generated Welcome
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one scene-only increment that accepts and
+paints the real `OverlayScene::Welcome` emitted by `FrontendHost` over a
+supported Empty pane. The prepared plan retains the existing resolved area,
+introduction, ordered generated key routes and descriptions, and dismissal
+text. Displayed paint clips base-pane glyphs around the opaque Welcome card and
+uses the semantic overlay background, palette border, and overlay foreground
+roles without changing the scene contract.
+
+Context: the app already owns startup-restore policy, missing-workspace
+detection, first-action dismissal, generated live-keymap routes, descriptions,
+centered geometry, introduction, and dismissal text. Welcome is non-modal:
+resize preserves it, while the first key, paste, click, or wheel action dismisses
+it and still proceeds. The excluded renderer rejected that complete product
+scene even though no app, persistence, restore implementation, command-table,
+or keymap access was required.
+
+Rationale: retaining `WelcomeOverlay` in the headless paint plan keeps first-run
+policy and generated route truth in the app and scene layers. A writable
+disposable project with no workspace file proves the real startup path rather
+than synthesizing the overlay. The same prepared data drives the displayed
+surface, border, aligned route rows, and dismissal. Scalar-character fitting
+remains deliberate; grapheme, wide-cell, and full style correctness remain
+Phase 4 work.
+
+Consequences: no app, runtime, persistence, restore implementation, scene,
+command table, keymap, production dependency, allowlist, installer, default
+command, or release surface changes. Every current overlay variant now reaches
+the excluded plan. Multiple panes, restore in the excluded native shell, full
+input/theme/style parity, Artifact Preview, and production GPU admission remain
+separately gated. The next slice is exactly two horizontally tiled Empty panes.
+
+Verification: the real-host test recorded the initial
+`UnsupportedScene::Overlay("welcome")` failure, then passed with the product
+Welcome retained unchanged by the prepared plan. The isolated renderer test
+covers geometry, title, introduction, blank separators, ordered and aligned
+route/description rows, dismissal, and bounded lines. `./ci/gpu-spike.sh` passed
+28 tests (two native-shell, eleven real-host, and fifteen isolated-renderer)
+plus the renderer dependency-boundary scan, and `cargo test -p mandatum-app
+--lib` passed all 248 tests. A displayed disposable harness compiled against
+the exact local host, scene, and renderer showed the real Welcome over Empty
+content without glyph leakage; Escape dismissed it, focused Ctrl+Q exited 0,
+and no smoke or native-spike process remained. The final merge-gate result is
+recorded in `docs/verification.md`.

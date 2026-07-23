@@ -16,7 +16,7 @@ use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, HelpEntry, HelpOverlay, OverlayScene, PaletteOverlay,
     PaneContent, PaneScene, PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneColor, SearchEntry,
     SearchOverlay, SessionMapOverlay, SessionMapRow, TerminalSurface, Theme, TimelineEntry,
-    TimelineOverlay, WorkspaceScene, layout,
+    TimelineOverlay, WelcomeOverlay, WorkspaceScene, layout,
 };
 use winit::window::Window;
 
@@ -66,6 +66,7 @@ pub struct PreparedScene<'a> {
     session_map: Option<&'a SessionMapOverlay>,
     prompt: Option<&'a PromptOverlay>,
     help: Option<&'a HelpOverlay>,
+    welcome: Option<&'a WelcomeOverlay>,
 }
 
 impl PreparedScene<'_> {
@@ -116,6 +117,10 @@ impl PreparedScene<'_> {
     pub fn help(&self) -> Option<&HelpOverlay> {
         self.help
     }
+
+    pub fn welcome(&self) -> Option<&WelcomeOverlay> {
+        self.welcome
+    }
 }
 
 /// Prepare the deliberately narrow paint plan without a window or
@@ -157,19 +162,32 @@ pub fn prepare_scene<'a>(
             (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
         }
     };
-    let (palette, context_menu, timeline, search, session_map, prompt, help) = match &scene.overlay
+    let (palette, context_menu, timeline, search, session_map, prompt, help, welcome) = match &scene
+        .overlay
     {
-        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None, None, None, None, None),
-        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None, None, None, None, None),
-        Some(OverlayScene::Timeline(timeline)) => {
-            (None, None, Some(timeline), None, None, None, None)
+        Some(OverlayScene::Palette(palette)) => {
+            (Some(palette), None, None, None, None, None, None, None)
         }
-        Some(OverlayScene::Search(search)) => (None, None, None, Some(search), None, None, None),
-        Some(OverlayScene::SessionMap(map)) => (None, None, None, None, Some(map), None, None),
-        Some(OverlayScene::Prompt(prompt)) => (None, None, None, None, None, Some(prompt), None),
-        Some(OverlayScene::Help(help)) => (None, None, None, None, None, None, Some(help)),
-        Some(OverlayScene::Welcome(_)) => return Err(UnsupportedScene::Overlay("welcome")),
-        None => (None, None, None, None, None, None, None),
+        Some(OverlayScene::ContextMenu(menu)) => {
+            (None, Some(menu), None, None, None, None, None, None)
+        }
+        Some(OverlayScene::Timeline(timeline)) => {
+            (None, None, Some(timeline), None, None, None, None, None)
+        }
+        Some(OverlayScene::Search(search)) => {
+            (None, None, None, Some(search), None, None, None, None)
+        }
+        Some(OverlayScene::SessionMap(map)) => {
+            (None, None, None, None, Some(map), None, None, None)
+        }
+        Some(OverlayScene::Prompt(prompt)) => {
+            (None, None, None, None, None, Some(prompt), None, None)
+        }
+        Some(OverlayScene::Help(help)) => (None, None, None, None, None, None, Some(help), None),
+        Some(OverlayScene::Welcome(welcome)) => {
+            (None, None, None, None, None, None, None, Some(welcome))
+        }
+        None => (None, None, None, None, None, None, None, None),
     };
     Ok(PreparedScene {
         scene,
@@ -186,6 +204,7 @@ pub fn prepare_scene<'a>(
         session_map,
         prompt,
         help,
+        welcome,
     })
 }
 
@@ -392,6 +411,42 @@ fn help_cursor_cell(help: &HelpOverlay) -> Option<(u16, u16)> {
     let query_end = 2usize.saturating_add(help.query.chars().count());
     let column = query_end.min(usize::from(inner.width.saturating_sub(1))) as u16;
     Some((inner.x.saturating_add(column), inner.y))
+}
+
+fn welcome_lines(welcome: &WelcomeOverlay) -> Vec<String> {
+    let inner = layout::pane_inner_rect(welcome.area);
+    let mut lines = vec![String::new(); usize::from(welcome.area.height)];
+    if !lines.is_empty() {
+        lines[0] = " Mandatum ".to_owned();
+    }
+    if lines.len() > 1 {
+        lines[1] = format!(" {}", fit_cell_line(&welcome.introduction, inner.width));
+    }
+
+    let key_width = welcome
+        .entries
+        .iter()
+        .map(|entry| entry.keys.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (row, entry) in welcome.entries.iter().enumerate() {
+        if let Some(slot) = lines.get_mut(row + 3) {
+            let padding = key_width.saturating_sub(entry.keys.chars().count());
+            let content = format!(
+                "  {}{}  {}",
+                entry.keys,
+                " ".repeat(padding),
+                entry.description
+            );
+            *slot = format!(" {}", fit_cell_line(&content, inner.width));
+        }
+    }
+    if let Some(row) = welcome.entries.len().checked_add(4)
+        && let Some(slot) = lines.get_mut(row)
+    {
+        *slot = format!(" {}", fit_cell_line(&welcome.dismissal, inner.width));
+    }
+    lines
 }
 
 fn text_bounds_around_occlusion(bounds: TextBounds, occlusion: TextBounds) -> Vec<TextBounds> {
@@ -1431,6 +1486,82 @@ impl GpuText {
                 right: (help_x + help_width).ceil() as i32,
                 bottom: (help_y + help_height).ceil() as i32,
             });
+        } else if let Some(welcome) = prepared.welcome {
+            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
+            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
+            let welcome_x = welcome.area.x as f32 * self.cell_w;
+            let welcome_y = welcome.area.y as f32 * self.cell_h;
+            let welcome_width = welcome.area.width as f32 * self.cell_w;
+            let welcome_height = welcome.area.height as f32 * self.cell_h;
+            push_quad(
+                &mut quads,
+                welcome_x,
+                welcome_y,
+                welcome_width,
+                welcome_height,
+                overlay_bg_rgba,
+            );
+            if welcome.area.width > 0 && welcome.area.height > 0 {
+                let border = resolve(theme.palette_border, DEFAULT_FG);
+                let border_rgba = [border[0], border[1], border[2], 255];
+                push_quad(
+                    &mut quads,
+                    welcome_x,
+                    welcome_y,
+                    welcome_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    welcome_x,
+                    welcome_y + welcome_height - 1.0,
+                    welcome_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    welcome_x,
+                    welcome_y,
+                    1.0,
+                    welcome_height,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    welcome_x + welcome_width - 1.0,
+                    welcome_y,
+                    1.0,
+                    welcome_height,
+                    border_rgba,
+                );
+            }
+
+            let overlay_text = welcome_lines(welcome).join("\n");
+            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            self.overlay_buffer.set_wrap(Wrap::None);
+            self.overlay_buffer
+                .set_size(Some(welcome_width.max(1.0)), Some(welcome_height.max(1.0)));
+            self.overlay_buffer.set_text(
+                &overlay_text,
+                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                    overlay_fg[0],
+                    overlay_fg[1],
+                    overlay_fg[2],
+                )),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            overlay_position = Some((welcome_x, welcome_y));
+            overlay_clip = Some(TextBounds {
+                left: welcome_x.floor() as i32,
+                top: welcome_y.floor() as i32,
+                right: (welcome_x + welcome_width).ceil() as i32,
+                bottom: (welcome_y + welcome_height).ceil() as i32,
+            });
         } else if let Some(map) = prepared.session_map {
             let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
             let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
@@ -1658,14 +1789,15 @@ impl GpuText {
                 custom_glyphs: &[],
             },
         ];
-        let pane_text_bounds = if prepared.search.is_some() || prepared.help.is_some() {
-            text_bounds_around_occlusion(
-                content_bounds,
-                overlay_clip.expect("prepared opaque text overlay always sets its clip bounds"),
-            )
-        } else {
-            vec![content_bounds]
-        };
+        let pane_text_bounds =
+            if prepared.search.is_some() || prepared.help.is_some() || prepared.welcome.is_some() {
+                text_bounds_around_occlusion(
+                    content_bounds,
+                    overlay_clip.expect("prepared opaque text overlay always sets its clip bounds"),
+                )
+            } else {
+                vec![content_bounds]
+            };
         for bounds in pane_text_bounds {
             text_areas.push(TextArea {
                 buffer: &self.text_buffer,
@@ -1884,7 +2016,7 @@ mod tests {
         AgentContent, AgentStatus, ContextMenuEntry, ContextMenuOverlay, EmptyContent, HeaderScene,
         HelpEntry, HelpOverlay, OverlayScene, PaneId, PaneSceneKind, PromptOverlay, SceneCell,
         SceneRect, SceneSize, SearchEntry, SearchOverlay, StatusScene, TaskContent, TimelineEntry,
-        TimelineOverlay, WelcomeOverlay,
+        TimelineOverlay, WelcomeEntry, WelcomeOverlay,
     };
 
     fn terminal_content() -> PaneContent {
@@ -2350,6 +2482,54 @@ mod tests {
     }
 
     #[test]
+    fn welcome_plan_preserves_scene_data_hierarchy_alignment_and_bounds() {
+        let mut with_welcome = scene(vec![pane(
+            PaneSceneKind::StatusLog,
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            }),
+        )]);
+        let welcome = WelcomeOverlay {
+            area: SceneRect::new(3, 4, 48, 8),
+            introduction: "A workspace for terminals, tasks, and agents.".to_owned(),
+            entries: vec![
+                WelcomeEntry {
+                    keys: "ctrl+p".to_owned(),
+                    description: "Command palette".to_owned(),
+                },
+                WelcomeEntry {
+                    keys: "f1".to_owned(),
+                    description: "Help".to_owned(),
+                },
+            ],
+            dismissal: "Any key or click dismisses this note".to_owned(),
+        };
+        with_welcome.overlay = Some(OverlayScene::Welcome(welcome.clone()));
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&with_welcome, &theme).unwrap();
+        let prepared_welcome = prepared
+            .welcome()
+            .expect("welcome scene data was not retained");
+        let lines = welcome_lines(prepared_welcome);
+
+        assert_eq!(prepared_welcome, &welcome);
+        assert_eq!(lines.len(), usize::from(welcome.area.height));
+        assert_eq!(lines[0], " Mandatum ");
+        assert_eq!(lines[1], " A workspace for terminals, tasks, and agents.");
+        assert!(lines[2].is_empty());
+        assert_eq!(lines[3], "   ctrl+p  Command palette");
+        assert_eq!(lines[4], "   f1      Help");
+        assert!(lines[5].is_empty());
+        assert_eq!(lines[6], " Any key or click dismisses this note");
+        assert!(lines.last().unwrap().is_empty());
+        assert!(lines.iter().skip(1).all(|line| {
+            line.chars().count() <= usize::from(layout::pane_inner_rect(welcome.area).width) + 1
+        }));
+    }
+
+    #[test]
     fn session_map_plan_preserves_scene_data_geometry_and_row_alignment() {
         let mut with_map = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
         let map = SessionMapOverlay {
@@ -2434,19 +2614,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_and_multiple_panes_fail_explicitly() {
-        let mut with_overlay = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
-        with_overlay.overlay = Some(OverlayScene::Welcome(WelcomeOverlay {
-            area: SceneRect::new(0, 0, 2, 1),
-            introduction: "welcome".to_owned(),
-            entries: Vec::new(),
-            dismissal: "dismiss".to_owned(),
-        }));
-        assert_eq!(
-            prepare_scene(&with_overlay, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Overlay("welcome")
-        );
-
+    fn multiple_panes_fail_explicitly() {
         let multiple = scene(vec![
             pane(PaneSceneKind::Terminal, terminal_content()),
             pane(PaneSceneKind::Terminal, terminal_content()),

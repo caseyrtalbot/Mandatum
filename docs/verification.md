@@ -599,6 +599,39 @@ Dated Phase 3 generated Help increment (2026-07-22):
   trace checks. The final gate is rerun after recording this result so the
   committed tree itself is the tree proved green.
 
+Dated Phase 3 generated Welcome increment (2026-07-22):
+
+- The required real-host tracer bullet used a writable disposable project with
+  no workspace file, startup restore enabled, and PTY spawning disabled. A
+  neutral resize preserved the first-run note and proved the next product frame
+  contained `OverlayScene::Welcome` over the real Empty pane with
+  `layout::welcome_rect`, the scene-owned introduction, ordered generated
+  `ctrl+p`, right-click, F1, and Ctrl+Q route/description rows, and dismissal
+  text. Before implementation, `prepare_scene` failed at runtime with
+  `UnsupportedScene::Overlay("welcome")`.
+- The focused GREEN proves that exact generated Welcome reaches the prepared GPU
+  plan unchanged. The isolated renderer test covers retained geometry, title,
+  introduction, blank separators, ordered and aligned route/description rows,
+  dismissal, and bounded lines. Welcome joins Search and Help in pane-text
+  clipping so base glyphs cannot cross the opaque card.
+- `./ci/gpu-spike.sh` passed 28 tests (two native-shell tests, eleven real-host
+  integration tests, and fifteen isolated-renderer tests) plus the renderer
+  dependency-boundary scan. `cargo test -p mandatum-app --lib` passed all 248
+  tests.
+- The displayed macOS smoke used a disposable harness compiled against the exact
+  local `FrontendHost`, scene contract, and GPU renderer because the excluded
+  native shell deliberately leaves startup restore disabled. With a writable
+  project and missing workspace file, the real Empty pane remained around a
+  centered opaque Welcome card; its title, introduction, ordered generated
+  routes/descriptions, dismissal, and border painted without base-pane glyph
+  leakage. Escape dismissed the non-modal note, focused Ctrl+Q exited with code
+  0, and no smoke or native-spike process remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Multiple panes, restore in the excluded native shell,
+  broader input, Artifact Preview, and production admission remain separately
+  gated.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

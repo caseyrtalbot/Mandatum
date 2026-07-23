@@ -331,6 +331,62 @@ fn real_host_help_reaches_the_gpu_render_plan() {
 }
 
 #[test]
+fn real_host_welcome_reaches_the_gpu_render_plan() {
+    let project = DisposableProject::new("welcome");
+    let workspace_file = project.path.join(".mandatum").join("workspace.json");
+    assert!(
+        !workspace_file.exists(),
+        "disposable project unexpectedly contained a saved workspace"
+    );
+    let mut host = FrontendHost::new(AppConfig {
+        project_path: project.path.clone(),
+        workspace_file,
+        restore_on_startup: true,
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+
+    let snapshot = host.frame(frame_size);
+    assert_eq!(snapshot.scene.panes.len(), 1);
+    assert!(matches!(
+        snapshot.scene.panes[0].content,
+        PaneContent::Empty(_)
+    ));
+
+    let Some(OverlayScene::Welcome(welcome)) = &snapshot.scene.overlay else {
+        panic!("missing startup workspace did not produce the real welcome scene");
+    };
+    assert_eq!(
+        welcome.area,
+        layout::welcome_rect(frame_size, welcome.entries.len() as u16 + 4)
+    );
+    assert_eq!(
+        welcome.introduction,
+        "A workspace for terminals, tasks, and agents."
+    );
+    assert_eq!(
+        welcome
+            .entries
+            .iter()
+            .map(|entry| (entry.keys.as_str(), entry.description.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("ctrl+p", "Command palette — every command, searchable"),
+            ("right-click", "Pane menu"),
+            ("f1", "Help — keys, mouse, and glyphs"),
+            ("ctrl+q", "Quit Mandatum"),
+        ]
+    );
+    assert_eq!(welcome.dismissal, "Any key or click dismisses this note");
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real welcome scene");
+    assert_eq!(prepared.welcome(), Some(welcome));
+}
+
+#[test]
 fn real_host_pty_output_wakes_without_polling_and_reaches_a_frame() {
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
     let config = AppConfig {
