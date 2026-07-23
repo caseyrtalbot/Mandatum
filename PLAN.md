@@ -113,25 +113,20 @@ more useful without pretending the wider vision is finished:
   2 is also complete inside the excluded spike: its winit shell now drives the
   real `FrontendHost`, wakes through `EventLoopProxy`, translates neutral input,
   and paints the real header, terminal pane, status strip, and command palette
-  without its former duplicate PTY/parser state machine. Phase 3 is underway:
-  its scene-only increments now paint real one-pane task and agent content,
-  including live task output, the Empty fallback, the context menu, and the
-  execution timeline, session map, objective prompt, session-output search, and
-  generated Help and Welcome surfaces from existing scene data. The first two
-  exact multi-pane paths now cover two horizontally and two vertically tiled
-  Empty panes at usable frame sizes. The next completed path covers one tiled
-  Empty pane beneath the scene-resolved default floating Empty pane at usable
-  frame sizes; its real command route narrowly admits the required intermediate
-  two-horizontal-Empty plus Palette frame. Every admitted multi-pane rectangle
-  must retain a real bordered interior. Pane glyphs are converted to final
-  pixel bounds before subtracting a later float or any current opaque overlay;
-  header and status glyphs use the same overlay clipping path, including at
-  fractional cell widths.
-  Stacked, moved/resized or additional floating panes, dense, mixed-content,
-  broader two-pane overlays, and three-plus-pane layouts, broader input, and
-  restore remain parity work. Production GPU dependencies and release
-  admission remain blocked until the typed artifact scene surface, adapter
-  tests, and later admission decision exist; Artifact Preview remains unbuilt.
+  without its former duplicate PTY/parser state machine. Phase 3 is now
+  organized by capability family instead of one lifecycle per scene variant.
+  Its layout/composition family compiles the scene's ordered pane records
+  generically: tiled, stacked, zoomed, mixed-content, three-plus-pane,
+  moved/custom-float, multiple-float, and overlay combinations share one
+  structural validator, dynamic pane-buffer pool, and ordered pixel-space
+  occlusion path. The compiler validates only renderer-safety invariants;
+  `mandatum-scene` remains the sole owner of layout meaning and draw order. The
+  next family is content/style parity, including the neutral cell semantics
+  needed to close cursor, selection, and style behavior without layout special
+  cases. Input/lifecycle parity follows as its own family. Artifact Preview
+  then becomes a dedicated product-capability phase before hardening,
+  measurement, admission, or release work. Production GPU dependencies and
+  release admission remain blocked.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.

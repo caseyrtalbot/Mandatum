@@ -1,6 +1,6 @@
 // GPU frontend: wgpu surface + an instanced solid-quad pipeline for cell
 // backgrounds/selection/cursor/status, layered under GPU-rasterized glyphs
-// rendered by glyphon. All rendering is per-frame from a grid snapshot.
+// rendered by glyphon. All rendering is per-frame from WorkspaceScene.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,24 +27,32 @@ const CURSOR_BG: [u8; 4] = [210, 210, 220, 150];
 const STATUS_BG: [u8; 3] = [30, 32, 40];
 const STATUS_FG: [u8; 3] = [170, 176, 190];
 const BASE_FONT_PT: f32 = 15.0;
+const MAX_GPU_PANES: usize = 256;
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum UnsupportedScene {
-    Overlay(&'static str),
-    PaneCount(usize),
-    PaneContent(&'static str),
-    Layout(&'static str),
+pub enum SceneCompileError {
+    NoVisiblePane,
+    ResourceLimit {
+        resource: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    InvalidGeometry(&'static str),
 }
 
-impl std::fmt::Display for UnsupportedScene {
+impl std::fmt::Display for SceneCompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Overlay(kind) => write!(f, "{kind} overlays are not implemented"),
-            Self::PaneCount(count) => {
-                write!(f, "unsupported pane count: {count}")
-            }
-            Self::PaneContent(kind) => write!(f, "{kind} pane content is not implemented"),
-            Self::Layout(kind) => write!(f, "{kind} layout is not implemented"),
+            Self::NoVisiblePane => f.write_str("scene has no visible pane"),
+            Self::ResourceLimit {
+                resource,
+                actual,
+                maximum,
+            } => write!(
+                f,
+                "scene {resource} exceed the renderer limit: {actual} > {maximum}"
+            ),
+            Self::InvalidGeometry(reason) => write!(f, "invalid scene geometry: {reason}"),
         }
     }
 }
@@ -72,9 +80,9 @@ impl PreparedPane<'_> {
     }
 }
 
-/// Validate the deliberately narrow spike boundary without touching a GPU.
-/// Production-only scene shapes fail explicitly instead of being silently
-/// ignored while the renderer paints whichever terminal pane appears first.
+/// Compile the complete scene-owned pane program without touching a GPU.
+/// Layout meaning remains in `mandatum-scene`; this plan retains draw order and
+/// rejects only renderer resource or geometry hazards.
 #[derive(Debug)]
 pub struct PreparedScene<'a> {
     scene: &'a WorkspaceScene,
@@ -159,13 +167,13 @@ impl PreparedScene<'_> {
             cell_width,
             cell_height,
         );
-        let (floating_occlusion, opaque_overlay_occlusion) =
+        let (pane_occlusions, opaque_overlay_occlusion) =
             self.text_occlusions(cell_width, cell_height);
 
         Some(text_bounds_below_scene_occlusions(
             bounds,
             pane_index,
-            floating_occlusion,
+            &pane_occlusions,
             opaque_overlay_occlusion,
         ))
     }
@@ -174,23 +182,23 @@ impl PreparedScene<'_> {
         &self,
         cell_width: f32,
         cell_height: f32,
-    ) -> (Option<(usize, TextBounds)>, Option<TextBounds>) {
-        let floating_occlusion = self
+    ) -> (Vec<(usize, TextBounds)>, Option<TextBounds>) {
+        let pane_occlusions = self
             .panes
             .iter()
             .enumerate()
-            .find(|(_, pane)| pane.pane.floating)
             .map(|(index, pane)| {
                 (
                     index,
                     scene_rect_to_text_bounds(pane.pane.area, cell_width, cell_height),
                 )
-            });
+            })
+            .collect();
         let opaque_overlay_occlusion = self
             .opaque_overlay_area()
             .map(|area| scene_rect_to_text_bounds(area, cell_width, cell_height));
 
-        (floating_occlusion, opaque_overlay_occlusion)
+        (pane_occlusions, opaque_overlay_occlusion)
     }
 
     fn chrome_text_visible_bounds(
@@ -222,29 +230,14 @@ impl PreparedScene<'_> {
     }
 }
 
-/// Prepare the deliberately narrow paint plan without a window or
-/// GPU. The displayed renderer consumes this same value, so the excluded
-/// integration test exercises the real host-to-renderer boundary headlessly.
+/// Compile the scene-owned paint plan without a window or GPU. The displayed
+/// renderer consumes this same value, so integration tests exercise the real
+/// host-to-renderer boundary headlessly.
 pub fn prepare_scene<'a>(
     scene: &'a WorkspaceScene,
     theme: &'a Theme,
-) -> Result<PreparedScene<'a>, UnsupportedScene> {
-    match scene.panes.len() {
-        1 if scene.panes[0].stacked => {
-            return Err(UnsupportedScene::Layout("stacked panes"));
-        }
-        1 => {}
-        2 if is_two_horizontal_empty_panes(scene)
-            || is_two_horizontal_empty_panes_with_palette(scene)
-            || is_two_vertical_empty_panes(scene)
-            || is_two_floating_empty_panes(scene) => {}
-        2 => {
-            return Err(UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes",
-            ));
-        }
-        count => return Err(UnsupportedScene::PaneCount(count)),
-    }
+) -> Result<PreparedScene<'a>, SceneCompileError> {
+    validate_scene_structure(scene)?;
 
     let panes = scene.panes.iter().map(prepare_pane).collect::<Vec<_>>();
     let (palette, context_menu, timeline, search, session_map, prompt, help, welcome) = match &scene
@@ -289,101 +282,58 @@ pub fn prepare_scene<'a>(
     })
 }
 
-fn is_two_horizontal_empty_panes(scene: &WorkspaceScene) -> bool {
-    if scene.overlay.is_some() {
-        return false;
-    }
-    is_two_horizontal_empty_pane_geometry(scene)
-}
-
-fn is_two_horizontal_empty_panes_with_palette(scene: &WorkspaceScene) -> bool {
-    matches!(
-        scene.overlay.as_ref(),
-        Some(OverlayScene::Palette(palette))
-            if palette.area == layout::palette_overlay_rect(scene.size)
-    ) && is_two_horizontal_empty_pane_geometry(scene)
-}
-
-fn is_two_horizontal_empty_pane_geometry(scene: &WorkspaceScene) -> bool {
-    let [first, second] = scene.panes.as_slice() else {
-        return false;
-    };
+fn validate_scene_structure(scene: &WorkspaceScene) -> Result<(), SceneCompileError> {
     let workspace = layout::workspace_scene_area(scene.size);
+    if scene.panes.is_empty() {
+        return Err(SceneCompileError::NoVisiblePane);
+    }
+    if scene.panes.len() > MAX_GPU_PANES {
+        return Err(SceneCompileError::ResourceLimit {
+            resource: "panes",
+            actual: scene.panes.len(),
+            maximum: MAX_GPU_PANES,
+        });
+    }
+
     let Some(workspace_right) = rect_right_checked(workspace) else {
-        return false;
+        return Err(SceneCompileError::InvalidGeometry(
+            "workspace geometry overflows",
+        ));
     };
-    first.area.x == workspace.x
-        && first.area.y == workspace.y
-        && first.area.height == workspace.height
-        && rect_right_checked(first.area) == Some(second.area.x)
-        && second.area.y == workspace.y
-        && rect_right_checked(second.area) == Some(workspace_right)
-        && second.area.height == workspace.height
-        && pane_has_usable_interior(first.area)
-        && pane_has_usable_interior(second.area)
-        && !first.floating
-        && !first.stacked
-        && !first.zoomed
-        && !second.floating
-        && !second.stacked
-        && !second.zoomed
-        && matches!(first.content, PaneContent::Empty(_))
-        && matches!(second.content, PaneContent::Empty(_))
-}
-
-fn is_two_vertical_empty_panes(scene: &WorkspaceScene) -> bool {
-    if scene.overlay.is_some() {
-        return false;
-    }
-    let [first, second] = scene.panes.as_slice() else {
-        return false;
-    };
-    let workspace = layout::workspace_scene_area(scene.size);
     let Some(workspace_bottom) = rect_bottom_checked(workspace) else {
-        return false;
+        return Err(SceneCompileError::InvalidGeometry(
+            "workspace geometry overflows",
+        ));
     };
-    first.area.x == workspace.x
-        && first.area.y == workspace.y
-        && first.area.width == workspace.width
-        && rect_bottom_checked(first.area) == Some(second.area.y)
-        && second.area.x == workspace.x
-        && second.area.right() == workspace.right()
-        && rect_bottom_checked(second.area) == Some(workspace_bottom)
-        && second.area.width == workspace.width
-        && pane_has_usable_interior(first.area)
-        && pane_has_usable_interior(second.area)
-        && !first.floating
-        && !first.stacked
-        && !first.zoomed
-        && !second.floating
-        && !second.stacked
-        && !second.zoomed
-        && matches!(first.content, PaneContent::Empty(_))
-        && matches!(second.content, PaneContent::Empty(_))
-}
 
-fn is_two_floating_empty_panes(scene: &WorkspaceScene) -> bool {
-    if scene.overlay.is_some() {
-        return false;
+    for pane in &scene.panes {
+        if !pane_has_usable_interior(pane.area) {
+            return Err(SceneCompileError::InvalidGeometry(
+                "pane has no usable bordered interior",
+            ));
+        }
+        let Some(right) = rect_right_checked(pane.area) else {
+            return Err(SceneCompileError::InvalidGeometry(
+                "pane geometry overflows",
+            ));
+        };
+        let Some(bottom) = rect_bottom_checked(pane.area) else {
+            return Err(SceneCompileError::InvalidGeometry(
+                "pane geometry overflows",
+            ));
+        };
+        if pane.area.x < workspace.x
+            || pane.area.y < workspace.y
+            || right > workspace_right
+            || bottom > workspace_bottom
+        {
+            return Err(SceneCompileError::InvalidGeometry(
+                "pane lies outside the workspace",
+            ));
+        }
     }
-    let [first, second] = scene.panes.as_slice() else {
-        return false;
-    };
-    let workspace = layout::workspace_scene_area(scene.size);
-    let default_floating = layout::default_floating_pane_rect(scene.size);
 
-    first.area == workspace
-        && pane_has_usable_interior(first.area)
-        && !first.floating
-        && !first.stacked
-        && !first.zoomed
-        && second.area == default_floating
-        && pane_has_usable_interior(second.area)
-        && second.floating
-        && !second.stacked
-        && !second.zoomed
-        && matches!(first.content, PaneContent::Empty(_))
-        && matches!(second.content, PaneContent::Empty(_))
+    Ok(())
 }
 
 fn pane_has_usable_interior(area: SceneRect) -> bool {
@@ -734,26 +684,31 @@ fn text_bounds_intersect(first: TextBounds, second: TextBounds) -> bool {
         && first.bottom > second.top
 }
 
-fn text_bounds_below_later_float(
+fn text_bounds_below_later_panes(
     bounds: TextBounds,
     pane_index: usize,
-    floating_occlusion: Option<(usize, TextBounds)>,
+    pane_occlusions: &[(usize, TextBounds)],
 ) -> Vec<TextBounds> {
-    match floating_occlusion {
-        Some((floating_index, occlusion)) if pane_index < floating_index => {
-            text_bounds_around_occlusion(bounds, occlusion)
-        }
-        _ => vec![bounds],
+    let mut visible = vec![bounds];
+    for (_, occlusion) in pane_occlusions
+        .iter()
+        .filter(|(floating_index, _)| pane_index < *floating_index)
+    {
+        visible = visible
+            .into_iter()
+            .flat_map(|bounds| text_bounds_around_occlusion(bounds, *occlusion))
+            .collect();
     }
+    visible
 }
 
 fn text_bounds_below_scene_occlusions(
     bounds: TextBounds,
     pane_index: usize,
-    floating_occlusion: Option<(usize, TextBounds)>,
+    pane_occlusions: &[(usize, TextBounds)],
     opaque_overlay_occlusion: Option<TextBounds>,
 ) -> Vec<TextBounds> {
-    let mut visible = text_bounds_below_later_float(bounds, pane_index, floating_occlusion);
+    let mut visible = text_bounds_below_later_panes(bounds, pane_index, pane_occlusions);
     if let Some(occlusion) = opaque_overlay_occlusion {
         visible = visible
             .into_iter()
@@ -835,6 +790,44 @@ fn prompt_cursor_cell(prompt: &PromptOverlay) -> Option<(u16, u16)> {
     Some((inner.x.saturating_add(column), inner.y))
 }
 
+struct PaneBuffers {
+    title: Buffer,
+    body: Buffer,
+}
+
+#[derive(Default)]
+struct PaneBufferPool {
+    panes: Vec<PaneBuffers>,
+}
+
+impl PaneBufferPool {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn ensure_len(&mut self, len: usize, font_system: &mut FontSystem, metrics: Metrics) {
+        debug_assert!(len <= MAX_GPU_PANES);
+        while self.panes.len() < len {
+            self.panes.push(PaneBuffers {
+                title: Buffer::new(font_system, metrics),
+                body: Buffer::new(font_system, metrics),
+            });
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.panes.len()
+    }
+
+    fn set_metrics(&mut self, metrics: Metrics) {
+        for buffers in &mut self.panes {
+            buffers.title.set_metrics(metrics);
+            buffers.body.set_metrics(metrics);
+        }
+    }
+}
+
 pub struct GpuText {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -858,8 +851,7 @@ pub struct GpuText {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     header_buffer: Buffer,
-    title_buffers: Vec<Buffer>,
-    text_buffers: Vec<Buffer>,
+    pane_buffers: PaneBufferPool,
     status_buffer: Buffer,
     overlay_buffer: Buffer,
 
@@ -1025,12 +1017,6 @@ impl GpuText {
         let line_height = (font_size * 1.3).round();
         let metrics = Metrics::new(font_size, line_height);
         let header_buffer = Buffer::new(&mut font_system, metrics);
-        let title_buffers = (0..2)
-            .map(|_| Buffer::new(&mut font_system, metrics))
-            .collect();
-        let text_buffers = (0..2)
-            .map(|_| Buffer::new(&mut font_system, metrics))
-            .collect();
         let status_buffer = Buffer::new(&mut font_system, metrics);
         let overlay_buffer = Buffer::new(&mut font_system, metrics);
         let cell_w = measure_cell_width(&mut font_system, metrics);
@@ -1054,8 +1040,7 @@ impl GpuText {
             atlas,
             text_renderer,
             header_buffer,
-            title_buffers,
-            text_buffers,
+            pane_buffers: PaneBufferPool::new(),
             status_buffer,
             overlay_buffer,
             scale,
@@ -1092,12 +1077,7 @@ impl GpuText {
         let line_height = (self.font_size * 1.3).round();
         let metrics = Metrics::new(self.font_size, line_height);
         self.header_buffer.set_metrics(metrics);
-        for buffer in &mut self.title_buffers {
-            buffer.set_metrics(metrics);
-        }
-        for buffer in &mut self.text_buffers {
-            buffer.set_metrics(metrics);
-        }
+        self.pane_buffers.set_metrics(metrics);
         self.status_buffer.set_metrics(metrics);
         self.overlay_buffer.set_metrics(metrics);
         self.cell_w = measure_cell_width(&mut self.font_system, metrics);
@@ -1108,14 +1088,20 @@ impl GpuText {
     /// visible cells, styles, cursor/selection marks, and status come from the
     /// scene, never from a grid or parser. Returns the instant right after
     /// `present()` for input-to-present measurement. `Ok(None)` means the
-    /// swapchain frame could not be acquired; unsupported scene shapes return
-    /// a visible adapter error instead of being skipped or panicking.
+    /// swapchain frame could not be acquired; invalid geometry or resource
+    /// limits return a visible adapter error instead of being skipped or
+    /// panicking.
     pub fn render(
         &mut self,
         scene: &WorkspaceScene,
         theme: &Theme,
-    ) -> Result<Option<Instant>, UnsupportedScene> {
+    ) -> Result<Option<Instant>, SceneCompileError> {
         let prepared = prepare_scene(scene, theme)?;
+        self.pane_buffers.ensure_len(
+            prepared.panes.len(),
+            &mut self.font_system,
+            Metrics::new(self.font_size, self.cell_h),
+        );
 
         // Assemble foreground text buffers and background quads per pane,
         // painting straight from the scene-owned draw order and geometry.
@@ -1157,7 +1143,7 @@ impl GpuText {
             let pane_width = pane.area.width as f32 * self.cell_w;
             let pane_height = pane.area.height as f32 * self.cell_h;
 
-            if pane.floating && pane.area.width > 0 && pane.area.height > 0 {
+            if pane.area.width > 0 && pane.area.height > 0 {
                 push_quad(
                     &mut quads,
                     pane_x,
@@ -1276,8 +1262,11 @@ impl GpuText {
                 DEFAULT_FG,
             );
             let title_width = pane.area.width.saturating_sub(2) as f32 * self.cell_w;
-            self.title_buffers[index].set_size(Some(title_width.max(1.0)), Some(self.cell_h));
-            self.title_buffers[index].set_text(
+            let buffers = &mut self.pane_buffers.panes[index];
+            buffers
+                .title
+                .set_size(Some(title_width.max(1.0)), Some(self.cell_h));
+            buffers.title.set_text(
                 &pane.title,
                 &Attrs::new().family(Family::Monospace).color(GColor::rgb(
                     title_fg[0],
@@ -1287,7 +1276,9 @@ impl GpuText {
                 Shaping::Advanced,
                 None,
             );
-            self.title_buffers[index].shape_until_scroll(&mut self.font_system, false);
+            buffers
+                .title
+                .shape_until_scroll(&mut self.font_system, false);
 
             let default_attrs = Attrs::new().family(Family::Monospace);
             let spans = runs.iter().map(|(range, color)| {
@@ -1298,11 +1289,16 @@ impl GpuText {
             });
             let content_width = inner.width as f32 * self.cell_w;
             let content_height = inner.height as f32 * self.cell_h;
-            self.text_buffers[index].set_wrap(pane_plan.body_wrap);
-            self.text_buffers[index]
+            buffers.body.set_wrap(pane_plan.body_wrap);
+            buffers
+                .body
                 .set_size(Some(content_width.max(1.0)), Some(content_height.max(1.0)));
-            self.text_buffers[index].set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-            self.text_buffers[index].shape_until_scroll(&mut self.font_system, false);
+            buffers
+                .body
+                .set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+            buffers
+                .body
+                .shape_until_scroll(&mut self.font_system, false);
 
             pane_paints.push(PanePaint {
                 origin_x,
@@ -2089,7 +2085,7 @@ impl GpuText {
                 custom_glyphs: &[],
             });
         }
-        let (floating_occlusion, opaque_overlay_occlusion) =
+        let (pane_occlusions, opaque_overlay_occlusion) =
             prepared.text_occlusions(self.cell_w, self.cell_h);
         for (index, pane_paint) in pane_paints.iter().enumerate() {
             let title_bounds = TextBounds {
@@ -2101,11 +2097,11 @@ impl GpuText {
             for bounds in text_bounds_below_scene_occlusions(
                 title_bounds,
                 index,
-                floating_occlusion,
+                &pane_occlusions,
                 opaque_overlay_occlusion,
             ) {
                 text_areas.push(TextArea {
-                    buffer: &self.title_buffers[index],
+                    buffer: &self.pane_buffers.panes[index].title,
                     left: pane_paint.title_x,
                     top: pane_paint.title_y,
                     scale: 1.0,
@@ -2123,7 +2119,7 @@ impl GpuText {
                 .expect("pane paint index must match the prepared pane");
             for bounds in visible_bounds {
                 text_areas.push(TextArea {
-                    buffer: &self.text_buffers[index],
+                    buffer: &self.pane_buffers.panes[index].body,
                     left: pane_paint.origin_x,
                     top: pane_paint.origin_y,
                     scale: 1.0,
@@ -2347,6 +2343,22 @@ mod tests {
         TimelineOverlay, WelcomeEntry, WelcomeOverlay,
     };
 
+    #[test]
+    fn pane_buffer_pool_grows_to_the_scene_and_retains_bounded_high_water_capacity() {
+        let mut font_system = FontSystem::new();
+        let metrics = Metrics::new(15.0, 20.0);
+        let mut pool = PaneBufferPool::new();
+
+        pool.ensure_len(3, &mut font_system, metrics);
+        assert_eq!(pool.len(), 3);
+
+        pool.ensure_len(5, &mut font_system, metrics);
+        assert_eq!(pool.len(), 5);
+
+        pool.ensure_len(2, &mut font_system, metrics);
+        assert_eq!(pool.len(), 5);
+    }
+
     fn terminal_content() -> PaneContent {
         PaneContent::Terminal(TerminalSurface {
             rows: vec![vec![SceneCell::default(); 2]],
@@ -2359,7 +2371,7 @@ mod tests {
             id: PaneId::new("pane-1"),
             title: kind.label().to_owned(),
             kind,
-            area: SceneRect::new(0, 0, 2, 1),
+            area: SceneRect::new(0, 1, 80, 22),
             focused: true,
             floating: false,
             stacked: false,
@@ -2374,9 +2386,9 @@ mod tests {
             .map(|pane| pane.id.clone())
             .unwrap_or_else(|| PaneId::new("none"));
         WorkspaceScene {
-            size: SceneSize::new(2, 2),
+            size: SceneSize::new(80, 24),
             header: HeaderScene {
-                area: SceneRect::new(0, 0, 2, 0),
+                area: SceneRect::new(0, 0, 80, 1),
                 workspace_name: "test".to_owned(),
                 session_name: "session".to_owned(),
                 pane_count: panes.len(),
@@ -2389,7 +2401,7 @@ mod tests {
             panes,
             overlay: None,
             status: StatusScene {
-                area: SceneRect::new(0, 1, 2, 1),
+                area: SceneRect::new(0, 23, 80, 1),
                 text: "test status".to_owned(),
             },
             focused_pane,
@@ -2426,7 +2438,7 @@ mod tests {
                 output: Some(output),
             }),
         );
-        task.area = SceneRect::new(0, 0, 24, 10);
+        task.area = SceneRect::new(0, 1, 24, 10);
         let expected_rows = task.detail_lines().len();
         let scene = scene(vec![task]);
         let theme = Theme::default();
@@ -2461,7 +2473,7 @@ mod tests {
                 output_tail: Vec::new(),
             }),
         );
-        agent.area = SceneRect::new(0, 0, 20, 10);
+        agent.area = SceneRect::new(0, 1, 20, 10);
         let scene = scene(vec![agent]);
         let theme = Theme::default();
 
@@ -2869,7 +2881,7 @@ mod tests {
 
     #[test]
     fn full_frame_overlay_clips_header_and_status_glyphs() {
-        let size = SceneSize::new(3, 3);
+        let size = SceneSize::new(3, 5);
         let mut base = pane(
             PaneSceneKind::StatusLog,
             PaneContent::Empty(EmptyContent {
@@ -2882,7 +2894,7 @@ mod tests {
         candidate.size = size;
         candidate.header.area = layout::header_rect(size);
         candidate.status.area = layout::status_rect(size);
-        candidate.overlay = Some(search_overlay(SceneRect::new(0, 0, 3, 3)));
+        candidate.overlay = Some(search_overlay(SceneRect::new(0, 0, 3, 5)));
 
         let theme = Theme::default();
         let prepared = prepare_scene(&candidate, &theme).unwrap();
@@ -2960,9 +2972,7 @@ mod tests {
             bottom: i32::from(palette.bottom()),
         };
 
-        assert!(
-            text_bounds_below_scene_occlusions(title, 0, None, Some(palette_bounds)).is_empty()
-        );
+        assert!(text_bounds_below_scene_occlusions(title, 0, &[], Some(palette_bounds)).is_empty());
     }
 
     #[test]
@@ -2994,7 +3004,7 @@ mod tests {
             right: 80,
             bottom: 23,
         };
-        let visible = text_bounds_below_later_float(tiled_body, 0, Some((1, floating_pane)));
+        let visible = text_bounds_below_later_panes(tiled_body, 0, &[(1, floating_pane)]);
 
         assert_eq!(
             visible,
@@ -3017,8 +3027,82 @@ mod tests {
                 || bounds.top >= floating_pane.bottom
         }));
         assert_eq!(
-            text_bounds_below_later_float(tiled_body, 1, Some((1, floating_pane))),
+            text_bounds_below_later_panes(tiled_body, 1, &[(1, floating_pane)]),
             vec![tiled_body]
+        );
+    }
+
+    #[test]
+    fn ordered_occlusion_clips_each_pane_against_every_later_float_and_overlay() {
+        let body = TextBounds {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let first_float = TextBounds {
+            left: 10,
+            top: 10,
+            right: 70,
+            bottom: 70,
+        };
+        let second_float = TextBounds {
+            left: 30,
+            top: 30,
+            right: 90,
+            bottom: 90,
+        };
+        let overlay = TextBounds {
+            left: 40,
+            top: 0,
+            right: 60,
+            bottom: 100,
+        };
+        let floats = [(1, first_float), (2, second_float)];
+
+        for (pane_index, later_opaque) in [
+            (0, vec![first_float, second_float, overlay]),
+            (1, vec![second_float, overlay]),
+            (2, vec![overlay]),
+        ] {
+            let visible =
+                text_bounds_below_scene_occlusions(body, pane_index, &floats, Some(overlay));
+            assert!(
+                visible.iter().all(|bounds| later_opaque
+                    .iter()
+                    .all(|opaque| !text_bounds_intersect(*bounds, *opaque))),
+                "pane {pane_index} remained visible beneath a later opaque surface: {visible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_occlusion_treats_every_later_pane_as_opaque() {
+        let empty = || {
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            })
+        };
+        let mut first = pane(PaneSceneKind::Terminal, empty());
+        first.area = SceneRect::new(0, 1, 60, 22);
+        first.focused = false;
+        let mut second = pane(PaneSceneKind::Terminal, empty());
+        second.id = PaneId::new("pane-2");
+        second.area = SceneRect::new(20, 5, 60, 18);
+        second.floating = false;
+        let candidate = scene(vec![first, second]);
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&candidate, &theme).unwrap();
+        let later_pane = scene_rect_to_text_bounds(candidate.panes[1].area, 7.3, 13.5);
+        let visible = prepared.pane_text_visible_bounds(0, 7.3, 13.5).unwrap();
+
+        assert!(
+            visible
+                .iter()
+                .all(|bounds| !text_bounds_intersect(*bounds, later_pane)),
+            "earlier text remained visible under a later pane: {visible:?}"
         );
     }
 
@@ -3226,404 +3310,122 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_two_pane_content_fails_explicitly() {
-        let multiple = scene(vec![
-            pane(PaneSceneKind::Terminal, terminal_content()),
-            pane(PaneSceneKind::Terminal, terminal_content()),
-        ]);
-        assert_eq!(
-            prepare_scene(&multiple, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
-        );
-    }
-
-    #[test]
-    fn horizontal_empty_palette_admission_requires_the_scene_resolved_area() {
+    fn scene_compiler_accepts_the_layout_capability_family() {
         let empty = || {
             PaneContent::Empty(EmptyContent {
                 cwd_label: "/tmp".to_owned(),
                 restart_generation: 0,
             })
         };
-        let mut first = pane(PaneSceneKind::Terminal, empty());
-        first.area = SceneRect::new(0, 1, 40, 22);
-        first.focused = false;
-        let mut second = pane(PaneSceneKind::Terminal, empty());
-        second.id = PaneId::new("pane-2");
-        second.title = "terminal 2".to_owned();
-        second.area = SceneRect::new(40, 1, 40, 22);
-        let mut candidate = scene(vec![first, second]);
-        candidate.size = SceneSize::new(80, 24);
-        let mut palette = PaletteOverlay {
-            area: layout::palette_overlay_rect(candidate.size),
-            query: String::new(),
-            items: Vec::new(),
-            selected: None,
-            footer: String::new(),
-        };
-        candidate.overlay = Some(OverlayScene::Palette(palette.clone()));
-        assert!(prepare_scene(&candidate, &Theme::default()).is_ok());
 
-        palette.area.x = palette.area.x.saturating_add(1);
-        candidate.overlay = Some(OverlayScene::Palette(palette));
-        assert_eq!(
-            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
-        );
-    }
+        let mut horizontal_first = pane(PaneSceneKind::Terminal, terminal_content());
+        horizontal_first.area = SceneRect::new(0, 1, 40, 22);
+        horizontal_first.focused = false;
+        let mut horizontal_second = pane(PaneSceneKind::StatusLog, empty());
+        horizontal_second.id = PaneId::new("pane-2");
+        horizontal_second.area = SceneRect::new(40, 1, 40, 22);
+        let mut horizontal = scene(vec![horizontal_first, horizontal_second]);
+        horizontal.overlay = Some(palette_overlay(SceneRect::new(13, 5, 56, 14)));
 
-    #[test]
-    fn horizontal_empty_admission_requires_usable_bordered_pane_interiors() {
-        let empty = || {
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            })
-        };
-        let mut first = pane(PaneSceneKind::Terminal, empty());
-        first.area = SceneRect::new(0, 1, 3, 3);
-        first.focused = false;
-        let mut second = pane(PaneSceneKind::Terminal, empty());
-        second.id = PaneId::new("pane-2");
-        second.title = "terminal 2".to_owned();
-        second.area = SceneRect::new(3, 1, 3, 3);
-        let mut candidate = scene(vec![first, second]);
-        candidate.size = SceneSize::new(6, 5);
+        let mut vertical_first = pane(PaneSceneKind::Terminal, empty());
+        vertical_first.area = SceneRect::new(0, 1, 80, 11);
+        vertical_first.focused = false;
+        let mut vertical_second = pane(PaneSceneKind::Terminal, empty());
+        vertical_second.id = PaneId::new("pane-2");
+        vertical_second.area = SceneRect::new(0, 12, 80, 11);
+        vertical_second.stacked = true;
+        let vertical = scene(vec![vertical_first, vertical_second]);
 
-        assert!(prepare_scene(&candidate, &Theme::default()).is_ok());
-
-        candidate.size = SceneSize::new(5, 5);
-        candidate.panes[0].area = SceneRect::new(0, 1, 3, 3);
-        candidate.panes[1].area = SceneRect::new(3, 1, 2, 3);
-        assert_eq!(
-            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
-        );
-
-        candidate.size = SceneSize::new(6, 4);
-        candidate.panes[0].area = SceneRect::new(0, 1, 3, 2);
-        candidate.panes[1].area = SceneRect::new(3, 1, 3, 2);
-        assert_eq!(
-            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
-        );
-
-        candidate.size = SceneSize::new(80, 24);
-        candidate.panes[0].area = SceneRect::new(0, 1, 2, 22);
-        candidate.panes[1].area = SceneRect::new(2, 1, 78, 22);
-        assert_eq!(
-            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
-        );
-    }
-
-    #[test]
-    fn horizontal_admission_rejects_saturating_right_edge_overflow() {
-        let empty = || {
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            })
-        };
-        let mut first = pane(PaneSceneKind::Terminal, empty());
-        first.area = SceneRect::new(0, 1, 32_768, 3);
-        first.focused = false;
-        let mut second = pane(PaneSceneKind::Terminal, empty());
-        second.id = PaneId::new("pane-2");
-        second.area = SceneRect::new(32_768, 1, 32_767, 3);
-        let mut candidate = scene(vec![first, second]);
-        candidate.size = SceneSize::new(u16::MAX, 5);
-
-        assert!(prepare_scene(&candidate, &Theme::default()).is_ok());
-
-        candidate.panes[1].area.width = u16::MAX;
-        assert!(prepare_scene(&candidate, &Theme::default()).is_err());
-    }
-
-    #[test]
-    fn vertical_empty_admission_rejects_every_unsupported_shape() {
-        let empty = || {
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            })
-        };
-        let mut first = pane(PaneSceneKind::Terminal, empty());
-        first.area = SceneRect::new(0, 1, 80, 11);
-        first.focused = false;
-        let mut second = pane(PaneSceneKind::Terminal, empty());
-        second.id = PaneId::new("pane-2");
-        second.title = "terminal 2".to_owned();
-        second.area = SceneRect::new(0, 12, 80, 11);
-        let mut valid = scene(vec![first, second]);
-        valid.size = SceneSize::new(80, 24);
-
-        let mut cases = Vec::new();
-
-        let mut overlay = valid.clone();
-        overlay.overlay = Some(OverlayScene::Palette(PaletteOverlay {
-            area: SceneRect::new(10, 5, 20, 5),
-            query: String::new(),
-            items: Vec::new(),
-            selected: None,
-            footer: String::new(),
-        }));
-        cases.push(("overlay", overlay));
-
-        for (index, flag) in [
-            (0, "first floating"),
-            (1, "second floating"),
-            (0, "first stacked"),
-            (1, "second stacked"),
-            (0, "first zoomed"),
-            (1, "second zoomed"),
-        ] {
-            let mut flagged = valid.clone();
-            match flag {
-                "first floating" | "second floating" => flagged.panes[index].floating = true,
-                "first stacked" | "second stacked" => flagged.panes[index].stacked = true,
-                "first zoomed" | "second zoomed" => flagged.panes[index].zoomed = true,
-                _ => unreachable!(),
-            }
-            cases.push((flag, flagged));
-        }
-
-        let mut gap = valid.clone();
-        gap.panes[0].area.height = 10;
-        cases.push(("non-adjacent gap", gap));
-
-        let mut overlap = valid.clone();
-        overlap.panes[1].area.y = 11;
-        overlap.panes[1].area.height = 12;
-        cases.push(("non-adjacent overlap", overlap));
-
-        let mut off_workspace = valid.clone();
-        off_workspace.panes[1].area.width = 79;
-        cases.push(("off-workspace edge", off_workspace));
-
-        let mut mixed_content = valid;
-        mixed_content.panes[1].content = terminal_content();
-        cases.push(("mixed content", mixed_content));
-
-        for (label, candidate) in cases {
-            assert_eq!(
-                prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-                UnsupportedScene::Layout(
-                    "only two horizontal or vertical tiled, or default floating Empty panes"
-                ),
-                "{label}"
-            );
-        }
-    }
-
-    #[test]
-    fn vertical_empty_admission_requires_usable_bordered_pane_interiors() {
-        let empty = || {
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            })
-        };
-        let mut first = pane(PaneSceneKind::Terminal, empty());
-        first.area = SceneRect::new(0, 1, 3, 3);
-        first.focused = false;
-        let mut second = pane(PaneSceneKind::Terminal, empty());
-        second.id = PaneId::new("pane-2");
-        second.title = "terminal 2".to_owned();
-        second.area = SceneRect::new(0, 4, 3, 3);
-        let mut candidate = scene(vec![first, second]);
-        candidate.size = SceneSize::new(3, 8);
-
-        assert!(prepare_scene(&candidate, &Theme::default()).is_ok());
-
-        candidate.size = SceneSize::new(3, 7);
-        candidate.panes[1].area = SceneRect::new(0, 4, 3, 2);
-        assert_eq!(
-            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
-        );
-
-        candidate.size = SceneSize::new(2, 8);
-        candidate.panes[0].area = SceneRect::new(0, 1, 2, 3);
-        candidate.panes[1].area = SceneRect::new(0, 4, 2, 3);
-        assert_eq!(
-            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
-        );
-
-        candidate.size = SceneSize::new(80, 24);
-        candidate.panes[0].area = SceneRect::new(0, 1, 80, 2);
-        candidate.panes[1].area = SceneRect::new(0, 3, 80, 20);
-        assert_eq!(
-            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
-        );
-    }
-
-    #[test]
-    fn vertical_admission_rejects_saturating_bottom_edge_overflow() {
-        let empty = || {
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            })
-        };
-        let mut first = pane(PaneSceneKind::Terminal, empty());
-        first.area = SceneRect::new(0, 1, 3, 32_767);
-        first.focused = false;
-        let mut second = pane(PaneSceneKind::Terminal, empty());
-        second.id = PaneId::new("pane-2");
-        second.area = SceneRect::new(0, 32_768, 3, 32_766);
-        let mut candidate = scene(vec![first, second]);
-        candidate.size = SceneSize::new(3, u16::MAX);
-
-        assert!(prepare_scene(&candidate, &Theme::default()).is_ok());
-
-        candidate.panes[1].area.height = u16::MAX;
-        assert!(prepare_scene(&candidate, &Theme::default()).is_err());
-    }
-
-    #[test]
-    fn floating_empty_admission_rejects_every_unsupported_shape() {
-        let empty = || {
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            })
-        };
-        let mut first = pane(PaneSceneKind::Terminal, empty());
-        first.area = SceneRect::new(0, 1, 80, 22);
-        first.focused = false;
-        let mut second = pane(PaneSceneKind::Terminal, empty());
-        second.id = PaneId::new("pane-2");
-        second.title = "terminal 2".to_owned();
-        second.area = SceneRect::new(8, 5, 72, 18);
-        second.floating = true;
-        let mut valid = scene(vec![first, second]);
-        valid.size = SceneSize::new(80, 24);
-
-        let mut cases = Vec::new();
-
-        let mut overlay = valid.clone();
-        overlay.overlay = Some(OverlayScene::Palette(PaletteOverlay {
-            area: SceneRect::new(10, 5, 20, 5),
-            query: String::new(),
-            items: Vec::new(),
-            selected: None,
-            footer: String::new(),
-        }));
-        cases.push(("overlay", overlay));
-
-        for (index, flag) in [
-            (0, "first floating"),
-            (0, "first stacked"),
-            (0, "first zoomed"),
-            (1, "second tiled"),
-            (1, "second stacked"),
-            (1, "second zoomed"),
-        ] {
-            let mut flagged = valid.clone();
-            match flag {
-                "first floating" => flagged.panes[index].floating = true,
-                "first stacked" | "second stacked" => flagged.panes[index].stacked = true,
-                "first zoomed" | "second zoomed" => flagged.panes[index].zoomed = true,
-                "second tiled" => flagged.panes[index].floating = false,
-                _ => unreachable!(),
-            }
-            cases.push((flag, flagged));
-        }
-
-        for (label, index, area) in [
-            (
-                "tiled pane does not fill workspace",
-                0,
-                SceneRect::new(1, 1, 79, 22),
-            ),
-            ("floating x", 1, SceneRect::new(7, 5, 73, 18)),
-            ("floating y", 1, SceneRect::new(8, 4, 72, 19)),
-            ("floating width", 1, SceneRect::new(8, 5, 71, 18)),
-            ("floating height", 1, SceneRect::new(8, 5, 72, 17)),
-        ] {
-            let mut geometry = valid.clone();
-            geometry.panes[index].area = area;
-            cases.push((label, geometry));
-        }
-
-        let mut mixed_first = valid.clone();
-        mixed_first.panes[0].content = terminal_content();
-        cases.push(("mixed first content", mixed_first));
-
-        let mut mixed_second = valid;
-        mixed_second.panes[1].content = terminal_content();
-        cases.push(("mixed second content", mixed_second));
-
-        for (label, candidate) in cases {
-            assert_eq!(
-                prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-                UnsupportedScene::Layout(
-                    "only two horizontal or vertical tiled, or default floating Empty panes"
-                ),
-                "{label}"
-            );
-        }
-    }
-
-    #[test]
-    fn floating_empty_admission_requires_usable_bordered_pane_interiors() {
-        let empty = || {
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            })
-        };
         let mut tiled = pane(PaneSceneKind::Terminal, empty());
-        tiled.area = SceneRect::new(0, 1, 11, 7);
         tiled.focused = false;
-        let mut floating = pane(PaneSceneKind::Terminal, empty());
-        floating.id = PaneId::new("pane-2");
-        floating.title = "terminal 2".to_owned();
-        floating.area = SceneRect::new(8, 5, 3, 3);
-        floating.floating = true;
-        let mut candidate = scene(vec![tiled, floating]);
-        candidate.size = SceneSize::new(11, 9);
+        let mut first_float = pane(PaneSceneKind::Task, empty());
+        first_float.id = PaneId::new("pane-2");
+        first_float.area = SceneRect::new(8, 5, 50, 15);
+        first_float.focused = false;
+        first_float.floating = true;
+        let mut second_float = pane(PaneSceneKind::Agent, terminal_content());
+        second_float.id = PaneId::new("pane-3");
+        second_float.area = SceneRect::new(20, 8, 55, 13);
+        second_float.floating = true;
+        second_float.zoomed = true;
+        let multiple_floats = scene(vec![tiled, first_float, second_float]);
 
-        assert!(prepare_scene(&candidate, &Theme::default()).is_ok());
+        let theme = Theme::default();
+        for (label, candidate, expected_panes) in [
+            ("horizontal mixed content plus overlay", horizontal, 2),
+            ("vertical scene-owned flags", vertical, 2),
+            ("ordered overlapping floats", multiple_floats, 3),
+        ] {
+            let prepared = prepare_scene(&candidate, &theme)
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(prepared.panes.len(), expected_panes, "{label}");
+        }
+    }
 
-        candidate.size = SceneSize::new(10, 9);
-        candidate.panes[0].area = SceneRect::new(0, 1, 10, 7);
-        candidate.panes[1].area = SceneRect::new(8, 5, 2, 3);
-        assert_eq!(
-            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
+    #[test]
+    fn scene_compiler_rejects_only_structural_resource_hazards() {
+        let mut no_interior = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        no_interior.panes[0].area.width = 2;
+
+        let mut outside_workspace = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        outside_workspace.panes[0].area = SceneRect::new(79, 1, 3, 3);
+
+        let mut right_overflow = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        right_overflow.size = SceneSize::new(u16::MAX, 5);
+        right_overflow.panes[0].area = SceneRect::new(u16::MAX - 1, 1, 3, 3);
+
+        let mut bottom_overflow = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        bottom_overflow.size = SceneSize::new(3, u16::MAX);
+        bottom_overflow.panes[0].area = SceneRect::new(0, u16::MAX - 1, 3, 3);
+
+        let too_many = scene(
+            (0..=MAX_GPU_PANES)
+                .map(|index| {
+                    let mut pane = pane(PaneSceneKind::Terminal, terminal_content());
+                    pane.id = PaneId::new(format!("pane-{index}"));
+                    pane.area = SceneRect::new(0, 1, 3, 3);
+                    pane
+                })
+                .collect(),
         );
 
-        candidate.size = SceneSize::new(11, 8);
-        candidate.panes[0].area = SceneRect::new(0, 1, 11, 6);
-        candidate.panes[1].area = SceneRect::new(8, 5, 3, 2);
-        assert_eq!(
-            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled, or default floating Empty panes"
-            )
-        );
+        for (label, candidate, expected) in [
+            (
+                "bordered interior",
+                no_interior,
+                SceneCompileError::InvalidGeometry("pane has no usable bordered interior"),
+            ),
+            (
+                "workspace containment",
+                outside_workspace,
+                SceneCompileError::InvalidGeometry("pane lies outside the workspace"),
+            ),
+            (
+                "checked right edge",
+                right_overflow,
+                SceneCompileError::InvalidGeometry("pane geometry overflows"),
+            ),
+            (
+                "checked bottom edge",
+                bottom_overflow,
+                SceneCompileError::InvalidGeometry("pane geometry overflows"),
+            ),
+            (
+                "aggregate pane limit",
+                too_many,
+                SceneCompileError::ResourceLimit {
+                    resource: "panes",
+                    actual: MAX_GPU_PANES + 1,
+                    maximum: MAX_GPU_PANES,
+                },
+            ),
+        ] {
+            assert_eq!(
+                prepare_scene(&candidate, &Theme::default()).unwrap_err(),
+                expected,
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -3633,7 +3435,7 @@ mod tests {
             restart_generation: 7,
         });
         let mut empty_pane = pane(PaneSceneKind::StatusLog, empty);
-        empty_pane.area = SceneRect::new(0, 0, 20, 10);
+        empty_pane.area = SceneRect::new(0, 1, 20, 10);
         let scene = scene(vec![empty_pane]);
         let theme = Theme::default();
 

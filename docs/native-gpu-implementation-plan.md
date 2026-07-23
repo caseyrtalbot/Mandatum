@@ -1,8 +1,8 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the two-horizontal-, two-vertical-, and default two-pane-floating Empty
-increments are complete at verified usable frame sizes; production GPU
+its layout/composition capability family is complete in the excluded adapter,
+with content/style and input/lifecycle families remaining; production GPU
 admission pending (2026-07-23).
 
 This document is the durable implementation plan for a native window and
@@ -63,7 +63,7 @@ The detailed evidence and standing procedures live in
    IME composition are live frontend state and are never serialized.
 7. The terminal frontend remains available for SSH, headless use, recovery,
    and unsupported native environments.
-8. No production GPU dependency or release allowlist changes until the Phase 6
+8. No production GPU dependency or release allowlist changes until the Phase 7
    production-admission decision and its evidence are accepted.
 
 ## Shared Host Interface
@@ -151,7 +151,7 @@ Rollout boundary:
 Phase 0 accepts the product direction only. It is not production GPU-admission
 evidence. `ci/conformance.sh` remains unchanged in force until the typed scene
 surface, terminal fallback test, excluded-GPU render-plan test, and later Phase
-6 admission decision exist.
+7 admission decision exist.
 
 ## Phase 1 — Extract The Frontend-Neutral Host
 
@@ -419,31 +419,82 @@ adapter rejects that degenerate frame. Checked right/bottom endpoint arithmetic
 also rejects malformed maximum-dimension panes whose true edge would overflow
 `u16`.
 
-Render every current scene:
+Layout/composition capability family complete (2026-07-23): the renderer no
+longer admits one named topology at a time. `prepare_scene` is now a deep scene
+compiler over every ordered `WorkspaceScene::panes` record. It validates only
+renderer-safety invariants: a real bordered interior, checked endpoints, and
+workspace containment. Layout meaning, identity, overlap, stack/zoom flags,
+and draw order remain owned by `mandatum-scene`. The excluded adapter has an
+explicit 256-pane aggregate ceiling so its glyph-buffer high-water mark is
+bounded.
 
-- tiled, stacked, floating, zoomed, and dense multi-pane layouts;
+The compiler accepts tiled, stacked, zoomed, gapped/overlapping,
+mixed-content, three-plus-pane, moved/custom-float, multiple-float, and overlay
+combinations through the same path. The displayed renderer grows one
+title/body buffer pair per pane and retains high-water capacity instead of
+stopping at a fixed pane count. Text for each pane is clipped against every
+later opaque pane in scene order and then against the current opaque overlay
+in final pixel space. Focused real-host tracers cover a stack, three tiled
+panes, and two ordered floats; one capability matrix covers the broader
+structural combinations and resource hazards.
+
+This changes the unit of work. Individual variants may still start with a
+focused RED/GREEN tracer, but one aggregate review, displayed scenario matrix,
+documentation update, full gate, handoff, and commit complete the entire
+capability family.
+
+### Remaining Phase 3 capability families
+
+Content/style parity:
+
 - terminal, task, agent, and empty pane content;
 - every overlay, header attention segment, status surface, hit target, focus,
   selection, and cursor;
 - all built-in and custom semantic theme roles;
-- bold, dim, italic, underline, inverse, hidden, and strikethrough styles.
+- bold, dim, italic, underline, inverse, hidden, and strikethrough styles;
+- first define the neutral per-cell semantics needed for cursor, selection,
+  wide-cell continuation, and style mapping so the renderer consumes one cell
+  program rather than adding content- or layout-specific paint branches.
 
-Complete input parity:
+Input/lifecycle parity:
 
 - workspace chords before terminal fallback;
 - BackTab, Alt-as-Meta, paste, pointer capture/passthrough, scrollback,
   selection, focus, resize, and quit;
-- keyboard-only completeness and reduced-motion behavior.
+- keyboard-only completeness and reduced-motion behavior;
+- native restore/startup behavior, scale changes, clipboard effects, and clean
+  shutdown through the existing `FrontendHost` boundary.
 
-Exit gate: no `UnsupportedScene` result is reachable for a product-generated
-scene, and semantic/golden tests cover every scene and input enum variant.
+Exit gate: no unplanned `SceneCompileError` is reachable for a
+product-generated scene, and semantic/golden tests cover every scene and input
+enum variant.
 
-## Phase 4 — Make Text And IME Correct
+## Phase 4 — Build The Artifact Preview Capability
 
-Dependency: Phase 3.
+Dependency: Phase 3 capability families.
 
-- Define grapheme clusters, wide-cell continuation, combining-mark, fallback,
-  cursor, and selection alignment in the scene contract.
+Build the product trigger accepted in Phase 0 as one vertical capability
+family:
+
+- persist only project-relative `ArtifactPaneIntent`;
+- validate and decode bounded PNG files in app-owned live state;
+- carry loading, ready, and failed states plus bounded RGBA8 sRGB pixels through
+  a typed scene surface;
+- paint a deterministic labeled fallback card in the terminal adapter;
+- upload and contain-fit the same scene-owned surface in the GPU adapter;
+- prove path containment, symlink rejection, byte/dimension/decoded-size caps,
+  reload/revision behavior, malformed input, and visible failure states.
+
+Exit gate: a task- or agent-produced PNG opens as a reviewable workspace pane
+through the real host, both adapters consume the same typed scene state, and no
+GPU dependency enters a production crate.
+
+## Phase 5 — Make Advanced Text And IME Correct
+
+Dependency: Phase 3 neutral cell semantics and Phase 4.
+
+- Consume the Phase 3 cell/continuation representation while completing
+  grapheme clusters, combining marks, fallback, cursor, and selection alignment.
 - Preserve terminal-cell semantics rather than reshaping raw terminal output
   into proportional text.
 - Add a neutral text/IME composition contract; composed text is not paste.
@@ -455,7 +506,7 @@ Dependency: Phase 3.
 Exit gate: fixtures and visual checks prove cell alignment, selection, cursor,
 IME, and scaling across the supported platform matrix.
 
-## Phase 5 — Harden And Measure
+## Phase 6 — Harden And Measure
 
 Dependency: feature parity.
 
@@ -484,9 +535,9 @@ Proposed thresholds for the later admission decision, not current promises:
 Exit gate: every threshold actually accepted in Phase 0 passes. Historical
 p50-only or bytes-out measurements cannot substitute for symmetric evidence.
 
-## Phase 6 — Admit And Promote The Product Adapter
+## Phase 7 — Admit And Promote The Product Adapter
 
-Dependency: accepted trigger plus Phase 5 evidence.
+Dependency: accepted trigger plus Phase 6 evidence.
 
 - Add a production frontend crate only now.
 - Keep it dependent on the app host and scene contract, never concrete runtime
@@ -501,7 +552,7 @@ Dependency: accepted trigger plus Phase 5 evidence.
 Exit gate: admission decision, dependency-boundary negative tests, full gate,
 native gate, parity checks, and evidence record are all green.
 
-## Phase 7 — Roll Out Without Losing The Terminal
+## Phase 8 — Roll Out Without Losing The Terminal
 
 Dependency: production admission.
 
@@ -554,14 +605,13 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Continue Phase 3 inside `spikes/frontend-wgpu` with one layout-only increment:
-support the lowest-complexity real two-pane stacked Empty topology emitted by a
-`FrontendHost`. Begin with a failing real-host tracer that splits an Empty pane,
-stacks the focused pane through the generated product route, and proves the
-scene's one-visible-pane stacked representation plus the durable two-pane
-header facts before extending only the prepared-plan admission and GPU paint
-needed for that exact shape. Preserve every covered one-pane path, both tiled
-two-pane paths, and the completed default floating path. Stop before dense,
-broader floating, or three-plus-pane layouts; mixed multi-pane content; broader
-input; restore implementation changes; Artifact Preview; or production
-admission.
+Continue Phase 3 with the content/style capability family, not another
+layout-specific lifecycle. First define the smallest renderer-neutral cell
+program that preserves the existing `SceneCell` contract while making cursor,
+selection, wide-cell continuation, and style roles explicit enough for both
+frontends. Then compile terminal, task, agent, Empty, chrome, and overlay paint
+through that one program. Use focused RED/GREEN tracers for semantic gaps, but
+complete the family with one aggregate review, one displayed scenario matrix,
+one documentation/gate/handoff cycle, and one commit. Stop before changing
+input/lifecycle behavior, building Artifact Preview, admitting production GPU
+dependencies, or altering release surfaces.

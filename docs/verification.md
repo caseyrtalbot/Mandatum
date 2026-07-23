@@ -300,7 +300,7 @@ stacks, not an exhaustive taxonomy of GPU libraries.
 Selecting the Artifact Preview capability in Phase 0 is not GPU-admission
 evidence. Future production admission still requires the named typed artifact
 scene contract, executable terminal-fallback and excluded-GPU adapter tests,
-and a separate Phase 6 decision accepting that evidence.
+and a separate Phase 7 decision accepting that evidence.
 
 Dated maintenance run (2026-07-21): after refreshing the excluded lock's four
 workspace path packages from `0.1.0` to `0.2.0`, `./ci/gpu-spike.sh` passed
@@ -842,6 +842,42 @@ Dated aggregate-review corrections-only slice (2026-07-23):
   Stacked, moved/resized or additional floating panes, broader two-pane
   overlays, dense, mixed-content, and three-plus-pane scenes remain
   fail-closed. Artifact Preview and production GPU admission remain pending.
+
+Layout/composition capability-family verification (2026-07-23), superseding
+the topology limits above:
+
+- Focused RED/GREEN tracers covered one real stack, three real tiled panes, two
+  real ordered floats, dynamic pane-buffer growth, and final-pixel subtraction
+  of every later opaque pane plus the current overlay. The stack first failed
+  with `Layout("stacked panes")`; three panes first failed with `PaneCount(3)`;
+  and the buffer test first failed to compile because no dynamic pool existed.
+- The completed `prepare_scene` compiler no longer recognizes layout
+  topologies. It validates a usable bordered interior, checked pane endpoints,
+  workspace containment, and a 256-pane aggregate renderer ceiling. It does
+  not reconstruct scene identity, tiled coverage, overlap, flags, focus, or
+  draw order.
+- Aggregate review found and corrected two high-confidence defects. A
+  zero-pane scene could prepare successfully while the public one-pane
+  inspection helpers indexed pane zero; zero panes now return
+  `SceneCompileError::NoVisiblePane`. Occlusion initially considered only
+  `floating` panes, so overlapping non-floating panes could leak lower text;
+  every pane now paints an opaque base and every later pane in scene order is
+  subtracted. The review also replaced topology-era error strings with typed
+  compile failures and bounded the retained pane-buffer high-water mark.
+- `./ci/gpu-spike.sh` passed 48 tests: two native-shell tests, twenty-two
+  real-host integration tests, and twenty-four isolated-renderer tests, plus
+  the renderer dependency-boundary scan.
+- A release build ran one visible missing-shell scenario matrix on macOS. It
+  progressed from one pane to three tiled panes, stacked the first split while
+  retaining the durable three-pane header count, added two overlapping floats,
+  and opened Help over the resulting five-pane scene. Screenshot inspection
+  showed distinct three-pane buffers, the scene-owned stack representation,
+  opaque later-pane composition, and no underlying text through Help. Ctrl+Q
+  exited 0 and no native-spike process remained.
+- Remaining Phase 3 work is grouped into content/style parity (beginning with
+  neutral cell semantics) and input/lifecycle parity. Artifact Preview is the
+  next dedicated product-capability phase. The spike remains excluded, and
+  production dependency admission and release changes remain blocked.
 
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the

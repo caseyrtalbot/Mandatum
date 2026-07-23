@@ -12,7 +12,7 @@ use std::{
 };
 
 use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
-use mandatum_gpu_renderer_spike::{GpuText, UnsupportedScene};
+use mandatum_gpu_renderer_spike::{GpuText, SceneCompileError};
 use mandatum_scene::{
     SceneSize,
     input::{
@@ -189,7 +189,7 @@ impl App {
         drained == EVENT_DRAIN_BUDGET
     }
 
-    fn render_frame(&mut self) -> Result<(), UnsupportedScene> {
+    fn render_frame(&mut self) -> Result<(), SceneCompileError> {
         let Some(size) = self.scene_size() else {
             return Ok(());
         };

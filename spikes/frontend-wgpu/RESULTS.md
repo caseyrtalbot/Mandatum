@@ -1,17 +1,17 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 underway; one-pane content, every current one-pane overlay,
-the first two exact tiled two-pane layouts, and the default two-pane floating
-Empty topology at verified usable frame sizes are covered.**
+Status: **Phase 3 underway; its layout/composition capability family is
+complete in the excluded adapter. Content/style and input/lifecycle parity
+remain.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
-renders the host's real header, one terminal, task, agent, or Empty pane, status
+renders the host's real header, terminal, task, agent, and Empty panes, status
 strip, command palette, context menu, execution timeline, session map, Set agent
-objective prompt, session-output Search, generated Help, generated Welcome, and
-exactly two horizontally or vertically tiled Empty panes plus the default
-two-pane floating Empty topology at verified usable frame sizes on the GPU.
-Typed clipboard effects
-return to the native shell.
+objective prompt, session-output Search, generated Help, and generated Welcome.
+One scene compiler consumes arbitrary ordered pane layouts, including tiled,
+stacked, zoomed, mixed-content, three-plus-pane, moved/custom-float,
+multiple-float, and overlay combinations. Typed clipboard effects return to the
+native shell.
 
 This remains an isolated frontend outside the Cargo workspace (the root
 `Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
@@ -275,6 +275,35 @@ overflow `u16`. A visible 800x632 release smoke drove the long-path Palette
 transition and default float; screenshots showed no leakage at the observed
 scale, Ctrl+Q exited cleanly, and no native or attempted-shell process remained.
 
+Capability-family layout/composition verification (2026-07-23): focused
+real-host tracers first failed on a two-pane stack (`Layout("stacked panes")`)
+and three tiled panes (`PaneCount(3)`). A dynamic buffer-pool test first failed
+to compile because no pane pool existed. The final compiler retains the public
+`prepare_scene(&WorkspaceScene, &Theme)` seam while removing topology
+predicates. It validates usable bordered interiors, checked endpoints,
+workspace containment, and a 256-pane aggregate renderer ceiling; layout
+identity, flags, overlap, and draw order remain scene-owned.
+
+The displayed renderer now grows title/body glyph buffers with the scene and
+keeps a bounded high-water mark. Every pane paints an opaque base, and earlier
+title/body text is clipped in final pixel space against every later pane plus
+the current opaque overlay. Aggregate review caught and corrected two defects
+before completion: zero-pane preparation exposed panicking one-pane accessors,
+and only `floating` panes initially occluded lower text. Zero panes now fail
+with `SceneCompileError::NoVisiblePane`; ordered occlusion no longer consults a
+layout flag. Structural failures and resource limits use typed compile errors
+instead of topology-era error strings.
+
+`./ci/gpu-spike.sh` passed 48 tests (two native-shell, twenty-two real-host, and
+twenty-four isolated-renderer) plus the renderer dependency-boundary scan.
+Displayed release verification used one missing-shell session: it progressed
+from one pane to three tiled panes, stacked the first split while preserving
+the durable three-pane header count, added two overlapping floats, and opened
+Help over the five-pane composition. Screenshot inspection showed distinct
+three-pane buffers, correct stack representation, opaque later-pane
+composition, and no underlying text through the Help surface. Ctrl+Q exited 0
+and no native-spike process remained.
+
 ## Verdict (read this first)
 
 The 2026-07-09 GPU run showed a **measured, roughly 2x latency advantage** over
@@ -316,21 +345,14 @@ How the current boundary is enforced:
 | `src/bin/tui_probe.rs` | external terminal latency harness; not workstation state |
 
 `prepare_scene` is the window/GPU-free renderer seam used by the controlled
-integration test and by the displayed renderer. It accepts the real header,
-one terminal, task, agent, or Empty pane, status, theme, and optional palette,
-context menu, timeline, session map, objective prompt, Search, Help, or Welcome
-plus exact horizontal and vertical two-Empty-pane scenes, the default
-two-pane-floating Empty scene, and the horizontal two-Empty-pane Palette frame
-needed to dispatch Float at usable frame sizes. Broader multi-pane shapes and
-degenerate multi-pane scenes still fail explicitly. The displayed renderer uses
-the scene's pane-inner geometry, chrome, terminal/task surface, scene-composed
-detail lines, status, palette, context-menu, timeline, session-map, prompt,
-Search, Help, and Welcome data rather than deriving product presentation itself.
-Its narrow default-float recognition consumes
-`layout::default_floating_pane_rect`, so the core default and scene clamping
-calculation have one owner. Its pane-body paint plan converts complete bounds to
-final pixels before subtracting later-float and every current opaque-overlay
-area.
+integration test and by the displayed renderer. It compiles the real header,
+status, theme, every current pane content and overlay type, and every ordered
+pane record without recognizing a topology. The scene owns pane geometry,
+identity, flags, overlap, and order. The compiler checks only usable bordered
+interiors, checked workspace containment, and its explicit 256-pane resource
+ceiling. The displayed renderer uses dynamic per-pane title/body buffers, paints
+an opaque base for every pane, and converts text bounds to final pixels before
+subtracting every later pane and the current opaque overlay.
 
 The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
 relevant only to the historical 2026-07-09 benchmark evidence below. Both files
@@ -551,13 +573,10 @@ panic, exit 0).
 
 ## What a production adapter would still need
 
-- **Complete broader scene parity.** Header, one terminal/task/agent pane,
-  Empty fallback, status, theme, command palette, context menu, timeline,
-  session map, objective prompt, Search, Help, Welcome, exact horizontal and
-  vertical two-Empty-pane layouts, and the default two-pane floating Empty
-  topology at usable frame sizes are bound. Production still needs restore,
-  broader multi-pane layouts,
-  and hit-target parity.
+- **Complete content/style and input/lifecycle parity.** Layout composition is
+  generic. Production still needs a neutral cell program for full cursor,
+  selection, style, and wide-cell semantics, plus restore, hit-target, modifier,
+  pointer, scale-change, and shutdown parity.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
@@ -587,10 +606,10 @@ spikes/frontend-wgpu/target/release/mandatum-frontend-wgpu-spike --exit-after 12
 ```
 
 For the displayed Phase 3 task/agent smoke, use neutral palette input to create
-the task (`b`) or agent (`a`) pane and zoom it (`z`) before the next redraw;
-mixed-content task/agent multi-pane paint remains deliberately unsupported.
-Confirm the task shows live output, the agent shows its objective/state detail,
-and Ctrl+Q leaves no native-spike or child process. Source modules:
+the task (`b`) or agent (`a`) pane alongside existing panes; zoom (`z`) is an
+optional layout check, not an admission workaround. Confirm every mixed-content
+pane paints, the task shows live output, the agent shows its objective/state
+detail, and Ctrl+Q leaves no native-spike or child process. Source modules:
 `src/main.rs` (winit translation, host ownership, wake/effect/heartbeat/redraw
 scheduling, instrumentation),
 `gpu-renderer` + `src/gpu.rs` (structurally isolated scene/theme-to-GPU paint),
@@ -626,22 +645,21 @@ state, and footer contained inside the border. Escape must close the overlay,
 and Ctrl+Q must leave no native-spike or attempted-shell process.
 
 For the displayed objective-prompt smoke, use the same disposable missing-shell
-launch and queue neutral Ctrl+P then `a`, Ctrl+P then `z`, and Ctrl+P then `p`
-before the next redraw because mixed-content agent/Empty multi-pane paint
-remains deliberately unsupported. Confirm the real zoomed agent scene remains
-beneath the centered bordered Set agent objective prompt and that its focused
-pane title, configured objective input, block cursor, and footer paint inside
-the border. Escape must close the prompt, and Ctrl+Q must leave no native-spike
-or attempted-shell process.
+launch, create and focus an agent with Ctrl+P then `a`, and open its prompt with
+Ctrl+P then `p`. Confirm the mixed Empty/agent scene remains beneath the
+centered bordered Set agent objective prompt and that its focused pane title,
+configured objective input, block cursor, and footer paint inside the border.
+Escape must close the prompt, and Ctrl+Q must leave no native-spike or
+attempted-shell process.
 
 For the displayed Search smoke, use the same writable disposable missing-shell
-launch and queue neutral Ctrl+P then `a` and Ctrl+P then `z` before the next
-redraw. Open Search with Ctrl+Shift+F, paste `kind:timeline search`, and confirm
-the real zoomed agent remains around a centered opaque Search modal without
-base-pane glyph leakage. The title, query and block cursor, grouped timeline
-source, selected result, repeated-source elision, and footer must remain inside
-the border. Escape must close Search, and Ctrl+Q must exit 0 without leaving a
-native-spike or attempted-shell process.
+launch, create an agent with Ctrl+P then `a`, and optionally zoom it with
+Ctrl+P then `z`. Open Search with Ctrl+Shift+F, paste `kind:timeline search`,
+and confirm the mixed scene remains around a centered opaque Search modal
+without base-pane glyph leakage. The title, query and block cursor, grouped
+timeline source, selected result, repeated-source elision, and footer must
+remain inside the border. Escape must close Search, and Ctrl+Q must exit 0
+without leaving a native-spike or attempted-shell process.
 
 For the displayed Help smoke, use the same writable disposable missing-shell
 launch, press F1, and type a filter retaining `Search session output`. Confirm
@@ -704,12 +722,12 @@ underway: its first increments add real one-pane task metadata/live output,
 agent detail, the Empty fallback, the existing context menu, execution timeline,
 session map, objective prompt, session-output Search, generated Help, and
 generated Welcome without changing the scene or host contract. Its first two
-multi-pane increments add only the exact real two-horizontal- and
-two-vertical-Empty-pane scenes; the next adds only the exact default
-two-pane-floating Empty scene and its required horizontal Palette command
-frame. A production wgpu adapter still needs restore, broader multi-pane and
-scene parity, correct grapheme width, IME and composition, runtime DPI, full
-style mapping, surface-loss recovery, and damage tracking.
+layout increments were superseded by one capability-family compiler over the
+complete ordered pane vector, with bounded dynamic resources and generic
+later-pane/overlay occlusion. A production wgpu adapter still needs
+content/style and input/lifecycle parity, Artifact Preview, correct advanced
+grapheme and IME behavior, runtime DPI, surface-loss recovery, and damage
+tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selects the

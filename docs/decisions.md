@@ -2058,3 +2058,58 @@ renderer dependency-boundary scan; all 35 scene tests and all 248 app library
 tests pass. Displayed smoke showed no leakage at the observed 800x632 scale,
 Ctrl+Q exited cleanly, and no native or attempted-shell process remained. The
 full merge-gate and review results are recorded in `docs/verification.md`.
+
+## Accepted: Capability-Family Scene Compilation Replaces Topology Admission
+
+Status: accepted (2026-07-23)
+
+Decision: complete native/GPU parity by capability family rather than running a
+full delivery lifecycle for every layout variant. The excluded adapter keeps
+`prepare_scene(&WorkspaceScene, &Theme)` as its public seam and deepens the
+prepared scene compiler behind it. Layout/composition is one family: compile
+every ordered scene pane through generic structural validation, dynamically
+size pane paint resources, and subtract every later opaque pane plus the
+current opaque overlay in scene order.
+
+Context: Phase 3 had accumulated a separate admission predicate, tracer,
+displayed smoke, review, documentation update, gate, handoff, and commit for
+each horizontal, vertical, and default-float topology. That repeated layout
+knowledge in the adapter and made the cost of parity grow with the number of
+variants even though `WorkspaceScene` already carries resolved rectangles,
+flags, content, and draw order.
+
+Rationale: the scene contract is already the authoritative layout program.
+The renderer needs only local resource-safety checks: a usable bordered
+interior, checked endpoints, workspace containment, and an aggregate pane
+ceiling. It must not prove identity, tiled coverage, reject intentional
+overlap, recompute default geometry, or infer draw order from flags. One deep
+compiler therefore handles stacked, zoomed, three-plus-pane, mixed-content,
+moved/custom-float, multiple-float, and overlay combinations without a new
+special case.
+
+Consequences:
+
+- the older exact-topology admission decisions remain historical evidence but
+  no longer describe the active renderer boundary;
+- pane title/body buffers grow with the scene and retain high-water capacity;
+- the excluded adapter rejects more than 256 visible panes, bounding that
+  high-water mark without changing the product's layout model;
+- lower pane text is clipped against every later pane, not only the first
+  floating pane;
+- focused RED/GREEN tracers remain useful, but aggregate review, displayed
+  smoke, doc sync, full gate, handoff, and commit happen once per capability
+  family;
+- the next Phase 3 family is content/style parity, beginning with neutral cell
+  semantics; input/lifecycle parity follows;
+- Artifact Preview is a dedicated phase before hardening, measurement,
+  admission, and rollout.
+
+Verification: the stack tracer first failed with `Layout("stacked panes")`;
+the three-pane tracer first failed with `PaneCount(3)`; and the dynamic buffer
+test first failed to compile because no pane pool existed. Focused GREEN runs
+then covered a real stack, three tiled panes, two real ordered floats, dynamic
+high-water growth, and multi-float-plus-overlay pixel occlusion. The isolated
+renderer and real-host suites pass as capability matrices. Aggregate review,
+displayed smoke, and `./ci/gpu-spike.sh` are recorded in
+`docs/verification.md`; `./ci/gate.sh` remains the final family completion
+gate.

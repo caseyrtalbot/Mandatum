@@ -101,20 +101,28 @@ loses its documentation or its gate.
 - Update `README.md` and `docs/repo-structure.md` when crates or the doc set
   change. Remove references to files that no longer exist.
 
-## Phase completion protocol
+## Capability-family completion protocol
 
-When a phase or implementation slice reaches its stop point and its required
-tests are green:
+Plan and review related variants as one capability family, implemented behind
+one deep component. A tracer may use a focused RED/GREEN cycle, but do not run
+the full documentation, displayed-smoke, aggregate-review, gate, handoff, and
+commit lifecycle separately for every layout, overlay, input, or style variant.
 
-1. update every affected source-of-truth document with only verified facts;
-2. create or replace the project handoff with the verified stop point, any
-   remaining unknowns, and one exact next task;
-3. rerun `./ci/gate.sh` after the final repo documentation changes;
-4. inspect `git diff --check` and `git status --short`; and
-5. commit the code, tests, and synchronized repo documentation together.
+When a capability family reaches its stop point and its focused tests are
+green:
 
-A phase is not complete while its docs or handoff are stale. Do not defer doc
-sync or the handoff to a later phase or commit.
+1. run one aggregate review over the complete family and correct the findings;
+2. run one representative displayed scenario matrix when visual behavior
+   changed;
+3. update every affected source-of-truth document with only verified facts;
+4. create or replace the project handoff with the verified stop point, any
+   remaining unknowns, and one exact next capability family;
+5. rerun `./ci/gate.sh` after the final repo documentation changes;
+6. inspect `git diff --check` and `git status --short`; and
+7. commit the code, tests, and synchronized repo documentation together.
+
+A capability family is not complete while its docs or handoff are stale. Do
+not defer doc sync or the handoff to a later family or commit.
 
 ## Done means
 

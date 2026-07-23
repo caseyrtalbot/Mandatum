@@ -7,7 +7,7 @@ use std::{
 };
 
 use mandatum_app::{AppConfig, FrontendHost};
-use mandatum_gpu_renderer_spike::{UnsupportedScene, prepare_scene};
+use mandatum_gpu_renderer_spike::prepare_scene;
 use mandatum_scene::{
     HitTargetKind, OverlayScene, PaneContent, SceneRect, SceneSize,
     input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
@@ -142,6 +142,71 @@ fn real_host_two_horizontal_empty_panes_reach_the_gpu_render_plan() {
             .iter()
             .all(|pane| pane.pane_surface().is_none())
     );
+}
+
+#[test]
+fn real_host_three_tiled_empty_panes_reach_the_gpu_render_plan() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+    dispatch_palette_command(&mut host, 'v');
+    dispatch_palette_command(&mut host, 'v');
+
+    let snapshot = host.frame(frame_size);
+    assert_eq!(snapshot.scene.header.pane_count, 3);
+    assert_eq!(snapshot.scene.panes.len(), 3);
+    assert_eq!(snapshot.scene.panes[0].area, SceneRect::new(0, 1, 40, 22));
+    assert_eq!(snapshot.scene.panes[1].area, SceneRect::new(40, 1, 20, 22));
+    assert_eq!(snapshot.scene.panes[2].area, SceneRect::new(60, 1, 20, 22));
+    assert!(snapshot.scene.panes[2].focused);
+    assert!(
+        snapshot
+            .scene
+            .panes
+            .iter()
+            .all(|pane| matches!(pane.content, PaneContent::Empty(_)))
+    );
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare three scene-resolved tiled panes");
+    assert_eq!(prepared.panes().len(), 3);
+    for (prepared, scene) in prepared.panes().iter().zip(&snapshot.scene.panes) {
+        assert_eq!(prepared.scene(), scene);
+    }
+}
+
+#[test]
+fn real_host_two_ordered_floats_reach_the_gpu_render_plan() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+    dispatch_palette_command(&mut host, 'n');
+    dispatch_palette_command(&mut host, 'n');
+
+    let snapshot = host.frame(frame_size);
+    assert_eq!(snapshot.scene.header.pane_count, 3);
+    assert_eq!(snapshot.scene.panes.len(), 3);
+    assert_eq!(snapshot.scene.panes[0].area, SceneRect::new(0, 1, 80, 22));
+    assert!(!snapshot.scene.panes[0].floating);
+    for pane in &snapshot.scene.panes[1..] {
+        assert_eq!(pane.area, SceneRect::new(8, 5, 72, 18));
+        assert!(pane.floating);
+    }
+    assert!(!snapshot.scene.panes[1].focused);
+    assert!(snapshot.scene.panes[2].focused);
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real ordered-float scene");
+    assert_eq!(prepared.panes().len(), 3);
+    for (prepared, scene) in prepared.panes().iter().zip(&snapshot.scene.panes) {
+        assert_eq!(prepared.scene(), scene);
+    }
 }
 
 #[test]
@@ -471,7 +536,7 @@ fn real_host_two_horizontal_empty_palette_clips_long_wrapped_pane_detail() {
 }
 
 #[test]
-fn real_host_two_pane_stack_remains_unsupported_by_gpu_render_plan() {
+fn real_host_two_pane_stack_reaches_the_gpu_render_plan() {
     let mut host = FrontendHost::new(AppConfig {
         spawn_pty: false,
         ..AppConfig::default()
@@ -485,10 +550,10 @@ fn real_host_two_pane_stack_remains_unsupported_by_gpu_render_plan() {
     assert_eq!(snapshot.scene.header.pane_count, 2);
     assert_eq!(snapshot.scene.panes.len(), 1);
     assert!(snapshot.scene.panes[0].stacked);
-    assert_eq!(
-        prepare_scene(&snapshot.scene, &snapshot.theme).unwrap_err(),
-        UnsupportedScene::Layout("stacked panes")
-    );
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real stacked pane");
+    assert_eq!(prepared.panes().len(), 1);
+    assert_eq!(prepared.panes()[0].scene(), &snapshot.scene.panes[0]);
 }
 
 #[test]
