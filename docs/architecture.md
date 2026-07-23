@@ -222,9 +222,12 @@ also scene-bound: its resolved area, filter query, windowed durable-event rows,
 selected index, and footer pass unchanged through the prepared GPU plan. The
 session map follows the same boundary: its resolved area, ordered tree rows,
 depth, glyph, label, live state, focus marker, badges, selection, and footer
-remain app/scene-owned. Its former `TerminalSession`, direct parser/input path,
-and `scene_bridge` are removed; its window, platform-input translation, GPU,
-and paint-scheduling state remain frontend-local.
+remain app/scene-owned. The objective prompt is scene-bound too: its resolved
+area, focused pane title, configured input, cursor location, and footer paint
+without renderer access to app or runtime state. Its former `TerminalSession`,
+direct parser/input path, and `scene_bridge` are removed; its window,
+platform-input translation, GPU, and paint-scheduling state remain
+frontend-local.
 
 A native shell may own a window, platform wake handle, DPI/IME state,
 clipboard integration, GPU surface/device resources, glyph caches, and paint
@@ -233,10 +236,10 @@ model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 Phase 3 is underway. Terminal, task, agent, and Empty one-pane content plus the
-palette, context-menu, timeline, and session-map overlays are now covered.
-Restore handling, multi-pane layouts, remaining overlays, and broader
-scene/input parity remain. Artifact Preview and production GPU admission remain
-later, separately gated decisions.
+palette, context-menu, timeline, session-map, and objective-prompt overlays are
+now covered. Restore handling, multi-pane layouts, remaining overlays, and
+broader scene/input parity remain. Artifact Preview and production GPU
+admission remain later, separately gated decisions.
 
 ### `workflows`
 

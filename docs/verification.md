@@ -484,6 +484,39 @@ Dated Phase 3 session-map increment (2026-07-22):
   denied, build, all workspace tests, conformance, and documentation trace
   checks.
 
+Dated Phase 3 objective-prompt increment (2026-07-22):
+
+- The required real-host tracer bullet used a fresh `FrontendHost` with PTY
+  spawning disabled and a distinctive configured agent objective, drove the
+  neutral Ctrl+P then `a`, Ctrl+P then `z`, and Ctrl+P then `p` routes, and
+  proved the next product frame contained `OverlayScene::Prompt` over the real
+  focused zoomed agent pane with `layout::prompt_rect`, its pane ID in the
+  title, the configured objective input, and the scene-composed footer. Before
+  implementation, `prepare_scene` failed at runtime with
+  `UnsupportedScene::Overlay("prompt")`.
+- The focused GREEN proves that exact product prompt reaches the prepared GPU
+  plan unchanged. The isolated renderer test covers retained geometry, title,
+  input, block-cursor cell, footer, row alignment, and bounded overlay text.
+- `./ci/gpu-spike.sh` passed twenty tests (two native-shell tests, eight
+  real-host integration tests, and ten isolated-renderer tests) plus the
+  renderer dependency-boundary scan. `cargo test -p mandatum-app --lib` passed
+  all 248 tests.
+- The displayed release build ran on macOS from a writable disposable project
+  with an intentionally missing shell. Process-targeted neutral key events
+  queued the create-agent and zoom commands before the next redraw, preserving
+  the deliberate multi-pane rejection, then opened Set agent objective. The
+  real zoomed agent scene remained visible beneath a centered bordered prompt;
+  its focused pane title, configured objective input, visible block cursor, and
+  bounded footer painted. Escape closed the prompt, Ctrl+Q exited with code 0,
+  and no native-spike or attempted-shell process remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Multiple panes, remaining overlays, broader input,
+  restore, Artifact Preview, and production admission remain separately gated.
+- The post-documentation `./ci/gate.sh` passed formatting, Clippy with warnings
+  denied, build, all workspace tests, conformance, and documentation trace
+  checks.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

@@ -309,6 +309,16 @@ the bordered map, showed the active session and selected focused pane, closed
 with Escape, and quit cleanly. Additional overlays, multi-pane layouts,
 restore, and broader input/theme/style parity remain explicitly unsupported.
 
+Sixth narrow increment complete (2026-07-22): a fresh real `FrontendHost` with
+PTY spawning disabled created and zoomed an agent pane, then drove the neutral
+Ctrl+P then `p` route and produced the existing `OverlayScene::Prompt`. The
+excluded render plan retains and paints the prompt's resolved area, focused
+pane title, configured objective input, block cursor, and footer with the
+existing semantic overlay theme roles. The displayed macOS smoke showed that
+same objective prompt over the real zoomed agent scene, closed with Escape, and
+quit cleanly. Additional overlays, multi-pane layouts, restore, and broader
+input/theme/style parity remain explicitly unsupported.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -446,11 +456,12 @@ the date, environment, command, endpoint, and result.
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one scene-only increment:
 add a failing real-`FrontendHost` headless test for a product-generated
-`OverlayScene::Prompt` over one supported zoomed agent pane, then extend
-`prepare_scene` and displayed GPU paint to render only the existing objective
-prompt area, title, input, cursor, and footer. Drive the product route through
-neutral Ctrl+P then `a` (new agent), Ctrl+P then `z` (zoom), and Ctrl+P then `p`
-(Set agent objective). Preserve terminal/task/agent/Empty, header, one-pane
-geometry, status, theme, palette, context-menu, timeline, and session-map
-behavior. Stop before multi-pane layout, additional overlay variants, broader
-input, restore, Artifact Preview, or production admission.
+`OverlayScene::Search` over one supported zoomed agent pane, then extend
+`prepare_scene` and displayed GPU paint to render only the existing search
+area, query/cursor, grouped source labels, matched text, selection, overflow,
+and footer. Create and zoom an agent with a distinctive objective before
+driving the neutral Ctrl+Shift+F route and typing a matching query. Preserve
+terminal/task/agent/Empty, header, one-pane geometry, status, theme, palette,
+context-menu, timeline, session-map, and objective-prompt behavior. Stop before
+multi-pane layout, additional overlay variants, broader input, restore,
+Artifact Preview, or production admission.

@@ -14,8 +14,8 @@ use glyphon::{
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, OverlayScene, PaletteOverlay, PaneContent, PaneScene,
-    SESSION_MAP_FOCUS_GLYPH, SceneColor, SessionMapOverlay, SessionMapRow, TerminalSurface, Theme,
-    TimelineEntry, TimelineOverlay, WorkspaceScene, layout,
+    PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneColor, SessionMapOverlay, SessionMapRow,
+    TerminalSurface, Theme, TimelineEntry, TimelineOverlay, WorkspaceScene, layout,
 };
 use winit::window::Window;
 
@@ -62,6 +62,7 @@ pub struct PreparedScene<'a> {
     context_menu: Option<&'a ContextMenuOverlay>,
     timeline: Option<&'a TimelineOverlay>,
     session_map: Option<&'a SessionMapOverlay>,
+    prompt: Option<&'a PromptOverlay>,
 }
 
 impl PreparedScene<'_> {
@@ -99,6 +100,10 @@ impl PreparedScene<'_> {
 
     pub fn session_map(&self) -> Option<&SessionMapOverlay> {
         self.session_map
+    }
+
+    pub fn prompt(&self) -> Option<&PromptOverlay> {
+        self.prompt
     }
 }
 
@@ -141,16 +146,16 @@ pub fn prepare_scene<'a>(
             (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
         }
     };
-    let (palette, context_menu, timeline, session_map) = match &scene.overlay {
-        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None, None),
-        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None, None),
-        Some(OverlayScene::Timeline(timeline)) => (None, None, Some(timeline), None),
-        Some(OverlayScene::SessionMap(map)) => (None, None, None, Some(map)),
-        Some(OverlayScene::Prompt(_)) => return Err(UnsupportedScene::Overlay("prompt")),
+    let (palette, context_menu, timeline, session_map, prompt) = match &scene.overlay {
+        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None, None, None),
+        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None, None, None),
+        Some(OverlayScene::Timeline(timeline)) => (None, None, Some(timeline), None, None),
+        Some(OverlayScene::SessionMap(map)) => (None, None, None, Some(map), None),
+        Some(OverlayScene::Prompt(prompt)) => (None, None, None, None, Some(prompt)),
         Some(OverlayScene::Search(_)) => return Err(UnsupportedScene::Overlay("search")),
         Some(OverlayScene::Help(_)) => return Err(UnsupportedScene::Overlay("help")),
         Some(OverlayScene::Welcome(_)) => return Err(UnsupportedScene::Overlay("welcome")),
-        None => (None, None, None, None),
+        None => (None, None, None, None, None),
     };
     Ok(PreparedScene {
         scene,
@@ -164,6 +169,7 @@ pub fn prepare_scene<'a>(
         context_menu,
         timeline,
         session_map,
+        prompt,
     })
 }
 
@@ -297,6 +303,35 @@ fn session_map_lines(map: &SessionMapOverlay) -> Vec<String> {
         lines[footer_row] = session_map_outer_line(&format!(" {}", map.footer), inner.width);
     }
     lines
+}
+
+fn prompt_lines(prompt: &PromptOverlay) -> Vec<String> {
+    let inner = layout::pane_inner_rect(prompt.area);
+    let mut lines = vec![String::new(); usize::from(prompt.area.height)];
+    if !lines.is_empty() {
+        lines[0] = fit_cell_line(&prompt.title, prompt.area.width);
+    }
+    if lines.len() > 1 {
+        lines[1] = format!(
+            " {}",
+            fit_cell_line(&format!("> {}", prompt.input), inner.width)
+        );
+    }
+    if lines.len() > 2 {
+        let footer_row = lines.len() - 2;
+        lines[footer_row] = format!(" {}", fit_cell_line(&prompt.footer, inner.width));
+    }
+    lines
+}
+
+fn prompt_cursor_cell(prompt: &PromptOverlay) -> Option<(u16, u16)> {
+    let inner = layout::pane_inner_rect(prompt.area);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let input_end = 2usize.saturating_add(prompt.input.chars().count());
+    let column = input_end.min(usize::from(inner.width.saturating_sub(1))) as u16;
+    Some((inner.x.saturating_add(column), inner.y))
 }
 
 pub struct GpuText {
@@ -1111,6 +1146,92 @@ impl GpuText {
                 right: (map_x + map_width).ceil() as i32,
                 bottom: (map_y + map_height).ceil() as i32,
             });
+        } else if let Some(prompt) = prepared.prompt {
+            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
+            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
+            let prompt_x = prompt.area.x as f32 * self.cell_w;
+            let prompt_y = prompt.area.y as f32 * self.cell_h;
+            let prompt_width = prompt.area.width as f32 * self.cell_w;
+            let prompt_height = prompt.area.height as f32 * self.cell_h;
+            push_quad(
+                &mut quads,
+                prompt_x,
+                prompt_y,
+                prompt_width,
+                prompt_height,
+                overlay_bg_rgba,
+            );
+            if prompt.area.width > 0 && prompt.area.height > 0 {
+                let border = resolve(theme.palette_border, DEFAULT_FG);
+                let border_rgba = [border[0], border[1], border[2], 255];
+                push_quad(
+                    &mut quads,
+                    prompt_x,
+                    prompt_y,
+                    prompt_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    prompt_x,
+                    prompt_y + prompt_height - 1.0,
+                    prompt_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    prompt_x,
+                    prompt_y,
+                    1.0,
+                    prompt_height,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    prompt_x + prompt_width - 1.0,
+                    prompt_y,
+                    1.0,
+                    prompt_height,
+                    border_rgba,
+                );
+            }
+            if let Some((column, row)) = prompt_cursor_cell(prompt) {
+                push_quad(
+                    &mut quads,
+                    column as f32 * self.cell_w,
+                    row as f32 * self.cell_h,
+                    self.cell_w,
+                    self.cell_h,
+                    CURSOR_BG,
+                );
+            }
+
+            let overlay_text = prompt_lines(prompt).join("\n");
+            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            self.overlay_buffer.set_wrap(Wrap::None);
+            self.overlay_buffer
+                .set_size(Some(prompt_width.max(1.0)), Some(prompt_height.max(1.0)));
+            self.overlay_buffer.set_text(
+                &overlay_text,
+                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                    overlay_fg[0],
+                    overlay_fg[1],
+                    overlay_fg[2],
+                )),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            overlay_position = Some((prompt_x, prompt_y));
+            overlay_clip = Some(TextBounds {
+                left: prompt_x.floor() as i32,
+                top: prompt_y.floor() as i32,
+                right: (prompt_x + prompt_width).ceil() as i32,
+                bottom: (prompt_y + prompt_height).ceil() as i32,
+            });
         }
 
         // Upload quad instances (grow buffer if needed).
@@ -1388,8 +1509,8 @@ mod tests {
     use super::*;
     use mandatum_scene::{
         AgentContent, AgentStatus, ContextMenuEntry, ContextMenuOverlay, EmptyContent, HeaderScene,
-        OverlayScene, PaneId, PaneSceneKind, SceneCell, SceneRect, SceneSize, StatusScene,
-        TaskContent, TimelineEntry, TimelineOverlay, WelcomeOverlay,
+        OverlayScene, PaneId, PaneSceneKind, PromptOverlay, SceneCell, SceneRect, SceneSize,
+        StatusScene, TaskContent, TimelineEntry, TimelineOverlay, WelcomeOverlay,
     };
 
     fn terminal_content() -> PaneContent {
@@ -1674,6 +1795,41 @@ mod tests {
             line.chars().count() <= usize::from(layout::pane_inner_rect(map.area).width) + 1
         }));
         assert!(lines.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn prompt_plan_preserves_scene_data_geometry_cursor_and_footer() {
+        let mut with_prompt = scene(vec![pane(PaneSceneKind::Agent, terminal_content())]);
+        let prompt = PromptOverlay {
+            area: SceneRect::new(3, 4, 42, 5),
+            title: " Set agent objective — pane-1 ".to_owned(),
+            input: "Inspect prompt paint".to_owned(),
+            footer: "enter save · esc cancel".to_owned(),
+        };
+        with_prompt.overlay = Some(OverlayScene::Prompt(prompt.clone()));
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&with_prompt, &theme).unwrap();
+        let prepared_prompt = prepared
+            .prompt()
+            .expect("prompt scene data was not retained");
+        let lines = prompt_lines(prepared_prompt);
+
+        assert_eq!(prepared_prompt, &prompt);
+        assert_eq!(lines.len(), usize::from(prompt.area.height));
+        assert_eq!(lines[0], prompt.title);
+        assert_eq!(lines[1], " > Inspect prompt paint");
+        assert_eq!(lines[lines.len() - 2], " enter save · esc cancel");
+        assert!(lines.last().unwrap().is_empty());
+        assert_eq!(
+            prompt_cursor_cell(prepared_prompt),
+            Some((
+                layout::pane_inner_rect(prompt.area)
+                    .x
+                    .saturating_add(2 + prompt.input.chars().count() as u16),
+                layout::pane_inner_rect(prompt.area).y,
+            ))
+        );
     }
 
     #[test]

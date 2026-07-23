@@ -191,6 +191,41 @@ fn real_host_session_map_reaches_the_gpu_render_plan() {
 }
 
 #[test]
+fn real_host_objective_prompt_reaches_the_gpu_render_plan() {
+    let configured_objective = "Inspect OBJECTIVE_PROMPT_PLAN_OK";
+    let mut host = FrontendHost::new(AppConfig {
+        agent_objective: configured_objective.to_owned(),
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+
+    dispatch_palette_command(&mut host, 'a');
+    dispatch_palette_command(&mut host, 'z');
+    dispatch_palette_command(&mut host, 'p');
+
+    let snapshot = host.frame(frame_size);
+    assert_eq!(snapshot.scene.panes.len(), 1);
+    let agent_pane = &snapshot.scene.panes[0];
+    assert!(agent_pane.focused);
+    assert!(agent_pane.zoomed);
+    assert!(matches!(agent_pane.content, PaneContent::Agent(_)));
+
+    let Some(OverlayScene::Prompt(prompt)) = &snapshot.scene.overlay else {
+        panic!("Set agent objective did not produce the real prompt scene");
+    };
+    assert_eq!(prompt.area, layout::prompt_rect(frame_size));
+    assert!(prompt.title.contains(agent_pane.id.as_str()));
+    assert_eq!(prompt.input, configured_objective);
+    assert_eq!(prompt.footer, "enter save · esc cancel");
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real objective-prompt scene");
+    assert_eq!(prepared.prompt(), Some(prompt));
+}
+
+#[test]
 fn real_host_pty_output_wakes_without_polling_and_reaches_a_frame() {
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
     let config = AppConfig {

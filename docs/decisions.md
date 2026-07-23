@@ -1619,3 +1619,43 @@ tests. A displayed release smoke showed the real active session and selected
 focused pane over the failed-PTY Empty state, then Escape and Ctrl+Q closed it
 and the process cleanly. The final merge-gate result is recorded in
 `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers The Objective Prompt
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one scene-only increment that accepts and
+paints the real `OverlayScene::Prompt` emitted by `FrontendHost` over a
+supported zoomed agent pane. The prepared plan retains the existing resolved
+area, title naming the focused pane, configured objective input, and footer.
+Displayed paint adds the existing block-cursor convention and uses the
+semantic overlay background, palette border, and overlay foreground roles
+without changing the scene contract.
+
+Context: the app already owns prompt modality, focused-agent gating, configured
+objective text, editing, save/cancel behavior, title, footer, and centered
+geometry. The excluded renderer rejected that complete product scene even
+though no app, runtime, agent connector, or command-model access was required.
+
+Rationale: retaining `PromptOverlay` in the headless paint plan keeps prompt
+content and behavior in the app and scene layers. The same prepared data drives
+the displayed background, border, title, input, bounded cursor cell, and pinned
+footer. Scalar-character cursor placement remains deliberate here; grapheme,
+wide-cell, and IME correctness remain Phase 4 work.
+
+Consequences: no app, runtime, scene, agent, production dependency, allowlist,
+installer, default command, or release surface changes. Multiple panes, the
+remaining overlay variants, full input/theme/style parity, restore, Artifact
+Preview, and production GPU admission remain separately gated. The next slice
+is the existing one-pane session-output search overlay only.
+
+Verification: the real-host test recorded the initial
+`UnsupportedScene::Overlay("prompt")` failure, then passed with the product
+prompt retained unchanged by the prepared plan. The isolated renderer test
+covers area, title, input, cursor cell, footer, and row alignment.
+`./ci/gpu-spike.sh` passed twenty tests (two native-shell, eight real-host, and
+ten isolated-renderer) plus the renderer dependency-boundary scan, and `cargo
+test -p mandatum-app --lib` passed all 248 tests. A displayed release smoke
+showed the real zoomed agent objective prompt, block cursor, and bounded footer,
+then Escape and Ctrl+Q closed it and the process cleanly. The final merge-gate
+result is recorded in `docs/verification.md`.
