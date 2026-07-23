@@ -312,6 +312,57 @@ fn real_host_two_horizontal_empty_panes_with_float_palette_reach_the_gpu_render_
 }
 
 #[test]
+fn real_host_two_horizontal_empty_palette_clips_long_wrapped_pane_detail() {
+    let project = DisposableProject::new("palette-occlusion");
+    let long_project_path = project
+        .path
+        .join("wrapped-project-segment".repeat(5))
+        .join("more-wrapped-detail".repeat(5));
+    std::fs::create_dir_all(&long_project_path)
+        .expect("long disposable project path should be writable");
+    let mut host = FrontendHost::new(AppConfig {
+        project_path: long_project_path.clone(),
+        workspace_file: long_project_path.join(".mandatum").join("workspace.json"),
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+    dispatch_palette_command(&mut host, 'v');
+    host.handle_input(InputEvent::Key(Key::ctrl('p')));
+
+    let snapshot = host.frame(frame_size);
+    let Some(OverlayScene::Palette(palette)) = &snapshot.scene.overlay else {
+        panic!("Float command transition did not produce the real Palette frame");
+    };
+    assert_eq!(snapshot.scene.panes.len(), 2);
+    assert_eq!(snapshot.scene.panes[0].area, SceneRect::new(0, 1, 40, 22));
+    assert_eq!(snapshot.scene.panes[1].area, SceneRect::new(40, 1, 40, 22));
+    assert_eq!(palette.area, layout::palette_overlay_rect(frame_size));
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real two-pane Palette frame");
+    let first_inner = layout::pane_inner_rect(snapshot.scene.panes[0].area);
+    assert!(
+        prepared.panes()[0].pane_text().chars().count() > usize::from(first_inner.width) * 4,
+        "real Empty detail was not long enough to wrap through the Palette area"
+    );
+
+    let visible = prepared
+        .pane_text_visible_areas(0)
+        .expect("first prepared pane should expose its visible body areas");
+    assert!(
+        visible.iter().all(|area| {
+            area.right() <= palette.area.x
+                || area.bottom() <= palette.area.y
+                || area.x >= palette.area.right()
+                || area.y >= palette.area.bottom()
+        }),
+        "underlying pane text remains paintable through the Palette: {visible:?}"
+    );
+}
+
+#[test]
 fn real_host_two_pane_stack_remains_unsupported_by_gpu_render_plan() {
     let mut host = FrontendHost::new(AppConfig {
         spawn_pty: false,

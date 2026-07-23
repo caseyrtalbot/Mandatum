@@ -212,12 +212,13 @@ neutral Ctrl+P and `v` followed by Ctrl+P and `f`. It proved tiled `pane-1` at
 `(0, 1, 80, 22)`, focused floating `pane-2` at `(8, 5, 72, 18)`, durable
 titles, exact layout flags, and complete Empty detail before first failing with
 `Layout("only two horizontal or vertical tiled Empty panes")`. The prepared
-plan now admits that exact default floating shape; the existing scene-order GPU
-path paints both pane records without recomputing their rectangles. The float
-paints an opaque background and clips lower-pane title/body glyph bounds around
-its scene-owned rectangle. An isolated negative matrix rejects overlays,
-forbidden flags, altered tiled or floating geometry, and mixed content. The
-first displayed attempt exposed the
+plan now admits that exact default floating shape by comparing against the
+scene layer's canonical `FloatingRect::default()` resolution and clamping
+result. The existing scene-order GPU path paints both pane records without
+owning layout policy. The float paints an opaque background and clips
+lower-pane title/body glyph bounds around its scene-owned rectangle. An
+isolated negative matrix rejects overlays, forbidden flags, altered tiled or
+floating geometry, and mixed content. The first displayed attempt exposed the
 real intermediate two-horizontal-Empty plus Palette frame required to dispatch
 Float; a second RED now covers that frame, and only that exact two-pane Palette
 route was admitted. A cold reviewer found that lower-pane glyphs could render
@@ -230,6 +231,24 @@ project path showed `2 pane(s)`, the tiled `terminal` clipped behind focused
 floating `terminal 2`, and complete Empty detail; Ctrl+Q exited 0 and no native
 or attempted-shell process remained. Stacked, broader floating, dense,
 mixed-content, and three-plus-pane layouts remain unsupported.
+
+Corrective verification (2026-07-23): focused RED first proved that the scene
+layer exposed no canonical default-float resolver and that the real
+two-horizontal-Empty Palette transition exposed no testable Palette-safe
+pane-text regions. `mandatum-scene` now resolves `FloatingRect::default()`
+through its existing clamp at both 80x24 and a small 6x3 viewport, and the
+adapter consumes that result. A real-host long-path regression proves Empty
+detail wraps through the Palette rows while all submitted pane-body glyph
+regions stay outside its opaque area. A cold-review negative test proves an
+altered Palette rectangle remains rejected, and a cold-recheck regression at
+9x5 proves pane-title glyphs are also removed from the Palette area.
+`./ci/gpu-spike.sh` passed 39 tests (two native-shell, seventeen real-host, and
+twenty isolated-renderer) plus the boundary scan; all 35 scene tests and all
+248 app library tests passed. A
+displayed 800x632 macOS smoke drove the exact Palette transition and default
+float from the same long-path missing-shell route; both opaque surfaces clipped
+underlying glyphs, Ctrl+Q exited 0, and no native or attempted-shell process
+remained. No additional scene shape or production surface was admitted.
 
 ## Verdict (read this first)
 
@@ -281,7 +300,10 @@ needed to dispatch Float. Broader multi-pane shapes and overlays still fail
 explicitly. The displayed renderer uses the scene's pane-inner geometry,
 chrome, terminal/task surface, scene-composed detail lines, status, palette,
 context-menu, timeline, session-map, prompt, Search, Help, and Welcome data
-rather than deriving product presentation itself.
+rather than deriving product presentation itself. Its narrow default-float
+recognition consumes `layout::default_floating_pane_rect`, so the core default
+and scene clamping calculation have one owner. Its pane-body paint plan also
+subtracts the opaque Palette area before submitting glyphs.
 
 The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
 relevant only to the historical 2026-07-09 benchmark evidence below. Both files

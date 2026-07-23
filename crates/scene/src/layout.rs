@@ -40,6 +40,12 @@ pub fn workspace_scene_area(size: SceneSize) -> SceneRect {
     }
 }
 
+/// Resolve the core product's default floating-pane intent inside the
+/// workspace area for a frame of `size`.
+pub fn default_floating_pane_rect(size: SceneSize) -> SceneRect {
+    floating_rect(workspace_scene_area(size), &FloatingRect::default())
+}
+
 /// The status strip rect at the bottom of the frame.
 pub fn status_rect(size: SceneSize) -> SceneRect {
     if size.height >= 3 {
@@ -561,6 +567,22 @@ mod tests {
         let floating = panes.iter().find(|pane| pane.floating).unwrap();
         assert_eq!(floating.pane_id, PaneId::new("pane-2"));
         assert_eq!(floating.area, SceneRect::new(8, 4, 96, 28));
+    }
+
+    #[test]
+    fn default_floating_pane_rect_resolves_the_product_80x24_viewport() {
+        assert_eq!(
+            default_floating_pane_rect(SceneSize::new(80, 24)),
+            SceneRect::new(8, 5, 72, 18)
+        );
+    }
+
+    #[test]
+    fn default_floating_pane_rect_clamps_inside_a_small_viewport() {
+        assert_eq!(
+            default_floating_pane_rect(SceneSize::new(6, 3)),
+            SceneRect::new(5, 1, 1, 1)
+        );
     }
 
     // Focusing a buried float must raise it: the focused float is always

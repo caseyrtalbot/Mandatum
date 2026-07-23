@@ -1958,3 +1958,48 @@ wrapping project path: the tiled pane remained clipped behind focused floating
 `terminal 2`, both panes showed complete Empty detail, Ctrl+Q exited 0, and no
 native or attempted-shell process remained. The final merge-gate result is
 recorded in `docs/verification.md`.
+
+## Accepted: Default-Float Recognition And Palette Occlusion Stay Scene-Bound
+
+Status: accepted (2026-07-23)
+
+Decision: correct the excluded GPU adapter without admitting another scene
+shape. `mandatum-scene::layout::default_floating_pane_rect` now resolves the
+core `FloatingRect::default()` inside the scene workspace through the existing
+floating-rect clamping calculation. The adapter recognizes its one supported
+default float by consuming that result instead of duplicating the default
+offsets, dimensions, and clamps. The exact admitted two-horizontal-Empty plus
+Palette transition now treats the Palette as opaque and subtracts its
+scene-owned area from every underlying pane title and body glyph region.
+
+Context: the adapter had copied the core default values and the scene clamping
+formula to recognize the supported float. A future core default or scene clamp
+change could therefore make it reject the real product scene despite the
+documented scene-owned layout boundary. Separately, the Palette background quad
+was submitted before all glyph text, while pane-text occlusion covered Search,
+Help, and Welcome only; long wrapped Empty detail could paint through the
+Palette during the real Float command transition.
+
+Rationale: one small public scene resolver keeps durable default intent and
+resolved geometry behind the existing layout module without moving product
+policy into the renderer. A headless visible-area plan makes the glyph
+occlusion used by displayed paint directly testable against a real
+`FrontendHost` frame rather than proving admission and geometry alone.
+
+Consequences: the already-supported default floating path and its narrow
+Palette transition are preserved. Stacked, moved/resized or additional
+floating panes, broader two-pane overlays, dense, mixed-content, and
+three-plus-pane scenes remain fail-closed. No app, runtime, command,
+persistence, production dependency, release allowlist, installer, Artifact
+Preview, or production-admission surface changes.
+
+Verification: focused RED runs first failed because the shared scene resolver
+and Palette-safe pane-text visibility plan did not exist. Focused GREEN proves
+default resolution at 80x24, clamping in a 6x3 viewport, and a real
+two-horizontal-Empty Palette frame whose deliberately long project path wraps
+through the overlay while every submitted pane-body glyph region remains
+outside it. Cold review added one negative test proving that altering the
+Palette's scene-resolved rectangle fails closed and one small-viewport
+regression proving pane-title glyphs are also removed from the opaque area.
+Full gate and displayed-smoke evidence are recorded in
+`docs/verification.md`.

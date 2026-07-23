@@ -763,6 +763,45 @@ Dated Phase 3 two-pane-floating-Empty increment (2026-07-23):
 - The final post-documentation `./ci/gate.sh` is run after cold review and this
   recorded result so the committed tree itself is the tree proved green.
 
+Dated overnight-pilot corrective slice 3 (2026-07-23):
+
+- The canonical default-float tracer first failed to compile because
+  `mandatum-scene` exposed no shared resolver. The real two-horizontal-Empty
+  Palette tracer then failed to compile because the prepared paint plan exposed
+  no Palette-safe pane-text visibility regions.
+- Focused GREEN proves the scene resolver produces `(8, 5, 72, 18)` for an
+  80x24 frame and clamps the same core `FloatingRect::default()` intent to
+  `(5, 1, 1, 1)` for a 6x3 frame. The adapter consumes that result instead of
+  copying the default offsets, dimensions, or clamping formula.
+- All 17 real-host tests pass. The added regression constructs the exact
+  admitted two-horizontal-Empty plus Palette frame from `FrontendHost` with a
+  deliberately long project path, proves its Empty detail wraps through the
+  Palette rows, and proves every pane-body glyph paint region is outside the
+  scene-owned Palette rectangle. All 20 isolated renderer tests and all 35
+  scene tests pass.
+- `./ci/gpu-spike.sh` passed 39 tests (two native-shell, seventeen real-host,
+  and twenty isolated-renderer) plus the renderer dependency-boundary scan.
+  `cargo test -p mandatum-app --lib` passed all 248 tests.
+- The first post-documentation `./ci/gate.sh` passed formatting, Clippy with
+  warnings denied, build, every workspace test, conformance, and doc trace.
+  The gate is rerun after cold recheck and this recorded result so the committed
+  tree itself is the tree proved green.
+- The displayed release smoke ran from the same long-path disposable project
+  with an intentionally missing shell in a visible 800x632 macOS window.
+  System Events drove Ctrl+P then `v`, reopened the real Palette, and screenshot
+  inspection showed wrapped base text only outside the opaque Palette.
+  Dispatching `f` produced the focused default float with lower-pane glyphs
+  clipped around it. Ctrl+Q exited 0, and no native-spike or attempted-shell
+  process remained.
+- The spike remains excluded from the product workspace/build/release. Stacked,
+  moved/resized or additional floating panes, broader two-pane overlays, dense,
+  mixed-content, and three-plus-pane scenes remain fail-closed. Artifact
+  Preview and production GPU admission remain pending. A cold-review correction
+  also proves an altered Palette rectangle is rejected rather than broadening
+  the exact transition admission. The cold recheck found a second
+  small-viewport title overlap; a focused RED/GREEN regression now proves
+  Palette occlusion applies to underlying pane titles as well as pane bodies.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

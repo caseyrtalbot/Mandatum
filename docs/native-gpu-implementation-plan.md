@@ -389,14 +389,16 @@ route followed by Ctrl+P then `f` Float pane after an 80x24 resize. The
 resulting scene contained tiled `pane-1` at `(0, 1, 80, 22)` and focused
 floating `pane-2` at `(8, 5, 72, 18)`, with durable titles, exact layout flags,
 and complete Empty detail. The prepared plan admits that default floating
-shape, and the existing scene-order GPU path paints the tiled pane before the
-float from their scene-owned rectangles. The float paints an opaque background,
-and lower-pane title/body glyph bounds are clipped around it so wrapped detail
-cannot bleed through. Displayed verification exposed the
-required intermediate two-horizontal-Empty plus Palette frame; one additional
-real-host RED now covers it, and admission is limited to that exact command
-route. Stacked, moved/resized or additional floating panes, dense,
-mixed-content, and three-plus-pane layouts remain explicitly unsupported.
+shape by calling the scene layer's canonical `FloatingRect::default()`
+resolution and clamping path, and the existing scene-order GPU path paints the
+tiled pane before the float from their scene-owned rectangles. The float paints
+an opaque background, and lower-pane title/body glyph bounds are clipped around
+it so wrapped detail cannot bleed through. Displayed verification exposed the
+required intermediate two-horizontal-Empty plus Palette frame; its opaque
+surface now clips wrapped underlying pane detail too. Real-host regressions
+cover that exact command transition, and admission remains limited to it.
+Stacked, moved/resized or additional floating panes, dense, mixed-content, and
+three-plus-pane layouts remain explicitly unsupported.
 
 Render every current scene:
 

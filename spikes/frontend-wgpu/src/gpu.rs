@@ -14,9 +14,9 @@ use glyphon::{
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, HelpEntry, HelpOverlay, OverlayScene, PaletteOverlay,
-    PaneContent, PaneScene, PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneColor, SearchEntry,
-    SearchOverlay, SessionMapOverlay, SessionMapRow, TerminalSurface, Theme, TimelineEntry,
-    TimelineOverlay, WelcomeOverlay, WorkspaceScene, layout,
+    PaneContent, PaneScene, PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneColor, SceneRect,
+    SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow, TerminalSurface, Theme,
+    TimelineEntry, TimelineOverlay, WelcomeOverlay, WorkspaceScene, layout,
 };
 use winit::window::Window;
 
@@ -146,6 +146,40 @@ impl PreparedScene<'_> {
     pub fn welcome(&self) -> Option<&WelcomeOverlay> {
         self.welcome
     }
+
+    pub fn pane_text_visible_areas(&self, pane_index: usize) -> Option<Vec<SceneRect>> {
+        let pane = self.panes.get(pane_index)?;
+        let mut visible = vec![layout::pane_inner_rect(pane.pane.area)];
+
+        if let Some((_, floating)) = self
+            .panes
+            .iter()
+            .enumerate()
+            .find(|(index, pane)| *index > pane_index && pane.pane.floating)
+        {
+            visible = visible
+                .into_iter()
+                .flat_map(|area| scene_rects_around_occlusion(area, floating.pane.area))
+                .collect();
+        }
+
+        if let Some(occlusion) = self.opaque_overlay_area() {
+            visible = visible
+                .into_iter()
+                .flat_map(|area| scene_rects_around_occlusion(area, occlusion))
+                .collect();
+        }
+
+        Some(visible)
+    }
+
+    fn opaque_overlay_area(&self) -> Option<SceneRect> {
+        self.palette
+            .map(|overlay| overlay.area)
+            .or_else(|| self.search.map(|overlay| overlay.area))
+            .or_else(|| self.help.map(|overlay| overlay.area))
+            .or_else(|| self.welcome.map(|overlay| overlay.area))
+    }
 }
 
 /// Prepare the deliberately narrow paint plan without a window or
@@ -223,8 +257,11 @@ fn is_two_horizontal_empty_panes(scene: &WorkspaceScene) -> bool {
 }
 
 fn is_two_horizontal_empty_panes_with_palette(scene: &WorkspaceScene) -> bool {
-    matches!(scene.overlay.as_ref(), Some(OverlayScene::Palette(_)))
-        && is_two_horizontal_empty_pane_geometry(scene)
+    matches!(
+        scene.overlay.as_ref(),
+        Some(OverlayScene::Palette(palette))
+            if palette.area == layout::palette_overlay_rect(scene.size)
+    ) && is_two_horizontal_empty_pane_geometry(scene)
 }
 
 fn is_two_horizontal_empty_pane_geometry(scene: &WorkspaceScene) -> bool {
@@ -283,28 +320,58 @@ fn is_two_floating_empty_panes(scene: &WorkspaceScene) -> bool {
         return false;
     };
     let workspace = layout::workspace_scene_area(scene.size);
-    let floating_x = workspace
-        .x
-        .saturating_add(8_u16.min(workspace.width.saturating_sub(1)));
-    let floating_y = workspace
-        .y
-        .saturating_add(4_u16.min(workspace.height.saturating_sub(1)));
-    let floating_width = 96_u16.min(workspace.right().saturating_sub(floating_x).max(1));
-    let floating_height = 28_u16.min(workspace.bottom().saturating_sub(floating_y).max(1));
+    let default_floating = layout::default_floating_pane_rect(scene.size);
 
     first.area == workspace
         && !first.floating
         && !first.stacked
         && !first.zoomed
-        && second.area.x == floating_x
-        && second.area.y == floating_y
-        && second.area.width == floating_width
-        && second.area.height == floating_height
+        && second.area == default_floating
         && second.floating
         && !second.stacked
         && !second.zoomed
         && matches!(first.content, PaneContent::Empty(_))
         && matches!(second.content, PaneContent::Empty(_))
+}
+
+fn scene_rects_around_occlusion(bounds: SceneRect, occlusion: SceneRect) -> Vec<SceneRect> {
+    let left = bounds.x.max(occlusion.x);
+    let top = bounds.y.max(occlusion.y);
+    let right = bounds.right().min(occlusion.right());
+    let bottom = bounds.bottom().min(occlusion.bottom());
+    if left >= right || top >= bottom {
+        return vec![bounds];
+    }
+
+    let mut visible = Vec::with_capacity(4);
+    if bounds.y < top {
+        visible.push(SceneRect::new(
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            top - bounds.y,
+        ));
+    }
+    if bottom < bounds.bottom() {
+        visible.push(SceneRect::new(
+            bounds.x,
+            bottom,
+            bounds.width,
+            bounds.bottom() - bottom,
+        ));
+    }
+    if bounds.x < left {
+        visible.push(SceneRect::new(bounds.x, top, left - bounds.x, bottom - top));
+    }
+    if right < bounds.right() {
+        visible.push(SceneRect::new(
+            right,
+            top,
+            bounds.right() - right,
+            bottom - top,
+        ));
+    }
+    visible
 }
 
 fn prepare_pane(pane: &PaneScene) -> PreparedPane<'_> {
@@ -637,6 +704,22 @@ fn text_bounds_below_later_float(
         }
         _ => vec![bounds],
     }
+}
+
+fn text_bounds_below_scene_occlusions(
+    bounds: TextBounds,
+    pane_index: usize,
+    floating_occlusion: Option<(usize, TextBounds)>,
+    opaque_overlay_occlusion: Option<TextBounds>,
+) -> Vec<TextBounds> {
+    let mut visible = text_bounds_below_later_float(bounds, pane_index, floating_occlusion);
+    if let Some(occlusion) = opaque_overlay_occlusion {
+        visible = visible
+            .into_iter()
+            .flat_map(|bounds| text_bounds_around_occlusion(bounds, occlusion))
+            .collect();
+    }
+    visible
 }
 
 fn session_map_line(row: &SessionMapRow, width: u16) -> String {
@@ -1017,8 +1100,6 @@ impl GpuText {
         struct PanePaint {
             origin_x: f32,
             origin_y: f32,
-            content_width: f32,
-            content_height: f32,
             title_x: f32,
             title_y: f32,
             title_width: f32,
@@ -1185,8 +1266,6 @@ impl GpuText {
             pane_paints.push(PanePaint {
                 origin_x,
                 origin_y,
-                content_width,
-                content_height,
                 title_x: (pane.area.x.saturating_add(1)) as f32 * self.cell_w,
                 title_y: pane.area.y as f32 * self.cell_h,
                 title_width,
@@ -1313,6 +1392,12 @@ impl GpuText {
                 palette.area.x as f32 * self.cell_w,
                 palette.area.y as f32 * self.cell_h,
             ));
+            overlay_clip = Some(TextBounds {
+                left: (palette.area.x as f32 * self.cell_w).floor() as i32,
+                top: (palette.area.y as f32 * self.cell_h).floor() as i32,
+                right: (palette.area.right() as f32 * self.cell_w).ceil() as i32,
+                bottom: (palette.area.bottom() as f32 * self.cell_h).ceil() as i32,
+            });
         } else if let Some(menu) = prepared.context_menu {
             let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
             let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
@@ -1975,6 +2060,12 @@ impl GpuText {
                     },
                 )
             });
+        let opaque_overlay_occlusion = prepared.opaque_overlay_area().map(|area| TextBounds {
+            left: (area.x as f32 * self.cell_w).floor() as i32,
+            top: (area.y as f32 * self.cell_h).floor() as i32,
+            right: (area.right() as f32 * self.cell_w).ceil() as i32,
+            bottom: (area.bottom() as f32 * self.cell_h).ceil() as i32,
+        });
         for (index, pane_paint) in pane_paints.iter().enumerate() {
             let title_bounds = TextBounds {
                 left: pane_paint.title_x.floor() as i32,
@@ -1982,7 +2073,12 @@ impl GpuText {
                 right: (pane_paint.title_x + pane_paint.title_width).ceil() as i32,
                 bottom: (pane_paint.title_y + self.cell_h).ceil() as i32,
             };
-            for bounds in text_bounds_below_later_float(title_bounds, index, floating_occlusion) {
+            for bounds in text_bounds_below_scene_occlusions(
+                title_bounds,
+                index,
+                floating_occlusion,
+                opaque_overlay_occlusion,
+            ) {
                 text_areas.push(TextArea {
                     buffer: &self.title_buffers[index],
                     left: pane_paint.title_x,
@@ -1997,23 +2093,16 @@ impl GpuText {
                     custom_glyphs: &[],
                 });
             }
-            let content_bounds = TextBounds {
-                left: pane_paint.origin_x.floor() as i32,
-                top: pane_paint.origin_y.floor() as i32,
-                right: (pane_paint.origin_x + pane_paint.content_width).ceil() as i32,
-                bottom: (pane_paint.origin_y + pane_paint.content_height).ceil() as i32,
-            };
-            let mut pane_text_bounds =
-                text_bounds_below_later_float(content_bounds, index, floating_occlusion);
-            if prepared.search.is_some() || prepared.help.is_some() || prepared.welcome.is_some() {
-                let opaque_overlay =
-                    overlay_clip.expect("prepared opaque text overlay always sets its clip bounds");
-                pane_text_bounds = pane_text_bounds
-                    .into_iter()
-                    .flat_map(|bounds| text_bounds_around_occlusion(bounds, opaque_overlay))
-                    .collect();
-            }
-            for bounds in pane_text_bounds {
+            let visible_areas = prepared
+                .pane_text_visible_areas(index)
+                .expect("pane paint index must match the prepared pane");
+            for area in visible_areas {
+                let bounds = TextBounds {
+                    left: (area.x as f32 * self.cell_w).floor() as i32,
+                    top: (area.y as f32 * self.cell_h).floor() as i32,
+                    right: (area.right() as f32 * self.cell_w).ceil() as i32,
+                    bottom: (area.bottom() as f32 * self.cell_h).ceil() as i32,
+                };
                 text_areas.push(TextArea {
                     buffer: &self.text_buffers[index],
                     left: pane_paint.origin_x,
@@ -2627,6 +2716,29 @@ mod tests {
     }
 
     #[test]
+    fn palette_occlusion_clips_pane_titles_at_small_admitted_viewports() {
+        let size = SceneSize::new(9, 5);
+        let palette = layout::palette_overlay_rect(size);
+        assert_eq!(palette, SceneRect::new(1, 1, 7, 3));
+        let title = TextBounds {
+            left: 1,
+            top: 1,
+            right: 3,
+            bottom: 2,
+        };
+        let palette_bounds = TextBounds {
+            left: i32::from(palette.x),
+            top: i32::from(palette.y),
+            right: i32::from(palette.right()),
+            bottom: i32::from(palette.bottom()),
+        };
+
+        assert!(
+            text_bounds_below_scene_occlusions(title, 0, None, Some(palette_bounds)).is_empty()
+        );
+    }
+
+    #[test]
     fn floating_pane_occlusion_clips_long_wrapped_empty_detail_from_the_tiled_pane() {
         let empty = PaneContent::Empty(EmptyContent {
             cwd_label: format!("/{}", "long-project-segment/".repeat(8)),
@@ -2894,6 +3006,43 @@ mod tests {
         ]);
         assert_eq!(
             prepare_scene(&multiple, &Theme::default()).unwrap_err(),
+            UnsupportedScene::Layout(
+                "only two horizontal or vertical tiled, or default floating Empty panes"
+            )
+        );
+    }
+
+    #[test]
+    fn horizontal_empty_palette_admission_requires_the_scene_resolved_area() {
+        let empty = || {
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            })
+        };
+        let mut first = pane(PaneSceneKind::Terminal, empty());
+        first.area = SceneRect::new(0, 1, 40, 22);
+        first.focused = false;
+        let mut second = pane(PaneSceneKind::Terminal, empty());
+        second.id = PaneId::new("pane-2");
+        second.title = "terminal 2".to_owned();
+        second.area = SceneRect::new(40, 1, 40, 22);
+        let mut candidate = scene(vec![first, second]);
+        candidate.size = SceneSize::new(80, 24);
+        let mut palette = PaletteOverlay {
+            area: layout::palette_overlay_rect(candidate.size),
+            query: String::new(),
+            items: Vec::new(),
+            selected: None,
+            footer: String::new(),
+        };
+        candidate.overlay = Some(OverlayScene::Palette(palette.clone()));
+        assert!(prepare_scene(&candidate, &Theme::default()).is_ok());
+
+        palette.area.x = palette.area.x.saturating_add(1);
+        candidate.overlay = Some(OverlayScene::Palette(palette));
+        assert_eq!(
+            prepare_scene(&candidate, &Theme::default()).unwrap_err(),
             UnsupportedScene::Layout(
                 "only two horizontal or vertical tiled, or default floating Empty panes"
             )

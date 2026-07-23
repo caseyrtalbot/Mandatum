@@ -245,9 +245,13 @@ pane beneath one default-position floating Empty pane, including rectangles,
 titles, focus, and details. The prepared GPU plan retains one paint record per
 pane and the adapter paints them in scene order. The exact floating command
 route also admits its intermediate two-horizontal-Empty plus Palette frame.
-The float is an opaque surface, and lower-pane title/body glyph bounds are
-clipped around its scene-owned rectangle. The renderer neither recomputes
-layout nor admits other multi-pane shapes.
+The float and Palette are opaque surfaces, and underlying pane glyph bounds are
+clipped around their scene-owned rectangles. Default-float recognition calls
+the scene layer's canonical resolver, which applies `FloatingRect::default()`
+through the same clamping calculation used by scene construction; the adapter
+contains no duplicate default geometry or pane-layout calculation. It still
+validates the exact admitted flags, content, and geometry and rejects other
+multi-pane shapes.
 Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
 state remain frontend-local.
