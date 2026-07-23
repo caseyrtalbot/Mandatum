@@ -14,7 +14,7 @@ use glyphon::{
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, OverlayScene, PaletteOverlay, PaneContent, PaneScene,
-    SceneColor, TerminalSurface, Theme, WorkspaceScene, layout,
+    SceneColor, TerminalSurface, Theme, TimelineEntry, TimelineOverlay, WorkspaceScene, layout,
 };
 use winit::window::Window;
 
@@ -59,6 +59,7 @@ pub struct PreparedScene<'a> {
     body_wrap: Wrap,
     palette: Option<&'a PaletteOverlay>,
     context_menu: Option<&'a ContextMenuOverlay>,
+    timeline: Option<&'a TimelineOverlay>,
 }
 
 impl PreparedScene<'_> {
@@ -88,6 +89,10 @@ impl PreparedScene<'_> {
 
     pub fn context_menu(&self) -> Option<&ContextMenuOverlay> {
         self.context_menu
+    }
+
+    pub fn timeline(&self) -> Option<&TimelineOverlay> {
+        self.timeline
     }
 }
 
@@ -130,16 +135,16 @@ pub fn prepare_scene<'a>(
             (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
         }
     };
-    let (palette, context_menu) = match &scene.overlay {
-        Some(OverlayScene::Palette(palette)) => (Some(palette), None),
-        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu)),
-        Some(OverlayScene::Timeline(_)) => return Err(UnsupportedScene::Overlay("timeline")),
+    let (palette, context_menu, timeline) = match &scene.overlay {
+        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None),
+        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None),
+        Some(OverlayScene::Timeline(timeline)) => (None, None, Some(timeline)),
         Some(OverlayScene::SessionMap(_)) => return Err(UnsupportedScene::Overlay("session map")),
         Some(OverlayScene::Prompt(_)) => return Err(UnsupportedScene::Overlay("prompt")),
         Some(OverlayScene::Search(_)) => return Err(UnsupportedScene::Overlay("search")),
         Some(OverlayScene::Help(_)) => return Err(UnsupportedScene::Overlay("help")),
         Some(OverlayScene::Welcome(_)) => return Err(UnsupportedScene::Overlay("welcome")),
-        None => (None, None),
+        None => (None, None, None),
     };
     Ok(PreparedScene {
         scene,
@@ -151,6 +156,7 @@ pub fn prepare_scene<'a>(
         body_wrap,
         palette,
         context_menu,
+        timeline,
     })
 }
 
@@ -197,6 +203,50 @@ fn context_menu_line(item: &ContextMenuEntry, width: u16) -> String {
         hint = item.chord_hint
     );
     fit_cell_line(&line, width as u16)
+}
+
+fn timeline_line(item: &TimelineEntry, width: u16) -> String {
+    fit_cell_line(
+        &format!(" {} {:>10}  {}", item.glyph, item.when, item.text),
+        width,
+    )
+}
+
+fn timeline_outer_line(content: &str, inner_width: u16) -> String {
+    format!(" {}", fit_cell_line(content, inner_width))
+}
+
+fn timeline_lines(timeline: &TimelineOverlay) -> Vec<String> {
+    let inner = layout::pane_inner_rect(timeline.area);
+    let window = layout::palette_item_window(inner, timeline.items.len(), timeline.selected);
+    let mut lines = vec![String::new(); usize::from(timeline.area.height)];
+    if !lines.is_empty() {
+        lines[0] = " Timeline ".to_owned();
+    }
+    if lines.len() > 1 {
+        let input = if timeline.query.is_empty() {
+            "> type to filter · pane:<id> kind:<family> since:<5m>".to_owned()
+        } else {
+            format!("> {}_", timeline.query)
+        };
+        lines[1] = timeline_outer_line(&input, inner.width);
+    }
+    if timeline.items.is_empty() && lines.len() > 2 {
+        lines[2] = timeline_outer_line(" no matching events", inner.width);
+    }
+    for (row, index) in window.enumerate() {
+        if let Some(slot) = lines.get_mut(row + 2) {
+            *slot = timeline_outer_line(
+                &timeline_line(&timeline.items[index], inner.width),
+                inner.width,
+            );
+        }
+    }
+    if lines.len() > 1 {
+        let footer_row = lines.len() - 2;
+        lines[footer_row] = timeline_outer_line(&format!(" {}", timeline.footer), inner.width);
+    }
+    lines
 }
 
 pub struct GpuText {
@@ -695,6 +745,7 @@ impl GpuText {
             .shape_until_scroll(&mut self.font_system, false);
 
         let mut overlay_position = None;
+        let mut overlay_clip = None;
         if let Some(palette) = prepared.palette {
             let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
             push_quad(
@@ -837,6 +888,101 @@ impl GpuText {
             self.overlay_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             overlay_position = Some((inner.x as f32 * self.cell_w, inner.y as f32 * self.cell_h));
+        } else if let Some(timeline) = prepared.timeline {
+            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
+            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
+            let timeline_x = timeline.area.x as f32 * self.cell_w;
+            let timeline_y = timeline.area.y as f32 * self.cell_h;
+            let timeline_width = timeline.area.width as f32 * self.cell_w;
+            let timeline_height = timeline.area.height as f32 * self.cell_h;
+            push_quad(
+                &mut quads,
+                timeline_x,
+                timeline_y,
+                timeline_width,
+                timeline_height,
+                overlay_bg_rgba,
+            );
+            if timeline.area.width > 0 && timeline.area.height > 0 {
+                let border = resolve(theme.palette_border, DEFAULT_FG);
+                let border_rgba = [border[0], border[1], border[2], 255];
+                push_quad(
+                    &mut quads,
+                    timeline_x,
+                    timeline_y,
+                    timeline_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    timeline_x,
+                    timeline_y + timeline_height - 1.0,
+                    timeline_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    timeline_x,
+                    timeline_y,
+                    1.0,
+                    timeline_height,
+                    border_rgba,
+                );
+                push_quad(
+                    &mut quads,
+                    timeline_x + timeline_width - 1.0,
+                    timeline_y,
+                    1.0,
+                    timeline_height,
+                    border_rgba,
+                );
+            }
+
+            let inner = layout::pane_inner_rect(timeline.area);
+            let window =
+                layout::palette_item_window(inner, timeline.items.len(), timeline.selected);
+            for (row, index) in window.enumerate() {
+                if timeline.selected == Some(index) {
+                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
+                    push_quad(
+                        &mut quads,
+                        inner.x as f32 * self.cell_w,
+                        (inner.y + 1 + row as u16) as f32 * self.cell_h,
+                        inner.width as f32 * self.cell_w,
+                        self.cell_h,
+                        [selection[0], selection[1], selection[2], 190],
+                    );
+                }
+            }
+
+            let overlay_text = timeline_lines(timeline).join("\n");
+            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            self.overlay_buffer.set_wrap(Wrap::None);
+            self.overlay_buffer.set_size(
+                Some(timeline_width.max(1.0)),
+                Some(timeline_height.max(1.0)),
+            );
+            self.overlay_buffer.set_text(
+                &overlay_text,
+                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                    overlay_fg[0],
+                    overlay_fg[1],
+                    overlay_fg[2],
+                )),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            overlay_position = Some((timeline_x, timeline_y));
+            overlay_clip = Some(TextBounds {
+                left: timeline_x.floor() as i32,
+                top: timeline_y.floor() as i32,
+                right: (timeline_x + timeline_width).ceil() as i32,
+                bottom: (timeline_y + timeline_height).ceil() as i32,
+            });
         }
 
         // Upload quad instances (grow buffer if needed).
@@ -925,7 +1071,7 @@ impl GpuText {
                 left,
                 top,
                 scale: 1.0,
-                bounds: full,
+                bounds: overlay_clip.unwrap_or(full),
                 default_color: GColor::rgb(overlay_fg[0], overlay_fg[1], overlay_fg[2]),
                 custom_glyphs: &[],
             });
@@ -1115,7 +1261,7 @@ mod tests {
     use mandatum_scene::{
         AgentContent, AgentStatus, ContextMenuEntry, ContextMenuOverlay, EmptyContent, HeaderScene,
         OverlayScene, PaneId, PaneSceneKind, SceneCell, SceneRect, SceneSize, StatusScene,
-        TaskContent, WelcomeOverlay,
+        TaskContent, TimelineEntry, TimelineOverlay, WelcomeOverlay,
     };
 
     fn terminal_content() -> PaneContent {
@@ -1274,6 +1420,83 @@ mod tests {
         assert!(lines[0].starts_with(" Zoom pane"));
         assert!(lines[0].ends_with("ctrl+p z"));
         assert_eq!(lines[0].chars().count(), usize::from(inner.width) - 1);
+    }
+
+    #[test]
+    fn timeline_plan_preserves_scene_data_geometry_and_row_alignment() {
+        let mut with_timeline = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let timeline = TimelineOverlay {
+            area: SceneRect::new(3, 4, 54, 8),
+            query: "task".to_owned(),
+            items: vec![
+                TimelineEntry {
+                    glyph: "✗".to_owned(),
+                    when: "2m ago".to_owned(),
+                    text: "task pane-2 failed: exit 3".to_owned(),
+                    pane: Some(PaneId::new("pane-2")),
+                },
+                TimelineEntry {
+                    glyph: "▶".to_owned(),
+                    when: "3m ago".to_owned(),
+                    text: "task pane-2 started".to_owned(),
+                    pane: Some(PaneId::new("pane-2")),
+                },
+            ],
+            selected: Some(1),
+            skipped_malformed: 1,
+            footer: "enter jump · esc close · 1 malformed line(s) skipped".to_owned(),
+        };
+        with_timeline.overlay = Some(OverlayScene::Timeline(timeline.clone()));
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&with_timeline, &theme).unwrap();
+        let prepared_timeline = prepared
+            .timeline()
+            .expect("timeline scene data was not retained");
+        let lines = timeline_lines(prepared_timeline);
+
+        assert_eq!(prepared_timeline, &timeline);
+        assert_eq!(lines.len(), usize::from(timeline.area.height));
+        assert_eq!(lines[0], " Timeline ");
+        assert_eq!(lines[1], " > task_");
+        assert!(lines[2].contains("✗"));
+        assert!(lines[2].contains("2m ago"));
+        assert!(lines[2].contains("failed: exit 3"));
+        assert!(lines[lines.len() - 2].starts_with("  enter jump"));
+        assert!(lines.iter().skip(1).all(|line| {
+            line.chars().count() <= usize::from(layout::pane_inner_rect(timeline.area).width) + 1
+        }));
+        assert!(lines.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn timeline_plan_paints_the_empty_filter_state_inside_the_inner_bounds() {
+        let mut with_timeline = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let timeline = TimelineOverlay {
+            area: SceneRect::new(3, 4, 24, 7),
+            query: "missing".to_owned(),
+            items: Vec::new(),
+            selected: None,
+            skipped_malformed: 0,
+            footer: "footer text that must stay inside the overlay border".to_owned(),
+        };
+        with_timeline.overlay = Some(OverlayScene::Timeline(timeline.clone()));
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&with_timeline, &theme).unwrap();
+        let lines = timeline_lines(prepared.timeline().unwrap());
+        let inner_width = usize::from(layout::pane_inner_rect(timeline.area).width);
+
+        assert_eq!(lines[1], " > missing_");
+        assert_eq!(lines[2], "  no matching events");
+        assert!(lines[lines.len() - 2].starts_with(' '));
+        assert!(
+            lines
+                .iter()
+                .skip(1)
+                .all(|line| line.chars().count() <= inner_width + 1)
+        );
+        assert!(lines.last().unwrap().is_empty());
     }
 
     #[test]

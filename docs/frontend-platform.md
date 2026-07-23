@@ -101,11 +101,11 @@ self-instrumenting latency/frame-time measurement. Phase 2 then replaced that
 spike-local PTY/parser/input state machine with the product's real
 `FrontendHost`: winit emits neutral `InputEvent` values, the host's coalesced
 wake callback drives `EventLoopProxy`, typed clipboard effects return to the
-native shell, and the GPU renderer paints the real header, one terminal pane,
-one task pane with optional live output, one agent pane, status strip, and
-command palette from `FrameSnapshot` scene/theme data. Phase 3 remains underway;
-empty content, multi-pane layouts, remaining overlays, and broader input parity
-are still explicit gaps.
+native shell, and the GPU renderer paints the real header, one terminal, task,
+agent, or Empty pane, status strip, command palette, context menu, and execution
+timeline from `FrameSnapshot` scene/theme data. Phase 3 remains underway;
+multi-pane layouts, remaining overlays, and broader input parity are still
+explicit gaps.
 
 The adapter remains outside the Cargo workspace, product build, release
 artifacts, and merge gate. The opt-in `./ci/gpu-spike.sh` maintenance check runs
@@ -195,7 +195,8 @@ platform effects, migrates the terminal shell first, and only then connects the
 excluded native adapter to real workstation state. Phases 1 and 2 are complete:
 the terminal and excluded native shells now exercise the same host, runtime,
 neutral input, scene, wake, and typed-effect boundaries. Phase 3 is underway:
-the first scene-only increment covers real one-pane task and agent content.
-Empty content, restore, multi-pane layouts, remaining overlays, and broader
-input parity remain. Selecting the capability branch does not weaken the
-production conformance gate, and Artifact Preview remains unbuilt.
+scene-only increments cover real one-pane task and agent content, the Empty
+fallback, context menu, and execution timeline. Restore, multi-pane layouts,
+remaining overlays, and broader input parity remain. Selecting the capability
+branch does not weaken the production conformance gate, and Artifact Preview
+remains unbuilt.

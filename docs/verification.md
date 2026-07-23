@@ -420,6 +420,39 @@ Dated Phase 3 context-menu increment (2026-07-22):
   build, all workspace tests, conformance, and documentation trace checks after
   the synchronized documentation edits.
 
+Dated Phase 3 timeline increment (2026-07-22):
+
+- The required real-host tracer bullet used a writable disposable workspace
+  file with PTY spawning disabled, drove the real Show timeline palette route
+  through neutral Ctrl+P then `/` input, and proved the next product frame
+  contained `OverlayScene::Timeline` with the recorded `show-timeline` dispatch.
+  Before implementation, `prepare_scene` failed at runtime with
+  `UnsupportedScene::Overlay("timeline")`.
+- The focused GREEN proves that exact product timeline reaches the prepared GPU
+  plan unchanged, including its resolved area, selected row, and timeline-item
+  hit target. The isolated renderer test covers the retained query, ordered
+  glyph/time/text rows, selection, footer, outer/inner row alignment, bounded
+  overlay text, and the explicit `no matching events` state.
+- `./ci/gpu-spike.sh` passed sixteen tests (two native-shell tests, six
+  real-host integration tests, and eight isolated-renderer tests) plus the
+  renderer dependency-boundary scan. `cargo test -p mandatum-app --lib` passed
+  all 248 tests.
+- The displayed release build ran on macOS from a writable disposable project
+  with an intentionally missing shell. The real Empty pane and product chrome
+  remained visible beneath a centered bordered Timeline; the selected recorded
+  dispatch, glyph, relative time, filter prompt, live `show` query, and footer
+  painted. A second displayed pass confirmed a `zzzz` filter paints
+  `no matching events` and keeps query/footer text inside the border. Escape
+  closed the overlay, Ctrl+Q exited cleanly, and no native-spike or
+  attempted-shell process remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Multiple panes, remaining overlays, broader input,
+  restore, Artifact Preview, and production admission remain separately gated.
+- The post-documentation `./ci/gate.sh` passed formatting, Clippy with warnings
+  denied, build, all workspace tests, conformance, and documentation trace
+  checks.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

@@ -1,8 +1,8 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the context-menu overlay increment is complete; production GPU admission
-pending (2026-07-22).
+the timeline overlay increment is complete; production GPU admission pending
+(2026-07-22).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -287,6 +287,17 @@ The displayed macOS smoke kept the real Empty pane, header, status, geometry,
 and theme beneath the bordered menu. Additional overlays, multi-pane layouts,
 restore, and broader input/theme/style parity remain explicitly unsupported.
 
+Fourth narrow increment complete (2026-07-22): a writable disposable project
+and fresh real `FrontendHost` recorded the existing Show timeline dispatch,
+then the neutral palette `/` route produced `OverlayScene::Timeline` over the
+supported Empty pane. The excluded render plan retains and paints the scene's
+resolved area, query, windowed event rows, selected index, skipped-malformed
+footer, and existing semantic theme roles. The displayed macOS smoke kept the
+real Empty pane and product chrome beneath the bordered timeline, painted the
+recorded event and live `show` filter, closed with Escape, and quit cleanly.
+Additional overlays, multi-pane layouts, restore, and broader
+input/theme/style parity remain explicitly unsupported.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -424,9 +435,9 @@ the date, environment, command, endpoint, and result.
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one scene-only increment:
 add a failing real-`FrontendHost` headless test for a product-generated
-`OverlayScene::Timeline` over one supported pane, then extend `prepare_scene`
-and displayed GPU paint to render only the existing timeline scene data and
+`OverlayScene::SessionMap` over one supported pane, then extend `prepare_scene`
+and displayed GPU paint to render only the existing session-map scene data and
 geometry. Preserve terminal/task/agent/Empty, header, one-pane geometry,
-status, theme, palette, and context-menu behavior. Stop before multi-pane
-layout, additional overlay variants, broader input, restore, Artifact Preview,
-or production admission.
+status, theme, palette, context-menu, and timeline behavior. Stop before
+multi-pane layout, additional overlay variants, broader input, restore,
+Artifact Preview, or production admission.

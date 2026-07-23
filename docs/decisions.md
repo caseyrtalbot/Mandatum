@@ -1535,3 +1535,45 @@ scan, and `cargo test -p mandatum-app --lib` passed all 248 tests. A displayed
 release smoke showed the real menu over the failed-PTY Empty state, then Escape
 and Ctrl+Q closed it and the process cleanly. The final merge-gate result is
 recorded in `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers The Product Timeline
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one scene-only increment that accepts and
+paints a real `OverlayScene::Timeline` emitted by `FrontendHost` over any
+already-supported one-pane scene. The prepared plan retains the existing
+resolved area, query, ordered glyph/time/text rows, selected index,
+skipped-malformed count, and footer. Displayed paint uses the existing overlay
+background, palette border, foreground, and selection theme roles without
+changing the scene contract.
+
+Context: the app already records a command dispatch before it opens the durable
+timeline, reads the tail from the writable project surface, composes the filter
+query and visible event window, and builds row hit targets from shared layout
+math. The excluded renderer was rejecting that complete product scene even
+though no additional app, runtime, or timeline-log access was required.
+
+Rationale: retaining `TimelineOverlay` in the headless paint plan keeps durable
+history, filtering, selection, glyph meaning, relative-time text, and geometry
+in the app and scene layers. The same prepared data drives the displayed
+background, border, title, filter prompt, selected event row, and pinned footer.
+Scalar-character fitting remains deliberate here; grapheme and wide-cell
+correctness remain Phase 4 work.
+
+Consequences: no app, runtime, scene, workspace, production dependency,
+allowlist, installer, default command, or release surface changes. Multiple
+panes, the remaining overlay variants, full input/theme/style parity, restore,
+Artifact Preview, and production GPU admission remain separately gated. The
+next slice is the existing one-pane session-map overlay only.
+
+Verification: the real-host test recorded the initial
+`UnsupportedScene::Overlay("timeline")` failure, then passed with the product
+timeline retained unchanged by the prepared plan. The isolated renderer test
+covers area, query, rows, selection, footer, and row alignment.
+`./ci/gpu-spike.sh` passed sixteen tests plus the renderer dependency-boundary
+scan, and `cargo test -p mandatum-app --lib` passed all 248 tests. A displayed
+release smoke showed the recorded event, live `show` filter, and bounded
+`no matching events` state over the failed-PTY Empty state, then Escape and
+Ctrl+Q closed it and the process cleanly. The final merge-gate result is
+recorded in `docs/verification.md`.

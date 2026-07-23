@@ -114,12 +114,13 @@ more useful without pretending the wider vision is finished:
   real `FrontendHost`, wakes through `EventLoopProxy`, translates neutral input,
   and paints the real header, terminal pane, status strip, and command palette
   without its former duplicate PTY/parser state machine. Phase 3 is underway:
-  its first narrow increment paints real one-pane task and agent content,
-  including live task output, from the existing scene data. Empty pane content
-  is the next scene-only increment; multi-pane layouts, remaining overlays,
-  broader input, and restore remain parity work. Production GPU dependencies and release
-  admission remain blocked until the typed artifact scene surface, adapter
-  tests, and later admission decision exist; Artifact Preview remains unbuilt.
+  its scene-only increments now paint real one-pane task and agent content,
+  including live task output, the Empty fallback, the context menu, and the
+  execution timeline from existing scene data. Multi-pane layouts, remaining
+  overlays, broader input, and restore remain parity work. Production GPU
+  dependencies and release admission remain blocked until the typed artifact
+  scene surface, adapter tests, and later admission decision exist; Artifact
+  Preview remains unbuilt.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.

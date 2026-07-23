@@ -217,7 +217,9 @@ neutral `InputEvent` values, and paints the host's real scene header, terminal
 pane, task pane with optional live output, agent pane, status strip, and command
 palette. It also paints the product's Empty fallback from its scene-composed
 cwd, restart-generation, and no-live-grid detail lines, plus the existing
-context-menu area, rows, chord hints, and selection. Its former
+context-menu area, rows, chord hints, and selection. The execution timeline is
+also scene-bound: its resolved area, filter query, windowed durable-event rows,
+selected index, and footer pass unchanged through the prepared GPU plan. Its former
 `TerminalSession`, direct parser/input path, and `scene_bridge` are removed; its
 window, platform-input translation, GPU, and paint-scheduling state remain
 frontend-local.
@@ -229,9 +231,10 @@ model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 Phase 3 is underway. Terminal, task, agent, and Empty one-pane content plus the
-palette and context-menu overlays are now covered. Restore handling, multi-pane
-layouts, remaining overlays, and broader scene/input parity remain. Artifact
-Preview and production GPU admission remain later, separately gated decisions.
+palette, context-menu, and timeline overlays are now covered. Restore handling,
+multi-pane layouts, remaining overlays, and broader scene/input parity remain.
+Artifact Preview and production GPU admission remain later, separately gated
+decisions.
 
 ### `workflows`
 

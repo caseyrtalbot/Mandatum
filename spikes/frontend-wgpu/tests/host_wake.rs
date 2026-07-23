@@ -1,5 +1,8 @@
 use std::{
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -8,11 +11,36 @@ use mandatum_gpu_renderer_spike::prepare_scene;
 use mandatum_scene::{
     HitTargetKind, OverlayScene, PaneContent, SceneSize,
     input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
+    layout,
 };
 
 fn dispatch_palette_command(host: &mut FrontendHost, key: char) {
     host.handle_input(InputEvent::Key(Key::ctrl('p')));
     host.handle_input(InputEvent::Key(Key::plain(KeyCode::Char(key))));
+}
+
+struct DisposableProject {
+    path: std::path::PathBuf,
+}
+
+impl DisposableProject {
+    fn new(label: &str) -> Self {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "mandatum-gpu-host-{label}-{}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("disposable project directory should be writable");
+        Self { path }
+    }
+}
+
+impl Drop for DisposableProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 #[test]
@@ -82,6 +110,47 @@ fn real_host_context_menu_reaches_the_gpu_render_plan() {
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real context-menu scene");
     assert_eq!(prepared.context_menu(), Some(menu));
+}
+
+#[test]
+fn real_host_timeline_reaches_the_gpu_render_plan() {
+    let project = DisposableProject::new("timeline");
+    let mut host = FrontendHost::new(AppConfig {
+        project_path: project.path.clone(),
+        workspace_file: project.path.join(".mandatum").join("workspace.json"),
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+
+    dispatch_palette_command(&mut host, '/');
+
+    let snapshot = host.frame(frame_size);
+    let Some(OverlayScene::Timeline(timeline)) = &snapshot.scene.overlay else {
+        panic!("Show timeline did not produce the real timeline scene");
+    };
+    assert_eq!(timeline.area, layout::timeline_overlay_rect(frame_size));
+    assert_eq!(timeline.selected, Some(0));
+    assert!(
+        timeline
+            .items
+            .iter()
+            .any(|item| item.text.contains("dispatched show-timeline")),
+        "timeline did not retain the recorded Show timeline dispatch: {:?}",
+        timeline.items
+    );
+    assert!(
+        snapshot
+            .scene
+            .hit_targets
+            .iter()
+            .any(|target| matches!(target.kind, HitTargetKind::TimelineItem(0)))
+    );
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real timeline scene");
+    assert_eq!(prepared.timeline(), Some(timeline));
 }
 
 #[test]

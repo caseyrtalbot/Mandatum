@@ -1,11 +1,11 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 underway; one-pane content and the context menu are covered.**
+Status: **Phase 3 underway; one-pane content, context menu, and timeline are covered.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, one terminal, task, agent, or Empty pane, status
-strip, command palette, and context menu on the GPU. Typed clipboard effects
-return to the native shell.
+strip, command palette, context menu, and execution timeline on the GPU. Typed
+clipboard effects return to the native shell.
 
 This remains an isolated frontend outside the Cargo workspace (the root
 `Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
@@ -64,6 +64,21 @@ the first selected, closed with Escape, and quit with Ctrl+Q without leaving a
 native or attempted-shell process. Multi-pane layouts, remaining overlays,
 restore, broader input, Artifact Preview, and production admission remain.
 
+Phase 3 timeline verification (2026-07-22): a real-host tracer bullet used a
+writable disposable workspace with PTY spawning disabled, drove the neutral
+Ctrl+P then `/` route, proved `OverlayScene::Timeline` contained the recorded
+Show timeline dispatch, and first failed with `Overlay("timeline")`. The final
+plan retains the resolved area, query, ordered glyph/time/text rows, selected
+index, skipped-malformed count, footer, and explicit no-match state.
+`./ci/gpu-spike.sh` passed sixteen tests plus the renderer-boundary scan, and all
+248 app library tests passed. A
+displayed missing-shell smoke kept the real Empty pane and product chrome
+beneath a centered bordered Timeline, painted the selected event and live
+`show` filter, and confirmed a `zzzz` query paints `no matching events` without
+crossing the border. It closed with Escape and quit with Ctrl+Q without leaving
+a native or attempted-shell process. Multi-pane layouts, remaining overlays,
+restore, broader input, Artifact Preview, and production admission remain.
+
 ## Verdict (read this first)
 
 The 2026-07-09 GPU run showed a **measured, roughly 2x latency advantage** over
@@ -106,11 +121,12 @@ How the current boundary is enforced:
 
 `prepare_scene` is the window/GPU-free renderer seam used by the controlled
 integration test and by the displayed renderer. It accepts the real header,
-one terminal, task, agent, or Empty pane, status, theme, and optional palette or
-context menu while explicitly rejecting multiple panes and unsupported
-overlays. The displayed renderer uses the scene's pane-inner geometry, chrome,
-terminal/task surface, scene-composed detail lines, status, palette, and
-context-menu data rather than deriving product presentation itself.
+one terminal, task, agent, or Empty pane, status, theme, and optional palette,
+context menu, or timeline while explicitly rejecting multiple panes and
+unsupported overlays. The displayed renderer uses the scene's pane-inner
+geometry, chrome, terminal/task surface, scene-composed detail lines, status,
+palette, context-menu, and timeline data rather than deriving product
+presentation itself.
 
 The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
 relevant only to the historical 2026-07-09 benchmark evidence below. Both files
@@ -276,22 +292,24 @@ panic, exit 0).
   selection, command routing, and quit behavior remain behind the host.
 - Cmd+V reads arboard into `InputEvent::Paste`; typed
   `FrontendEffect::SetClipboard` values are drained back to arboard.
-- The real scene header, focused terminal pane and chrome, status strip, and
-  Ctrl+P command palette render from scene/theme data. Escape closes the real
-  palette and Ctrl+Q performs the real host quit path.
+- The real scene header, focused pane and chrome, status strip, Ctrl+P command
+  palette, context menu, and execution timeline render from scene/theme data.
+  Escape closes the real overlays and Ctrl+Q performs the real host quit path.
 - Real one-pane task scenes render scene-composed command/cwd/runtime metadata
   with tail-preserving one-row fitting plus the live task output surface below;
   real one-pane agent scenes render wrapped objective/status/action/approval/
   changed-file detail from the same scene contract.
+- Real one-pane Empty scenes render the scene-composed cwd, restart generation,
+  and no-live-grid detail without querying app or runtime state.
 - Window resize and scale changes recompute scene cell dimensions and send a
   neutral resize to the host; the app/runtime owns PTY and parser resizing.
 - ANSI color: 16-color, 256-color cube, grayscale ramp, and direct RGB, plus
   inverse (fg/bg swap). Rendered as GPU quad backgrounds + colored glyph runs.
 - Deterministic instrumentation with `--typing-bench`, `--flood`, and
   `--exit-after N` (JSON summary to stdout).
-- A headless integration test starts a real PTY through `FrontendHost`, blocks
-  on the injected wake callback, drains runtime events, and prepares the real
-  terminal scene through the renderer boundary.
+- Headless integration tests start a real PTY through `FrontendHost`, exercise
+  supported pane and overlay routes through neutral input, and prepare the real
+  product scenes through the renderer boundary.
 - No-display / wedge safety: `EventLoop::new()`, window creation, and GPU
   adapter/device requests each fail to a clean JSON error line and a non-zero
   exit rather than hanging, and a watchdog thread hard-exits if the event loop
@@ -328,9 +346,9 @@ panic, exit 0).
 ## What a production adapter would still need
 
 - **Complete broader scene parity.** Header, one terminal/task/agent pane,
-  Empty fallback, status, theme, command palette, and context menu are bound.
-  Production still needs restore, multiple panes, hit-target parity, and the
-  remaining overlay variants.
+  Empty fallback, status, theme, command palette, context menu, and timeline are
+  bound. Production still needs restore, multiple panes, hit-target parity, and
+  the remaining overlay variants.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
@@ -382,6 +400,14 @@ keeps every product label and chord hint visible with the first row selected.
 Escape must close the menu, and Ctrl+Q must leave no native-spike or
 attempted-shell process.
 
+For the displayed timeline smoke, use the same writable disposable
+missing-shell launch, press Ctrl+P then `/`, and confirm the real Empty pane and
+product chrome remain beneath a centered bordered Timeline. The recorded
+`show-timeline` dispatch must appear selected with its glyph and relative time;
+the filter prompt and footer must paint. Type `show` to exercise the live query,
+then Escape must close the overlay and Ctrl+Q must leave no native-spike or
+attempted-shell process.
+
 ## Final spike verdict
 
 **The 2026-07-09 GPU run proved a real, measured, user-visible latency win and a
@@ -401,11 +427,11 @@ removed without GPU work. Phase 2 subsequently replaced the duplicate spike
 host with the real `FrontendHost` and completed the header, one-terminal,
 status, palette, neutral-input, wake, and typed-effect slice. Phase 3 is now
 underway: its first increments add real one-pane task metadata/live output,
-agent detail, the Empty fallback, and the existing context menu without
-changing the scene or host contract. A production wgpu adapter still needs
-restore, multi-pane and broader scene parity, correct grapheme width, IME and
-composition, runtime DPI, full style mapping, surface-loss recovery, and damage
-tracking.
+agent detail, the Empty fallback, the existing context menu, and the execution
+timeline without changing the scene or host contract. A production wgpu
+adapter still needs restore, multi-pane and broader scene parity, correct
+grapheme width, IME and composition, runtime DPI, full style mapping,
+surface-loss recovery, and damage tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selects the
