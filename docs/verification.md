@@ -718,6 +718,51 @@ Dated Phase 3 two-vertical-Empty-pane increment (2026-07-22):
   trace checks. The final gate is rerun after review and this recorded result so
   the committed tree itself is the tree proved green.
 
+Dated Phase 3 two-pane-floating-Empty increment (2026-07-23):
+
+- The required real-host tracer used `AppConfig { spawn_pty: false, .. }`,
+  resized to 80x24, then drove neutral Ctrl+P and `v` followed by Ctrl+P and
+  `f`. It proved tiled `pane-1` at `(0, 1, 80, 22)`, focused floating `pane-2`
+  at `(8, 5, 72, 18)`, durable titles, exact layout flags, and complete cwd,
+  restart-generation, and no-live-grid detail in both panes. Before
+  implementation, `prepare_scene` failed with
+  `UnsupportedScene::Layout("only two horizontal or vertical tiled Empty
+  panes")`.
+- The focused GREEN retains both pane records and their complete Empty details,
+  carries no terminal surface for either pane, and preserves every completed
+  one-pane and tiled two-pane path. The isolated negative matrix proves
+  overlays, forbidden flags, altered tiled/floating geometry, and mixed
+  content fail with the narrow two-pane layout error.
+- The first displayed release attempt exposed the real intermediate
+  two-horizontal-Empty plus Palette frame between Split and Float. A second
+  real-host tracer first failed with the same narrow layout error; the final
+  plan admits only that exact Palette command frame, not broader two-pane
+  overlays.
+- A fresh cold reviewer found that all pane glyphs were submitted after all
+  quads, so long wrapped tiled-pane detail could bleed through the floating
+  surface. The review-fixed path paints an opaque float, clips lower-pane
+  title/body glyph bounds around it, and has an isolated long-cwd regression.
+- `./ci/gpu-spike.sh` passed 36 tests (two native-shell tests, sixteen
+  real-host integration tests, and eighteen isolated-renderer tests) plus the
+  renderer dependency-boundary scan. `cargo test -p mandatum-app --lib` passed
+  all 248 tests.
+- The displayed release smoke launched the excluded native shell from a
+  writable disposable project with an intentionally missing shell, then drove
+  Ctrl+P and `v` followed by Ctrl+P and `f` through macOS System Events. The
+  visible 800x632 window header reported `2 pane(s)`; tiled `terminal` filled
+  the workspace behind focused floating `terminal 2`, and both panes painted
+  complete Empty detail. The smoke was repeated from the review-fixed release
+  binary with a long wrapping project path; lower-pane glyphs stayed outside
+  the opaque float. Ctrl+Q exited 0, and no native-spike or attempted-shell
+  process remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Stacked, broader floating, dense, mixed-content,
+  three-plus-pane, and broader two-pane overlay scenes, restore, broader input,
+  Artifact Preview, and production admission remain separately gated.
+- The final post-documentation `./ci/gate.sh` is run after cold review and this
+  recorded result so the committed tree itself is the tree proved green.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

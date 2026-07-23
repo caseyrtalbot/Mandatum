@@ -1,8 +1,8 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the two-horizontal- and two-vertical-Empty-pane increments are complete;
-production GPU admission pending (2026-07-22).
+the two-horizontal-, two-vertical-, and smallest two-pane-floating Empty
+increments are complete; production GPU admission pending (2026-07-23).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -383,6 +383,21 @@ native window. Stacked, floating, dense, mixed-content, and three-plus-pane
 layouts, restore in the excluded native shell, and broader input/theme/style
 parity remain explicitly unsupported.
 
+Twelfth narrow increment complete (2026-07-23): a fresh real `FrontendHost`
+with PTY spawning disabled drove the generated Ctrl+P then `v` Split pane right
+route followed by Ctrl+P then `f` Float pane after an 80x24 resize. The
+resulting scene contained tiled `pane-1` at `(0, 1, 80, 22)` and focused
+floating `pane-2` at `(8, 5, 72, 18)`, with durable titles, exact layout flags,
+and complete Empty detail. The prepared plan admits that default floating
+shape, and the existing scene-order GPU path paints the tiled pane before the
+float from their scene-owned rectangles. The float paints an opaque background,
+and lower-pane title/body glyph bounds are clipped around it so wrapped detail
+cannot bleed through. Displayed verification exposed the
+required intermediate two-horizontal-Empty plus Palette frame; one additional
+real-host RED now covers it, and admission is limited to that exact command
+route. Stacked, moved/resized or additional floating panes, dense,
+mixed-content, and three-plus-pane layouts remain explicitly unsupported.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -519,12 +534,13 @@ the date, environment, command, endpoint, and result.
 ## Next Implementation Slice
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one layout-only increment:
-support the smallest real two-pane floating Empty layout emitted by a
-`FrontendHost`. Begin with one failing real-host tracer that splits an Empty
-pane, floats the focused pane through the generated product route, and proves
-both scene-owned pane rectangles, durable titles, focus, layout flags, and
-complete Empty detail before extending only the prepared-plan admission and
-GPU paint needed for that exact shape. Preserve every covered one-pane path and
-both completed two-pane tiled paths. Stop before stacked, dense, or
-three-plus-pane layouts; mixed multi-pane content; broader input; restore
-implementation changes; Artifact Preview; or production admission.
+support the smallest real two-pane stacked Empty layout emitted by a
+`FrontendHost`. Begin with a failing real-host tracer that splits an Empty pane,
+stacks the focused pane through the generated product route, and proves the
+scene's one-visible-pane stacked representation plus the durable two-pane
+header facts before extending only the prepared-plan admission and GPU paint
+needed for that exact shape. Preserve every covered one-pane path, both tiled
+two-pane paths, and the completed default floating path. Stop before dense,
+broader floating, or three-plus-pane layouts; mixed multi-pane content; broader
+input; restore implementation changes; Artifact Preview; or production
+admission.

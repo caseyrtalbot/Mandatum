@@ -160,10 +160,13 @@ pub fn prepare_scene<'a>(
             return Err(UnsupportedScene::Layout("stacked panes"));
         }
         1 => {}
-        2 if is_two_horizontal_empty_panes(scene) || is_two_vertical_empty_panes(scene) => {}
+        2 if is_two_horizontal_empty_panes(scene)
+            || is_two_horizontal_empty_panes_with_palette(scene)
+            || is_two_vertical_empty_panes(scene)
+            || is_two_floating_empty_panes(scene) => {}
         2 => {
             return Err(UnsupportedScene::Layout(
-                "only two horizontal or vertical tiled Empty panes",
+                "only two horizontal or vertical tiled, or default floating Empty panes",
             ));
         }
         count => return Err(UnsupportedScene::PaneCount(count)),
@@ -216,6 +219,15 @@ fn is_two_horizontal_empty_panes(scene: &WorkspaceScene) -> bool {
     if scene.overlay.is_some() {
         return false;
     }
+    is_two_horizontal_empty_pane_geometry(scene)
+}
+
+fn is_two_horizontal_empty_panes_with_palette(scene: &WorkspaceScene) -> bool {
+    matches!(scene.overlay.as_ref(), Some(OverlayScene::Palette(_)))
+        && is_two_horizontal_empty_pane_geometry(scene)
+}
+
+fn is_two_horizontal_empty_pane_geometry(scene: &WorkspaceScene) -> bool {
     let [first, second] = scene.panes.as_slice() else {
         return false;
     };
@@ -257,6 +269,38 @@ fn is_two_vertical_empty_panes(scene: &WorkspaceScene) -> bool {
         && !first.stacked
         && !first.zoomed
         && !second.floating
+        && !second.stacked
+        && !second.zoomed
+        && matches!(first.content, PaneContent::Empty(_))
+        && matches!(second.content, PaneContent::Empty(_))
+}
+
+fn is_two_floating_empty_panes(scene: &WorkspaceScene) -> bool {
+    if scene.overlay.is_some() {
+        return false;
+    }
+    let [first, second] = scene.panes.as_slice() else {
+        return false;
+    };
+    let workspace = layout::workspace_scene_area(scene.size);
+    let floating_x = workspace
+        .x
+        .saturating_add(8_u16.min(workspace.width.saturating_sub(1)));
+    let floating_y = workspace
+        .y
+        .saturating_add(4_u16.min(workspace.height.saturating_sub(1)));
+    let floating_width = 96_u16.min(workspace.right().saturating_sub(floating_x).max(1));
+    let floating_height = 28_u16.min(workspace.bottom().saturating_sub(floating_y).max(1));
+
+    first.area == workspace
+        && !first.floating
+        && !first.stacked
+        && !first.zoomed
+        && second.area.x == floating_x
+        && second.area.y == floating_y
+        && second.area.width == floating_width
+        && second.area.height == floating_height
+        && second.floating
         && !second.stacked
         && !second.zoomed
         && matches!(first.content, PaneContent::Empty(_))
@@ -580,6 +624,19 @@ fn text_bounds_around_occlusion(bounds: TextBounds, occlusion: TextBounds) -> Ve
         });
     }
     visible
+}
+
+fn text_bounds_below_later_float(
+    bounds: TextBounds,
+    pane_index: usize,
+    floating_occlusion: Option<(usize, TextBounds)>,
+) -> Vec<TextBounds> {
+    match floating_occlusion {
+        Some((floating_index, occlusion)) if pane_index < floating_index => {
+            text_bounds_around_occlusion(bounds, occlusion)
+        }
+        _ => vec![bounds],
+    }
 }
 
 fn session_map_line(row: &SessionMapRow, width: u16) -> String {
@@ -978,6 +1035,16 @@ impl GpuText {
             let pane_width = pane.area.width as f32 * self.cell_w;
             let pane_height = pane.area.height as f32 * self.cell_h;
 
+            if pane.floating && pane.area.width > 0 && pane.area.height > 0 {
+                push_quad(
+                    &mut quads,
+                    pane_x,
+                    pane_y,
+                    pane_width,
+                    pane_height,
+                    [DEFAULT_BG[0], DEFAULT_BG[1], DEFAULT_BG[2], 255],
+                );
+            }
             if pane.area.width > 0 && pane.area.height > 0 {
                 push_quad(&mut quads, pane_x, pane_y, pane_width, 1.0, border_rgba);
                 push_quad(
@@ -1891,6 +1958,23 @@ impl GpuText {
             default_color: GColor::rgb(header_fg[0], header_fg[1], header_fg[2]),
             custom_glyphs: &[],
         }];
+        let floating_occlusion = prepared
+            .panes
+            .iter()
+            .enumerate()
+            .find(|(_, pane)| pane.pane.floating)
+            .map(|(index, pane)| {
+                let area = pane.pane.area;
+                (
+                    index,
+                    TextBounds {
+                        left: (area.x as f32 * self.cell_w).floor() as i32,
+                        top: (area.y as f32 * self.cell_h).floor() as i32,
+                        right: (area.right() as f32 * self.cell_w).ceil() as i32,
+                        bottom: (area.bottom() as f32 * self.cell_h).ceil() as i32,
+                    },
+                )
+            });
         for (index, pane_paint) in pane_paints.iter().enumerate() {
             let title_bounds = TextBounds {
                 left: pane_paint.title_x.floor() as i32,
@@ -1898,36 +1982,37 @@ impl GpuText {
                 right: (pane_paint.title_x + pane_paint.title_width).ceil() as i32,
                 bottom: (pane_paint.title_y + self.cell_h).ceil() as i32,
             };
-            text_areas.push(TextArea {
-                buffer: &self.title_buffers[index],
-                left: pane_paint.title_x,
-                top: pane_paint.title_y,
-                scale: 1.0,
-                bounds: title_bounds,
-                default_color: GColor::rgb(
-                    pane_paint.title_fg[0],
-                    pane_paint.title_fg[1],
-                    pane_paint.title_fg[2],
-                ),
-                custom_glyphs: &[],
-            });
+            for bounds in text_bounds_below_later_float(title_bounds, index, floating_occlusion) {
+                text_areas.push(TextArea {
+                    buffer: &self.title_buffers[index],
+                    left: pane_paint.title_x,
+                    top: pane_paint.title_y,
+                    scale: 1.0,
+                    bounds,
+                    default_color: GColor::rgb(
+                        pane_paint.title_fg[0],
+                        pane_paint.title_fg[1],
+                        pane_paint.title_fg[2],
+                    ),
+                    custom_glyphs: &[],
+                });
+            }
             let content_bounds = TextBounds {
                 left: pane_paint.origin_x.floor() as i32,
                 top: pane_paint.origin_y.floor() as i32,
                 right: (pane_paint.origin_x + pane_paint.content_width).ceil() as i32,
                 bottom: (pane_paint.origin_y + pane_paint.content_height).ceil() as i32,
             };
-            let pane_text_bounds = if prepared.search.is_some()
-                || prepared.help.is_some()
-                || prepared.welcome.is_some()
-            {
-                text_bounds_around_occlusion(
-                    content_bounds,
-                    overlay_clip.expect("prepared opaque text overlay always sets its clip bounds"),
-                )
-            } else {
-                vec![content_bounds]
-            };
+            let mut pane_text_bounds =
+                text_bounds_below_later_float(content_bounds, index, floating_occlusion);
+            if prepared.search.is_some() || prepared.help.is_some() || prepared.welcome.is_some() {
+                let opaque_overlay =
+                    overlay_clip.expect("prepared opaque text overlay always sets its clip bounds");
+                pane_text_bounds = pane_text_bounds
+                    .into_iter()
+                    .flat_map(|bounds| text_bounds_around_occlusion(bounds, opaque_overlay))
+                    .collect();
+            }
             for bounds in pane_text_bounds {
                 text_areas.push(TextArea {
                     buffer: &self.text_buffers[index],
@@ -2542,6 +2627,63 @@ mod tests {
     }
 
     #[test]
+    fn floating_pane_occlusion_clips_long_wrapped_empty_detail_from_the_tiled_pane() {
+        let empty = PaneContent::Empty(EmptyContent {
+            cwd_label: format!("/{}", "long-project-segment/".repeat(8)),
+            restart_generation: 0,
+        });
+        let mut tiled = pane(PaneSceneKind::StatusLog, empty);
+        tiled.area = SceneRect::new(0, 1, 80, 22);
+        let scene = scene(vec![tiled]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        assert!(
+            prepared.pane_text().chars().count()
+                > usize::from(layout::pane_inner_rect(scene.panes[0].area).width)
+        );
+        assert_eq!(prepared.panes[0].body_wrap, Wrap::WordOrGlyph);
+
+        let tiled_body = TextBounds {
+            left: 1,
+            top: 2,
+            right: 79,
+            bottom: 22,
+        };
+        let floating_pane = TextBounds {
+            left: 8,
+            top: 5,
+            right: 80,
+            bottom: 23,
+        };
+        let visible = text_bounds_below_later_float(tiled_body, 0, Some((1, floating_pane)));
+
+        assert_eq!(
+            visible,
+            vec![
+                TextBounds {
+                    bottom: 5,
+                    ..tiled_body
+                },
+                TextBounds {
+                    top: 5,
+                    right: 8,
+                    ..tiled_body
+                },
+            ]
+        );
+        assert!(visible.iter().all(|bounds| {
+            bounds.right <= floating_pane.left
+                || bounds.bottom <= floating_pane.top
+                || bounds.left >= floating_pane.right
+                || bounds.top >= floating_pane.bottom
+        }));
+        assert_eq!(
+            text_bounds_below_later_float(tiled_body, 1, Some((1, floating_pane))),
+            vec![tiled_body]
+        );
+    }
+
+    #[test]
     fn help_plan_preserves_scene_data_grouping_keys_cursor_selection_and_footer() {
         let mut with_help = scene(vec![pane(
             PaneSceneKind::StatusLog,
@@ -2752,7 +2894,9 @@ mod tests {
         ]);
         assert_eq!(
             prepare_scene(&multiple, &Theme::default()).unwrap_err(),
-            UnsupportedScene::Layout("only two horizontal or vertical tiled Empty panes")
+            UnsupportedScene::Layout(
+                "only two horizontal or vertical tiled, or default floating Empty panes"
+            )
         );
     }
 
@@ -2824,7 +2968,94 @@ mod tests {
         for (label, candidate) in cases {
             assert_eq!(
                 prepare_scene(&candidate, &Theme::default()).unwrap_err(),
-                UnsupportedScene::Layout("only two horizontal or vertical tiled Empty panes"),
+                UnsupportedScene::Layout(
+                    "only two horizontal or vertical tiled, or default floating Empty panes"
+                ),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn floating_empty_admission_rejects_every_unsupported_shape() {
+        let empty = || {
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            })
+        };
+        let mut first = pane(PaneSceneKind::Terminal, empty());
+        first.area = SceneRect::new(0, 1, 80, 22);
+        first.focused = false;
+        let mut second = pane(PaneSceneKind::Terminal, empty());
+        second.id = PaneId::new("pane-2");
+        second.title = "terminal 2".to_owned();
+        second.area = SceneRect::new(8, 5, 72, 18);
+        second.floating = true;
+        let mut valid = scene(vec![first, second]);
+        valid.size = SceneSize::new(80, 24);
+
+        let mut cases = Vec::new();
+
+        let mut overlay = valid.clone();
+        overlay.overlay = Some(OverlayScene::Palette(PaletteOverlay {
+            area: SceneRect::new(10, 5, 20, 5),
+            query: String::new(),
+            items: Vec::new(),
+            selected: None,
+            footer: String::new(),
+        }));
+        cases.push(("overlay", overlay));
+
+        for (index, flag) in [
+            (0, "first floating"),
+            (0, "first stacked"),
+            (0, "first zoomed"),
+            (1, "second tiled"),
+            (1, "second stacked"),
+            (1, "second zoomed"),
+        ] {
+            let mut flagged = valid.clone();
+            match flag {
+                "first floating" => flagged.panes[index].floating = true,
+                "first stacked" | "second stacked" => flagged.panes[index].stacked = true,
+                "first zoomed" | "second zoomed" => flagged.panes[index].zoomed = true,
+                "second tiled" => flagged.panes[index].floating = false,
+                _ => unreachable!(),
+            }
+            cases.push((flag, flagged));
+        }
+
+        for (label, index, area) in [
+            (
+                "tiled pane does not fill workspace",
+                0,
+                SceneRect::new(1, 1, 79, 22),
+            ),
+            ("floating x", 1, SceneRect::new(7, 5, 73, 18)),
+            ("floating y", 1, SceneRect::new(8, 4, 72, 19)),
+            ("floating width", 1, SceneRect::new(8, 5, 71, 18)),
+            ("floating height", 1, SceneRect::new(8, 5, 72, 17)),
+        ] {
+            let mut geometry = valid.clone();
+            geometry.panes[index].area = area;
+            cases.push((label, geometry));
+        }
+
+        let mut mixed_first = valid.clone();
+        mixed_first.panes[0].content = terminal_content();
+        cases.push(("mixed first content", mixed_first));
+
+        let mut mixed_second = valid;
+        mixed_second.panes[1].content = terminal_content();
+        cases.push(("mixed second content", mixed_second));
+
+        for (label, candidate) in cases {
+            assert_eq!(
+                prepare_scene(&candidate, &Theme::default()).unwrap_err(),
+                UnsupportedScene::Layout(
+                    "only two horizontal or vertical tiled, or default floating Empty panes"
+                ),
                 "{label}"
             );
         }

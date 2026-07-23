@@ -1905,3 +1905,56 @@ panes")`. The isolated negative matrix also proves overlays, every forbidden
 layout flag on either pane, invalid adjacency/workspace geometry, and mixed
 content fail closed. The final merge-gate result is recorded in
 `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers The Default Two-Pane Floating Empty Layout
+
+Status: accepted (2026-07-23)
+
+Decision: continue Phase 3 with one layout-only increment that accepts and
+paints the smallest two-pane floating `PaneContent::Empty` layout emitted by a
+real `FrontendHost`. Admission is limited to one tiled Empty pane filling the
+workspace plus one default-position floating Empty pane at the scene-resolved
+rectangle. The exact command route also admits the intermediate
+two-horizontal-Empty plus Palette frame required to dispatch Float.
+
+Context: Ctrl+P then `v`, followed by Ctrl+P then `f`, already mutates product
+layout into the target scene. At 80x24 it resolves tiled `pane-1` to
+`(0, 1, 80, 22)` and focused floating `pane-2` to `(8, 5, 72, 18)`. The
+existing scene-order GPU paint consumed both records, but prepared-plan
+admission rejected the floating shape. Displayed verification then exposed
+that native redraw sees the real two-pane Palette frame between those commands.
+
+Rationale: retaining each `PaneScene` unchanged keeps rectangles, durable
+titles, focus, layout flags, and Empty detail app/scene-owned. Validating only
+the default floating rectangle and the one Palette command frame avoids
+claiming moved/resized floats or broader two-pane overlays while making the
+required real native route executable. Because the GPU submits glyphs after
+pane quads, the floating surface must also paint an opaque background and clip
+lower-pane title/body glyph bounds around its scene-owned rectangle.
+
+Consequences: no app, runtime, scene, layout, command table, keymap,
+persistence, production dependency, allowlist, installer, default command, or
+release surface changes. Every covered one-pane content/overlay path and both
+tiled two-pane paths remain green. Stacked, broader floating, dense,
+mixed-content, and three-plus-pane layouts, restore, broader input/theme/style
+parity, Artifact Preview, and production GPU admission remain separately
+gated. The next implementation slice is the smallest still-rejected two-pane
+stacked Empty layout.
+
+Verification: the required real-host tracer first failed with
+`UnsupportedScene::Layout("only two horizontal or vertical tiled Empty
+panes")`, then retained both exact pane records and complete Empty details.
+The displayed route exposed a second RED for the intermediate Palette frame;
+that exact frame now reaches the same prepared plan. A cold reviewer found
+that lower-pane glyphs could otherwise render over the float after its quads;
+the fix adds opaque float fill, clips lower title/body bounds, and covers a
+long wrapped Empty cwd. The isolated negative matrix rejects overlays,
+forbidden flags, altered tiled/floating geometry, and mixed content.
+`./ci/gpu-spike.sh` passed 36 tests (two native-shell, sixteen real-host, and
+eighteen isolated-renderer) plus the renderer boundary scan,
+and `cargo test -p mandatum-app --lib` passed all 248 tests. A displayed
+missing-shell release smoke repeated from the review-fixed binary with a long
+wrapping project path: the tiled pane remained clipped behind focused floating
+`terminal 2`, both panes showed complete Empty detail, Ctrl+Q exited 0, and no
+native or attempted-shell process remained. The final merge-gate result is
+recorded in `docs/verification.md`.

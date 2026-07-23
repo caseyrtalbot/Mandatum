@@ -215,6 +215,103 @@ fn real_host_two_vertical_empty_panes_reach_the_gpu_render_plan() {
 }
 
 #[test]
+fn real_host_two_pane_floating_empty_layout_reaches_the_gpu_render_plan() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+    dispatch_palette_command(&mut host, 'v');
+    dispatch_palette_command(&mut host, 'f');
+
+    let snapshot = host.frame(frame_size);
+    assert_eq!(snapshot.scene.panes.len(), 2);
+    let first = &snapshot.scene.panes[0];
+    let second = &snapshot.scene.panes[1];
+    assert_eq!(first.id.as_str(), "pane-1");
+    assert_eq!(first.title, "terminal");
+    assert_eq!(first.area, SceneRect::new(0, 1, 80, 22));
+    assert!(!first.focused);
+    assert!(!first.floating);
+    assert!(!first.stacked);
+    assert!(!first.zoomed);
+    let first_empty = match &first.content {
+        PaneContent::Empty(empty) => empty,
+        other => panic!("expected first Empty pane, got {other:?}"),
+    };
+    let first_details = [
+        format!("cwd: {}", first_empty.cwd_label),
+        format!("restart generation: {}", first_empty.restart_generation),
+        "no live PTY grid is attached to this pane".to_owned(),
+    ];
+    assert_eq!(first.detail_lines(), first_details);
+
+    assert_eq!(second.id.as_str(), "pane-2");
+    assert_eq!(second.title, "terminal 2");
+    assert_eq!(second.area, SceneRect::new(8, 5, 72, 18));
+    assert!(second.focused);
+    assert!(second.floating);
+    assert!(!second.stacked);
+    assert!(!second.zoomed);
+    let second_empty = match &second.content {
+        PaneContent::Empty(empty) => empty,
+        other => panic!("expected second Empty pane, got {other:?}"),
+    };
+    let second_details = [
+        format!("cwd: {}", second_empty.cwd_label),
+        format!("restart generation: {}", second_empty.restart_generation),
+        "no live PTY grid is attached to this pane".to_owned(),
+    ];
+    assert_eq!(second.detail_lines(), second_details);
+    assert_eq!(snapshot.scene.focused_pane, second.id);
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the two-pane floating Empty layout");
+    assert_eq!(prepared.panes().len(), 2);
+    assert_eq!(prepared.panes()[0].scene(), first);
+    assert_eq!(prepared.panes()[1].scene(), second);
+    for detail in &first_details {
+        assert!(prepared.panes()[0].pane_text().contains(detail));
+    }
+    for detail in &second_details {
+        assert!(prepared.panes()[1].pane_text().contains(detail));
+    }
+    assert!(
+        prepared
+            .panes()
+            .iter()
+            .all(|pane| pane.pane_surface().is_none())
+    );
+}
+
+#[test]
+fn real_host_two_horizontal_empty_panes_with_float_palette_reach_the_gpu_render_plan() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+    dispatch_palette_command(&mut host, 'v');
+    host.handle_input(InputEvent::Key(Key::ctrl('p')));
+
+    let snapshot = host.frame(frame_size);
+    assert_eq!(snapshot.scene.panes.len(), 2);
+    assert!(matches!(
+        snapshot.scene.overlay,
+        Some(OverlayScene::Palette(_))
+    ));
+    assert_eq!(snapshot.scene.panes[0].area, SceneRect::new(0, 1, 40, 22));
+    assert_eq!(snapshot.scene.panes[1].area, SceneRect::new(40, 1, 40, 22));
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the float command's intermediate Palette frame");
+    assert_eq!(prepared.panes().len(), 2);
+    assert!(prepared.has_palette());
+}
+
+#[test]
 fn real_host_two_pane_stack_remains_unsupported_by_gpu_render_plan() {
     let mut host = FrontendHost::new(AppConfig {
         spawn_pty: false,

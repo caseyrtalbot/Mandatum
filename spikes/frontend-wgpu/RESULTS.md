@@ -1,14 +1,16 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 underway; one-pane content, every current overlay, and the
-first two exact tiled two-pane layouts are covered.**
+Status: **Phase 3 underway; one-pane content, every current one-pane overlay,
+the first two exact tiled two-pane layouts, and the smallest default two-pane
+floating Empty layout are covered.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, one terminal, task, agent, or Empty pane, status
 strip, command palette, context menu, execution timeline, session map, Set agent
 objective prompt, session-output Search, generated Help, generated Welcome, and
-exactly two horizontally or vertically tiled Empty panes on the GPU. Typed
-clipboard effects return to the native shell.
+exactly two horizontally or vertically tiled Empty panes plus the smallest
+default two-pane floating Empty layout on the GPU. Typed clipboard effects
+return to the native shell.
 
 This remains an isolated frontend outside the Cargo workspace (the root
 `Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
@@ -204,6 +206,31 @@ pending. A fresh cold read added a real-host regression for the one-visible-pane
 stack shape and an isolated negative matrix for vertical overlays, forbidden
 flags, invalid geometry, and mixed content; all now fail closed explicitly.
 
+Phase 3 two-pane-floating-Empty verification (2026-07-23): the required
+real-host tracer used PTY spawning disabled, resized to 80x24, then drove
+neutral Ctrl+P and `v` followed by Ctrl+P and `f`. It proved tiled `pane-1` at
+`(0, 1, 80, 22)`, focused floating `pane-2` at `(8, 5, 72, 18)`, durable
+titles, exact layout flags, and complete Empty detail before first failing with
+`Layout("only two horizontal or vertical tiled Empty panes")`. The prepared
+plan now admits that exact default floating shape; the existing scene-order GPU
+path paints both pane records without recomputing their rectangles. The float
+paints an opaque background and clips lower-pane title/body glyph bounds around
+its scene-owned rectangle. An isolated negative matrix rejects overlays,
+forbidden flags, altered tiled or floating geometry, and mixed content. The
+first displayed attempt exposed the
+real intermediate two-horizontal-Empty plus Palette frame required to dispatch
+Float; a second RED now covers that frame, and only that exact two-pane Palette
+route was admitted. A cold reviewer found that lower-pane glyphs could render
+over the float after its quads; the fix adds opaque fill, bounds clipping, and a
+long wrapped-cwd regression. `./ci/gpu-spike.sh` passed 36 tests (two
+native-shell, sixteen real-host, and eighteen isolated-renderer) plus the
+boundary scan, and all 248 app library tests passed. A displayed missing-shell
+release smoke repeated from the review-fixed binary with a long wrapping
+project path showed `2 pane(s)`, the tiled `terminal` clipped behind focused
+floating `terminal 2`, and complete Empty detail; Ctrl+Q exited 0 and no native
+or attempted-shell process remained. Stacked, broader floating, dense,
+mixed-content, and three-plus-pane layouts remain unsupported.
+
 ## Verdict (read this first)
 
 The 2026-07-09 GPU run showed a **measured, roughly 2x latency advantage** over
@@ -248,11 +275,13 @@ How the current boundary is enforced:
 integration test and by the displayed renderer. It accepts the real header,
 one terminal, task, agent, or Empty pane, status, theme, and optional palette,
 context menu, timeline, session map, objective prompt, Search, Help, or Welcome
-while explicitly rejecting multiple panes. The displayed
-renderer uses the scene's pane-inner geometry, chrome, terminal/task surface,
-scene-composed detail lines, status, palette, context-menu, timeline,
-session-map, prompt, Search, Help, and Welcome data rather than deriving product
-presentation itself.
+plus exact horizontal and vertical two-Empty-pane scenes, the default
+two-pane-floating Empty scene, and the horizontal two-Empty-pane Palette frame
+needed to dispatch Float. Broader multi-pane shapes and overlays still fail
+explicitly. The displayed renderer uses the scene's pane-inner geometry,
+chrome, terminal/task surface, scene-composed detail lines, status, palette,
+context-menu, timeline, session-map, prompt, Search, Help, and Welcome data
+rather than deriving product presentation itself.
 
 The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
 relevant only to the historical 2026-07-09 benchmark evidence below. Both files
@@ -475,8 +504,10 @@ panic, exit 0).
 
 - **Complete broader scene parity.** Header, one terminal/task/agent pane,
   Empty fallback, status, theme, command palette, context menu, timeline,
-  session map, objective prompt, Search, Help, and Welcome are bound. Production
-  still needs restore, multiple panes, and hit-target parity.
+  session map, objective prompt, Search, Help, Welcome, exact horizontal and
+  vertical two-Empty-pane layouts, and the default two-pane floating Empty
+  layout are bound. Production still needs restore, broader multi-pane layouts,
+  and hit-target parity.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
@@ -507,10 +538,11 @@ spikes/frontend-wgpu/target/release/mandatum-frontend-wgpu-spike --exit-after 12
 
 For the displayed Phase 3 task/agent smoke, use neutral palette input to create
 the task (`b`) or agent (`a`) pane and zoom it (`z`) before the next redraw;
-multi-pane paint remains deliberately unsupported. Confirm the task shows live
-output, the agent shows its objective/state detail, and Ctrl+Q leaves no
-native-spike or child process. Source modules: `src/main.rs` (winit translation,
-host ownership, wake/effect/heartbeat/redraw scheduling, instrumentation),
+mixed-content task/agent multi-pane paint remains deliberately unsupported.
+Confirm the task shows live output, the agent shows its objective/state detail,
+and Ctrl+Q leaves no native-spike or child process. Source modules:
+`src/main.rs` (winit translation, host ownership, wake/effect/heartbeat/redraw
+scheduling, instrumentation),
 `gpu-renderer` + `src/gpu.rs` (structurally isolated scene/theme-to-GPU paint),
 `src/stats.rs` (percentiles), and `src/bin/tui_probe.rs` (external terminal
 latency probe).
@@ -545,12 +577,12 @@ and Ctrl+Q must leave no native-spike or attempted-shell process.
 
 For the displayed objective-prompt smoke, use the same disposable missing-shell
 launch and queue neutral Ctrl+P then `a`, Ctrl+P then `z`, and Ctrl+P then `p`
-before the next redraw because ordinary multi-pane paint remains deliberately
-unsupported. Confirm the real zoomed agent scene remains beneath the centered
-bordered Set agent objective prompt and that its focused pane title, configured
-objective input, block cursor, and footer paint inside the border. Escape must
-close the prompt, and Ctrl+Q must leave no native-spike or attempted-shell
-process.
+before the next redraw because mixed-content agent/Empty multi-pane paint
+remains deliberately unsupported. Confirm the real zoomed agent scene remains
+beneath the centered bordered Set agent objective prompt and that its focused
+pane title, configured objective input, block cursor, and footer paint inside
+the border. Escape must close the prompt, and Ctrl+Q must leave no native-spike
+or attempted-shell process.
 
 For the displayed Search smoke, use the same writable disposable missing-shell
 launch and queue neutral Ctrl+P then `a` and Ctrl+P then `z` before the next
@@ -593,6 +625,13 @@ panes show the scene-owned Empty cwd, restart generation, and no-live-grid
 detail, and the lower `terminal 2` title has focus styling. Ctrl+Q must exit
 cleanly with no native-spike or attempted-shell process remaining.
 
+For the displayed two-pane-floating-Empty smoke, use the same writable
+disposable missing-shell launch. Press Ctrl+P then `v`, followed by Ctrl+P then
+`f`. Confirm the header reports `2 pane(s)`, `terminal` fills the workspace
+behind a bordered focused `terminal 2` float, and both panes paint their
+scene-owned Empty detail. Ctrl+Q must exit cleanly with no native-spike or
+attempted-shell process remaining.
+
 ## Final spike verdict
 
 **The 2026-07-09 GPU run proved a real, measured, user-visible latency win and a
@@ -616,10 +655,11 @@ agent detail, the Empty fallback, the existing context menu, execution timeline,
 session map, objective prompt, session-output Search, generated Help, and
 generated Welcome without changing the scene or host contract. Its first two
 multi-pane increments add only the exact real two-horizontal- and
-two-vertical-Empty-pane scenes. A production wgpu adapter still needs restore,
-broader multi-pane and scene parity, correct grapheme width, IME and
-composition, runtime DPI, full style mapping, surface-loss recovery, and damage
-tracking.
+two-vertical-Empty-pane scenes; the next adds only the exact default
+two-pane-floating Empty scene and its required horizontal Palette command
+frame. A production wgpu adapter still needs restore, broader multi-pane and
+scene parity, correct grapheme width, IME and composition, runtime DPI, full
+style mapping, surface-loss recovery, and damage tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selects the
