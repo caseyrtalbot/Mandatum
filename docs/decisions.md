@@ -1577,3 +1577,45 @@ release smoke showed the recorded event, live `show` filter, and bounded
 `no matching events` state over the failed-PTY Empty state, then Escape and
 Ctrl+Q closed it and the process cleanly. The final merge-gate result is
 recorded in `docs/verification.md`.
+
+## Accepted: The Excluded Native Render Plan Covers The Product Session Map
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one scene-only increment that accepts and
+paints a real `OverlayScene::SessionMap` emitted by `FrontendHost` over any
+already-supported one-pane scene. The prepared plan retains the existing
+resolved area, ordered session/pane rows, tree depth, glyph, label, live state,
+focus marker, layout badges, selected index, and footer. Displayed paint uses
+the existing overlay background, palette border, foreground, and selection
+theme roles without changing the scene contract.
+
+Context: the app already owns session/pane tree construction, live-state words,
+focus and layout facts, selection, footer legend, centered geometry, keyboard
+navigation, activation, and row hit targets. The excluded renderer was
+rejecting that complete product scene even though no additional app, runtime,
+workspace, or session-map model access was required.
+
+Rationale: retaining `SessionMapOverlay` in the headless paint plan keeps
+workspace visibility and navigation semantics in the app and scene layers. The
+same prepared data drives the displayed background, border, title, windowed
+tree rows, selected-row highlight, focus marker, state/badge text, and pinned
+footer. Scalar-character fitting remains deliberate here; grapheme and
+wide-cell correctness remain Phase 4 work.
+
+Consequences: no app, runtime, scene, workspace, production dependency,
+allowlist, installer, default command, or release surface changes. Multiple
+panes, the remaining overlay variants, full input/theme/style parity, restore,
+Artifact Preview, and production GPU admission remain separately gated. The
+next slice is the existing one-pane objective prompt only.
+
+Verification: the real-host test recorded the initial
+`UnsupportedScene::Overlay("session map")` failure, then passed with the product
+map retained unchanged by the prepared plan. The isolated renderer test covers
+area, tree rows, depth, glyph, state, focus, badges, selection, footer, and row
+alignment. `./ci/gpu-spike.sh` passed eighteen tests plus the renderer
+dependency-boundary scan, and `cargo test -p mandatum-app --lib` passed all 248
+tests. A displayed release smoke showed the real active session and selected
+focused pane over the failed-PTY Empty state, then Escape and Ctrl+Q closed it
+and the process cleanly. The final merge-gate result is recorded in
+`docs/verification.md`.

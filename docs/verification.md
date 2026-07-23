@@ -453,6 +453,37 @@ Dated Phase 3 timeline increment (2026-07-22):
   denied, build, all workspace tests, conformance, and documentation trace
   checks.
 
+Dated Phase 3 session-map increment (2026-07-22):
+
+- The required real-host tracer bullet used a fresh `FrontendHost` with PTY
+  spawning disabled, drove the real Show session map route through neutral
+  Ctrl+P then `m` input, and proved the next product frame contained
+  `OverlayScene::SessionMap` with its real active-session heading, focused pane
+  row, resolved area, selected index, and row hit target. Before
+  implementation, `prepare_scene` failed at runtime with
+  `UnsupportedScene::Overlay("session map")`.
+- The focused GREEN proves that exact product session map reaches the prepared
+  GPU plan unchanged. The isolated renderer test covers the retained geometry,
+  ordered tree rows, depth, glyph, label, live state, focus marker, badges,
+  selection, footer, row alignment, and bounded overlay text.
+- `./ci/gpu-spike.sh` passed eighteen tests (two native-shell tests, seven
+  real-host integration tests, and nine isolated-renderer tests) plus the
+  renderer dependency-boundary scan. `cargo test -p mandatum-app --lib` passed
+  all 248 tests.
+- The displayed release build ran on macOS from a writable disposable project
+  with an intentionally missing shell. The real Empty pane and product chrome
+  remained visible beneath a centered bordered Sessions map; the active session
+  heading, selected focused `pane-1 terminal` row, focus glyph, `idle` state,
+  and bounded footer painted. Escape closed the overlay, Ctrl+Q exited with code
+  0, and no native-spike or attempted-shell process remained.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Multiple panes, remaining overlays, broader input,
+  restore, Artifact Preview, and production admission remain separately gated.
+- The post-documentation `./ci/gate.sh` passed formatting, Clippy with warnings
+  denied, build, all workspace tests, conformance, and documentation trace
+  checks.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

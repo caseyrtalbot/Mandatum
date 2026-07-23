@@ -154,6 +154,43 @@ fn real_host_timeline_reaches_the_gpu_render_plan() {
 }
 
 #[test]
+fn real_host_session_map_reaches_the_gpu_render_plan() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+
+    dispatch_palette_command(&mut host, 'm');
+
+    let snapshot = host.frame(frame_size);
+    let Some(OverlayScene::SessionMap(map)) = &snapshot.scene.overlay else {
+        panic!("Show session map did not produce the real session-map scene");
+    };
+    assert_eq!(map.area, layout::session_map_rect(frame_size));
+    assert_eq!(map.rows.len(), 2);
+    assert_eq!(map.rows[0].depth, 0);
+    assert!(map.rows[0].label.contains("session-1"));
+    assert!(map.rows[0].label.contains("(active)"));
+    assert_eq!(map.selected, 1);
+    assert_eq!(map.rows[1].depth, 1);
+    assert!(map.rows[1].label.starts_with("pane-1"));
+    assert!(map.rows[1].focused);
+    assert!(
+        snapshot
+            .scene
+            .hit_targets
+            .iter()
+            .any(|target| { matches!(target.kind, HitTargetKind::SessionMapRow(1)) })
+    );
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real session-map scene");
+    assert_eq!(prepared.session_map(), Some(map));
+}
+
+#[test]
 fn real_host_pty_output_wakes_without_polling_and_reaches_a_frame() {
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
     let config = AppConfig {

@@ -1,7 +1,7 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-the timeline overlay increment is complete; production GPU admission pending
+the session-map overlay increment is complete; production GPU admission pending
 (2026-07-22).
 
 This document is the durable implementation plan for a native window and
@@ -298,6 +298,17 @@ recorded event and live `show` filter, closed with Escape, and quit cleanly.
 Additional overlays, multi-pane layouts, restore, and broader
 input/theme/style parity remain explicitly unsupported.
 
+Fifth narrow increment complete (2026-07-22): a fresh real `FrontendHost` with
+PTY spawning disabled drove the neutral Ctrl+P then `m` route and produced the
+existing `OverlayScene::SessionMap` over the supported Empty pane. The excluded
+render plan retains and paints the scene's resolved area, ordered session/pane
+rows, tree depth, glyph, label, live state, focus marker, layout badges,
+selected index, and footer with the existing semantic overlay theme roles. The
+displayed missing-shell smoke kept the Empty pane and product chrome beneath
+the bordered map, showed the active session and selected focused pane, closed
+with Escape, and quit cleanly. Additional overlays, multi-pane layouts,
+restore, and broader input/theme/style parity remain explicitly unsupported.
+
 Render every current scene:
 
 - tiled, stacked, floating, zoomed, and dense multi-pane layouts;
@@ -435,9 +446,11 @@ the date, environment, command, endpoint, and result.
 
 Continue Phase 3 inside `spikes/frontend-wgpu` with one scene-only increment:
 add a failing real-`FrontendHost` headless test for a product-generated
-`OverlayScene::SessionMap` over one supported pane, then extend `prepare_scene`
-and displayed GPU paint to render only the existing session-map scene data and
-geometry. Preserve terminal/task/agent/Empty, header, one-pane geometry,
-status, theme, palette, context-menu, and timeline behavior. Stop before
-multi-pane layout, additional overlay variants, broader input, restore,
-Artifact Preview, or production admission.
+`OverlayScene::Prompt` over one supported zoomed agent pane, then extend
+`prepare_scene` and displayed GPU paint to render only the existing objective
+prompt area, title, input, cursor, and footer. Drive the product route through
+neutral Ctrl+P then `a` (new agent), Ctrl+P then `z` (zoom), and Ctrl+P then `p`
+(Set agent objective). Preserve terminal/task/agent/Empty, header, one-pane
+geometry, status, theme, palette, context-menu, timeline, and session-map
+behavior. Stop before multi-pane layout, additional overlay variants, broader
+input, restore, Artifact Preview, or production admission.

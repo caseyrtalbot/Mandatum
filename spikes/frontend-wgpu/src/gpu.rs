@@ -14,7 +14,8 @@ use glyphon::{
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, OverlayScene, PaletteOverlay, PaneContent, PaneScene,
-    SceneColor, TerminalSurface, Theme, TimelineEntry, TimelineOverlay, WorkspaceScene, layout,
+    SESSION_MAP_FOCUS_GLYPH, SceneColor, SessionMapOverlay, SessionMapRow, TerminalSurface, Theme,
+    TimelineEntry, TimelineOverlay, WorkspaceScene, layout,
 };
 use winit::window::Window;
 
@@ -60,6 +61,7 @@ pub struct PreparedScene<'a> {
     palette: Option<&'a PaletteOverlay>,
     context_menu: Option<&'a ContextMenuOverlay>,
     timeline: Option<&'a TimelineOverlay>,
+    session_map: Option<&'a SessionMapOverlay>,
 }
 
 impl PreparedScene<'_> {
@@ -93,6 +95,10 @@ impl PreparedScene<'_> {
 
     pub fn timeline(&self) -> Option<&TimelineOverlay> {
         self.timeline
+    }
+
+    pub fn session_map(&self) -> Option<&SessionMapOverlay> {
+        self.session_map
     }
 }
 
@@ -135,16 +141,16 @@ pub fn prepare_scene<'a>(
             (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
         }
     };
-    let (palette, context_menu, timeline) = match &scene.overlay {
-        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None),
-        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None),
-        Some(OverlayScene::Timeline(timeline)) => (None, None, Some(timeline)),
-        Some(OverlayScene::SessionMap(_)) => return Err(UnsupportedScene::Overlay("session map")),
+    let (palette, context_menu, timeline, session_map) = match &scene.overlay {
+        Some(OverlayScene::Palette(palette)) => (Some(palette), None, None, None),
+        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu), None, None),
+        Some(OverlayScene::Timeline(timeline)) => (None, None, Some(timeline), None),
+        Some(OverlayScene::SessionMap(map)) => (None, None, None, Some(map)),
         Some(OverlayScene::Prompt(_)) => return Err(UnsupportedScene::Overlay("prompt")),
         Some(OverlayScene::Search(_)) => return Err(UnsupportedScene::Overlay("search")),
         Some(OverlayScene::Help(_)) => return Err(UnsupportedScene::Overlay("help")),
         Some(OverlayScene::Welcome(_)) => return Err(UnsupportedScene::Overlay("welcome")),
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
     Ok(PreparedScene {
         scene,
@@ -157,6 +163,7 @@ pub fn prepare_scene<'a>(
         palette,
         context_menu,
         timeline,
+        session_map,
     })
 }
 
@@ -245,6 +252,49 @@ fn timeline_lines(timeline: &TimelineOverlay) -> Vec<String> {
     if lines.len() > 1 {
         let footer_row = lines.len() - 2;
         lines[footer_row] = timeline_outer_line(&format!(" {}", timeline.footer), inner.width);
+    }
+    lines
+}
+
+fn session_map_line(row: &SessionMapRow, width: u16) -> String {
+    let marker = if row.focused {
+        SESSION_MAP_FOCUS_GLYPH
+    } else {
+        " "
+    };
+    let indent = "  ".repeat(usize::from(row.depth));
+    let mut line = format!("{marker}{indent}{} {}", row.glyph, row.label);
+    if !row.state.is_empty() {
+        line.push_str(&format!("  {}", row.state));
+    }
+    if !row.badges.is_empty() {
+        line.push_str(&format!("  [{}]", row.badges));
+    }
+    fit_cell_line(&line, width)
+}
+
+fn session_map_outer_line(content: &str, inner_width: u16) -> String {
+    format!(" {}", fit_cell_line(content, inner_width))
+}
+
+fn session_map_lines(map: &SessionMapOverlay) -> Vec<String> {
+    let inner = layout::pane_inner_rect(map.area);
+    let window = layout::session_map_item_window(inner, map.rows.len(), Some(map.selected));
+    let mut lines = vec![String::new(); usize::from(map.area.height)];
+    if !lines.is_empty() {
+        lines[0] = " Sessions ".to_owned();
+    }
+    for (row, index) in window.enumerate() {
+        if let Some(slot) = lines.get_mut(row + 1) {
+            *slot = session_map_outer_line(
+                &session_map_line(&map.rows[index], inner.width),
+                inner.width,
+            );
+        }
+    }
+    if lines.len() > 1 {
+        let footer_row = lines.len() - 2;
+        lines[footer_row] = session_map_outer_line(&format!(" {}", map.footer), inner.width);
     }
     lines
 }
@@ -983,6 +1033,84 @@ impl GpuText {
                 right: (timeline_x + timeline_width).ceil() as i32,
                 bottom: (timeline_y + timeline_height).ceil() as i32,
             });
+        } else if let Some(map) = prepared.session_map {
+            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
+            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
+            let map_x = map.area.x as f32 * self.cell_w;
+            let map_y = map.area.y as f32 * self.cell_h;
+            let map_width = map.area.width as f32 * self.cell_w;
+            let map_height = map.area.height as f32 * self.cell_h;
+            push_quad(
+                &mut quads,
+                map_x,
+                map_y,
+                map_width,
+                map_height,
+                overlay_bg_rgba,
+            );
+            if map.area.width > 0 && map.area.height > 0 {
+                let border = resolve(theme.palette_border, DEFAULT_FG);
+                let border_rgba = [border[0], border[1], border[2], 255];
+                push_quad(&mut quads, map_x, map_y, map_width, 1.0, border_rgba);
+                push_quad(
+                    &mut quads,
+                    map_x,
+                    map_y + map_height - 1.0,
+                    map_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(&mut quads, map_x, map_y, 1.0, map_height, border_rgba);
+                push_quad(
+                    &mut quads,
+                    map_x + map_width - 1.0,
+                    map_y,
+                    1.0,
+                    map_height,
+                    border_rgba,
+                );
+            }
+
+            let inner = layout::pane_inner_rect(map.area);
+            let window = layout::session_map_item_window(inner, map.rows.len(), Some(map.selected));
+            for (row, index) in window.enumerate() {
+                if map.selected == index {
+                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
+                    push_quad(
+                        &mut quads,
+                        inner.x as f32 * self.cell_w,
+                        (inner.y + row as u16) as f32 * self.cell_h,
+                        inner.width as f32 * self.cell_w,
+                        self.cell_h,
+                        [selection[0], selection[1], selection[2], 190],
+                    );
+                }
+            }
+
+            let overlay_text = session_map_lines(map).join("\n");
+            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            self.overlay_buffer.set_wrap(Wrap::None);
+            self.overlay_buffer
+                .set_size(Some(map_width.max(1.0)), Some(map_height.max(1.0)));
+            self.overlay_buffer.set_text(
+                &overlay_text,
+                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                    overlay_fg[0],
+                    overlay_fg[1],
+                    overlay_fg[2],
+                )),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            overlay_position = Some((map_x, map_y));
+            overlay_clip = Some(TextBounds {
+                left: map_x.floor() as i32,
+                top: map_y.floor() as i32,
+                right: (map_x + map_width).ceil() as i32,
+                bottom: (map_y + map_height).ceil() as i32,
+            });
         }
 
         // Upload quad instances (grow buffer if needed).
@@ -1496,6 +1624,55 @@ mod tests {
                 .skip(1)
                 .all(|line| line.chars().count() <= inner_width + 1)
         );
+        assert!(lines.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_map_plan_preserves_scene_data_geometry_and_row_alignment() {
+        let mut with_map = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let map = SessionMapOverlay {
+            area: SceneRect::new(3, 4, 64, 7),
+            rows: vec![
+                SessionMapRow {
+                    depth: 0,
+                    glyph: "▸".to_owned(),
+                    label: "session-1 · project · 2 pane(s) (active)".to_owned(),
+                    state: String::new(),
+                    focused: false,
+                    badges: String::new(),
+                },
+                SessionMapRow {
+                    depth: 1,
+                    glyph: "❯".to_owned(),
+                    label: "pane-1 terminal".to_owned(),
+                    state: "open".to_owned(),
+                    focused: true,
+                    badges: "zoom float".to_owned(),
+                },
+            ],
+            selected: 1,
+            footer: "↑/↓ move · enter focus · esc close".to_owned(),
+        };
+        with_map.overlay = Some(OverlayScene::SessionMap(map.clone()));
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&with_map, &theme).unwrap();
+        let prepared_map = prepared
+            .session_map()
+            .expect("session-map scene data was not retained");
+        let lines = session_map_lines(prepared_map);
+
+        assert_eq!(prepared_map, &map);
+        assert_eq!(lines.len(), usize::from(map.area.height));
+        assert_eq!(lines[0], " Sessions ");
+        assert!(lines[1].contains("▸ session-1"));
+        assert!(lines[2].contains("●  ❯ pane-1 terminal"));
+        assert!(lines[2].contains("open"));
+        assert!(lines[2].contains("[zoom float]"));
+        assert!(lines[lines.len() - 2].starts_with("  ↑/↓ move"));
+        assert!(lines.iter().skip(1).all(|line| {
+            line.chars().count() <= usize::from(layout::pane_inner_rect(map.area).width) + 1
+        }));
         assert!(lines.last().unwrap().is_empty());
     }
 
