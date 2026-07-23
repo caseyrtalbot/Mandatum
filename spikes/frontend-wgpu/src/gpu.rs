@@ -13,8 +13,8 @@ use glyphon::{
 // mandatum-terminal-vt: the real app host converts its grids before the
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
-    OverlayScene, PaletteOverlay, PaneContent, PaneScene, SceneColor, TerminalSurface, Theme,
-    WorkspaceScene, layout,
+    ContextMenuEntry, ContextMenuOverlay, OverlayScene, PaletteOverlay, PaneContent, PaneScene,
+    SceneColor, TerminalSurface, Theme, WorkspaceScene, layout,
 };
 use winit::window::Window;
 
@@ -58,6 +58,7 @@ pub struct PreparedScene<'a> {
     pane_text_rows: usize,
     body_wrap: Wrap,
     palette: Option<&'a PaletteOverlay>,
+    context_menu: Option<&'a ContextMenuOverlay>,
 }
 
 impl PreparedScene<'_> {
@@ -83,6 +84,10 @@ impl PreparedScene<'_> {
 
     pub fn has_palette(&self) -> bool {
         self.palette.is_some()
+    }
+
+    pub fn context_menu(&self) -> Option<&ContextMenuOverlay> {
+        self.context_menu
     }
 }
 
@@ -125,18 +130,16 @@ pub fn prepare_scene<'a>(
             (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
         }
     };
-    let palette = match &scene.overlay {
-        Some(OverlayScene::Palette(palette)) => Some(palette),
-        Some(OverlayScene::ContextMenu(_)) => {
-            return Err(UnsupportedScene::Overlay("context menu"));
-        }
+    let (palette, context_menu) = match &scene.overlay {
+        Some(OverlayScene::Palette(palette)) => (Some(palette), None),
+        Some(OverlayScene::ContextMenu(menu)) => (None, Some(menu)),
         Some(OverlayScene::Timeline(_)) => return Err(UnsupportedScene::Overlay("timeline")),
         Some(OverlayScene::SessionMap(_)) => return Err(UnsupportedScene::Overlay("session map")),
         Some(OverlayScene::Prompt(_)) => return Err(UnsupportedScene::Overlay("prompt")),
         Some(OverlayScene::Search(_)) => return Err(UnsupportedScene::Overlay("search")),
         Some(OverlayScene::Help(_)) => return Err(UnsupportedScene::Overlay("help")),
         Some(OverlayScene::Welcome(_)) => return Err(UnsupportedScene::Overlay("welcome")),
-        None => None,
+        None => (None, None),
     };
     Ok(PreparedScene {
         scene,
@@ -147,6 +150,7 @@ pub fn prepare_scene<'a>(
         pane_text_rows,
         body_wrap,
         palette,
+        context_menu,
     })
 }
 
@@ -179,6 +183,20 @@ fn fit_cell_line(line: &str, width: u16) -> String {
     fitted.push('…');
     fitted.extend(&characters[characters.len() - tail_len..]);
     fitted
+}
+
+fn context_menu_line(item: &ContextMenuEntry, width: u16) -> String {
+    let width = usize::from(width);
+    let label = format!(" {}", item.label);
+    let label_width = label.chars().count();
+    let hint_width = item.chord_hint.chars().count() + 1;
+    let padding = width.saturating_sub(label_width + hint_width).max(1);
+    let line = format!(
+        "{label}{}{hint}",
+        " ".repeat(padding),
+        hint = item.chord_hint
+    );
+    fit_cell_line(&line, width as u16)
 }
 
 pub struct GpuText {
@@ -724,6 +742,7 @@ impl GpuText {
             }
             let overlay_text = lines.join("\n");
             let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            self.overlay_buffer.set_wrap(Wrap::None);
             self.overlay_buffer.set_size(
                 Some(palette.area.width as f32 * self.cell_w),
                 Some(palette.area.height as f32 * self.cell_h),
@@ -744,6 +763,80 @@ impl GpuText {
                 palette.area.x as f32 * self.cell_w,
                 palette.area.y as f32 * self.cell_h,
             ));
+        } else if let Some(menu) = prepared.context_menu {
+            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
+            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
+            let menu_x = menu.area.x as f32 * self.cell_w;
+            let menu_y = menu.area.y as f32 * self.cell_h;
+            let menu_width = menu.area.width as f32 * self.cell_w;
+            let menu_height = menu.area.height as f32 * self.cell_h;
+            push_quad(
+                &mut quads,
+                menu_x,
+                menu_y,
+                menu_width,
+                menu_height,
+                overlay_bg_rgba,
+            );
+            if menu.area.width > 0 && menu.area.height > 0 {
+                let border = resolve(theme.palette_border, DEFAULT_FG);
+                let border_rgba = [border[0], border[1], border[2], 255];
+                push_quad(&mut quads, menu_x, menu_y, menu_width, 1.0, border_rgba);
+                push_quad(
+                    &mut quads,
+                    menu_x,
+                    menu_y + menu_height - 1.0,
+                    menu_width,
+                    1.0,
+                    border_rgba,
+                );
+                push_quad(&mut quads, menu_x, menu_y, 1.0, menu_height, border_rgba);
+                push_quad(
+                    &mut quads,
+                    menu_x + menu_width - 1.0,
+                    menu_y,
+                    1.0,
+                    menu_height,
+                    border_rgba,
+                );
+            }
+
+            let inner = layout::pane_inner_rect(menu.area);
+            let visible_items = menu.items.iter().take(usize::from(inner.height));
+            let overlay_text = visible_items
+                .map(|item| context_menu_line(item, inner.width))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if menu.selected < menu.items.len() && menu.selected < usize::from(inner.height) {
+                let selection = resolve(theme.palette_selection, [70, 100, 180]);
+                push_quad(
+                    &mut quads,
+                    inner.x as f32 * self.cell_w,
+                    (inner.y + menu.selected as u16) as f32 * self.cell_h,
+                    inner.width as f32 * self.cell_w,
+                    self.cell_h,
+                    [selection[0], selection[1], selection[2], 190],
+                );
+            }
+            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
+            self.overlay_buffer.set_wrap(Wrap::None);
+            self.overlay_buffer.set_size(
+                Some(inner.width as f32 * self.cell_w),
+                Some(inner.height as f32 * self.cell_h),
+            );
+            self.overlay_buffer.set_text(
+                &overlay_text,
+                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
+                    overlay_fg[0],
+                    overlay_fg[1],
+                    overlay_fg[2],
+                )),
+                Shaping::Advanced,
+                None,
+            );
+            self.overlay_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            overlay_position = Some((inner.x as f32 * self.cell_w, inner.y as f32 * self.cell_h));
         }
 
         // Upload quad instances (grow buffer if needed).
@@ -1020,8 +1113,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 mod tests {
     use super::*;
     use mandatum_scene::{
-        AgentContent, AgentStatus, EmptyContent, HeaderScene, OverlayScene, PaneId, PaneSceneKind,
-        SceneCell, SceneRect, SceneSize, StatusScene, TaskContent, WelcomeOverlay,
+        AgentContent, AgentStatus, ContextMenuEntry, ContextMenuOverlay, EmptyContent, HeaderScene,
+        OverlayScene, PaneId, PaneSceneKind, SceneCell, SceneRect, SceneSize, StatusScene,
+        TaskContent, WelcomeOverlay,
     };
 
     fn terminal_content() -> PaneContent {
@@ -1147,6 +1241,39 @@ mod tests {
         assert!(prepared.pane_text().contains("deliberately long objective"));
         assert_eq!(prepared.body_wrap, Wrap::WordOrGlyph);
         assert!(prepared.pane_surface().is_none());
+    }
+
+    #[test]
+    fn context_menu_plan_preserves_scene_data_geometry_and_row_alignment() {
+        let mut with_menu = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let menu = ContextMenuOverlay {
+            area: SceneRect::new(3, 4, 26, 5),
+            items: vec![
+                ContextMenuEntry::new("Zoom pane", "ctrl+p z"),
+                ContextMenuEntry::new("Close pane", "ctrl+p x"),
+                ContextMenuEntry::new("Copy selection", ""),
+            ],
+            selected: 1,
+        };
+        with_menu.overlay = Some(OverlayScene::ContextMenu(menu.clone()));
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&with_menu, &theme).unwrap();
+        let prepared_menu = prepared
+            .context_menu()
+            .expect("context-menu scene data was not retained");
+
+        assert_eq!(prepared_menu, &menu);
+        let inner = layout::pane_inner_rect(prepared_menu.area);
+        let lines = prepared_menu
+            .items
+            .iter()
+            .map(|item| context_menu_line(item, inner.width))
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), usize::from(inner.height));
+        assert!(lines[0].starts_with(" Zoom pane"));
+        assert!(lines[0].ends_with("ctrl+p z"));
+        assert_eq!(lines[0].chars().count(), usize::from(inner.width) - 1);
     }
 
     #[test]

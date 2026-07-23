@@ -6,8 +6,8 @@ use std::{
 use mandatum_app::{AppConfig, FrontendHost};
 use mandatum_gpu_renderer_spike::prepare_scene;
 use mandatum_scene::{
-    PaneContent, SceneSize,
-    input::{InputEvent, Key, KeyCode},
+    HitTargetKind, OverlayScene, PaneContent, SceneSize,
+    input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
 };
 
 fn dispatch_palette_command(host: &mut FrontendHost, key: char) {
@@ -44,6 +44,44 @@ fn real_host_empty_pane_reaches_the_gpu_render_plan() {
             .contains("no live PTY grid is attached"),
         "prepared empty plan did not retain the real scene display data"
     );
+}
+
+#[test]
+fn real_host_context_menu_reaches_the_gpu_render_plan() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+
+    let initial = host.frame(frame_size);
+    let pane_body = initial
+        .scene
+        .hit_targets
+        .iter()
+        .find(|target| matches!(target.kind, HitTargetKind::PaneBody(_)))
+        .expect("fresh real host frame did not expose a pane-body hit target");
+    host.handle_input(InputEvent::Pointer(PointerEvent {
+        kind: PointerKind::Down,
+        button: Some(PointerButton::Right),
+        column: pane_body.rect.x,
+        row: pane_body.rect.y,
+        mods: Modifiers::NONE,
+    }));
+
+    let snapshot = host.frame(frame_size);
+    let Some(OverlayScene::ContextMenu(menu)) = &snapshot.scene.overlay else {
+        panic!("neutral right-click did not produce the real context-menu scene");
+    };
+    assert_eq!(menu.area.x, pane_body.rect.x);
+    assert_eq!(menu.area.y, pane_body.rect.y);
+    assert_eq!(menu.selected, 0);
+    assert_eq!(menu.items[0].label, "Command palette");
+
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real context-menu scene");
+    assert_eq!(prepared.context_menu(), Some(menu));
 }
 
 #[test]

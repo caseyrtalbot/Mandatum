@@ -393,6 +393,33 @@ Dated Phase 3 Empty increment (2026-07-22):
   build, all workspace tests, conformance, and documentation trace checks after
   the synchronized documentation edits.
 
+Dated Phase 3 context-menu increment (2026-07-22):
+
+- The required real-host tracer bullet built an exact pane-body hit target from
+  a fresh `FrontendHost` frame with PTY spawning disabled, sent a neutral
+  right-button down event inside it, proved the next product frame contained
+  `OverlayScene::ContextMenu`, and first failed in `prepare_scene` with
+  `Overlay("context menu")`.
+- The final real-host test proves that product menu reaches the prepared GPU
+  plan unchanged. Its isolated renderer test proves the resolved area, ordered
+  rows, chord hints, selected index, and right-aligned line plan are retained.
+- `./ci/gpu-spike.sh` passed thirteen tests (two native-shell tests, five
+  real-host integration tests, and six isolated-renderer tests) plus the
+  renderer dependency-boundary scan. `cargo test -p mandatum-app --lib` passed
+  all 248 tests.
+- The displayed release build ran on macOS from a disposable project with an
+  intentionally missing shell. The real Empty pane remained visible beneath a
+  bordered menu at the right-click anchor; all twelve product labels and chord
+  hints painted, the first row was highlighted, Escape closed the menu, and
+  Ctrl+Q exited cleanly with no native-spike or attempted-shell process left.
+- The spike remains excluded from the product workspace/build/release. The
+  isolated renderer still consumes only `WorkspaceScene` plus `Theme` with no
+  PTY/parser dependency. Multiple panes, remaining overlays, broader input,
+  restore, Artifact Preview, and production admission remain separately gated.
+- The final `./ci/gate.sh` passed formatting, Clippy with warnings denied,
+  build, all workspace tests, conformance, and documentation trace checks after
+  the synchronized documentation edits.
+
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the
 approval bridge, and `LICENSE`). Release and install surfaces may not reference

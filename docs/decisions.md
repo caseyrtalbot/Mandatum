@@ -1496,3 +1496,42 @@ mandatum-app --lib` passed all 248 tests. A displayed release smoke showed the
 real failed-PTY Empty state and all three detail lines, then quit cleanly with
 no native or attempted-shell process. The final `./ci/gate.sh` passed after
 these synchronized documentation edits.
+
+## Accepted: The Excluded Native Render Plan Covers The Product Context Menu
+
+Status: accepted (2026-07-22)
+
+Decision: continue Phase 3 with one scene-only increment that accepts and
+paints a real `OverlayScene::ContextMenu` emitted by `FrontendHost` over any
+already-supported one-pane scene. The prepared plan retains the existing
+resolved area, ordered labels and chord hints, and selected index. Displayed
+paint uses the existing overlay background, palette border, foreground, and
+selection theme roles without changing the scene contract.
+
+Context: the app already opens the menu from neutral right-click input resolved
+against the exact prior frame's pane hit targets. It already composes the
+pane-relevant rows, state-aware labels, keyboard routes, clamped menu area, and
+row hit targets. The excluded renderer was rejecting that complete product
+scene even though no additional app or runtime data was required.
+
+Rationale: borrowing the existing `ContextMenuOverlay` in the headless paint
+plan keeps menu behavior in the app and geometry in the scene layer. The same
+plan drives displayed background, border, selection, one-row labels, and
+right-aligned chord hints. Matching the current scalar-character alignment is
+deliberate; grapheme and wide-cell correctness remain Phase 4 work.
+
+Consequences: no app, runtime, scene, workspace, production dependency,
+allowlist, installer, default command, or release surface changes. Multiple
+panes, the remaining overlay variants, full input/theme/style parity, restore,
+Artifact Preview, and production GPU admission remain separately gated. The
+next slice is the existing one-pane timeline overlay only.
+
+Verification: the real-host test recorded the initial
+`UnsupportedScene::Overlay("context menu")` failure, then passed with the
+product menu retained unchanged by the prepared plan. The isolated renderer
+test covers area, rows, selection, and right-aligned chord text.
+`./ci/gpu-spike.sh` passed thirteen tests plus the renderer dependency-boundary
+scan, and `cargo test -p mandatum-app --lib` passed all 248 tests. A displayed
+release smoke showed the real menu over the failed-PTY Empty state, then Escape
+and Ctrl+Q closed it and the process cleanly. The final merge-gate result is
+recorded in `docs/verification.md`.

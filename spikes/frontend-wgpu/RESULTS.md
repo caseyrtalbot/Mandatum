@@ -1,11 +1,11 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 underway; task, agent, and Empty one-pane content are covered.**
+Status: **Phase 3 underway; one-pane content and the context menu are covered.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, one terminal, task, agent, or Empty pane, status
-strip, and command palette on the GPU. Typed clipboard effects return to the
-native shell.
+strip, command palette, and context menu on the GPU. Typed clipboard effects
+return to the native shell.
 
 This remains an isolated frontend outside the Cargo workspace (the root
 `Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
@@ -52,6 +52,18 @@ panes, remaining overlays, restore, broader input, Artifact Preview, and
 production admission remain pending. The final `./ci/gate.sh` passed after
 these synchronized documentation edits.
 
+Phase 3 context-menu verification (2026-07-22): a fresh real-host tracer bullet
+used the exact pane-body target from the initial frame, sent a neutral
+right-click, proved the next frame carried `OverlayScene::ContextMenu`, and
+first failed with `Overlay("context menu")`. The final plan retains the menu's
+resolved area, rows, chord hints, and selected index. `./ci/gpu-spike.sh` passed
+thirteen tests plus the renderer-boundary scan, and all 248 app library tests
+passed. A displayed missing-shell smoke kept the real Empty pane and product
+chrome beneath the bordered menu, painted all twelve real rows and hints with
+the first selected, closed with Escape, and quit with Ctrl+Q without leaving a
+native or attempted-shell process. Multi-pane layouts, remaining overlays,
+restore, broader input, Artifact Preview, and production admission remain.
+
 ## Verdict (read this first)
 
 The 2026-07-09 GPU run showed a **measured, roughly 2x latency advantage** over
@@ -94,11 +106,11 @@ How the current boundary is enforced:
 
 `prepare_scene` is the window/GPU-free renderer seam used by the controlled
 integration test and by the displayed renderer. It accepts the real header,
-one terminal, task, agent, or Empty pane, status, theme, and optional palette
-while explicitly rejecting multiple panes and unsupported overlays. The
-displayed renderer uses the scene's pane-inner geometry, chrome, terminal/task
-surface, scene-composed detail lines, status, and palette data rather than
-deriving product presentation itself.
+one terminal, task, agent, or Empty pane, status, theme, and optional palette or
+context menu while explicitly rejecting multiple panes and unsupported
+overlays. The displayed renderer uses the scene's pane-inner geometry, chrome,
+terminal/task surface, scene-composed detail lines, status, palette, and
+context-menu data rather than deriving product presentation itself.
 
 The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
 relevant only to the historical 2026-07-09 benchmark evidence below. Both files
@@ -316,9 +328,9 @@ panic, exit 0).
 ## What a production adapter would still need
 
 - **Complete broader scene parity.** Header, one terminal/task/agent pane,
-  Empty fallback, status, theme, and command palette are bound. Production still
-  needs restore, multiple panes, hit-target parity, and the remaining overlay
-  variants.
+  Empty fallback, status, theme, command palette, and context menu are bound.
+  Production still needs restore, multiple panes, hit-target parity, and the
+  remaining overlay variants.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
@@ -364,6 +376,12 @@ must leave the one terminal intent visible as Empty content with cwd, restart
 generation, and no-live-grid detail. Confirm Ctrl+Q leaves no native-spike or
 attempted-shell process.
 
+For the displayed context-menu smoke, use the same disposable missing-shell
+launch, right-click inside the Empty pane body, and confirm the bordered menu
+keeps every product label and chord hint visible with the first row selected.
+Escape must close the menu, and Ctrl+Q must leave no native-spike or
+attempted-shell process.
+
 ## Final spike verdict
 
 **The 2026-07-09 GPU run proved a real, measured, user-visible latency win and a
@@ -383,10 +401,11 @@ removed without GPU work. Phase 2 subsequently replaced the duplicate spike
 host with the real `FrontendHost` and completed the header, one-terminal,
 status, palette, neutral-input, wake, and typed-effect slice. Phase 3 is now
 underway: its first increments add real one-pane task metadata/live output,
-agent detail, and the Empty fallback without changing the scene or host
-contract. A production wgpu adapter still needs restore, multi-pane and broader
-scene parity, correct grapheme width, IME and composition, runtime DPI, full
-style mapping, surface-loss recovery, and damage tracking.
+agent detail, the Empty fallback, and the existing context menu without
+changing the scene or host contract. A production wgpu adapter still needs
+restore, multi-pane and broader scene parity, correct grapheme width, IME and
+composition, runtime DPI, full style mapping, surface-loss recovery, and damage
+tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selects the
