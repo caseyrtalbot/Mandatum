@@ -2063,6 +2063,10 @@ full merge-gate and review results are recorded in `docs/verification.md`.
 
 Status: accepted (2026-07-23)
 
+The capability-family delivery unit remains accepted. Its temporary per-pane
+paint mechanism was superseded later the same day by
+“One Neutral Cell Program Owns Frontend Presentation” below.
+
 Decision: complete native/GPU parity by capability family rather than running a
 full delivery lifecycle for every layout variant. The excluded adapter keeps
 `prepare_scene(&WorkspaceScene, &Theme)` as its public seam and deepens the
@@ -2113,3 +2117,58 @@ renderer and real-host suites pass as capability matrices. Aggregate review,
 displayed smoke, and `./ci/gpu-spike.sh` are recorded in
 `docs/verification.md`; `./ci/gate.sh` remains the final family completion
 gate.
+
+## Accepted: One Neutral Cell Program Owns Frontend Presentation
+
+Status: accepted (2026-07-23)
+
+Decision: `mandatum-scene` compiles every `WorkspaceScene` into one
+renderer-neutral, final-topmost `CellProgram`. Each coordinate carries one
+occupancy (`Glyph(char)` or `WideContinuation`), complete `SceneCellStyle`, an
+optional selection kind, and a cursor mark. Terminal, task, agent, Empty,
+header/status chrome, pane titles/borders, and every overlay use this compiler.
+The shipped ratatui renderer and excluded GPU renderer are translation-only
+adapters over the same program.
+
+Context: layout/composition parity still left two presentation authorities.
+The ratatui adapter owned pane/overlay widgets and the GPU adapter retained
+content-specific strings, buffers, and overlay formatters. The GPU path also
+honored only a subset of cell style, selection, and cursor semantics. Adding
+more content-specific GPU branches would have multiplied drift with every
+surface and theme role.
+
+Rationale: presentation meaning belongs beside the renderer-neutral scene
+contract. One cell compiler makes opacity, truncation/wrapping, semantic roles,
+selection, cursor, and modifiers independently testable and gives every
+frontend the same complete paint input. Keeping `SceneCell` unchanged avoids
+claiming grapheme-width data the terminal engine does not yet expose; the
+explicit continuation occupancy is the truthful Phase 5 seam.
+
+Consequences:
+
+- the old ratatui pane, surface, and overlay modules are deleted;
+- GPU `PreparedScene` retains only `CellProgram`, not pane/content/overlay
+  shadow plans;
+- cell storage replaces earlier paint at the same coordinate while compiling,
+  so retained memory is bounded by final frame coverage rather than summed
+  overlapping pane area;
+- the GPU adapter maps ANSI/indexed/RGB colors, bold, dim, italic, underline,
+  inverse, hidden, strikethrough, terminal/item selection, and cursor;
+- the excluded GPU boundary rejects more than 256 panes, more than 262,144
+  frame cells, a conservative precompile estimate above 4,000,000 paint
+  instructions, or more than 4,096 retained row buffers;
+- these are adapter resource limits, not product layout meaning;
+- `./ci/gpu-spike.sh` now includes warnings-denied all-target clippy;
+- input/lifecycle parity is the next Phase 3 family; wide/grapheme production
+  and IME remain Phase 5, and production GPU admission remains blocked.
+
+Verification: focused RED/GREEN tracers cover terminal style/selection/cursor,
+mixed pane content, every overlay, final-cell opacity, narrow pane/overlay
+containment, huge off-frame rectangles, many overlapping panes, reverse-video
+modifier composition, and checked GPU resource limits. Real-host tests assert
+representative final program content for Empty, task, agent, copy mode, and
+every overlay. Aggregate review removed duplicate authorities and corrected
+unbounded replacement storage, degenerate-border leakage, contradictory
+selection state, and missing spike clippy coverage. The exact automated and
+displayed evidence is recorded in `docs/verification.md`; `./ci/gate.sh`
+remains the final completion gate.

@@ -157,6 +157,8 @@ Owns renderer-neutral presentation:
 - tiled, stacked, floating, and zoomed surfaces
 - terminal grid surfaces (`TerminalSurface`: windowed styled cells, cursor,
   scrollback viewport, selection)
+- the whole-frame renderer-neutral `CellProgram`: glyph or wide-continuation
+  occupancy, complete cell style, selection kind, cursor, and scene paint order
 - task and agent summaries (`PaneContent`)
 - command palette view model
 - status strips
@@ -239,25 +241,25 @@ decides whether the first-run note exists, and the scene carries its resolved
 area, introduction, ordered live key routes and descriptions, and dismissal
 text. The adapter paints and clips that opaque card without reading persistence,
 the keymap, or app state.
-The excluded GPU adapter now treats layout/composition as one capability
-family. `prepare_scene` compiles every ordered pane record from
-`WorkspaceScene` instead of recognizing named two-pane topologies. It validates
-only renderer-safety invariants: every visible pane has a usable 3x3 bordered
-interior, checked endpoints, and workspace containment. Identity, tiled
-coverage, gaps, overlap, stack/zoom/floating flags, and focus ordering are not
-reconstructed because `mandatum-scene` already owns those meanings and
-`WorkspaceScene::panes` is the paint order. The excluded adapter caps a
-compiled frame at 256 panes, bounding its retained glyph-buffer pool without
-adding a product layout rule.
+The excluded GPU adapter treats layout/composition and content/style as two
+completed capability families. `prepare_scene` validates renderer-safety
+invariants and checked aggregate resource limits, then receives the one
+whole-frame `CellProgram` compiled by `mandatum-scene`; it does not recognize
+named topologies or retain a content-specific shadow plan. Identity, tiled
+coverage, gaps, overlap, stack/zoom/floating flags, focus ordering, chrome,
+pane/overlay text, opacity, selection, cursor, and styles are not reconstructed
+in the adapter because the scene compiler already owns those meanings.
 
-The prepared plan retains one record per pane, and the displayed renderer grows
-one title/body buffer pair per record while retaining high-water capacity.
-Pane title and body bounds are converted to final pixel `TextBounds`, clipped
-against every later opaque pane in scene order, and then clipped
-against the current opaque overlay. Header and status text use the same overlay
-subtraction. This one path covers tiled, stacked, zoomed, mixed-content,
-three-plus-pane, moved/custom-float, multiple-float, and overlay combinations
-without moving layout policy into the adapter.
+The compiler applies scene paint order and emits final topmost cells in
+deterministic row-major order. The ratatui adapter translates their neutral
+color and modifier values into buffer cells. The GPU adapter paints each final
+background quad and shapes styled row runs for its glyph. This one path covers
+terminal, task, agent,
+Empty, chrome, every overlay, tiled/stacked/zoomed/mixed-content/dense/floating
+compositions, built-in and custom theme roles, all current style modifiers,
+terminal/item selection, and cursor without frontend presentation branches.
+The explicit `WideContinuation` occupancy is the Phase 5 seam; current scene
+surfaces still carry scalar cells and do not claim grapheme-width correctness.
 Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
 state remain frontend-local.
@@ -268,10 +270,10 @@ scheduling. It may not own a second PTY/parser path, command router, approval
 model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
-Phase 3 is underway. Its layout/composition capability family is complete;
-content/style parity (starting with neutral cell semantics) and input/lifecycle
-parity remain. Artifact Preview is the next dedicated product-capability phase,
-before hardening, measurement, production GPU admission, or rollout.
+Phase 3 is underway. Its layout/composition and content/style capability
+families are complete; input/lifecycle parity remains. Artifact Preview is the
+next dedicated product-capability phase, before hardening, measurement,
+production GPU admission, or rollout.
 
 ### `workflows`
 

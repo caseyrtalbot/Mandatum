@@ -843,8 +843,10 @@ Dated aggregate-review corrections-only slice (2026-07-23):
   overlays, dense, mixed-content, and three-plus-pane scenes remain
   fail-closed. Artifact Preview and production GPU admission remain pending.
 
-Layout/composition capability-family verification (2026-07-23), superseding
-the topology limits above:
+Layout/composition capability-family verification (2026-07-23), at that
+family's original stop point and superseding the topology limits above. Its
+per-pane paint resources were subsequently replaced by the content/style cell
+program recorded below:
 
 - Focused RED/GREEN tracers covered one real stack, three real tiled panes, two
   real ordered floats, dynamic pane-buffer growth, and final-pixel subtraction
@@ -874,10 +876,54 @@ the topology limits above:
   showed distinct three-pane buffers, the scene-owned stack representation,
   opaque later-pane composition, and no underlying text through Help. Ctrl+Q
   exited 0 and no native-spike process remained.
-- Remaining Phase 3 work is grouped into content/style parity (beginning with
-  neutral cell semantics) and input/lifecycle parity. Artifact Preview is the
-  next dedicated product-capability phase. The spike remains excluded, and
+- The next family at this stop point was content/style parity. That family is
+  now complete below; input/lifecycle remains. The spike remains excluded, and
   production dependency admission and release changes remain blocked.
+
+Content/style capability-family verification (2026-07-23):
+
+- Focused RED/GREEN tracers established the public neutral cell contract first,
+  then terminal, task, agent, Empty, header/status chrome, pane borders/titles,
+  Palette, context menu, timeline, session map, objective prompt, Search, Help,
+  and Welcome semantics. `SceneCell` remains unchanged. `CellProgram` carries
+  final topmost `Glyph(char)` or `WideContinuation` occupancy, complete
+  `SceneCellStyle`, one optional selection kind, and cursor state in
+  deterministic row-major order.
+- The ratatui renderer and excluded GPU renderer consume that same final cell
+  program. The GPU translation covers ANSI/indexed/RGB colors; built-in and
+  custom semantic roles; bold, dim, italic, underline, inverse, hidden, and
+  strikethrough; terminal/item selection; cursor; and opaque replacement.
+  `PreparedScene` contains no pane/content/overlay shadow plan.
+- Real-host tests assert representative final program text and semantic marks
+  for Empty, task output, agent detail, copy selection/cursor, and every
+  overlay. Focused compiler tests cover huge off-frame rectangles, 128 fully
+  overlapping panes, true bordered interiors for one- and two-cell panes, and
+  every overlay at one- and two-cell dimensions. GPU tests cover reverse-video
+  composition, continuation/hidden cells, final opacity, and checked pane,
+  frame-cell, paint-work, and row-buffer ceilings.
+- Aggregate review found and corrected the remaining defects before completion:
+  obsolete ratatui modules and the GPU shadow plan were removed; duplicate
+  selection truth was collapsed; off-frame and degenerate-border paint was
+  clipped; final-cell storage replaced the unbounded replacement stream for
+  both adapters; GPU work/resource ceilings were checked before compile; and
+  warnings-denied all-target clippy joined `./ci/gpu-spike.sh`.
+- `cargo test -p mandatum-scene` passed 45 tests (35 unit and 10 integration);
+  `cargo test -p mandatum-renderer` passed 28 tests; and
+  `./ci/gpu-spike.sh` passed 34 tests (two native-shell, twenty-three real-host,
+  and nine isolated GPU tests), warnings-denied clippy, formatting, and the
+  renderer dependency-boundary scan.
+- The final release build ran a displayed 800x632 macOS matrix with a custom
+  `mandatum-light` theme. It showed the real Empty fallback; a successful task
+  with 256-color foreground/background plus bold, italic, underline, and
+  strikethrough output; a fake agent in the waiting-for-approval attention
+  state; and an opaque Palette with custom border/surface/selection roles over
+  that mixed scene. Screenshot inspection found no covered-text leakage.
+  Escape closed the overlay, Ctrl+Q exited 0, and no native-spike process
+  remained.
+- Input/lifecycle parity is the exact next Phase 3 family. True
+  grapheme/wide-cell production and IME remain Phase 5 boundaries. Artifact
+  Preview, production GPU admission, workspace/release dependencies, and
+  rollout remain unchanged and blocked.
 
 The same conformance check resolves all Cargo features and keeps release builds,
 archive members, and installer binaries on explicit allowlists (`mandatum`, the

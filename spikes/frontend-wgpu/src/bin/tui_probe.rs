@@ -13,6 +13,7 @@
 //!     dedicated input thread wakes the main loop; ~8 ms redraw cap), so the
 //!     number includes the redraw-cap coalescing window but no poll interval.
 //!   - GPU number  = key -> GPU present, which DOES include the on-screen paint.
+//!
 //! So the TUI figure is if anything flattered (it stops at bytes-out, before
 //! pixels), yet still carries the poll-loop cost. The comparison table in
 //! RESULTS.md states this caveat next to the numbers.
@@ -127,7 +128,9 @@ fn main() {
                 break;
             }
         }
-        if std::env::var_os("MANDATUM_DEBUG").is_some() && (samples_ms.len() + misses) % 25 == 0 {
+        if std::env::var_os("MANDATUM_DEBUG").is_some()
+            && (samples_ms.len() + misses).is_multiple_of(25)
+        {
             eprintln!("[probe] samples={} misses={}", samples_ms.len(), misses);
         }
         // If the app never echoes, bail rather than burning the full attempt

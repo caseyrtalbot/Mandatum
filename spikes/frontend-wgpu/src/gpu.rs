@@ -2,32 +2,31 @@
 // backgrounds/selection/cursor/status, layered under GPU-rasterized glyphs
 // rendered by glyphon. All rendering is per-frame from WorkspaceScene.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
+    Style as FontStyle, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Weight, Wrap, cosmic_text::UnderlineStyle,
 };
 // The renderer consumes ONLY the scene contract. It never imports
 // mandatum-terminal-vt: the real app host converts its grids before the
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
-    ContextMenuEntry, ContextMenuOverlay, HelpEntry, HelpOverlay, OverlayScene, PaletteOverlay,
-    PaneContent, PaneScene, PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneColor, SceneRect,
-    SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow, TerminalSurface, Theme,
-    TimelineEntry, TimelineOverlay, WelcomeOverlay, WorkspaceScene, layout,
+    CellOccupancy, CellProgram, CellSelection, OverlayScene, ProgramCell, SceneColor, SceneRect,
+    Theme, WorkspaceScene, compile_cell_program, layout,
 };
 use winit::window::Window;
 
 const DEFAULT_FG: [u8; 3] = [220, 220, 224];
 const DEFAULT_BG: [u8; 3] = [18, 18, 22];
-const SELECTION_BG: [u8; 4] = [70, 100, 180, 150];
-const CURSOR_BG: [u8; 4] = [210, 210, 220, 150];
-const STATUS_BG: [u8; 3] = [30, 32, 40];
-const STATUS_FG: [u8; 3] = [170, 176, 190];
 const BASE_FONT_PT: f32 = 15.0;
 const MAX_GPU_PANES: usize = 256;
+const MAX_GPU_FRAME_CELLS: usize = 262_144;
+const MAX_GPU_CELL_INSTRUCTIONS: usize = 4_000_000;
+const MAX_GPU_ROW_BUFFERS: usize = 4_096;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SceneCompileError {
@@ -58,228 +57,26 @@ impl std::fmt::Display for SceneCompileError {
 }
 
 #[derive(Debug)]
-pub struct PreparedPane<'a> {
-    pane: &'a PaneScene,
-    terminal: Option<&'a TerminalSurface>,
-    pane_text: String,
-    pane_text_rows: usize,
-    body_wrap: Wrap,
+pub struct PreparedScene {
+    cell_program: CellProgram,
 }
 
-impl PreparedPane<'_> {
-    pub fn scene(&self) -> &PaneScene {
-        self.pane
-    }
-
-    pub fn pane_text(&self) -> &str {
-        &self.pane_text
-    }
-
-    pub fn pane_surface(&self) -> Option<&TerminalSurface> {
-        self.terminal
+impl PreparedScene {
+    pub fn cell_program(&self) -> &CellProgram {
+        &self.cell_program
     }
 }
 
-/// Compile the complete scene-owned pane program without touching a GPU.
-/// Layout meaning remains in `mandatum-scene`; this plan retains draw order and
-/// rejects only renderer resource or geometry hazards.
-#[derive(Debug)]
-pub struct PreparedScene<'a> {
-    scene: &'a WorkspaceScene,
-    theme: &'a Theme,
-    panes: Vec<PreparedPane<'a>>,
-    palette: Option<&'a PaletteOverlay>,
-    context_menu: Option<&'a ContextMenuOverlay>,
-    timeline: Option<&'a TimelineOverlay>,
-    search: Option<&'a SearchOverlay>,
-    session_map: Option<&'a SessionMapOverlay>,
-    prompt: Option<&'a PromptOverlay>,
-    help: Option<&'a HelpOverlay>,
-    welcome: Option<&'a WelcomeOverlay>,
-}
-
-impl PreparedScene<'_> {
-    pub fn header_text(&self) -> &str {
-        &self.scene.header.text
-    }
-
-    pub fn pane_title(&self) -> &str {
-        &self.panes[0].pane.title
-    }
-
-    pub fn pane_text(&self) -> &str {
-        &self.panes[0].pane_text
-    }
-
-    pub fn pane_surface(&self) -> Option<&TerminalSurface> {
-        self.panes[0].terminal
-    }
-
-    pub fn panes(&self) -> &[PreparedPane<'_>] {
-        &self.panes
-    }
-
-    pub fn theme_name(&self) -> &str {
-        &self.theme.name
-    }
-
-    pub fn has_palette(&self) -> bool {
-        self.palette.is_some()
-    }
-
-    pub fn context_menu(&self) -> Option<&ContextMenuOverlay> {
-        self.context_menu
-    }
-
-    pub fn timeline(&self) -> Option<&TimelineOverlay> {
-        self.timeline
-    }
-
-    pub fn search(&self) -> Option<&SearchOverlay> {
-        self.search
-    }
-
-    pub fn session_map(&self) -> Option<&SessionMapOverlay> {
-        self.session_map
-    }
-
-    pub fn prompt(&self) -> Option<&PromptOverlay> {
-        self.prompt
-    }
-
-    pub fn help(&self) -> Option<&HelpOverlay> {
-        self.help
-    }
-
-    pub fn welcome(&self) -> Option<&WelcomeOverlay> {
-        self.welcome
-    }
-
-    pub fn pane_text_visible_bounds(
-        &self,
-        pane_index: usize,
-        cell_width: f32,
-        cell_height: f32,
-    ) -> Option<Vec<TextBounds>> {
-        let pane = self.panes.get(pane_index)?;
-        let bounds = scene_rect_to_text_bounds(
-            layout::pane_inner_rect(pane.pane.area),
-            cell_width,
-            cell_height,
-        );
-        let (pane_occlusions, opaque_overlay_occlusion) =
-            self.text_occlusions(cell_width, cell_height);
-
-        Some(text_bounds_below_scene_occlusions(
-            bounds,
-            pane_index,
-            &pane_occlusions,
-            opaque_overlay_occlusion,
-        ))
-    }
-
-    fn text_occlusions(
-        &self,
-        cell_width: f32,
-        cell_height: f32,
-    ) -> (Vec<(usize, TextBounds)>, Option<TextBounds>) {
-        let pane_occlusions = self
-            .panes
-            .iter()
-            .enumerate()
-            .map(|(index, pane)| {
-                (
-                    index,
-                    scene_rect_to_text_bounds(pane.pane.area, cell_width, cell_height),
-                )
-            })
-            .collect();
-        let opaque_overlay_occlusion = self
-            .opaque_overlay_area()
-            .map(|area| scene_rect_to_text_bounds(area, cell_width, cell_height));
-
-        (pane_occlusions, opaque_overlay_occlusion)
-    }
-
-    fn chrome_text_visible_bounds(
-        &self,
-        area: SceneRect,
-        cell_width: f32,
-        cell_height: f32,
-    ) -> Vec<TextBounds> {
-        let bounds = scene_rect_to_text_bounds(area, cell_width, cell_height);
-        match self.opaque_overlay_area() {
-            Some(area) => text_bounds_around_occlusion(
-                bounds,
-                scene_rect_to_text_bounds(area, cell_width, cell_height),
-            ),
-            None => vec![bounds],
-        }
-    }
-
-    fn opaque_overlay_area(&self) -> Option<SceneRect> {
-        self.palette
-            .map(|overlay| overlay.area)
-            .or_else(|| self.context_menu.map(|overlay| overlay.area))
-            .or_else(|| self.timeline.map(|overlay| overlay.area))
-            .or_else(|| self.search.map(|overlay| overlay.area))
-            .or_else(|| self.session_map.map(|overlay| overlay.area))
-            .or_else(|| self.prompt.map(|overlay| overlay.area))
-            .or_else(|| self.help.map(|overlay| overlay.area))
-            .or_else(|| self.welcome.map(|overlay| overlay.area))
-    }
-}
-
-/// Compile the scene-owned paint plan without a window or GPU. The displayed
-/// renderer consumes this same value, so integration tests exercise the real
-/// host-to-renderer boundary headlessly.
-pub fn prepare_scene<'a>(
-    scene: &'a WorkspaceScene,
-    theme: &'a Theme,
-) -> Result<PreparedScene<'a>, SceneCompileError> {
+/// Validate renderer resource and geometry boundaries, then compile the shared
+/// renderer-neutral cell program without touching a window or GPU.
+pub fn prepare_scene(
+    scene: &WorkspaceScene,
+    theme: &Theme,
+) -> Result<PreparedScene, SceneCompileError> {
     validate_scene_structure(scene)?;
-
-    let panes = scene.panes.iter().map(prepare_pane).collect::<Vec<_>>();
-    let (palette, context_menu, timeline, search, session_map, prompt, help, welcome) = match &scene
-        .overlay
-    {
-        Some(OverlayScene::Palette(palette)) => {
-            (Some(palette), None, None, None, None, None, None, None)
-        }
-        Some(OverlayScene::ContextMenu(menu)) => {
-            (None, Some(menu), None, None, None, None, None, None)
-        }
-        Some(OverlayScene::Timeline(timeline)) => {
-            (None, None, Some(timeline), None, None, None, None, None)
-        }
-        Some(OverlayScene::Search(search)) => {
-            (None, None, None, Some(search), None, None, None, None)
-        }
-        Some(OverlayScene::SessionMap(map)) => {
-            (None, None, None, None, Some(map), None, None, None)
-        }
-        Some(OverlayScene::Prompt(prompt)) => {
-            (None, None, None, None, None, Some(prompt), None, None)
-        }
-        Some(OverlayScene::Help(help)) => (None, None, None, None, None, None, Some(help), None),
-        Some(OverlayScene::Welcome(welcome)) => {
-            (None, None, None, None, None, None, None, Some(welcome))
-        }
-        None => (None, None, None, None, None, None, None, None),
-    };
-    Ok(PreparedScene {
-        scene,
-        theme,
-        panes,
-        palette,
-        context_menu,
-        timeline,
-        search,
-        session_map,
-        prompt,
-        help,
-        welcome,
-    })
+    let cell_program = compile_cell_program(scene, theme);
+    validate_compiled_program(&cell_program)?;
+    Ok(PreparedScene { cell_program })
 }
 
 fn validate_scene_structure(scene: &WorkspaceScene) -> Result<(), SceneCompileError> {
@@ -294,7 +91,6 @@ fn validate_scene_structure(scene: &WorkspaceScene) -> Result<(), SceneCompileEr
             maximum: MAX_GPU_PANES,
         });
     }
-
     let Some(workspace_right) = rect_right_checked(workspace) else {
         return Err(SceneCompileError::InvalidGeometry(
             "workspace geometry overflows",
@@ -333,7 +129,117 @@ fn validate_scene_structure(scene: &WorkspaceScene) -> Result<(), SceneCompileEr
         }
     }
 
+    validate_precompile_resources(scene)?;
     Ok(())
+}
+
+fn validate_precompile_resources(scene: &WorkspaceScene) -> Result<(), SceneCompileError> {
+    let Some(frame_cells) =
+        usize::from(scene.size.width).checked_mul(usize::from(scene.size.height))
+    else {
+        return Err(SceneCompileError::ResourceLimit {
+            resource: "frame cells",
+            actual: usize::MAX,
+            maximum: MAX_GPU_FRAME_CELLS,
+        });
+    };
+    enforce_resource_limit("frame cells", frame_cells, MAX_GPU_FRAME_CELLS)?;
+    enforce_resource_limit(
+        "row buffers",
+        usize::from(scene.size.height),
+        MAX_GPU_ROW_BUFFERS,
+    )?;
+
+    // The cell compiler retains only final topmost cells, but it still visits
+    // each semantic paint surface. Bound that precompile work, including
+    // overlaps, with a conservative four-operation charge for fill, border,
+    // text, and replacement.
+    let mut painted_cells = 0usize;
+    add_rect_cells(&mut painted_cells, scene.header.area)?;
+    add_rect_cells(&mut painted_cells, scene.status.area)?;
+    for segment in &scene.header.attention {
+        add_rect_cells(&mut painted_cells, segment.rect)?;
+    }
+    for pane in &scene.panes {
+        add_rect_cells(&mut painted_cells, pane.area)?;
+    }
+    if let Some(area) = scene.overlay.as_ref().map(overlay_area) {
+        add_rect_cells(&mut painted_cells, area)?;
+    }
+    let Some(estimated_instructions) = painted_cells.checked_mul(4) else {
+        return Err(SceneCompileError::ResourceLimit {
+            resource: "cell instructions",
+            actual: usize::MAX,
+            maximum: MAX_GPU_CELL_INSTRUCTIONS,
+        });
+    };
+    enforce_resource_limit(
+        "cell instructions",
+        estimated_instructions,
+        MAX_GPU_CELL_INSTRUCTIONS,
+    )
+}
+
+fn validate_compiled_program(program: &CellProgram) -> Result<(), SceneCompileError> {
+    let instructions = program.cells().count();
+    enforce_resource_limit("cell instructions", instructions, MAX_GPU_CELL_INSTRUCTIONS)?;
+
+    let mut occupied_rows = vec![false; usize::from(program.size().height)];
+    for (_, y, _) in program.cells() {
+        occupied_rows[usize::from(y)] = true;
+    }
+    let row_buffers = occupied_rows
+        .into_iter()
+        .filter(|occupied| *occupied)
+        .count();
+    enforce_resource_limit("row buffers", row_buffers, MAX_GPU_ROW_BUFFERS)
+}
+
+fn enforce_resource_limit(
+    resource: &'static str,
+    actual: usize,
+    maximum: usize,
+) -> Result<(), SceneCompileError> {
+    if actual > maximum {
+        return Err(SceneCompileError::ResourceLimit {
+            resource,
+            actual,
+            maximum,
+        });
+    }
+    Ok(())
+}
+
+fn add_rect_cells(total: &mut usize, area: SceneRect) -> Result<(), SceneCompileError> {
+    let Some(cells) = usize::from(area.width).checked_mul(usize::from(area.height)) else {
+        return Err(SceneCompileError::ResourceLimit {
+            resource: "cell instructions",
+            actual: usize::MAX,
+            maximum: MAX_GPU_CELL_INSTRUCTIONS,
+        });
+    };
+    *total = total.checked_add(cells).unwrap_or(usize::MAX);
+    if *total == usize::MAX {
+        return Err(SceneCompileError::ResourceLimit {
+            resource: "cell instructions",
+            actual: usize::MAX,
+            maximum: MAX_GPU_CELL_INSTRUCTIONS,
+        });
+    }
+    Ok(())
+}
+
+fn overlay_area(overlay: &OverlayScene) -> SceneRect {
+    match overlay {
+        OverlayScene::Palette(overlay) => overlay.area,
+        OverlayScene::ContextMenu(overlay) => overlay.area,
+        OverlayScene::Timeline(overlay) => overlay.area,
+        OverlayScene::SessionMap(overlay) => overlay.area,
+        OverlayScene::Prompt(overlay) => overlay.area,
+        OverlayScene::Search(overlay) => overlay.area,
+        OverlayScene::Help(overlay) => overlay.area,
+        OverlayScene::Welcome(overlay) => overlay.area,
+    }
 }
 
 fn pane_has_usable_interior(area: SceneRect) -> bool {
@@ -348,484 +254,197 @@ fn rect_bottom_checked(area: SceneRect) -> Option<u16> {
     area.y.checked_add(area.height)
 }
 
-fn prepare_pane(pane: &PaneScene) -> PreparedPane<'_> {
-    let inner_width = layout::pane_inner_rect(pane.area).width;
-    let (terminal, pane_text, pane_text_rows, body_wrap) = match &pane.content {
-        PaneContent::Terminal(surface) => (Some(surface), String::new(), 0, Wrap::None),
-        PaneContent::Task(task) => {
-            // Task output owns the rows below metadata, so each scene detail
-            // entry must remain exactly one GPU row. Match the terminal
-            // adapter's tail-preserving fit instead of allowing shaping to
-            // wrap or embedded newlines to consume unbudgeted rows.
-            let lines = pane
-                .detail_lines()
-                .into_iter()
-                .map(|line| fit_cell_line(&normalize_cell_line(&line), inner_width))
-                .collect::<Vec<_>>();
-            let rows = lines.len();
-            (task.output.as_ref(), lines.join("\n"), rows, Wrap::None)
-        }
-        PaneContent::Agent(_) => {
-            let lines = pane.detail_lines();
-            let rows = lines.len();
-            (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
-        }
-        PaneContent::Empty(_) => {
-            let lines = pane.detail_lines();
-            let rows = lines.len();
-            (None, lines.join("\n"), rows, Wrap::WordOrGlyph)
-        }
-    };
-    PreparedPane {
-        pane,
-        terminal,
-        pane_text,
-        pane_text_rows,
-        body_wrap,
-    }
-}
-
-fn normalize_cell_line(line: &str) -> String {
-    line.chars()
-        .map(|character| match character {
-            '\r' | '\n' => ' ',
-            other => other,
-        })
-        .collect()
-}
-
-/// Fit one logical task row to the scene's cell width while retaining both
-/// the label and the load-bearing tail (exit code, flag, or filename).
-fn fit_cell_line(line: &str, width: u16) -> String {
-    let width = usize::from(width);
-    let characters = line.chars().collect::<Vec<_>>();
-    if characters.len() <= width {
-        return line.to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    if width == 1 {
-        return "…".to_owned();
-    }
-    let tail_len = (width - 1) / 2;
-    let head_len = width - 1 - tail_len;
-    let mut fitted = characters[..head_len].iter().collect::<String>();
-    fitted.push('…');
-    fitted.extend(&characters[characters.len() - tail_len..]);
-    fitted
-}
-
-fn context_menu_line(item: &ContextMenuEntry, width: u16) -> String {
-    let width = usize::from(width);
-    let label = format!(" {}", item.label);
-    let label_width = label.chars().count();
-    let hint_width = item.chord_hint.chars().count() + 1;
-    let padding = width.saturating_sub(label_width + hint_width).max(1);
-    let line = format!(
-        "{label}{}{hint}",
-        " ".repeat(padding),
-        hint = item.chord_hint
-    );
-    fit_cell_line(&line, width as u16)
-}
-
-fn timeline_line(item: &TimelineEntry, width: u16) -> String {
-    fit_cell_line(
-        &format!(" {} {:>10}  {}", item.glyph, item.when, item.text),
-        width,
-    )
-}
-
-fn timeline_outer_line(content: &str, inner_width: u16) -> String {
-    format!(" {}", fit_cell_line(content, inner_width))
-}
-
-fn timeline_lines(timeline: &TimelineOverlay) -> Vec<String> {
-    let inner = layout::pane_inner_rect(timeline.area);
-    let window = layout::palette_item_window(inner, timeline.items.len(), timeline.selected);
-    let mut lines = vec![String::new(); usize::from(timeline.area.height)];
-    if !lines.is_empty() {
-        lines[0] = " Timeline ".to_owned();
-    }
-    if lines.len() > 1 {
-        let input = if timeline.query.is_empty() {
-            "> type to filter · pane:<id> kind:<family> since:<5m>".to_owned()
-        } else {
-            format!("> {}_", timeline.query)
-        };
-        lines[1] = timeline_outer_line(&input, inner.width);
-    }
-    if timeline.items.is_empty() && lines.len() > 2 {
-        lines[2] = timeline_outer_line(" no matching events", inner.width);
-    }
-    for (row, index) in window.enumerate() {
-        if let Some(slot) = lines.get_mut(row + 2) {
-            *slot = timeline_outer_line(
-                &timeline_line(&timeline.items[index], inner.width),
-                inner.width,
-            );
-        }
-    }
-    if lines.len() > 1 {
-        let footer_row = lines.len() - 2;
-        lines[footer_row] = timeline_outer_line(&format!(" {}", timeline.footer), inner.width);
-    }
-    lines
-}
-
-fn search_line(item: &SearchEntry, source: &str, width: u16) -> String {
-    fit_cell_line(&format!("{source}  {}", item.text), width)
-}
-
-fn search_outer_line(content: &str, inner_width: u16) -> String {
-    format!(" {}", fit_cell_line(content, inner_width))
-}
-
-fn search_lines(search: &SearchOverlay) -> Vec<String> {
-    let inner = layout::pane_inner_rect(search.area);
-    let window = layout::palette_item_window(inner, search.items.len(), search.selected);
-    let mut lines = vec![String::new(); usize::from(search.area.height)];
-    if !lines.is_empty() {
-        lines[0] = " Search Session Output ".to_owned();
-    }
-    if lines.len() > 1 {
-        let input = if search.query.is_empty() {
-            "> type to search output · pane:<title> kind:<terminal|task|agent|timeline>".to_owned()
-        } else {
-            format!("> {}", search.query)
-        };
-        lines[1] = search_outer_line(&input, inner.width);
-    }
-    if search.items.is_empty() && lines.len() > 2 {
-        let calm = if search.query.trim().is_empty() {
-            " searching this session's pane output and timeline (snapshot)"
-        } else {
-            " no matches"
-        };
-        lines[2] = search_outer_line(calm, inner.width);
-    }
-    let mut previous_source: Option<&str> = None;
-    for (row, index) in window.enumerate() {
-        let item = &search.items[index];
-        let source = if previous_source == Some(item.source.as_str()) {
-            " ".repeat(item.source.chars().count())
-        } else {
-            item.source.clone()
-        };
-        previous_source = Some(item.source.as_str());
-        if let Some(slot) = lines.get_mut(row + 2) {
-            *slot = search_outer_line(&search_line(item, &source, inner.width), inner.width);
-        }
-    }
-    if lines.len() > 1 {
-        let footer_row = lines.len() - 2;
-        lines[footer_row] = search_outer_line(&format!(" {}", search.footer), inner.width);
-    }
-    lines
-}
-
-fn search_cursor_cell(search: &SearchOverlay) -> Option<(u16, u16)> {
-    let inner = layout::pane_inner_rect(search.area);
-    if search.query.is_empty() || inner.width == 0 || inner.height == 0 {
-        return None;
-    }
-    let query_end = 2usize.saturating_add(search.query.chars().count());
-    let column = query_end.min(usize::from(inner.width.saturating_sub(1))) as u16;
-    Some((inner.x.saturating_add(column), inner.y))
-}
-
-fn help_line(item: &HelpEntry, width: u16) -> String {
-    let line = if item.heading {
-        format!(" {}", item.label)
-    } else if item.keys.is_empty() {
-        format!("   {}", item.label)
-    } else {
-        format!("   {}  {}", item.label, item.keys)
-    };
-    fit_cell_line(&line, width)
-}
-
-fn help_outer_line(content: &str, inner_width: u16) -> String {
-    format!(" {}", fit_cell_line(content, inner_width))
-}
-
-fn help_lines(help: &HelpOverlay) -> Vec<String> {
-    let inner = layout::pane_inner_rect(help.area);
-    let window = layout::palette_item_window(inner, help.items.len(), help.selected);
-    let mut lines = vec![String::new(); usize::from(help.area.height)];
-    if !lines.is_empty() {
-        lines[0] = " Help ".to_owned();
-    }
-    if lines.len() > 1 {
-        let input = if help.query.is_empty() {
-            "> type to filter the keymap".to_owned()
-        } else {
-            format!("> {}", help.query)
-        };
-        lines[1] = help_outer_line(&input, inner.width);
-    }
-    if help.items.is_empty() && lines.len() > 2 {
-        lines[2] = help_outer_line(" no matching entries", inner.width);
-    }
-    for (row, index) in window.enumerate() {
-        if let Some(slot) = lines.get_mut(row + 2) {
-            *slot = help_outer_line(&help_line(&help.items[index], inner.width), inner.width);
-        }
-    }
-    if lines.len() > 1 {
-        let footer_row = lines.len() - 2;
-        lines[footer_row] = help_outer_line(&format!(" {}", help.footer), inner.width);
-    }
-    lines
-}
-
-fn help_cursor_cell(help: &HelpOverlay) -> Option<(u16, u16)> {
-    let inner = layout::pane_inner_rect(help.area);
-    if help.query.is_empty() || inner.width == 0 || inner.height == 0 {
-        return None;
-    }
-    let query_end = 2usize.saturating_add(help.query.chars().count());
-    let column = query_end.min(usize::from(inner.width.saturating_sub(1))) as u16;
-    Some((inner.x.saturating_add(column), inner.y))
-}
-
-fn welcome_lines(welcome: &WelcomeOverlay) -> Vec<String> {
-    let inner = layout::pane_inner_rect(welcome.area);
-    let mut lines = vec![String::new(); usize::from(welcome.area.height)];
-    if !lines.is_empty() {
-        lines[0] = " Mandatum ".to_owned();
-    }
-    if lines.len() > 1 {
-        lines[1] = format!(" {}", fit_cell_line(&welcome.introduction, inner.width));
-    }
-
-    let key_width = welcome
-        .entries
-        .iter()
-        .map(|entry| entry.keys.chars().count())
-        .max()
-        .unwrap_or(0);
-    for (row, entry) in welcome.entries.iter().enumerate() {
-        if let Some(slot) = lines.get_mut(row + 3) {
-            let padding = key_width.saturating_sub(entry.keys.chars().count());
-            let content = format!(
-                "  {}{}  {}",
-                entry.keys,
-                " ".repeat(padding),
-                entry.description
-            );
-            *slot = format!(" {}", fit_cell_line(&content, inner.width));
-        }
-    }
-    if let Some(row) = welcome.entries.len().checked_add(4)
-        && let Some(slot) = lines.get_mut(row)
-    {
-        *slot = format!(" {}", fit_cell_line(&welcome.dismissal, inner.width));
-    }
-    lines
-}
-
-fn text_bounds_around_occlusion(bounds: TextBounds, occlusion: TextBounds) -> Vec<TextBounds> {
-    let left = bounds.left.max(occlusion.left);
-    let top = bounds.top.max(occlusion.top);
-    let right = bounds.right.min(occlusion.right);
-    let bottom = bounds.bottom.min(occlusion.bottom);
-    if left >= right || top >= bottom {
-        return vec![bounds];
-    }
-
-    let mut visible = Vec::with_capacity(4);
-    if bounds.top < top {
-        visible.push(TextBounds {
-            bottom: top,
-            ..bounds
-        });
-    }
-    if bottom < bounds.bottom {
-        visible.push(TextBounds {
-            top: bottom,
-            ..bounds
-        });
-    }
-    if bounds.left < left {
-        visible.push(TextBounds {
-            top,
-            right: left,
-            bottom,
-            ..bounds
-        });
-    }
-    if right < bounds.right {
-        visible.push(TextBounds {
-            left: right,
-            top,
-            bottom,
-            ..bounds
-        });
-    }
-    visible
-}
-
-fn scene_rect_to_text_bounds(area: SceneRect, cell_width: f32, cell_height: f32) -> TextBounds {
-    TextBounds {
-        left: (area.x as f32 * cell_width).floor() as i32,
-        top: (area.y as f32 * cell_height).floor() as i32,
-        right: (area.right() as f32 * cell_width).ceil() as i32,
-        bottom: (area.bottom() as f32 * cell_height).ceil() as i32,
-    }
-}
-
-#[cfg(test)]
-fn text_bounds_intersect(first: TextBounds, second: TextBounds) -> bool {
-    first.left < second.right
-        && first.right > second.left
-        && first.top < second.bottom
-        && first.bottom > second.top
-}
-
-fn text_bounds_below_later_panes(
-    bounds: TextBounds,
-    pane_index: usize,
-    pane_occlusions: &[(usize, TextBounds)],
-) -> Vec<TextBounds> {
-    let mut visible = vec![bounds];
-    for (_, occlusion) in pane_occlusions
-        .iter()
-        .filter(|(floating_index, _)| pane_index < *floating_index)
-    {
-        visible = visible
-            .into_iter()
-            .flat_map(|bounds| text_bounds_around_occlusion(bounds, *occlusion))
-            .collect();
-    }
-    visible
-}
-
-fn text_bounds_below_scene_occlusions(
-    bounds: TextBounds,
-    pane_index: usize,
-    pane_occlusions: &[(usize, TextBounds)],
-    opaque_overlay_occlusion: Option<TextBounds>,
-) -> Vec<TextBounds> {
-    let mut visible = text_bounds_below_later_panes(bounds, pane_index, pane_occlusions);
-    if let Some(occlusion) = opaque_overlay_occlusion {
-        visible = visible
-            .into_iter()
-            .flat_map(|bounds| text_bounds_around_occlusion(bounds, occlusion))
-            .collect();
-    }
-    visible
-}
-
-fn session_map_line(row: &SessionMapRow, width: u16) -> String {
-    let marker = if row.focused {
-        SESSION_MAP_FOCUS_GLYPH
-    } else {
-        " "
-    };
-    let indent = "  ".repeat(usize::from(row.depth));
-    let mut line = format!("{marker}{indent}{} {}", row.glyph, row.label);
-    if !row.state.is_empty() {
-        line.push_str(&format!("  {}", row.state));
-    }
-    if !row.badges.is_empty() {
-        line.push_str(&format!("  [{}]", row.badges));
-    }
-    fit_cell_line(&line, width)
-}
-
-fn session_map_outer_line(content: &str, inner_width: u16) -> String {
-    format!(" {}", fit_cell_line(content, inner_width))
-}
-
-fn session_map_lines(map: &SessionMapOverlay) -> Vec<String> {
-    let inner = layout::pane_inner_rect(map.area);
-    let window = layout::session_map_item_window(inner, map.rows.len(), Some(map.selected));
-    let mut lines = vec![String::new(); usize::from(map.area.height)];
-    if !lines.is_empty() {
-        lines[0] = " Sessions ".to_owned();
-    }
-    for (row, index) in window.enumerate() {
-        if let Some(slot) = lines.get_mut(row + 1) {
-            *slot = session_map_outer_line(
-                &session_map_line(&map.rows[index], inner.width),
-                inner.width,
-            );
-        }
-    }
-    if lines.len() > 1 {
-        let footer_row = lines.len() - 2;
-        lines[footer_row] = session_map_outer_line(&format!(" {}", map.footer), inner.width);
-    }
-    lines
-}
-
-fn prompt_lines(prompt: &PromptOverlay) -> Vec<String> {
-    let inner = layout::pane_inner_rect(prompt.area);
-    let mut lines = vec![String::new(); usize::from(prompt.area.height)];
-    if !lines.is_empty() {
-        lines[0] = fit_cell_line(&prompt.title, prompt.area.width);
-    }
-    if lines.len() > 1 {
-        lines[1] = format!(
-            " {}",
-            fit_cell_line(&format!("> {}", prompt.input), inner.width)
-        );
-    }
-    if lines.len() > 2 {
-        let footer_row = lines.len() - 2;
-        lines[footer_row] = format!(" {}", fit_cell_line(&prompt.footer, inner.width));
-    }
-    lines
-}
-
-fn prompt_cursor_cell(prompt: &PromptOverlay) -> Option<(u16, u16)> {
-    let inner = layout::pane_inner_rect(prompt.area);
-    if inner.width == 0 || inner.height == 0 {
-        return None;
-    }
-    let input_end = 2usize.saturating_add(prompt.input.chars().count());
-    let column = input_end.min(usize::from(inner.width.saturating_sub(1))) as u16;
-    Some((inner.x.saturating_add(column), inner.y))
-}
-
-struct PaneBuffers {
-    title: Buffer,
-    body: Buffer,
-}
-
 #[derive(Default)]
-struct PaneBufferPool {
-    panes: Vec<PaneBuffers>,
+struct RowBufferPool {
+    rows: Vec<Buffer>,
 }
 
-impl PaneBufferPool {
+impl RowBufferPool {
     fn new() -> Self {
         Self::default()
     }
 
     fn ensure_len(&mut self, len: usize, font_system: &mut FontSystem, metrics: Metrics) {
-        debug_assert!(len <= MAX_GPU_PANES);
-        while self.panes.len() < len {
-            self.panes.push(PaneBuffers {
-                title: Buffer::new(font_system, metrics),
-                body: Buffer::new(font_system, metrics),
-            });
+        while self.rows.len() < len {
+            self.rows.push(Buffer::new(font_system, metrics));
         }
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.panes.len()
+        self.rows.len()
     }
 
     fn set_metrics(&mut self, metrics: Metrics) {
-        for buffers in &mut self.panes {
-            buffers.title.set_metrics(metrics);
-            buffers.body.set_metrics(metrics);
+        for buffer in &mut self.rows {
+            buffer.set_metrics(metrics);
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedCell {
+    glyph: char,
+    foreground: [u8; 4],
+    background: [u8; 4],
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GlyphStyle {
+    foreground: [u8; 4],
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+}
+
+impl From<ResolvedCell> for GlyphStyle {
+    fn from(cell: ResolvedCell) -> Self {
+        Self {
+            foreground: cell.foreground,
+            bold: cell.bold,
+            italic: cell.italic,
+            underline: cell.underline,
+            strikethrough: cell.strikethrough,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProgramRow {
+    y: u16,
+    x: u16,
+    text: String,
+    runs: Vec<(std::ops::Range<usize>, GlyphStyle)>,
+}
+
+#[derive(Debug)]
+struct PreparedCellProgram {
+    cells: Vec<(u16, u16, ResolvedCell)>,
+    rows: Vec<ProgramRow>,
+}
+
+fn resolve_program_cell(cell: &ProgramCell, theme: &Theme) -> ResolvedCell {
+    let mut foreground = resolve(cell.style.foreground, DEFAULT_FG);
+    let mut background = resolve(cell.style.background, DEFAULT_BG);
+    let terminal_selection_reverses = cell.selection == Some(CellSelection::Terminal)
+        && theme.selection_highlight == SceneColor::Default;
+    if cell.selection == Some(CellSelection::Terminal)
+        && theme.selection_highlight != SceneColor::Default
+    {
+        background = resolve(theme.selection_highlight, DEFAULT_BG);
+    }
+    // Item selection is already represented by the compiled style. A cursor
+    // and fallback terminal selection add the same reverse-video modifier as
+    // base inverse. Ratatui modifiers are presence bits, not XOR toggles, so
+    // any combination reverses exactly once.
+    if cell.style.inverse || terminal_selection_reverses || cell.cursor {
+        std::mem::swap(&mut foreground, &mut background);
+    }
+
+    let glyph = if cell.style.hidden {
+        ' '
+    } else {
+        match cell.occupancy {
+            CellOccupancy::Glyph('\r' | '\n') | CellOccupancy::WideContinuation => ' ',
+            CellOccupancy::Glyph(character) => character,
+        }
+    };
+    let alpha = if cell.style.dim { 150 } else { 255 };
+    ResolvedCell {
+        glyph,
+        foreground: [foreground[0], foreground[1], foreground[2], alpha],
+        background: [background[0], background[1], background[2], 255],
+        bold: cell.style.bold,
+        italic: cell.style.italic,
+        underline: cell.style.underline,
+        strikethrough: cell.style.strikethrough,
+    }
+}
+
+fn prepare_cell_program(program: &CellProgram, theme: &Theme) -> PreparedCellProgram {
+    let mut topmost = BTreeMap::new();
+    for (x, y, cell) in program.cells() {
+        topmost.insert((y, x), resolve_program_cell(cell, theme));
+    }
+
+    let cells = topmost
+        .iter()
+        .map(|(&(y, x), &cell)| (x, y, cell))
+        .collect::<Vec<_>>();
+    let mut rows_by_y: BTreeMap<u16, Vec<(u16, ResolvedCell)>> = BTreeMap::new();
+    for (&(y, x), &cell) in &topmost {
+        rows_by_y.entry(y).or_default().push((x, cell));
+    }
+    let rows = rows_by_y
+        .into_iter()
+        .filter_map(|(y, cells)| {
+            let first_x = cells.first()?.0;
+            let last_x = cells.last()?.0;
+            let by_x = cells.into_iter().collect::<BTreeMap<_, _>>();
+            let fallback = ResolvedCell {
+                glyph: ' ',
+                foreground: [DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2], 255],
+                background: [DEFAULT_BG[0], DEFAULT_BG[1], DEFAULT_BG[2], 255],
+                bold: false,
+                italic: false,
+                underline: false,
+                strikethrough: false,
+            };
+            let mut text = String::new();
+            let mut runs = Vec::new();
+            let mut run_start = 0;
+            let mut run_style = None;
+            for x in first_x..=last_x {
+                let cell = by_x.get(&x).copied().unwrap_or(fallback);
+                let style = GlyphStyle::from(cell);
+                if run_style != Some(style) {
+                    if let Some(previous) = run_style.replace(style) {
+                        runs.push((run_start..text.len(), previous));
+                    }
+                    run_start = text.len();
+                }
+                text.push(cell.glyph);
+            }
+            if let Some(style) = run_style {
+                runs.push((run_start..text.len(), style));
+            }
+            Some(ProgramRow {
+                y,
+                x: first_x,
+                text,
+                runs,
+            })
+        })
+        .collect();
+
+    PreparedCellProgram { cells, rows }
+}
+
+fn glyph_attrs(style: GlyphStyle) -> Attrs<'static> {
+    let mut attrs = Attrs::new().family(Family::Monospace).color(GColor::rgba(
+        style.foreground[0],
+        style.foreground[1],
+        style.foreground[2],
+        style.foreground[3],
+    ));
+    if style.bold {
+        attrs = attrs.weight(Weight::BOLD);
+    }
+    if style.italic {
+        attrs = attrs.style(FontStyle::Italic);
+    }
+    if style.underline {
+        attrs = attrs.underline(UnderlineStyle::Single);
+    }
+    if style.strikethrough {
+        attrs = attrs.strikethrough();
+    }
+    attrs
 }
 
 pub struct GpuText {
@@ -850,10 +469,7 @@ pub struct GpuText {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
-    header_buffer: Buffer,
-    pane_buffers: PaneBufferPool,
-    status_buffer: Buffer,
-    overlay_buffer: Buffer,
+    row_buffers: RowBufferPool,
 
     scale: f32,
     font_size: f32,
@@ -1016,9 +632,6 @@ impl GpuText {
         let font_size = (BASE_FONT_PT * scale).round();
         let line_height = (font_size * 1.3).round();
         let metrics = Metrics::new(font_size, line_height);
-        let header_buffer = Buffer::new(&mut font_system, metrics);
-        let status_buffer = Buffer::new(&mut font_system, metrics);
-        let overlay_buffer = Buffer::new(&mut font_system, metrics);
         let cell_w = measure_cell_width(&mut font_system, metrics);
         let cell_h = line_height;
 
@@ -1039,10 +652,7 @@ impl GpuText {
             viewport,
             atlas,
             text_renderer,
-            header_buffer,
-            pane_buffers: PaneBufferPool::new(),
-            status_buffer,
-            overlay_buffer,
+            row_buffers: RowBufferPool::new(),
             scale,
             font_size,
             cell_w,
@@ -1076,10 +686,7 @@ impl GpuText {
         self.font_size = (BASE_FONT_PT * scale).round();
         let line_height = (self.font_size * 1.3).round();
         let metrics = Metrics::new(self.font_size, line_height);
-        self.header_buffer.set_metrics(metrics);
-        self.pane_buffers.set_metrics(metrics);
-        self.status_buffer.set_metrics(metrics);
-        self.overlay_buffer.set_metrics(metrics);
+        self.row_buffers.set_metrics(metrics);
         self.cell_w = measure_cell_width(&mut self.font_system, metrics);
         self.cell_h = line_height;
     }
@@ -1097,946 +704,44 @@ impl GpuText {
         theme: &Theme,
     ) -> Result<Option<Instant>, SceneCompileError> {
         let prepared = prepare_scene(scene, theme)?;
-        self.pane_buffers.ensure_len(
-            prepared.panes.len(),
-            &mut self.font_system,
-            Metrics::new(self.font_size, self.cell_h),
-        );
+        let program = prepare_cell_program(prepared.cell_program(), theme);
+        let metrics = Metrics::new(self.font_size, self.cell_h);
+        self.row_buffers
+            .ensure_len(program.rows.len(), &mut self.font_system, metrics);
 
-        // Assemble foreground text buffers and background quads per pane,
-        // painting straight from the scene-owned draw order and geometry.
-        let mut quads: Vec<f32> = Vec::with_capacity(1024);
-
-        let header_background = resolve(theme.header_background, DEFAULT_BG);
-        push_quad(
-            &mut quads,
-            scene.header.area.x as f32 * self.cell_w,
-            scene.header.area.y as f32 * self.cell_h,
-            scene.header.area.width as f32 * self.cell_w,
-            scene.header.area.height as f32 * self.cell_h,
-            [
-                header_background[0],
-                header_background[1],
-                header_background[2],
-                255,
-            ],
-        );
-
-        let border = resolve(theme.pane_border, DEFAULT_FG);
-        let border_rgba = [border[0], border[1], border[2], 255];
-        struct PanePaint {
-            origin_x: f32,
-            origin_y: f32,
-            title_x: f32,
-            title_y: f32,
-            title_width: f32,
-            title_fg: [u8; 3],
-        }
-        let mut pane_paints = Vec::with_capacity(prepared.panes.len());
-        for (index, pane_plan) in prepared.panes.iter().enumerate() {
-            let pane = pane_plan.pane;
-            let inner = layout::pane_inner_rect(pane.area);
-            let origin_x = inner.x as f32 * self.cell_w;
-            let origin_y = inner.y as f32 * self.cell_h;
-            let pane_x = pane.area.x as f32 * self.cell_w;
-            let pane_y = pane.area.y as f32 * self.cell_h;
-            let pane_width = pane.area.width as f32 * self.cell_w;
-            let pane_height = pane.area.height as f32 * self.cell_h;
-
-            if pane.area.width > 0 && pane.area.height > 0 {
-                push_quad(
-                    &mut quads,
-                    pane_x,
-                    pane_y,
-                    pane_width,
-                    pane_height,
-                    [DEFAULT_BG[0], DEFAULT_BG[1], DEFAULT_BG[2], 255],
-                );
-            }
-            if pane.area.width > 0 && pane.area.height > 0 {
-                push_quad(&mut quads, pane_x, pane_y, pane_width, 1.0, border_rgba);
-                push_quad(
-                    &mut quads,
-                    pane_x,
-                    pane_y + pane_height - 1.0,
-                    pane_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(&mut quads, pane_x, pane_y, 1.0, pane_height, border_rgba);
-                push_quad(
-                    &mut quads,
-                    pane_x + pane_width - 1.0,
-                    pane_y,
-                    1.0,
-                    pane_height,
-                    border_rgba,
-                );
-            }
-
-            let mut screen_text = String::new();
-            let mut runs: Vec<(std::ops::Range<usize>, GColor)> = Vec::new();
-            if !pane_plan.pane_text.is_empty() {
-                let start = screen_text.len();
-                screen_text.push_str(&pane_plan.pane_text);
-                screen_text.push('\n');
-                runs.push((
-                    start..screen_text.len(),
-                    GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
-                ));
-            }
-
-            if let Some(surface) = pane_plan.terminal {
-                let row_offset = pane_plan.pane_text_rows;
-                for (y, row) in surface.rows.iter().enumerate() {
-                    if row_offset + y >= usize::from(inner.height) {
-                        break;
-                    }
-                    let abs = surface.first_row + y;
-                    let py = origin_y + (row_offset + y) as f32 * self.cell_h;
-                    let mut run_start = screen_text.len();
-                    let mut run_color: Option<GColor> = None;
-                    for (x, cell) in row.iter().take(usize::from(inner.width)).enumerate() {
-                        let style = cell.style;
-                        let (mut fg, mut bg) = (
-                            resolve(style.foreground, DEFAULT_FG),
-                            resolve(style.background, DEFAULT_BG),
-                        );
-                        if style.inverse {
-                            std::mem::swap(&mut fg, &mut bg);
-                        }
-
-                        let column = x as u16;
-                        let px = origin_x + x as f32 * self.cell_w;
-                        if bg != DEFAULT_BG {
-                            push_quad(
-                                &mut quads,
-                                px,
-                                py,
-                                self.cell_w,
-                                self.cell_h,
-                                [bg[0], bg[1], bg[2], 255],
-                            );
-                        }
-                        if surface.selection_contains(abs, column) {
-                            push_quad(&mut quads, px, py, self.cell_w, self.cell_h, SELECTION_BG);
-                        }
-                        if surface.cursor_at(abs, column) {
-                            push_quad(&mut quads, px, py, self.cell_w, self.cell_h, CURSOR_BG);
-                        }
-
-                        let gc = GColor::rgb(fg[0], fg[1], fg[2]);
-                        if run_color != Some(gc) {
-                            if let Some(previous) = run_color.take() {
-                                runs.push((run_start..screen_text.len(), previous));
-                            }
-                            run_start = screen_text.len();
-                            run_color = Some(gc);
-                        }
-                        screen_text.push(cell.character);
-                    }
-                    if let Some(previous) = run_color.take() {
-                        runs.push((run_start..screen_text.len(), previous));
-                    }
-                    let newline = screen_text.len();
-                    screen_text.push('\n');
-                    if let Some((range, _)) =
-                        runs.last_mut().filter(|(range, _)| range.end == newline)
-                    {
-                        range.end = screen_text.len();
-                    } else {
-                        runs.push((
-                            newline..screen_text.len(),
-                            GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
-                        ));
-                    }
-                }
-            }
-
-            let title_fg = resolve(
-                if pane.focused {
-                    theme.focus_title
-                } else {
-                    theme.pane_title
-                },
-                DEFAULT_FG,
+        // The cell compiler has already applied pane order, opacity, chrome,
+        // content, overlay, selection, and cursor semantics. The GPU adapter
+        // only translates final topmost cells into solid backgrounds and
+        // glyphon rows.
+        let mut quads = Vec::with_capacity(program.cells.len().saturating_mul(8));
+        for (x, y, cell) in &program.cells {
+            push_quad(
+                &mut quads,
+                f32::from(*x) * self.cell_w,
+                f32::from(*y) * self.cell_h,
+                self.cell_w,
+                self.cell_h,
+                cell.background,
             );
-            let title_width = pane.area.width.saturating_sub(2) as f32 * self.cell_w;
-            let buffers = &mut self.pane_buffers.panes[index];
-            buffers
-                .title
-                .set_size(Some(title_width.max(1.0)), Some(self.cell_h));
-            buffers.title.set_text(
-                &pane.title,
-                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                    title_fg[0],
-                    title_fg[1],
-                    title_fg[2],
-                )),
-                Shaping::Advanced,
-                None,
-            );
-            buffers
-                .title
-                .shape_until_scroll(&mut self.font_system, false);
-
-            let default_attrs = Attrs::new().family(Family::Monospace);
-            let spans = runs.iter().map(|(range, color)| {
-                (
-                    &screen_text[range.clone()],
-                    Attrs::new().family(Family::Monospace).color(*color),
-                )
-            });
-            let content_width = inner.width as f32 * self.cell_w;
-            let content_height = inner.height as f32 * self.cell_h;
-            buffers.body.set_wrap(pane_plan.body_wrap);
-            buffers
-                .body
-                .set_size(Some(content_width.max(1.0)), Some(content_height.max(1.0)));
-            buffers
-                .body
-                .set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-            buffers
-                .body
-                .shape_until_scroll(&mut self.font_system, false);
-
-            pane_paints.push(PanePaint {
-                origin_x,
-                origin_y,
-                title_x: (pane.area.x.saturating_add(1)) as f32 * self.cell_w,
-                title_y: pane.area.y as f32 * self.cell_h,
-                title_width,
-                title_fg,
-            });
         }
 
-        // Header, pane titles, status, and optional overlays all come from the
-        // real scene contract; the native shell derives no product chrome.
-        let header_x = scene.header.area.x as f32 * self.cell_w;
-        let header_y = scene.header.area.y as f32 * self.cell_h;
-        let header_fg = resolve(theme.header, DEFAULT_FG);
-        self.header_buffer
-            .set_size(Some(self.config.width as f32), Some(self.cell_h));
-        self.header_buffer.set_text(
-            &scene.header.text,
-            &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                header_fg[0],
-                header_fg[1],
-                header_fg[2],
-            )),
-            Shaping::Advanced,
-            None,
-        );
-        self.header_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-
-        let status_x = scene.status.area.x as f32 * self.cell_w;
-        let status_y = scene.status.area.y as f32 * self.cell_h;
-        let status_width = scene.status.area.width as f32 * self.cell_w;
-        let status = scene.status.text.as_str();
-        let status_fg = resolve(theme.status, STATUS_FG);
-        push_quad(
-            &mut quads,
-            status_x,
-            status_y,
-            status_width,
-            self.cell_h,
-            [STATUS_BG[0], STATUS_BG[1], STATUS_BG[2], 255],
-        );
-
-        self.status_buffer
-            .set_size(Some(self.config.width as f32), Some(self.cell_h));
-        self.status_buffer.set_text(
-            status,
-            &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                status_fg[0],
-                status_fg[1],
-                status_fg[2],
-            )),
-            Shaping::Advanced,
-            None,
-        );
-        self.status_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-
-        let mut overlay_position = None;
-        let mut overlay_clip = None;
-        if let Some(palette) = prepared.palette {
-            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
-            push_quad(
-                &mut quads,
-                palette.area.x as f32 * self.cell_w,
-                palette.area.y as f32 * self.cell_h,
-                palette.area.width as f32 * self.cell_w,
-                palette.area.height as f32 * self.cell_h,
-                [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255],
-            );
-            let palette_inner = layout::pane_inner_rect(palette.area);
-            let window =
-                layout::palette_item_window(palette_inner, palette.items.len(), palette.selected);
-            let mut lines = vec![String::new(); usize::from(palette.area.height)];
-            if !lines.is_empty() {
-                lines[0] = " Command Palette ".to_owned();
-            }
-            if lines.len() > 1 {
-                lines[1] = format!("> {}_", palette.query);
-            }
-            for (row, index) in window.clone().enumerate() {
-                let item = &palette.items[index];
-                let hint = item
-                    .key_hint
-                    .as_deref()
-                    .map_or(String::new(), |hint| format!("  {hint}"));
-                let line = format!(" {}{hint}  {}", item.label, item.detail);
-                if let Some(slot) = lines.get_mut(row + 2) {
-                    *slot = line;
-                }
-                if palette.selected == Some(index) {
-                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
-                    push_quad(
-                        &mut quads,
-                        palette_inner.x as f32 * self.cell_w,
-                        (palette_inner.y + 1 + row as u16) as f32 * self.cell_h,
-                        palette_inner.width as f32 * self.cell_w,
-                        self.cell_h,
-                        [selection[0], selection[1], selection[2], 190],
-                    );
-                }
-            }
-            if let Some(last) = lines.last_mut() {
-                *last = palette.footer.clone();
-            }
-            let overlay_text = lines.join("\n");
-            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
-            self.overlay_buffer.set_wrap(Wrap::None);
-            self.overlay_buffer.set_size(
-                Some(palette.area.width as f32 * self.cell_w),
-                Some(palette.area.height as f32 * self.cell_h),
-            );
-            self.overlay_buffer.set_text(
-                &overlay_text,
-                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                    overlay_fg[0],
-                    overlay_fg[1],
-                    overlay_fg[2],
-                )),
+        for (buffer, row) in self.row_buffers.rows.iter_mut().zip(program.rows.iter()) {
+            let width = row.text.chars().count() as f32 * self.cell_w;
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(Some(width.max(1.0)), Some(self.cell_h));
+            let spans = row
+                .runs
+                .iter()
+                .map(|(range, style)| (&row.text[range.clone()], glyph_attrs(*style)));
+            buffer.set_rich_text(
+                spans,
+                &Attrs::new().family(Family::Monospace),
                 Shaping::Advanced,
                 None,
             );
-            self.overlay_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            overlay_position = Some((
-                palette.area.x as f32 * self.cell_w,
-                palette.area.y as f32 * self.cell_h,
-            ));
-            overlay_clip = Some(TextBounds {
-                left: (palette.area.x as f32 * self.cell_w).floor() as i32,
-                top: (palette.area.y as f32 * self.cell_h).floor() as i32,
-                right: (palette.area.right() as f32 * self.cell_w).ceil() as i32,
-                bottom: (palette.area.bottom() as f32 * self.cell_h).ceil() as i32,
-            });
-        } else if let Some(menu) = prepared.context_menu {
-            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
-            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
-            let menu_x = menu.area.x as f32 * self.cell_w;
-            let menu_y = menu.area.y as f32 * self.cell_h;
-            let menu_width = menu.area.width as f32 * self.cell_w;
-            let menu_height = menu.area.height as f32 * self.cell_h;
-            push_quad(
-                &mut quads,
-                menu_x,
-                menu_y,
-                menu_width,
-                menu_height,
-                overlay_bg_rgba,
-            );
-            if menu.area.width > 0 && menu.area.height > 0 {
-                let border = resolve(theme.palette_border, DEFAULT_FG);
-                let border_rgba = [border[0], border[1], border[2], 255];
-                push_quad(&mut quads, menu_x, menu_y, menu_width, 1.0, border_rgba);
-                push_quad(
-                    &mut quads,
-                    menu_x,
-                    menu_y + menu_height - 1.0,
-                    menu_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(&mut quads, menu_x, menu_y, 1.0, menu_height, border_rgba);
-                push_quad(
-                    &mut quads,
-                    menu_x + menu_width - 1.0,
-                    menu_y,
-                    1.0,
-                    menu_height,
-                    border_rgba,
-                );
-            }
-
-            let inner = layout::pane_inner_rect(menu.area);
-            let visible_items = menu.items.iter().take(usize::from(inner.height));
-            let overlay_text = visible_items
-                .map(|item| context_menu_line(item, inner.width))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if menu.selected < menu.items.len() && menu.selected < usize::from(inner.height) {
-                let selection = resolve(theme.palette_selection, [70, 100, 180]);
-                push_quad(
-                    &mut quads,
-                    inner.x as f32 * self.cell_w,
-                    (inner.y + menu.selected as u16) as f32 * self.cell_h,
-                    inner.width as f32 * self.cell_w,
-                    self.cell_h,
-                    [selection[0], selection[1], selection[2], 190],
-                );
-            }
-            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
-            self.overlay_buffer.set_wrap(Wrap::None);
-            self.overlay_buffer.set_size(
-                Some(inner.width as f32 * self.cell_w),
-                Some(inner.height as f32 * self.cell_h),
-            );
-            self.overlay_buffer.set_text(
-                &overlay_text,
-                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                    overlay_fg[0],
-                    overlay_fg[1],
-                    overlay_fg[2],
-                )),
-                Shaping::Advanced,
-                None,
-            );
-            self.overlay_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            overlay_position = Some((inner.x as f32 * self.cell_w, inner.y as f32 * self.cell_h));
-        } else if let Some(timeline) = prepared.timeline {
-            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
-            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
-            let timeline_x = timeline.area.x as f32 * self.cell_w;
-            let timeline_y = timeline.area.y as f32 * self.cell_h;
-            let timeline_width = timeline.area.width as f32 * self.cell_w;
-            let timeline_height = timeline.area.height as f32 * self.cell_h;
-            push_quad(
-                &mut quads,
-                timeline_x,
-                timeline_y,
-                timeline_width,
-                timeline_height,
-                overlay_bg_rgba,
-            );
-            if timeline.area.width > 0 && timeline.area.height > 0 {
-                let border = resolve(theme.palette_border, DEFAULT_FG);
-                let border_rgba = [border[0], border[1], border[2], 255];
-                push_quad(
-                    &mut quads,
-                    timeline_x,
-                    timeline_y,
-                    timeline_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    timeline_x,
-                    timeline_y + timeline_height - 1.0,
-                    timeline_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    timeline_x,
-                    timeline_y,
-                    1.0,
-                    timeline_height,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    timeline_x + timeline_width - 1.0,
-                    timeline_y,
-                    1.0,
-                    timeline_height,
-                    border_rgba,
-                );
-            }
-
-            let inner = layout::pane_inner_rect(timeline.area);
-            let window =
-                layout::palette_item_window(inner, timeline.items.len(), timeline.selected);
-            for (row, index) in window.enumerate() {
-                if timeline.selected == Some(index) {
-                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
-                    push_quad(
-                        &mut quads,
-                        inner.x as f32 * self.cell_w,
-                        (inner.y + 1 + row as u16) as f32 * self.cell_h,
-                        inner.width as f32 * self.cell_w,
-                        self.cell_h,
-                        [selection[0], selection[1], selection[2], 190],
-                    );
-                }
-            }
-
-            let overlay_text = timeline_lines(timeline).join("\n");
-            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
-            self.overlay_buffer.set_wrap(Wrap::None);
-            self.overlay_buffer.set_size(
-                Some(timeline_width.max(1.0)),
-                Some(timeline_height.max(1.0)),
-            );
-            self.overlay_buffer.set_text(
-                &overlay_text,
-                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                    overlay_fg[0],
-                    overlay_fg[1],
-                    overlay_fg[2],
-                )),
-                Shaping::Advanced,
-                None,
-            );
-            self.overlay_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            overlay_position = Some((timeline_x, timeline_y));
-            overlay_clip = Some(TextBounds {
-                left: timeline_x.floor() as i32,
-                top: timeline_y.floor() as i32,
-                right: (timeline_x + timeline_width).ceil() as i32,
-                bottom: (timeline_y + timeline_height).ceil() as i32,
-            });
-        } else if let Some(search) = prepared.search {
-            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
-            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
-            let search_x = search.area.x as f32 * self.cell_w;
-            let search_y = search.area.y as f32 * self.cell_h;
-            let search_width = search.area.width as f32 * self.cell_w;
-            let search_height = search.area.height as f32 * self.cell_h;
-            push_quad(
-                &mut quads,
-                search_x,
-                search_y,
-                search_width,
-                search_height,
-                overlay_bg_rgba,
-            );
-            if search.area.width > 0 && search.area.height > 0 {
-                let border = resolve(theme.palette_border, DEFAULT_FG);
-                let border_rgba = [border[0], border[1], border[2], 255];
-                push_quad(
-                    &mut quads,
-                    search_x,
-                    search_y,
-                    search_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    search_x,
-                    search_y + search_height - 1.0,
-                    search_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    search_x,
-                    search_y,
-                    1.0,
-                    search_height,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    search_x + search_width - 1.0,
-                    search_y,
-                    1.0,
-                    search_height,
-                    border_rgba,
-                );
-            }
-
-            let inner = layout::pane_inner_rect(search.area);
-            let window = layout::palette_item_window(inner, search.items.len(), search.selected);
-            for (row, index) in window.enumerate() {
-                if search.selected == Some(index) {
-                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
-                    push_quad(
-                        &mut quads,
-                        inner.x as f32 * self.cell_w,
-                        (inner.y + 1 + row as u16) as f32 * self.cell_h,
-                        inner.width as f32 * self.cell_w,
-                        self.cell_h,
-                        [selection[0], selection[1], selection[2], 190],
-                    );
-                }
-            }
-            if let Some((column, row)) = search_cursor_cell(search) {
-                push_quad(
-                    &mut quads,
-                    column as f32 * self.cell_w,
-                    row as f32 * self.cell_h,
-                    self.cell_w,
-                    self.cell_h,
-                    CURSOR_BG,
-                );
-            }
-
-            let overlay_text = search_lines(search).join("\n");
-            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
-            self.overlay_buffer.set_wrap(Wrap::None);
-            self.overlay_buffer
-                .set_size(Some(search_width.max(1.0)), Some(search_height.max(1.0)));
-            self.overlay_buffer.set_text(
-                &overlay_text,
-                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                    overlay_fg[0],
-                    overlay_fg[1],
-                    overlay_fg[2],
-                )),
-                Shaping::Advanced,
-                None,
-            );
-            self.overlay_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            overlay_position = Some((search_x, search_y));
-            overlay_clip = Some(TextBounds {
-                left: search_x.floor() as i32,
-                top: search_y.floor() as i32,
-                right: (search_x + search_width).ceil() as i32,
-                bottom: (search_y + search_height).ceil() as i32,
-            });
-        } else if let Some(help) = prepared.help {
-            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
-            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
-            let help_x = help.area.x as f32 * self.cell_w;
-            let help_y = help.area.y as f32 * self.cell_h;
-            let help_width = help.area.width as f32 * self.cell_w;
-            let help_height = help.area.height as f32 * self.cell_h;
-            push_quad(
-                &mut quads,
-                help_x,
-                help_y,
-                help_width,
-                help_height,
-                overlay_bg_rgba,
-            );
-            if help.area.width > 0 && help.area.height > 0 {
-                let border = resolve(theme.palette_border, DEFAULT_FG);
-                let border_rgba = [border[0], border[1], border[2], 255];
-                push_quad(&mut quads, help_x, help_y, help_width, 1.0, border_rgba);
-                push_quad(
-                    &mut quads,
-                    help_x,
-                    help_y + help_height - 1.0,
-                    help_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(&mut quads, help_x, help_y, 1.0, help_height, border_rgba);
-                push_quad(
-                    &mut quads,
-                    help_x + help_width - 1.0,
-                    help_y,
-                    1.0,
-                    help_height,
-                    border_rgba,
-                );
-            }
-
-            let inner = layout::pane_inner_rect(help.area);
-            let window = layout::palette_item_window(inner, help.items.len(), help.selected);
-            for (row, index) in window.enumerate() {
-                if help.selected == Some(index) {
-                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
-                    push_quad(
-                        &mut quads,
-                        inner.x as f32 * self.cell_w,
-                        (inner.y + 1 + row as u16) as f32 * self.cell_h,
-                        inner.width as f32 * self.cell_w,
-                        self.cell_h,
-                        [selection[0], selection[1], selection[2], 190],
-                    );
-                }
-            }
-            if let Some((column, row)) = help_cursor_cell(help) {
-                push_quad(
-                    &mut quads,
-                    column as f32 * self.cell_w,
-                    row as f32 * self.cell_h,
-                    self.cell_w,
-                    self.cell_h,
-                    CURSOR_BG,
-                );
-            }
-
-            let overlay_text = help_lines(help).join("\n");
-            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
-            self.overlay_buffer.set_wrap(Wrap::None);
-            self.overlay_buffer
-                .set_size(Some(help_width.max(1.0)), Some(help_height.max(1.0)));
-            self.overlay_buffer.set_text(
-                &overlay_text,
-                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                    overlay_fg[0],
-                    overlay_fg[1],
-                    overlay_fg[2],
-                )),
-                Shaping::Advanced,
-                None,
-            );
-            self.overlay_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            overlay_position = Some((help_x, help_y));
-            overlay_clip = Some(TextBounds {
-                left: help_x.floor() as i32,
-                top: help_y.floor() as i32,
-                right: (help_x + help_width).ceil() as i32,
-                bottom: (help_y + help_height).ceil() as i32,
-            });
-        } else if let Some(welcome) = prepared.welcome {
-            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
-            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
-            let welcome_x = welcome.area.x as f32 * self.cell_w;
-            let welcome_y = welcome.area.y as f32 * self.cell_h;
-            let welcome_width = welcome.area.width as f32 * self.cell_w;
-            let welcome_height = welcome.area.height as f32 * self.cell_h;
-            push_quad(
-                &mut quads,
-                welcome_x,
-                welcome_y,
-                welcome_width,
-                welcome_height,
-                overlay_bg_rgba,
-            );
-            if welcome.area.width > 0 && welcome.area.height > 0 {
-                let border = resolve(theme.palette_border, DEFAULT_FG);
-                let border_rgba = [border[0], border[1], border[2], 255];
-                push_quad(
-                    &mut quads,
-                    welcome_x,
-                    welcome_y,
-                    welcome_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    welcome_x,
-                    welcome_y + welcome_height - 1.0,
-                    welcome_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    welcome_x,
-                    welcome_y,
-                    1.0,
-                    welcome_height,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    welcome_x + welcome_width - 1.0,
-                    welcome_y,
-                    1.0,
-                    welcome_height,
-                    border_rgba,
-                );
-            }
-
-            let overlay_text = welcome_lines(welcome).join("\n");
-            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
-            self.overlay_buffer.set_wrap(Wrap::None);
-            self.overlay_buffer
-                .set_size(Some(welcome_width.max(1.0)), Some(welcome_height.max(1.0)));
-            self.overlay_buffer.set_text(
-                &overlay_text,
-                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                    overlay_fg[0],
-                    overlay_fg[1],
-                    overlay_fg[2],
-                )),
-                Shaping::Advanced,
-                None,
-            );
-            self.overlay_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            overlay_position = Some((welcome_x, welcome_y));
-            overlay_clip = Some(TextBounds {
-                left: welcome_x.floor() as i32,
-                top: welcome_y.floor() as i32,
-                right: (welcome_x + welcome_width).ceil() as i32,
-                bottom: (welcome_y + welcome_height).ceil() as i32,
-            });
-        } else if let Some(map) = prepared.session_map {
-            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
-            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
-            let map_x = map.area.x as f32 * self.cell_w;
-            let map_y = map.area.y as f32 * self.cell_h;
-            let map_width = map.area.width as f32 * self.cell_w;
-            let map_height = map.area.height as f32 * self.cell_h;
-            push_quad(
-                &mut quads,
-                map_x,
-                map_y,
-                map_width,
-                map_height,
-                overlay_bg_rgba,
-            );
-            if map.area.width > 0 && map.area.height > 0 {
-                let border = resolve(theme.palette_border, DEFAULT_FG);
-                let border_rgba = [border[0], border[1], border[2], 255];
-                push_quad(&mut quads, map_x, map_y, map_width, 1.0, border_rgba);
-                push_quad(
-                    &mut quads,
-                    map_x,
-                    map_y + map_height - 1.0,
-                    map_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(&mut quads, map_x, map_y, 1.0, map_height, border_rgba);
-                push_quad(
-                    &mut quads,
-                    map_x + map_width - 1.0,
-                    map_y,
-                    1.0,
-                    map_height,
-                    border_rgba,
-                );
-            }
-
-            let inner = layout::pane_inner_rect(map.area);
-            let window = layout::session_map_item_window(inner, map.rows.len(), Some(map.selected));
-            for (row, index) in window.enumerate() {
-                if map.selected == index {
-                    let selection = resolve(theme.palette_selection, [70, 100, 180]);
-                    push_quad(
-                        &mut quads,
-                        inner.x as f32 * self.cell_w,
-                        (inner.y + row as u16) as f32 * self.cell_h,
-                        inner.width as f32 * self.cell_w,
-                        self.cell_h,
-                        [selection[0], selection[1], selection[2], 190],
-                    );
-                }
-            }
-
-            let overlay_text = session_map_lines(map).join("\n");
-            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
-            self.overlay_buffer.set_wrap(Wrap::None);
-            self.overlay_buffer
-                .set_size(Some(map_width.max(1.0)), Some(map_height.max(1.0)));
-            self.overlay_buffer.set_text(
-                &overlay_text,
-                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                    overlay_fg[0],
-                    overlay_fg[1],
-                    overlay_fg[2],
-                )),
-                Shaping::Advanced,
-                None,
-            );
-            self.overlay_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            overlay_position = Some((map_x, map_y));
-            overlay_clip = Some(TextBounds {
-                left: map_x.floor() as i32,
-                top: map_y.floor() as i32,
-                right: (map_x + map_width).ceil() as i32,
-                bottom: (map_y + map_height).ceil() as i32,
-            });
-        } else if let Some(prompt) = prepared.prompt {
-            let overlay_bg = resolve(theme.overlay_background, DEFAULT_BG);
-            let overlay_bg_rgba = [overlay_bg[0], overlay_bg[1], overlay_bg[2], 255];
-            let prompt_x = prompt.area.x as f32 * self.cell_w;
-            let prompt_y = prompt.area.y as f32 * self.cell_h;
-            let prompt_width = prompt.area.width as f32 * self.cell_w;
-            let prompt_height = prompt.area.height as f32 * self.cell_h;
-            push_quad(
-                &mut quads,
-                prompt_x,
-                prompt_y,
-                prompt_width,
-                prompt_height,
-                overlay_bg_rgba,
-            );
-            if prompt.area.width > 0 && prompt.area.height > 0 {
-                let border = resolve(theme.palette_border, DEFAULT_FG);
-                let border_rgba = [border[0], border[1], border[2], 255];
-                push_quad(
-                    &mut quads,
-                    prompt_x,
-                    prompt_y,
-                    prompt_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    prompt_x,
-                    prompt_y + prompt_height - 1.0,
-                    prompt_width,
-                    1.0,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    prompt_x,
-                    prompt_y,
-                    1.0,
-                    prompt_height,
-                    border_rgba,
-                );
-                push_quad(
-                    &mut quads,
-                    prompt_x + prompt_width - 1.0,
-                    prompt_y,
-                    1.0,
-                    prompt_height,
-                    border_rgba,
-                );
-            }
-            if let Some((column, row)) = prompt_cursor_cell(prompt) {
-                push_quad(
-                    &mut quads,
-                    column as f32 * self.cell_w,
-                    row as f32 * self.cell_h,
-                    self.cell_w,
-                    self.cell_h,
-                    CURSOR_BG,
-                );
-            }
-
-            let overlay_text = prompt_lines(prompt).join("\n");
-            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
-            self.overlay_buffer.set_wrap(Wrap::None);
-            self.overlay_buffer
-                .set_size(Some(prompt_width.max(1.0)), Some(prompt_height.max(1.0)));
-            self.overlay_buffer.set_text(
-                &overlay_text,
-                &Attrs::new().family(Family::Monospace).color(GColor::rgb(
-                    overlay_fg[0],
-                    overlay_fg[1],
-                    overlay_fg[2],
-                )),
-                Shaping::Advanced,
-                None,
-            );
-            self.overlay_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            overlay_position = Some((prompt_x, prompt_y));
-            overlay_clip = Some(TextBounds {
-                left: prompt_x.floor() as i32,
-                top: prompt_y.floor() as i32,
-                right: (prompt_x + prompt_width).ceil() as i32,
-                bottom: (prompt_y + prompt_height).ceil() as i32,
-            });
+            buffer.shape_until_scroll(&mut self.font_system, false);
         }
 
-        // Upload quad instances (grow buffer if needed).
         if quads.len() > self.inst_capacity_floats {
             self.inst_capacity_floats = quads.len().next_power_of_two();
             self.inst_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2050,14 +755,14 @@ impl GpuText {
             .write_buffer(&self.inst_buf, 0, bytes_of_slice(&quads));
         let instance_count = (quads.len() / 8) as u32;
 
-        let res = [
+        let resolution = [
             self.config.width as f32,
             self.config.height as f32,
             0.0,
             0.0,
         ];
-        self.queue.write_buffer(&self.res_buf, 0, bytes_of(&res));
-
+        self.queue
+            .write_buffer(&self.res_buf, 0, bytes_of(&resolution));
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -2065,96 +770,25 @@ impl GpuText {
                 height: self.config.height,
             },
         );
-        let full = TextBounds {
-            left: 0,
-            top: 0,
-            right: self.config.width as i32,
-            bottom: self.config.height as i32,
-        };
-        let mut text_areas = Vec::new();
-        for bounds in
-            prepared.chrome_text_visible_bounds(scene.header.area, self.cell_w, self.cell_h)
-        {
-            text_areas.push(TextArea {
-                buffer: &self.header_buffer,
-                left: header_x,
-                top: header_y,
-                scale: 1.0,
-                bounds,
-                default_color: GColor::rgb(header_fg[0], header_fg[1], header_fg[2]),
-                custom_glyphs: &[],
-            });
-        }
-        let (pane_occlusions, opaque_overlay_occlusion) =
-            prepared.text_occlusions(self.cell_w, self.cell_h);
-        for (index, pane_paint) in pane_paints.iter().enumerate() {
-            let title_bounds = TextBounds {
-                left: pane_paint.title_x.floor() as i32,
-                top: pane_paint.title_y.floor() as i32,
-                right: (pane_paint.title_x + pane_paint.title_width).ceil() as i32,
-                bottom: (pane_paint.title_y + self.cell_h).ceil() as i32,
-            };
-            for bounds in text_bounds_below_scene_occlusions(
-                title_bounds,
-                index,
-                &pane_occlusions,
-                opaque_overlay_occlusion,
-            ) {
-                text_areas.push(TextArea {
-                    buffer: &self.pane_buffers.panes[index].title,
-                    left: pane_paint.title_x,
-                    top: pane_paint.title_y,
-                    scale: 1.0,
-                    bounds,
-                    default_color: GColor::rgb(
-                        pane_paint.title_fg[0],
-                        pane_paint.title_fg[1],
-                        pane_paint.title_fg[2],
-                    ),
-                    custom_glyphs: &[],
-                });
-            }
-            let visible_bounds = prepared
-                .pane_text_visible_bounds(index, self.cell_w, self.cell_h)
-                .expect("pane paint index must match the prepared pane");
-            for bounds in visible_bounds {
-                text_areas.push(TextArea {
-                    buffer: &self.pane_buffers.panes[index].body,
-                    left: pane_paint.origin_x,
-                    top: pane_paint.origin_y,
-                    scale: 1.0,
-                    bounds,
-                    default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
-                    custom_glyphs: &[],
-                });
-            }
-        }
-        for bounds in
-            prepared.chrome_text_visible_bounds(scene.status.area, self.cell_w, self.cell_h)
-        {
-            text_areas.push(TextArea {
-                buffer: &self.status_buffer,
-                left: status_x + 6.0,
-                top: status_y,
-                scale: 1.0,
-                bounds,
-                default_color: GColor::rgb(status_fg[0], status_fg[1], status_fg[2]),
-                custom_glyphs: &[],
-            });
-        }
-        if let Some((left, top)) = overlay_position {
-            let overlay_fg = resolve(theme.overlay_foreground, DEFAULT_FG);
-            text_areas.push(TextArea {
-                buffer: &self.overlay_buffer,
+
+        let text_areas = program.rows.iter().enumerate().map(|(index, row)| {
+            let left = f32::from(row.x) * self.cell_w;
+            let top = f32::from(row.y) * self.cell_h;
+            TextArea {
+                buffer: &self.row_buffers.rows[index],
                 left,
                 top,
                 scale: 1.0,
-                bounds: overlay_clip.unwrap_or(full),
-                default_color: GColor::rgb(overlay_fg[0], overlay_fg[1], overlay_fg[2]),
+                bounds: TextBounds {
+                    left: left.floor() as i32,
+                    top: top.floor() as i32,
+                    right: self.config.width as i32,
+                    bottom: (top + self.cell_h).ceil() as i32,
+                },
+                default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
                 custom_glyphs: &[],
-            });
-        }
-
+            }
+        });
         if self
             .text_renderer
             .prepare(
@@ -2172,8 +806,8 @@ impl GpuText {
         }
 
         let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             _ => return Ok(None),
         };
         let view = frame
@@ -2337,17 +971,15 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 mod tests {
     use super::*;
     use mandatum_scene::{
-        AgentContent, AgentStatus, ContextMenuEntry, ContextMenuOverlay, EmptyContent, HeaderScene,
-        HelpEntry, HelpOverlay, OverlayScene, PaneId, PaneSceneKind, PromptOverlay, SceneCell,
-        SceneRect, SceneSize, SearchEntry, SearchOverlay, StatusScene, TaskContent, TimelineEntry,
-        TimelineOverlay, WelcomeEntry, WelcomeOverlay,
+        EmptyContent, HeaderScene, OverlayScene, PaletteOverlay, PaneContent, PaneId, PaneScene,
+        PaneSceneKind, SceneCell, SceneRect, SceneSize, StatusScene, TerminalSurface,
     };
 
     #[test]
-    fn pane_buffer_pool_grows_to_the_scene_and_retains_bounded_high_water_capacity() {
+    fn row_buffer_pool_grows_to_the_program_and_retains_high_water_capacity() {
         let mut font_system = FontSystem::new();
         let metrics = Metrics::new(15.0, 20.0);
-        let mut pool = PaneBufferPool::new();
+        let mut pool = RowBufferPool::new();
 
         pool.ensure_len(3, &mut font_system, metrics);
         assert_eq!(pool.len(), 3);
@@ -2357,6 +989,152 @@ mod tests {
 
         pool.ensure_len(2, &mut font_system, metrics);
         assert_eq!(pool.len(), 5);
+    }
+
+    #[test]
+    fn generic_program_cell_mapping_honors_color_modifiers_and_terminal_selection() {
+        let theme = Theme {
+            selection_highlight: SceneColor::Rgb(90, 91, 92),
+            ..Theme::default()
+        };
+        let cell = ProgramCell {
+            occupancy: CellOccupancy::Glyph('X'),
+            style: mandatum_scene::SceneCellStyle {
+                foreground: SceneColor::Rgb(1, 2, 3),
+                background: SceneColor::Rgb(4, 5, 6),
+                bold: true,
+                dim: true,
+                italic: true,
+                underline: true,
+                inverse: false,
+                hidden: false,
+                strikethrough: true,
+            },
+            selection: Some(CellSelection::Terminal),
+            cursor: false,
+        };
+
+        let resolved = resolve_program_cell(&cell, &theme);
+        assert_eq!(resolved.glyph, 'X');
+        assert_eq!(resolved.foreground, [1, 2, 3, 150]);
+        assert_eq!(resolved.background, [90, 91, 92, 255]);
+        assert!(resolved.bold);
+        assert!(resolved.italic);
+        assert!(resolved.underline);
+        assert!(resolved.strikethrough);
+
+        let attrs = glyph_attrs(GlyphStyle::from(resolved));
+        assert_eq!(attrs.weight, Weight::BOLD);
+        assert_eq!(attrs.style, FontStyle::Italic);
+        assert_eq!(attrs.text_decoration.underline, UnderlineStyle::Single);
+        assert!(attrs.text_decoration.strikethrough);
+    }
+
+    #[test]
+    fn base_inverse_terminal_selection_fallback_and_cursor_reverse_once_by_presence() {
+        let cell = ProgramCell {
+            occupancy: CellOccupancy::Glyph('X'),
+            style: mandatum_scene::SceneCellStyle {
+                foreground: SceneColor::Rgb(1, 2, 3),
+                background: SceneColor::Rgb(4, 5, 6),
+                inverse: true,
+                ..mandatum_scene::SceneCellStyle::default()
+            },
+            selection: Some(CellSelection::Terminal),
+            cursor: true,
+        };
+
+        let resolved = resolve_program_cell(&cell, &Theme::default());
+
+        // Base inverse, fallback terminal selection, and the cursor all add
+        // the same reverse-video bit; their combination reverses once.
+        assert_eq!(resolved.foreground, [4, 5, 6, 255]);
+        assert_eq!(resolved.background, [1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn item_selection_uses_compiled_style_and_hidden_or_continuation_cells_are_blank() {
+        let item = ProgramCell {
+            occupancy: CellOccupancy::Glyph('I'),
+            style: mandatum_scene::SceneCellStyle {
+                foreground: SceneColor::Rgb(1, 2, 3),
+                background: SceneColor::Rgb(4, 5, 6),
+                inverse: true,
+                ..mandatum_scene::SceneCellStyle::default()
+            },
+            selection: Some(CellSelection::Item),
+            cursor: false,
+        };
+        let hidden = ProgramCell {
+            occupancy: CellOccupancy::Glyph('H'),
+            style: mandatum_scene::SceneCellStyle {
+                hidden: true,
+                ..mandatum_scene::SceneCellStyle::default()
+            },
+            selection: None,
+            cursor: false,
+        };
+        let continuation = ProgramCell {
+            occupancy: CellOccupancy::WideContinuation,
+            style: mandatum_scene::SceneCellStyle::default(),
+            selection: None,
+            cursor: false,
+        };
+
+        let resolved_item = resolve_program_cell(&item, &Theme::default());
+        assert_eq!(resolved_item.foreground, [4, 5, 6, 255]);
+        assert_eq!(resolved_item.background, [1, 2, 3, 255]);
+        assert_eq!(resolve_program_cell(&hidden, &Theme::default()).glyph, ' ');
+        assert_eq!(
+            resolve_program_cell(&continuation, &Theme::default()).glyph,
+            ' '
+        );
+    }
+
+    #[test]
+    fn generic_program_translation_keeps_only_the_topmost_opaque_cell() {
+        let surface = TerminalSurface {
+            rows: vec![
+                vec![
+                    SceneCell {
+                        character: 'X',
+                        style: mandatum_scene::SceneCellStyle::default(),
+                    };
+                    20
+                ];
+                10
+            ],
+            ..TerminalSurface::default()
+        };
+        let tiled = pane(PaneSceneKind::Terminal, PaneContent::Terminal(surface));
+        let mut floating = pane(
+            PaneSceneKind::StatusLog,
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            }),
+        );
+        floating.id = PaneId::new("pane-2");
+        floating.area = SceneRect::new(1, 2, 12, 8);
+        floating.focused = false;
+        floating.floating = true;
+        let scene = scene(vec![tiled, floating]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+
+        let translated = prepare_cell_program(prepared.cell_program(), &theme);
+        let final_cells = translated
+            .cells
+            .iter()
+            .filter(|(x, y, _)| (*x, *y) == (3, 6))
+            .collect::<Vec<_>>();
+
+        assert_eq!(final_cells.len(), 1);
+        assert_eq!(final_cells[0].2.glyph, ' ');
+        assert_eq!(
+            final_cells[0].2.background,
+            [DEFAULT_BG[0], DEFAULT_BG[1], DEFAULT_BG[2], 255]
+        );
     }
 
     fn terminal_content() -> PaneContent {
@@ -2416,897 +1194,10 @@ mod tests {
         let theme = Theme::default();
         let prepared = prepare_scene(&scene, &theme).unwrap();
 
-        assert_eq!(prepared.panes[0].pane.id, PaneId::new("pane-1"));
-        assert_eq!(prepared.panes[0].terminal.unwrap().rows.len(), 1);
+        assert_eq!(prepared.cell_program().size(), scene.size);
+        let inner = layout::pane_inner_rect(scene.panes[0].area);
+        assert!(prepared.cell_program().cell_at(inner.x, inner.y).is_some());
         assert_eq!(scene.status.text, "test status");
-    }
-
-    #[test]
-    fn task_plan_fits_each_detail_entry_to_one_row_and_keeps_output() {
-        let output = TerminalSurface {
-            rows: vec![vec![SceneCell::default(); 2]],
-            ..TerminalSurface::default()
-        };
-        let mut task = pane(
-            PaneSceneKind::Task,
-            PaneContent::Task(TaskContent {
-                command: "printf FIRST\nSECOND --verbose".to_owned(),
-                cwd_label: "/tmp".to_owned(),
-                recipe_label: None,
-                status_label: Some("running".to_owned()),
-                rerun_hint: None,
-                output: Some(output),
-            }),
-        );
-        task.area = SceneRect::new(0, 1, 24, 10);
-        let expected_rows = task.detail_lines().len();
-        let scene = scene(vec![task]);
-        let theme = Theme::default();
-
-        let prepared = prepare_scene(&scene, &theme).unwrap();
-        let lines = prepared.pane_text().lines().collect::<Vec<_>>();
-
-        assert_eq!(lines.len(), expected_rows);
-        assert!(lines[0].starts_with("command:"), "{:?}", lines[0]);
-        assert!(lines[0].ends_with("--verbose"), "{:?}", lines[0]);
-        assert_eq!(prepared.panes[0].pane_text_rows, expected_rows);
-        assert_eq!(prepared.panes[0].body_wrap, Wrap::None);
-        assert!(prepared.pane_surface().is_some());
-    }
-
-    #[test]
-    fn agent_plan_preserves_wrapping_for_long_scene_detail() {
-        let mut agent = pane(
-            PaneSceneKind::Agent,
-            PaneContent::Agent(AgentContent {
-                objective: "inspect a deliberately long objective that needs wrapping".to_owned(),
-                status_label: "draft".to_owned(),
-                status_role: AgentStatus::Draft,
-                pending_approvals: 0,
-                changed_file_count: 0,
-                changed_files: Vec::new(),
-                latest_summary: None,
-                current_action: None,
-                last_error: None,
-                relaunch_hint: None,
-                pending_approval: None,
-                output_tail: Vec::new(),
-            }),
-        );
-        agent.area = SceneRect::new(0, 1, 20, 10);
-        let scene = scene(vec![agent]);
-        let theme = Theme::default();
-
-        let prepared = prepare_scene(&scene, &theme).unwrap();
-
-        assert!(prepared.pane_text().contains("deliberately long objective"));
-        assert_eq!(prepared.panes[0].body_wrap, Wrap::WordOrGlyph);
-        assert!(prepared.pane_surface().is_none());
-    }
-
-    #[test]
-    fn context_menu_plan_preserves_scene_data_geometry_and_row_alignment() {
-        let mut with_menu = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
-        let menu = ContextMenuOverlay {
-            area: SceneRect::new(3, 4, 26, 5),
-            items: vec![
-                ContextMenuEntry::new("Zoom pane", "ctrl+p z"),
-                ContextMenuEntry::new("Close pane", "ctrl+p x"),
-                ContextMenuEntry::new("Copy selection", ""),
-            ],
-            selected: 1,
-        };
-        with_menu.overlay = Some(OverlayScene::ContextMenu(menu.clone()));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&with_menu, &theme).unwrap();
-        let prepared_menu = prepared
-            .context_menu()
-            .expect("context-menu scene data was not retained");
-
-        assert_eq!(prepared_menu, &menu);
-        let inner = layout::pane_inner_rect(prepared_menu.area);
-        let lines = prepared_menu
-            .items
-            .iter()
-            .map(|item| context_menu_line(item, inner.width))
-            .collect::<Vec<_>>();
-        assert_eq!(lines.len(), usize::from(inner.height));
-        assert!(lines[0].starts_with(" Zoom pane"));
-        assert!(lines[0].ends_with("ctrl+p z"));
-        assert_eq!(lines[0].chars().count(), usize::from(inner.width) - 1);
-    }
-
-    #[test]
-    fn timeline_plan_preserves_scene_data_geometry_and_row_alignment() {
-        let mut with_timeline = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
-        let timeline = TimelineOverlay {
-            area: SceneRect::new(3, 4, 54, 8),
-            query: "task".to_owned(),
-            items: vec![
-                TimelineEntry {
-                    glyph: "✗".to_owned(),
-                    when: "2m ago".to_owned(),
-                    text: "task pane-2 failed: exit 3".to_owned(),
-                    pane: Some(PaneId::new("pane-2")),
-                },
-                TimelineEntry {
-                    glyph: "▶".to_owned(),
-                    when: "3m ago".to_owned(),
-                    text: "task pane-2 started".to_owned(),
-                    pane: Some(PaneId::new("pane-2")),
-                },
-            ],
-            selected: Some(1),
-            skipped_malformed: 1,
-            footer: "enter jump · esc close · 1 malformed line(s) skipped".to_owned(),
-        };
-        with_timeline.overlay = Some(OverlayScene::Timeline(timeline.clone()));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&with_timeline, &theme).unwrap();
-        let prepared_timeline = prepared
-            .timeline()
-            .expect("timeline scene data was not retained");
-        let lines = timeline_lines(prepared_timeline);
-
-        assert_eq!(prepared_timeline, &timeline);
-        assert_eq!(lines.len(), usize::from(timeline.area.height));
-        assert_eq!(lines[0], " Timeline ");
-        assert_eq!(lines[1], " > task_");
-        assert!(lines[2].contains("✗"));
-        assert!(lines[2].contains("2m ago"));
-        assert!(lines[2].contains("failed: exit 3"));
-        assert!(lines[lines.len() - 2].starts_with("  enter jump"));
-        assert!(lines.iter().skip(1).all(|line| {
-            line.chars().count() <= usize::from(layout::pane_inner_rect(timeline.area).width) + 1
-        }));
-        assert!(lines.last().unwrap().is_empty());
-    }
-
-    #[test]
-    fn timeline_plan_paints_the_empty_filter_state_inside_the_inner_bounds() {
-        let mut with_timeline = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
-        let timeline = TimelineOverlay {
-            area: SceneRect::new(3, 4, 24, 7),
-            query: "missing".to_owned(),
-            items: Vec::new(),
-            selected: None,
-            skipped_malformed: 0,
-            footer: "footer text that must stay inside the overlay border".to_owned(),
-        };
-        with_timeline.overlay = Some(OverlayScene::Timeline(timeline.clone()));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&with_timeline, &theme).unwrap();
-        let lines = timeline_lines(prepared.timeline().unwrap());
-        let inner_width = usize::from(layout::pane_inner_rect(timeline.area).width);
-
-        assert_eq!(lines[1], " > missing_");
-        assert_eq!(lines[2], "  no matching events");
-        assert!(lines[lines.len() - 2].starts_with(' '));
-        assert!(
-            lines
-                .iter()
-                .skip(1)
-                .all(|line| line.chars().count() <= inner_width + 1)
-        );
-        assert!(lines.last().unwrap().is_empty());
-    }
-
-    #[test]
-    fn search_plan_preserves_scene_data_grouping_matches_cursor_and_footer() {
-        let mut with_search = scene(vec![pane(PaneSceneKind::Agent, terminal_content())]);
-        let search = SearchOverlay {
-            area: SceneRect::new(3, 4, 64, 8),
-            query: "fail".to_owned(),
-            items: vec![
-                SearchEntry {
-                    source: "agent · pane-2 (agent)".to_owned(),
-                    text: "first failing check".to_owned(),
-                    match_indices: vec![6, 7, 8, 9],
-                    pane: Some(PaneId::new("pane-2")),
-                },
-                SearchEntry {
-                    source: "agent · pane-2 (agent)".to_owned(),
-                    text: "FAILED tests::search".to_owned(),
-                    match_indices: vec![0, 1, 2, 3],
-                    pane: Some(PaneId::new("pane-2")),
-                },
-                SearchEntry {
-                    source: "timeline".to_owned(),
-                    text: "task pane-3 failed: exit 3".to_owned(),
-                    match_indices: vec![12, 13, 14, 15],
-                    pane: None,
-                },
-            ],
-            selected: Some(1),
-            overflow: 3,
-            footer: "+3 beyond cap (narrow the query) · enter jump · esc close".to_owned(),
-        };
-        with_search.overlay = Some(OverlayScene::Search(search.clone()));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&with_search, &theme).unwrap();
-        let prepared_search = prepared
-            .search()
-            .expect("search scene data was not retained");
-        let lines = search_lines(prepared_search);
-
-        assert_eq!(prepared_search, &search);
-        assert_eq!(prepared_search.items[1].match_indices, vec![0, 1, 2, 3]);
-        assert_eq!(lines.len(), usize::from(search.area.height));
-        assert_eq!(lines[0], " Search Session Output ");
-        assert_eq!(lines[1], " > fail");
-        assert!(lines[2].contains("agent · pane-2 (agent)"));
-        assert!(lines[2].contains("first failing check"));
-        assert!(lines[3].contains("FAILED tests::search"));
-        assert!(!lines[3].contains("agent · pane-2 (agent)"));
-        assert!(lines[4].contains("timeline"));
-        assert!(lines[4].contains("failed: exit 3"));
-        assert!(lines[lines.len() - 2].contains("+3 beyond cap"));
-        assert!(lines[lines.len() - 2].contains("enter jump"));
-        assert!(lines.last().unwrap().is_empty());
-        assert!(lines.iter().skip(1).all(|line| {
-            line.chars().count() <= usize::from(layout::pane_inner_rect(search.area).width) + 1
-        }));
-        assert_eq!(
-            search_cursor_cell(prepared_search),
-            Some((
-                layout::pane_inner_rect(search.area)
-                    .x
-                    .saturating_add(2 + search.query.chars().count() as u16),
-                layout::pane_inner_rect(search.area).y,
-            ))
-        );
-    }
-
-    #[test]
-    fn search_plan_paints_empty_states_inside_the_inner_bounds() {
-        let mut with_search = scene(vec![pane(PaneSceneKind::Agent, terminal_content())]);
-        let search = SearchOverlay {
-            area: SceneRect::new(3, 4, 96, 7),
-            query: "missing".to_owned(),
-            items: Vec::new(),
-            selected: None,
-            overflow: 0,
-            footer: "type to search · enter jump · esc close".to_owned(),
-        };
-        with_search.overlay = Some(OverlayScene::Search(search.clone()));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&with_search, &theme).unwrap();
-        let lines = search_lines(prepared.search().unwrap());
-        let inner_width = usize::from(layout::pane_inner_rect(search.area).width);
-
-        assert_eq!(lines[1], " > missing");
-        assert_eq!(lines[2], "  no matches");
-        assert!(lines[lines.len() - 2].starts_with(' '));
-        assert!(
-            lines
-                .iter()
-                .skip(1)
-                .all(|line| line.chars().count() <= inner_width + 1)
-        );
-
-        let mut empty_query = search;
-        empty_query.query.clear();
-        with_search.overlay = Some(OverlayScene::Search(empty_query.clone()));
-        let prepared = prepare_scene(&with_search, &theme).unwrap();
-        let lines = search_lines(prepared.search().unwrap());
-        assert!(lines[1].contains("type to search output"));
-        assert!(lines[2].contains("searching this session"));
-        assert_eq!(search_cursor_cell(&empty_query), None);
-    }
-
-    #[test]
-    fn search_occlusion_keeps_base_text_outside_the_overlay_only() {
-        let content = TextBounds {
-            left: 0,
-            top: 10,
-            right: 100,
-            bottom: 90,
-        };
-        let search = TextBounds {
-            left: 20,
-            top: 30,
-            right: 80,
-            bottom: 70,
-        };
-
-        assert_eq!(
-            text_bounds_around_occlusion(content, search),
-            vec![
-                TextBounds {
-                    bottom: 30,
-                    ..content
-                },
-                TextBounds { top: 70, ..content },
-                TextBounds {
-                    top: 30,
-                    right: 20,
-                    bottom: 70,
-                    ..content
-                },
-                TextBounds {
-                    left: 80,
-                    top: 30,
-                    bottom: 70,
-                    ..content
-                },
-            ]
-        );
-        assert_eq!(
-            text_bounds_around_occlusion(
-                content,
-                TextBounds {
-                    left: 110,
-                    top: 10,
-                    right: 120,
-                    bottom: 20,
-                }
-            ),
-            vec![content]
-        );
-    }
-
-    fn opaque_overlay_cases(area: SceneRect) -> [(&'static str, OverlayScene); 8] {
-        [
-            ("palette", palette_overlay(area)),
-            ("context menu", context_menu_overlay(area)),
-            ("timeline", timeline_overlay(area)),
-            ("search", search_overlay(area)),
-            ("session map", session_map_overlay(area)),
-            ("prompt", prompt_overlay(area)),
-            ("help", help_overlay(area)),
-            ("welcome", welcome_overlay(area)),
-        ]
-    }
-
-    fn palette_overlay(area: SceneRect) -> OverlayScene {
-        OverlayScene::Palette(PaletteOverlay {
-            area,
-            query: String::new(),
-            items: Vec::new(),
-            selected: None,
-            footer: String::new(),
-        })
-    }
-
-    fn context_menu_overlay(area: SceneRect) -> OverlayScene {
-        OverlayScene::ContextMenu(ContextMenuOverlay {
-            area,
-            items: Vec::new(),
-            selected: 0,
-        })
-    }
-
-    fn timeline_overlay(area: SceneRect) -> OverlayScene {
-        OverlayScene::Timeline(TimelineOverlay {
-            area,
-            query: String::new(),
-            items: Vec::new(),
-            selected: None,
-            skipped_malformed: 0,
-            footer: String::new(),
-        })
-    }
-
-    fn search_overlay(area: SceneRect) -> OverlayScene {
-        OverlayScene::Search(SearchOverlay {
-            area,
-            query: String::new(),
-            items: Vec::new(),
-            selected: None,
-            overflow: 0,
-            footer: String::new(),
-        })
-    }
-
-    fn session_map_overlay(area: SceneRect) -> OverlayScene {
-        OverlayScene::SessionMap(SessionMapOverlay {
-            area,
-            rows: Vec::new(),
-            selected: 0,
-            footer: String::new(),
-        })
-    }
-
-    fn prompt_overlay(area: SceneRect) -> OverlayScene {
-        OverlayScene::Prompt(PromptOverlay {
-            area,
-            title: String::new(),
-            input: String::new(),
-            footer: String::new(),
-        })
-    }
-
-    fn help_overlay(area: SceneRect) -> OverlayScene {
-        OverlayScene::Help(HelpOverlay {
-            area,
-            query: String::new(),
-            items: Vec::new(),
-            selected: None,
-            footer: String::new(),
-        })
-    }
-
-    fn welcome_overlay(area: SceneRect) -> OverlayScene {
-        OverlayScene::Welcome(WelcomeOverlay {
-            area,
-            introduction: String::new(),
-            entries: Vec::new(),
-            dismissal: String::new(),
-        })
-    }
-
-    #[test]
-    fn opaque_surfaces_clip_pane_bodies_in_final_fractional_pixel_bounds() {
-        let cell_width = 7.3;
-        let cell_height = 13.5;
-        let overlay_area = SceneRect::new(5, 3, 10, 5);
-
-        for (label, overlay) in opaque_overlay_cases(overlay_area) {
-            let mut base = pane(
-                PaneSceneKind::StatusLog,
-                PaneContent::Empty(EmptyContent {
-                    cwd_label: "/tmp".to_owned(),
-                    restart_generation: 0,
-                }),
-            );
-            base.area = SceneRect::new(0, 1, 20, 10);
-            let mut candidate = scene(vec![base]);
-            candidate.size = SceneSize::new(20, 12);
-            candidate.overlay = Some(overlay);
-
-            let theme = Theme::default();
-            let prepared = prepare_scene(&candidate, &theme).unwrap();
-            let occlusion = scene_rect_to_text_bounds(overlay_area, cell_width, cell_height);
-            let visible = prepared
-                .pane_text_visible_bounds(0, cell_width, cell_height)
-                .unwrap();
-
-            assert!(
-                visible
-                    .iter()
-                    .all(|bounds| !text_bounds_intersect(*bounds, occlusion)),
-                "{label} left pane-body pixels inside its opaque surface: {visible:?}"
-            );
-            assert!(
-                visible.iter().any(|bounds| bounds.right == occlusion.left),
-                "{label} did not preserve the pixel column immediately left of the surface"
-            );
-        }
-    }
-
-    #[test]
-    fn full_frame_overlay_clips_header_and_status_glyphs() {
-        let size = SceneSize::new(3, 5);
-        let mut base = pane(
-            PaneSceneKind::StatusLog,
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            }),
-        );
-        base.area = layout::workspace_scene_area(size);
-        let mut candidate = scene(vec![base]);
-        candidate.size = size;
-        candidate.header.area = layout::header_rect(size);
-        candidate.status.area = layout::status_rect(size);
-        candidate.overlay = Some(search_overlay(SceneRect::new(0, 0, 3, 5)));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&candidate, &theme).unwrap();
-
-        assert!(
-            prepared
-                .chrome_text_visible_bounds(candidate.header.area, 7.3, 13.5)
-                .is_empty()
-        );
-        assert!(
-            prepared
-                .chrome_text_visible_bounds(candidate.status.area, 7.3, 13.5)
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn floating_surface_clips_tiled_pane_body_in_final_fractional_pixel_bounds() {
-        let cell_width = 7.3;
-        let cell_height = 13.5;
-        let size = SceneSize::new(20, 12);
-        let workspace = layout::workspace_scene_area(size);
-        let floating_area = layout::default_floating_pane_rect(size);
-        let empty = || {
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            })
-        };
-        let mut tiled = pane(PaneSceneKind::Terminal, empty());
-        tiled.area = workspace;
-        tiled.focused = false;
-        let mut floating = pane(PaneSceneKind::Terminal, empty());
-        floating.id = PaneId::new("pane-2");
-        floating.title = "terminal 2".to_owned();
-        floating.area = floating_area;
-        floating.floating = true;
-        let mut candidate = scene(vec![tiled, floating]);
-        candidate.size = size;
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&candidate, &theme).unwrap();
-        let occlusion = scene_rect_to_text_bounds(floating_area, cell_width, cell_height);
-        let visible = prepared
-            .pane_text_visible_bounds(0, cell_width, cell_height)
-            .unwrap();
-
-        assert!(
-            visible
-                .iter()
-                .all(|bounds| !text_bounds_intersect(*bounds, occlusion)),
-            "tiled pane-body pixels remain inside the opaque float: {visible:?}"
-        );
-        assert!(
-            visible.iter().any(|bounds| bounds.right == occlusion.left),
-            "the pixel column immediately left of the float was not preserved"
-        );
-    }
-
-    #[test]
-    fn palette_occlusion_clips_pane_titles_at_small_admitted_viewports() {
-        let size = SceneSize::new(9, 5);
-        let palette = layout::palette_overlay_rect(size);
-        assert_eq!(palette, SceneRect::new(1, 1, 7, 3));
-        let title = TextBounds {
-            left: 1,
-            top: 1,
-            right: 3,
-            bottom: 2,
-        };
-        let palette_bounds = TextBounds {
-            left: i32::from(palette.x),
-            top: i32::from(palette.y),
-            right: i32::from(palette.right()),
-            bottom: i32::from(palette.bottom()),
-        };
-
-        assert!(text_bounds_below_scene_occlusions(title, 0, &[], Some(palette_bounds)).is_empty());
-    }
-
-    #[test]
-    fn floating_pane_occlusion_clips_long_wrapped_empty_detail_from_the_tiled_pane() {
-        let empty = PaneContent::Empty(EmptyContent {
-            cwd_label: format!("/{}", "long-project-segment/".repeat(8)),
-            restart_generation: 0,
-        });
-        let mut tiled = pane(PaneSceneKind::StatusLog, empty);
-        tiled.area = SceneRect::new(0, 1, 80, 22);
-        let scene = scene(vec![tiled]);
-        let theme = Theme::default();
-        let prepared = prepare_scene(&scene, &theme).unwrap();
-        assert!(
-            prepared.pane_text().chars().count()
-                > usize::from(layout::pane_inner_rect(scene.panes[0].area).width)
-        );
-        assert_eq!(prepared.panes[0].body_wrap, Wrap::WordOrGlyph);
-
-        let tiled_body = TextBounds {
-            left: 1,
-            top: 2,
-            right: 79,
-            bottom: 22,
-        };
-        let floating_pane = TextBounds {
-            left: 8,
-            top: 5,
-            right: 80,
-            bottom: 23,
-        };
-        let visible = text_bounds_below_later_panes(tiled_body, 0, &[(1, floating_pane)]);
-
-        assert_eq!(
-            visible,
-            vec![
-                TextBounds {
-                    bottom: 5,
-                    ..tiled_body
-                },
-                TextBounds {
-                    top: 5,
-                    right: 8,
-                    ..tiled_body
-                },
-            ]
-        );
-        assert!(visible.iter().all(|bounds| {
-            bounds.right <= floating_pane.left
-                || bounds.bottom <= floating_pane.top
-                || bounds.left >= floating_pane.right
-                || bounds.top >= floating_pane.bottom
-        }));
-        assert_eq!(
-            text_bounds_below_later_panes(tiled_body, 1, &[(1, floating_pane)]),
-            vec![tiled_body]
-        );
-    }
-
-    #[test]
-    fn ordered_occlusion_clips_each_pane_against_every_later_float_and_overlay() {
-        let body = TextBounds {
-            left: 0,
-            top: 0,
-            right: 100,
-            bottom: 100,
-        };
-        let first_float = TextBounds {
-            left: 10,
-            top: 10,
-            right: 70,
-            bottom: 70,
-        };
-        let second_float = TextBounds {
-            left: 30,
-            top: 30,
-            right: 90,
-            bottom: 90,
-        };
-        let overlay = TextBounds {
-            left: 40,
-            top: 0,
-            right: 60,
-            bottom: 100,
-        };
-        let floats = [(1, first_float), (2, second_float)];
-
-        for (pane_index, later_opaque) in [
-            (0, vec![first_float, second_float, overlay]),
-            (1, vec![second_float, overlay]),
-            (2, vec![overlay]),
-        ] {
-            let visible =
-                text_bounds_below_scene_occlusions(body, pane_index, &floats, Some(overlay));
-            assert!(
-                visible.iter().all(|bounds| later_opaque
-                    .iter()
-                    .all(|opaque| !text_bounds_intersect(*bounds, *opaque))),
-                "pane {pane_index} remained visible beneath a later opaque surface: {visible:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn ordered_occlusion_treats_every_later_pane_as_opaque() {
-        let empty = || {
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            })
-        };
-        let mut first = pane(PaneSceneKind::Terminal, empty());
-        first.area = SceneRect::new(0, 1, 60, 22);
-        first.focused = false;
-        let mut second = pane(PaneSceneKind::Terminal, empty());
-        second.id = PaneId::new("pane-2");
-        second.area = SceneRect::new(20, 5, 60, 18);
-        second.floating = false;
-        let candidate = scene(vec![first, second]);
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&candidate, &theme).unwrap();
-        let later_pane = scene_rect_to_text_bounds(candidate.panes[1].area, 7.3, 13.5);
-        let visible = prepared.pane_text_visible_bounds(0, 7.3, 13.5).unwrap();
-
-        assert!(
-            visible
-                .iter()
-                .all(|bounds| !text_bounds_intersect(*bounds, later_pane)),
-            "earlier text remained visible under a later pane: {visible:?}"
-        );
-    }
-
-    #[test]
-    fn help_plan_preserves_scene_data_grouping_keys_cursor_selection_and_footer() {
-        let mut with_help = scene(vec![pane(
-            PaneSceneKind::StatusLog,
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            }),
-        )]);
-        let help = HelpOverlay {
-            area: SceneRect::new(3, 4, 56, 8),
-            query: "search".to_owned(),
-            items: vec![
-                HelpEntry {
-                    heading: true,
-                    label: "App".to_owned(),
-                    keys: String::new(),
-                },
-                HelpEntry {
-                    heading: false,
-                    label: "Search session output".to_owned(),
-                    keys: "ctrl+shift+f".to_owned(),
-                },
-            ],
-            selected: Some(1),
-            footer: "type to filter · ↑/↓ scroll · esc close".to_owned(),
-        };
-        with_help.overlay = Some(OverlayScene::Help(help.clone()));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&with_help, &theme).unwrap();
-        let prepared_help = prepared.help().expect("help scene data was not retained");
-        let lines = help_lines(prepared_help);
-
-        assert_eq!(prepared_help, &help);
-        assert_eq!(lines.len(), usize::from(help.area.height));
-        assert_eq!(lines[0], " Help ");
-        assert_eq!(lines[1], " > search");
-        assert_eq!(lines[2], "  App");
-        assert!(lines[3].starts_with("    Search session output"));
-        assert!(lines[3].ends_with("ctrl+shift+f"));
-        assert_eq!(
-            lines[lines.len() - 2],
-            "  type to filter · ↑/↓ scroll · esc close"
-        );
-        assert!(lines.last().unwrap().is_empty());
-        assert!(lines.iter().skip(1).all(|line| {
-            line.chars().count() <= usize::from(layout::pane_inner_rect(help.area).width) + 1
-        }));
-        assert_eq!(
-            help_cursor_cell(prepared_help),
-            Some((
-                layout::pane_inner_rect(help.area)
-                    .x
-                    .saturating_add(2 + help.query.chars().count() as u16),
-                layout::pane_inner_rect(help.area).y,
-            ))
-        );
-
-        let mut no_matches = help;
-        no_matches.query.clear();
-        no_matches.items.clear();
-        no_matches.selected = None;
-        with_help.overlay = Some(OverlayScene::Help(no_matches.clone()));
-        let prepared = prepare_scene(&with_help, &theme).unwrap();
-        let lines = help_lines(prepared.help().unwrap());
-        assert!(lines[1].contains("type to filter the keymap"));
-        assert_eq!(lines[2], "  no matching entries");
-        assert_eq!(help_cursor_cell(&no_matches), None);
-    }
-
-    #[test]
-    fn welcome_plan_preserves_scene_data_hierarchy_alignment_and_bounds() {
-        let mut with_welcome = scene(vec![pane(
-            PaneSceneKind::StatusLog,
-            PaneContent::Empty(EmptyContent {
-                cwd_label: "/tmp".to_owned(),
-                restart_generation: 0,
-            }),
-        )]);
-        let welcome = WelcomeOverlay {
-            area: SceneRect::new(3, 4, 48, 8),
-            introduction: "A workspace for terminals, tasks, and agents.".to_owned(),
-            entries: vec![
-                WelcomeEntry {
-                    keys: "ctrl+p".to_owned(),
-                    description: "Command palette".to_owned(),
-                },
-                WelcomeEntry {
-                    keys: "f1".to_owned(),
-                    description: "Help".to_owned(),
-                },
-            ],
-            dismissal: "Any key or click dismisses this note".to_owned(),
-        };
-        with_welcome.overlay = Some(OverlayScene::Welcome(welcome.clone()));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&with_welcome, &theme).unwrap();
-        let prepared_welcome = prepared
-            .welcome()
-            .expect("welcome scene data was not retained");
-        let lines = welcome_lines(prepared_welcome);
-
-        assert_eq!(prepared_welcome, &welcome);
-        assert_eq!(lines.len(), usize::from(welcome.area.height));
-        assert_eq!(lines[0], " Mandatum ");
-        assert_eq!(lines[1], " A workspace for terminals, tasks, and agents.");
-        assert!(lines[2].is_empty());
-        assert_eq!(lines[3], "   ctrl+p  Command palette");
-        assert_eq!(lines[4], "   f1      Help");
-        assert!(lines[5].is_empty());
-        assert_eq!(lines[6], " Any key or click dismisses this note");
-        assert!(lines.last().unwrap().is_empty());
-        assert!(lines.iter().skip(1).all(|line| {
-            line.chars().count() <= usize::from(layout::pane_inner_rect(welcome.area).width) + 1
-        }));
-    }
-
-    #[test]
-    fn session_map_plan_preserves_scene_data_geometry_and_row_alignment() {
-        let mut with_map = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
-        let map = SessionMapOverlay {
-            area: SceneRect::new(3, 4, 64, 7),
-            rows: vec![
-                SessionMapRow {
-                    depth: 0,
-                    glyph: "▸".to_owned(),
-                    label: "session-1 · project · 2 pane(s) (active)".to_owned(),
-                    state: String::new(),
-                    focused: false,
-                    badges: String::new(),
-                },
-                SessionMapRow {
-                    depth: 1,
-                    glyph: "❯".to_owned(),
-                    label: "pane-1 terminal".to_owned(),
-                    state: "open".to_owned(),
-                    focused: true,
-                    badges: "zoom float".to_owned(),
-                },
-            ],
-            selected: 1,
-            footer: "↑/↓ move · enter focus · esc close".to_owned(),
-        };
-        with_map.overlay = Some(OverlayScene::SessionMap(map.clone()));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&with_map, &theme).unwrap();
-        let prepared_map = prepared
-            .session_map()
-            .expect("session-map scene data was not retained");
-        let lines = session_map_lines(prepared_map);
-
-        assert_eq!(prepared_map, &map);
-        assert_eq!(lines.len(), usize::from(map.area.height));
-        assert_eq!(lines[0], " Sessions ");
-        assert!(lines[1].contains("▸ session-1"));
-        assert!(lines[2].contains("●  ❯ pane-1 terminal"));
-        assert!(lines[2].contains("open"));
-        assert!(lines[2].contains("[zoom float]"));
-        assert!(lines[lines.len() - 2].starts_with("  ↑/↓ move"));
-        assert!(lines.iter().skip(1).all(|line| {
-            line.chars().count() <= usize::from(layout::pane_inner_rect(map.area).width) + 1
-        }));
-        assert!(lines.last().unwrap().is_empty());
-    }
-
-    #[test]
-    fn prompt_plan_preserves_scene_data_geometry_cursor_and_footer() {
-        let mut with_prompt = scene(vec![pane(PaneSceneKind::Agent, terminal_content())]);
-        let prompt = PromptOverlay {
-            area: SceneRect::new(3, 4, 42, 5),
-            title: " Set agent objective — pane-1 ".to_owned(),
-            input: "Inspect prompt paint".to_owned(),
-            footer: "enter save · esc cancel".to_owned(),
-        };
-        with_prompt.overlay = Some(OverlayScene::Prompt(prompt.clone()));
-
-        let theme = Theme::default();
-        let prepared = prepare_scene(&with_prompt, &theme).unwrap();
-        let prepared_prompt = prepared
-            .prompt()
-            .expect("prompt scene data was not retained");
-        let lines = prompt_lines(prepared_prompt);
-
-        assert_eq!(prepared_prompt, &prompt);
-        assert_eq!(lines.len(), usize::from(prompt.area.height));
-        assert_eq!(lines[0], prompt.title);
-        assert_eq!(lines[1], " > Inspect prompt paint");
-        assert_eq!(lines[lines.len() - 2], " enter save · esc cancel");
-        assert!(lines.last().unwrap().is_empty());
-        assert_eq!(
-            prompt_cursor_cell(prepared_prompt),
-            Some((
-                layout::pane_inner_rect(prompt.area)
-                    .x
-                    .saturating_add(2 + prompt.input.chars().count() as u16),
-                layout::pane_inner_rect(prompt.area).y,
-            ))
-        );
     }
 
     #[test]
@@ -3325,7 +1216,13 @@ mod tests {
         horizontal_second.id = PaneId::new("pane-2");
         horizontal_second.area = SceneRect::new(40, 1, 40, 22);
         let mut horizontal = scene(vec![horizontal_first, horizontal_second]);
-        horizontal.overlay = Some(palette_overlay(SceneRect::new(13, 5, 56, 14)));
+        horizontal.overlay = Some(OverlayScene::Palette(PaletteOverlay {
+            area: SceneRect::new(13, 5, 56, 14),
+            query: String::new(),
+            items: Vec::new(),
+            selected: None,
+            footer: String::new(),
+        }));
 
         let mut vertical_first = pane(PaneSceneKind::Terminal, empty());
         vertical_first.area = SceneRect::new(0, 1, 80, 11);
@@ -3358,7 +1255,18 @@ mod tests {
         ] {
             let prepared = prepare_scene(&candidate, &theme)
                 .unwrap_or_else(|error| panic!("{label}: {error}"));
-            assert_eq!(prepared.panes.len(), expected_panes, "{label}");
+            assert_eq!(candidate.panes.len(), expected_panes, "{label}");
+            assert_eq!(prepared.cell_program().size(), candidate.size, "{label}");
+            for pane in &candidate.panes {
+                assert!(
+                    prepared
+                        .cell_program()
+                        .cell_at(pane.area.x, pane.area.y)
+                        .is_some(),
+                    "{label}: pane {} did not reach the cell program",
+                    pane.id
+                );
+            }
         }
     }
 
@@ -3429,26 +1337,49 @@ mod tests {
     }
 
     #[test]
-    fn empty_plan_preserves_wrapping_for_scene_detail() {
-        let empty = PaneContent::Empty(EmptyContent {
-            cwd_label: "/tmp".to_owned(),
-            restart_generation: 7,
-        });
-        let mut empty_pane = pane(PaneSceneKind::StatusLog, empty);
-        empty_pane.area = SceneRect::new(0, 1, 20, 10);
-        let scene = scene(vec![empty_pane]);
-        let theme = Theme::default();
+    fn scene_compiler_rejects_aggregate_gpu_resource_hazards_before_compiling() {
+        let mut oversized_frame = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        oversized_frame.size = SceneSize::new(513, 512);
 
-        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let mut too_many_rows = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        too_many_rows.size = SceneSize::new(3, (MAX_GPU_ROW_BUFFERS + 1) as u16);
+        too_many_rows.panes[0].area = SceneRect::new(0, 1, 3, 3);
 
-        assert!(prepared.pane_text().contains("cwd: /tmp"));
-        assert!(prepared.pane_text().contains("restart generation: 7"));
-        assert!(
-            prepared
-                .pane_text()
-                .contains("no live PTY grid is attached to this pane")
+        let mut instruction_heavy = scene(
+            (0..5)
+                .map(|index| {
+                    let mut pane = pane(PaneSceneKind::Terminal, terminal_content());
+                    pane.id = PaneId::new(format!("pane-{index}"));
+                    pane.area = SceneRect::new(0, 1, 500, 498);
+                    pane
+                })
+                .collect(),
         );
-        assert_eq!(prepared.panes[0].body_wrap, Wrap::WordOrGlyph);
-        assert!(prepared.pane_surface().is_none());
+        instruction_heavy.size = SceneSize::new(500, 500);
+
+        assert_eq!(
+            prepare_scene(&oversized_frame, &Theme::default()).unwrap_err(),
+            SceneCompileError::ResourceLimit {
+                resource: "frame cells",
+                actual: 513 * 512,
+                maximum: MAX_GPU_FRAME_CELLS,
+            }
+        );
+        assert_eq!(
+            prepare_scene(&too_many_rows, &Theme::default()).unwrap_err(),
+            SceneCompileError::ResourceLimit {
+                resource: "row buffers",
+                actual: MAX_GPU_ROW_BUFFERS + 1,
+                maximum: MAX_GPU_ROW_BUFFERS,
+            }
+        );
+        assert!(matches!(
+            prepare_scene(&instruction_heavy, &Theme::default()).unwrap_err(),
+            SceneCompileError::ResourceLimit {
+                resource: "cell instructions",
+                actual,
+                maximum: MAX_GPU_CELL_INSTRUCTIONS,
+            } if actual > MAX_GPU_CELL_INSTRUCTIONS
+        ));
     }
 }

@@ -81,9 +81,11 @@ exposure, snapshots. `[L4-GATE]` conformance tests live in
 
 `mandatum-scene`: the renderer-neutral frontend contract. `WorkspaceScene`
 output model (geometry, pane content, terminal surfaces, overlays,
-header/status, hit targets), all pane-rect layout math (`layout.rs`),
-semantic themes (`theme.rs`), and the neutral input event types
-(`input.rs`). Engine-side: deps are `mandatum-core` + serde only (L1 gate).
+header/status, hit targets), its final-topmost whole-frame cell compiler
+(`cell_program.rs` plus private `cell_program/` modules), all pane-rect layout
+math (`layout.rs`), semantic themes (`theme.rs`), and the neutral input event
+types (`input.rs`). Engine-side: deps are `mandatum-core` + serde only (L1
+gate).
 
 ### `crates/agent-runtime`
 
@@ -96,8 +98,9 @@ serde_json (L1 gate).
 
 ### `crates/renderer`
 
-The ratatui terminal frontend adapter. Renders a `WorkspaceScene`; computes
-no layout and has no terminal-engine dependency (banned by the L1 gate).
+The ratatui terminal frontend adapter. Translates the scene compiler's neutral
+`CellProgram` into ratatui buffer cells; computes no layout/presentation rules
+and has no terminal-engine dependency (banned by the L1 gate).
 
 ### `crates/app`
 

@@ -10,6 +10,7 @@ cargo fmt --manifest-path "$manifest" -- --check
 # gpu-renderer compiles this file through include!, which cargo fmt does not
 # discover as a module. Keep the shared renderer source in the format gate.
 rustfmt --check --edition 2024 spikes/frontend-wgpu/src/gpu.rs
+cargo clippy --manifest-path "$manifest" --locked --workspace --all-targets -- -D warnings
 cargo test --manifest-path "$manifest" --locked --workspace --all-targets
 
 # The renderer is a separate spike-local crate. Prove its current-platform

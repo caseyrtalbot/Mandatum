@@ -118,15 +118,17 @@ more useful without pretending the wider vision is finished:
   Its layout/composition family compiles the scene's ordered pane records
   generically: tiled, stacked, zoomed, mixed-content, three-plus-pane,
   moved/custom-float, multiple-float, and overlay combinations share one
-  structural validator, dynamic pane-buffer pool, and ordered pixel-space
-  occlusion path. The compiler validates only renderer-safety invariants;
-  `mandatum-scene` remains the sole owner of layout meaning and draw order. The
-  next family is content/style parity, including the neutral cell semantics
-  needed to close cursor, selection, and style behavior without layout special
-  cases. Input/lifecycle parity follows as its own family. Artifact Preview
-  then becomes a dedicated product-capability phase before hardening,
-  measurement, admission, or release work. Production GPU dependencies and
-  release admission remain blocked.
+  structural validator and ordered paint path. Its content/style family is
+  complete too: `mandatum-scene` compiles terminal, task, agent, Empty, chrome,
+  and every overlay into one renderer-neutral `CellProgram`; both the shipped
+  ratatui adapter and excluded GPU adapter translate that same program,
+  including semantic colors, all current style modifiers, terminal/item
+  selection, cursor, opacity, and an explicit wide-continuation seam.
+  `mandatum-scene` remains the sole owner of layout and presentation meaning.
+  Input/lifecycle parity is the next Phase 3 family. Artifact Preview then
+  becomes a dedicated product-capability phase before hardening, measurement,
+  admission, or release work. Production GPU dependencies and release
+  admission remain blocked.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.

@@ -7,50 +7,50 @@
 //! and frontend (L1). The scene stays color-semantic; the [`Theme`] resolves
 //! each semantic role to a concrete color here in the adapter.
 
-mod overlay;
-mod pane;
-mod surface;
-
 use mandatum_scene::{
-    HeaderScene, OverlayScene, SceneColor, SceneRect, StatusScene, Theme, WorkspaceScene,
+    CellOccupancy, CellSelection, ProgramCell, SceneCellStyle, SceneColor, Theme, WorkspaceScene,
+    compile_cell_program,
 };
 use ratatui::{
     Frame,
-    layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::Paragraph,
 };
 
 /// Draw one frame of workspace scene state with the active theme. The scene
 /// carries every strip's area and composed text (`&WorkspaceScene` alone
-/// suffices to paint a frame); this adapter only translates to widgets.
+/// suffices to paint a frame); this adapter compiles the renderer-neutral cell
+/// program and only translates its cells into ratatui buffer cells.
 pub fn render(frame: &mut Frame<'_>, scene: &WorkspaceScene, theme: &Theme) {
-    render_header(frame, &scene.header, theme);
-    for pane_scene in &scene.panes {
-        pane::render_pane(frame, pane_scene, theme);
-    }
-    render_status(frame, &scene.status, theme);
-    match &scene.overlay {
-        Some(OverlayScene::Palette(palette)) => overlay::render_palette(frame, palette, theme),
-        Some(OverlayScene::ContextMenu(menu)) => overlay::render_context_menu(frame, menu, theme),
-        Some(OverlayScene::Timeline(timeline)) => overlay::render_timeline(frame, timeline, theme),
-        Some(OverlayScene::Search(search)) => overlay::render_search(frame, search, theme),
-        Some(OverlayScene::SessionMap(map)) => overlay::render_session_map(frame, map, theme),
-        Some(OverlayScene::Prompt(prompt)) => overlay::render_prompt(frame, prompt, theme),
-        Some(OverlayScene::Help(help)) => overlay::render_help(frame, help, theme),
-        Some(OverlayScene::Welcome(welcome)) => overlay::render_welcome(frame, welcome, theme),
-        None => {}
+    let program = compile_cell_program(scene, theme);
+    let buffer = frame.buffer_mut();
+    for (x, y, cell) in program.cells() {
+        let Some(target) = buffer.cell_mut((x, y)) else {
+            continue;
+        };
+        paint_program_cell(target, cell, theme);
     }
 }
 
-pub(crate) fn to_rect(rect: SceneRect) -> Rect {
-    Rect::new(rect.x, rect.y, rect.width, rect.height)
+fn paint_program_cell(target: &mut ratatui::buffer::Cell, cell: &ProgramCell, theme: &Theme) {
+    // The program already contains the final topmost cell. Ratatui's
+    // `set_style` patches existing state, so clear before translating it.
+    target.reset();
+    match cell.occupancy {
+        CellOccupancy::Glyph(character) => {
+            target.set_char(character);
+        }
+        CellOccupancy::WideContinuation => {
+            // A continuation occupies this cell but contributes no glyph.
+            // The reset above clears any glyph from an earlier layer.
+        }
+    }
+    target.set_style(program_cell_style(cell, theme));
 }
 
 /// Resolve a theme color to a ratatui color. The standard ANSI range maps to
 /// named colors (so themes address the terminal palette the way users
 /// expect); everything else passes through directly.
-pub(crate) fn theme_color(color: SceneColor) -> Color {
+fn theme_color(color: SceneColor) -> Color {
     match color {
         SceneColor::Default => Color::Reset,
         SceneColor::Ansi(0) => Color::Black,
@@ -74,62 +74,63 @@ pub(crate) fn theme_color(color: SceneColor) -> Color {
     }
 }
 
-/// A foreground style for a theme color, leaving `Default` unstyled.
-pub(crate) fn theme_fg(color: SceneColor) -> Style {
-    match color {
-        SceneColor::Default => Style::default(),
-        color => Style::default().fg(theme_color(color)),
+fn program_cell_style(cell: &ProgramCell, theme: &Theme) -> Style {
+    let mut style = cell_style(cell.style);
+    if cell.selection == Some(CellSelection::Terminal) {
+        style = match theme.selection_highlight {
+            SceneColor::Default => style.add_modifier(Modifier::REVERSED),
+            highlight => style.bg(theme_color(highlight)),
+        };
     }
+    // Item selection is already carried by `ProgramCell::style`; applying it
+    // again here would make the adapter reinterpret scene semantics.
+    if cell.cursor {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    style
 }
 
-/// Paint the attention strip: the scene's composed text, then each
-/// attention segment restyled in the theme's attention color at the rect
-/// the scene resolved for it.
-fn render_header(frame: &mut Frame<'_>, header: &HeaderScene, theme: &Theme) {
-    if header.area.is_empty() {
-        return;
+fn cell_style(style: SceneCellStyle) -> Style {
+    let mut cell_style = Style::default();
+    if style.foreground != SceneColor::Default {
+        cell_style = cell_style.fg(theme_color(style.foreground));
     }
-    let base = Style::default()
-        .fg(theme_color(theme.header))
-        .bg(theme_color(theme.header_background));
-    frame.render_widget(
-        Paragraph::new(header.text.clone()).style(base),
-        to_rect(header.area),
-    );
-    for segment in &header.attention {
-        if segment.rect.is_empty() {
-            continue;
-        }
-        frame.render_widget(
-            Paragraph::new(segment.label.clone()).style(
-                Style::default()
-                    .fg(theme_color(theme.attention))
-                    .bg(theme_color(theme.header_background))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            to_rect(segment.rect),
-        );
+    if style.background != SceneColor::Default {
+        cell_style = cell_style.bg(theme_color(style.background));
     }
-}
-
-fn render_status(frame: &mut Frame<'_>, status: &StatusScene, theme: &Theme) {
-    if status.area.is_empty() {
-        return;
+    if style.bold {
+        cell_style = cell_style.add_modifier(Modifier::BOLD);
     }
-    frame.render_widget(
-        Paragraph::new(format!(" {}", status.text)).style(theme_fg(theme.status)),
-        to_rect(status.area),
-    );
+    if style.dim {
+        cell_style = cell_style.add_modifier(Modifier::DIM);
+    }
+    if style.italic {
+        cell_style = cell_style.add_modifier(Modifier::ITALIC);
+    }
+    if style.underline {
+        cell_style = cell_style.add_modifier(Modifier::UNDERLINED);
+    }
+    if style.inverse {
+        cell_style = cell_style.add_modifier(Modifier::REVERSED);
+    }
+    if style.hidden {
+        cell_style = cell_style.add_modifier(Modifier::HIDDEN);
+    }
+    if style.strikethrough {
+        cell_style = cell_style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    cell_style
 }
 
 #[cfg(test)]
 mod tests {
     use mandatum_scene::{
         AgentApprovalPrompt, AgentContent, AgentStatus, AttentionSegment, ContextMenuEntry,
-        ContextMenuOverlay, EmptyContent, HelpOverlay, PaletteEntry, PaletteOverlay, PaneContent,
-        PaneId, PaneScene, PaneSceneKind, PromptOverlay, SceneCell, SceneCellStyle, SceneSize,
-        SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow, SurfacePosition, TaskContent,
-        TerminalSurface, TimelineEntry, TimelineOverlay, WelcomeEntry, WelcomeOverlay, layout,
+        ContextMenuOverlay, EmptyContent, HeaderScene, HelpOverlay, OverlayScene, PaletteEntry,
+        PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind, PromptOverlay, SceneCell,
+        SceneCellStyle, SceneRect, SceneSize, SearchEntry, SearchOverlay, SessionMapOverlay,
+        SessionMapRow, StatusScene, SurfacePosition, TaskContent, TerminalSurface, TimelineEntry,
+        TimelineOverlay, WelcomeEntry, WelcomeOverlay, layout,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -225,6 +226,73 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn adapter_translates_the_compiled_cell_program() {
+        let terminal_style = SceneCellStyle {
+            foreground: SceneColor::Rgb(1, 2, 3),
+            background: SceneColor::Rgb(4, 5, 6),
+            bold: true,
+            dim: true,
+            italic: true,
+            underline: true,
+            inverse: false,
+            hidden: true,
+            strikethrough: true,
+        };
+        let mut surface = text_surface(&["x"]);
+        surface.rows[0][0] = SceneCell {
+            character: 'x',
+            style: terminal_style,
+        };
+        surface.cursor = Some(SurfacePosition::new(0, 0));
+        surface.selection = Some((SurfacePosition::new(0, 0), SurfacePosition::new(0, 0)));
+        let workspace = scene(vec![pane(PaneContent::Terminal(surface))]);
+        let theme = Theme {
+            selection_highlight: SceneColor::Rgb(7, 8, 9),
+            ..Theme::default()
+        };
+
+        let program = compile_cell_program(&workspace, &theme);
+        let compiled = program.cell_at(1, 2).expect("inner cell is compiled");
+        assert_eq!(compiled.occupancy, CellOccupancy::Glyph('x'));
+        assert_eq!(compiled.selection, Some(CellSelection::Terminal));
+        assert!(compiled.cursor);
+
+        let terminal = draw_with_theme(&workspace, &theme);
+        let rendered = terminal.backend().buffer().cell((1u16, 2u16)).unwrap();
+        assert_eq!(rendered.symbol(), "x");
+        assert_eq!(rendered.fg, Color::Rgb(1, 2, 3));
+        assert_eq!(rendered.bg, Color::Rgb(7, 8, 9));
+        assert!(rendered.modifier.contains(Modifier::BOLD));
+        assert!(rendered.modifier.contains(Modifier::DIM));
+        assert!(rendered.modifier.contains(Modifier::ITALIC));
+        assert!(rendered.modifier.contains(Modifier::UNDERLINED));
+        assert!(rendered.modifier.contains(Modifier::HIDDEN));
+        assert!(rendered.modifier.contains(Modifier::CROSSED_OUT));
+        assert!(rendered.modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn wide_continuation_clears_an_earlier_glyph_without_emitting_one() {
+        let mut target = ratatui::buffer::Cell::new("x");
+        target.set_style(Style::default().add_modifier(Modifier::BOLD));
+        let continuation = ProgramCell {
+            occupancy: CellOccupancy::WideContinuation,
+            style: SceneCellStyle {
+                background: SceneColor::Rgb(4, 5, 6),
+                ..SceneCellStyle::default()
+            },
+            selection: None,
+            cursor: false,
+        };
+
+        paint_program_cell(&mut target, &continuation, &Theme::default());
+
+        assert_eq!(target.symbol(), " ");
+        assert_eq!(target.bg, Color::Rgb(4, 5, 6));
+        assert!(!target.modifier.contains(Modifier::BOLD));
     }
 
     #[test]

@@ -1,9 +1,9 @@
 # Native GPU Frontend Implementation Plan
 
 Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-its layout/composition capability family is complete in the excluded adapter,
-with content/style and input/lifecycle families remaining; production GPU
-admission pending (2026-07-23).
+its layout/composition and content/style capability families are complete in
+the excluded adapter, with input/lifecycle remaining; production GPU admission
+pending (2026-07-23).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -33,7 +33,7 @@ parallel product model.
 | Concern | Verified state | Planning consequence |
 |---|---|---|
 | Product state | `RuntimeEngine` owns all live terminal, task, and agent state; `AppState` folds durable and presentation state. | Reuse this state machine unchanged. |
-| Renderer contract | `WorkspaceScene` carries layout, pane surfaces, overlays, themes, and hit targets. | Extend the contract only for an admitted product capability, never for a renderer convenience. |
+| Renderer contract | `WorkspaceScene` carries layout, pane surfaces, overlays, themes, and hit targets; `mandatum-scene` compiles the complete frame into one neutral `CellProgram` consumed by both adapters. | Extend the semantic scene contract only for an admitted product capability, never for a renderer convenience. |
 | Terminal frontend | `app_shell.rs` drives `FrontendHost` while retaining the crossterm lifecycle, input reader, 250 ms heartbeat schedule, 8 ms redraw cap, rendering, and terminal effect encoding. | Keep this shipped fallback unchanged while the excluded native adapter advances through parity work. |
 | GPU spike | The excluded winit/wgpu shell now drives the real `FrontendHost`, translates winit input to neutral `InputEvent` values, and paints real `WorkspaceScene` snapshots through its scene-only renderer. Its duplicate `TerminalSession`, parser, input encoder, and scene bridge are gone. | Continue parity work against the shared host and scene contracts; do not add a second product state machine or promote the excluded dependency tree. |
 | Clipboard | `AppState` emits FIFO `FrontendEffect::SetClipboard(String)` values; `app_shell.rs` alone maps them to OSC 52. | Phase 1A is complete and proves the first renderer-neutral platform effect. |
@@ -420,41 +420,45 @@ also rejects malformed maximum-dimension panes whose true edge would overflow
 `u16`.
 
 Layout/composition capability family complete (2026-07-23): the renderer no
-longer admits one named topology at a time. `prepare_scene` is now a deep scene
-compiler over every ordered `WorkspaceScene::panes` record. It validates only
-renderer-safety invariants: a real bordered interior, checked endpoints, and
-workspace containment. Layout meaning, identity, overlap, stack/zoom flags,
-and draw order remain owned by `mandatum-scene`. The excluded adapter has an
-explicit 256-pane aggregate ceiling so its glyph-buffer high-water mark is
-bounded.
+longer admits one named topology at a time. `prepare_scene` validates only
+renderer-safety invariants and checked resource limits before consuming the
+scene compiler's final cell program. Layout meaning, identity, overlap,
+stack/zoom flags, and draw order remain owned by `mandatum-scene`; the excluded
+adapter has an explicit 256-pane ceiling.
 
-The compiler accepts tiled, stacked, zoomed, gapped/overlapping,
+The shared compiler accepts tiled, stacked, zoomed, gapped/overlapping,
 mixed-content, three-plus-pane, moved/custom-float, multiple-float, and overlay
-combinations through the same path. The displayed renderer grows one
-title/body buffer pair per pane and retains high-water capacity instead of
-stopping at a fixed pane count. Text for each pane is clipped against every
-later opaque pane in scene order and then against the current opaque overlay
-in final pixel space. Focused real-host tracers cover a stack, three tiled
-panes, and two ordered floats; one capability matrix covers the broader
-structural combinations and resource hazards.
+combinations through the same path. It applies scene order once and replaces
+covered coordinates while compiling, so retained cells are bounded by frame
+coverage. Focused real-host tracers cover a stack, three tiled panes, and two
+ordered floats; one capability matrix covers the broader structural
+combinations and resource hazards.
 
 This changes the unit of work. Individual variants may still start with a
 focused RED/GREEN tracer, but one aggregate review, displayed scenario matrix,
 documentation update, full gate, handoff, and commit complete the entire
 capability family.
 
-### Remaining Phase 3 capability families
+Content/style capability family complete (2026-07-23): `mandatum-scene`
+preserves the existing `SceneCell` contract and compiles the whole frame into a
+renderer-neutral `CellProgram`. A program cell has one occupancy
+(`Glyph(char)` or explicit `WideContinuation`), complete `SceneCellStyle`, one
+selection kind when selected, and a cursor mark. The compiler owns all current
+presentation rules for terminal, task, agent, Empty, header attention, status,
+pane chrome, and every overlay. Later opaque cells replace earlier scene-order
+paint.
 
-Content/style parity:
+The shipped ratatui renderer is now a thin translation of that program; its
+orphaned pane/surface/overlay implementations are removed. The excluded GPU
+renderer validates structural and checked aggregate-resource limits, then
+translates the same topmost cells into background quads and styled glyph rows.
+It maps ANSI/indexed/RGB colors, custom and built-in semantic roles, bold, dim,
+italic, underline, inverse, hidden, strikethrough, terminal/item selection, and
+cursor without content-specific paint branches. True grapheme/wide-cell
+production remains Phase 5; this family establishes the continuation seam
+without claiming width correctness.
 
-- terminal, task, agent, and empty pane content;
-- every overlay, header attention segment, status surface, hit target, focus,
-  selection, and cursor;
-- all built-in and custom semantic theme roles;
-- bold, dim, italic, underline, inverse, hidden, and strikethrough styles;
-- first define the neutral per-cell semantics needed for cursor, selection,
-  wide-cell continuation, and style mapping so the renderer consumes one cell
-  program rather than adding content- or layout-specific paint branches.
+### Remaining Phase 3 capability family
 
 Input/lifecycle parity:
 
@@ -605,13 +609,13 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Continue Phase 3 with the content/style capability family, not another
-layout-specific lifecycle. First define the smallest renderer-neutral cell
-program that preserves the existing `SceneCell` contract while making cursor,
-selection, wide-cell continuation, and style roles explicit enough for both
-frontends. Then compile terminal, task, agent, Empty, chrome, and overlay paint
-through that one program. Use focused RED/GREEN tracers for semantic gaps, but
-complete the family with one aggregate review, one displayed scenario matrix,
-one documentation/gate/handoff cycle, and one commit. Stop before changing
-input/lifecycle behavior, building Artifact Preview, admitting production GPU
-dependencies, or altering release surfaces.
+Continue Phase 3 with the input/lifecycle capability family. Prove workspace
+chords before terminal fallback, BackTab and modifier translation, paste,
+pointer capture/passthrough, scrollback and selection, focus/resize/quit,
+keyboard-only and reduced-motion behavior, native restore/startup, runtime
+scale changes, clipboard effects, and clean shutdown through the existing
+`FrontendHost` boundary. Use focused RED/GREEN tracers for uncovered behavior,
+then one aggregate review, displayed matrix, documentation/gate/handoff cycle,
+and commit. Stop before building Artifact Preview, changing advanced
+grapheme/IME behavior, admitting production GPU dependencies, or altering
+release surfaces.

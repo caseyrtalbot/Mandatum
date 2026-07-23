@@ -7,9 +7,10 @@ use std::{
 };
 
 use mandatum_app::{AppConfig, FrontendHost};
-use mandatum_gpu_renderer_spike::prepare_scene;
+use mandatum_gpu_renderer_spike::{PreparedScene, prepare_scene};
 use mandatum_scene::{
-    HitTargetKind, OverlayScene, PaneContent, SceneRect, SceneSize,
+    CellOccupancy, CellSelection, HitTargetKind, OverlayScene, PaneContent, SceneRect, SceneSize,
+    WorkspaceScene,
     input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
     layout,
 };
@@ -17,6 +18,103 @@ use mandatum_scene::{
 fn dispatch_palette_command(host: &mut FrontendHost, key: char) {
     host.handle_input(InputEvent::Key(Key::ctrl('p')));
     host.handle_input(InputEvent::Key(Key::plain(KeyCode::Char(key))));
+}
+
+fn assert_scene_reaches_cell_program(prepared: &PreparedScene, scene: &WorkspaceScene) {
+    let program = prepared.cell_program();
+    assert_eq!(program.size(), scene.size);
+    for pane in &scene.panes {
+        assert!(
+            program.cell_at(pane.area.x, pane.area.y).is_some(),
+            "pane {} did not reach the neutral cell program",
+            pane.id
+        );
+    }
+    if let Some(overlay) = &scene.overlay {
+        let area = match overlay {
+            OverlayScene::Palette(overlay) => overlay.area,
+            OverlayScene::ContextMenu(overlay) => overlay.area,
+            OverlayScene::Timeline(overlay) => overlay.area,
+            OverlayScene::SessionMap(overlay) => overlay.area,
+            OverlayScene::Prompt(overlay) => overlay.area,
+            OverlayScene::Search(overlay) => overlay.area,
+            OverlayScene::Help(overlay) => overlay.area,
+            OverlayScene::Welcome(overlay) => overlay.area,
+        };
+        assert!(
+            program.cell_at(area.x, area.y).is_some(),
+            "overlay did not reach the neutral cell program"
+        );
+    }
+}
+
+fn cell_program_text(prepared: &PreparedScene, area: SceneRect) -> String {
+    let program = prepared.cell_program();
+    let mut text = String::new();
+    for y in area.y..area.bottom().min(program.size().height) {
+        for x in area.x..area.right().min(program.size().width) {
+            text.push(match program.cell_at(x, y).map(|cell| cell.occupancy) {
+                Some(CellOccupancy::Glyph(character)) => character,
+                Some(CellOccupancy::WideContinuation) | None => ' ',
+            });
+        }
+        text.push('\n');
+    }
+    text
+}
+
+fn assert_cell_program_contains(prepared: &PreparedScene, area: SceneRect, expected: &str) {
+    let text = cell_program_text(prepared, area);
+    assert!(
+        text.contains(expected),
+        "final cell program did not contain {expected:?} in {area:?}; got:\n{text}"
+    );
+}
+
+fn assert_cell_program_has_item_selection(prepared: &PreparedScene, area: SceneRect) {
+    let program = prepared.cell_program();
+    assert!(
+        (area.y..area.bottom()).any(|y| {
+            (area.x..area.right()).any(|x| {
+                program
+                    .cell_at(x, y)
+                    .is_some_and(|cell| cell.selection == Some(CellSelection::Item))
+            })
+        }),
+        "final cell program did not retain selected-item style in {area:?}"
+    );
+}
+
+fn assert_cell_program_has_cursor(prepared: &PreparedScene, area: SceneRect) {
+    let program = prepared.cell_program();
+    assert!(
+        (area.y..area.bottom()).any(|y| {
+            (area.x..area.right()).any(|x| program.cell_at(x, y).is_some_and(|cell| cell.cursor))
+        }),
+        "final cell program did not retain cursor state in {area:?}"
+    );
+}
+
+fn assert_cell_program_has_bold_style(prepared: &PreparedScene, area: SceneRect) {
+    let program = prepared.cell_program();
+    assert!(
+        (area.y..area.bottom()).any(|y| {
+            (area.x..area.right())
+                .any(|x| program.cell_at(x, y).is_some_and(|cell| cell.style.bold))
+        }),
+        "final cell program did not retain bold style in {area:?}"
+    );
+}
+
+fn assert_focused_pane_title_style(prepared: &PreparedScene, pane: &mandatum_scene::PaneScene) {
+    let title_cell = prepared
+        .cell_program()
+        .cell_at(pane.area.x.saturating_add(1), pane.area.y)
+        .expect("focused pane title did not reach the final cell program");
+    assert!(
+        title_cell.style.bold,
+        "focused pane title lost its compiled bold style"
+    );
 }
 
 struct DisposableProject {
@@ -66,11 +164,51 @@ fn real_host_empty_pane_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real empty pane");
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    let pane = &snapshot.scene.panes[0];
+    assert_cell_program_contains(
+        &prepared,
+        layout::pane_inner_rect(pane.area),
+        "no live PTY grid is attached",
+    );
+    assert_focused_pane_title_style(&prepared, pane);
+}
+
+#[test]
+fn real_host_copy_mode_compiles_selection_and_cursor_into_the_gpu_cell_program() {
+    let project = DisposableProject::new("copy-mode-cell-program");
+    let mut host = FrontendHost::new(AppConfig {
+        project_path: project.path.clone(),
+        workspace_file: project.path.join("workspace.json"),
+        spawn_pty: true,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+    dispatch_palette_command(&mut host, '[');
+    host.handle_input(InputEvent::Key(Key::plain(KeyCode::Char('v'))));
+    host.handle_input(InputEvent::Key(Key::plain(KeyCode::Right)));
+    host.handle_input(InputEvent::Key(Key::plain(KeyCode::Right)));
+
+    let snapshot = host.frame(frame_size);
+    assert!(snapshot.scene.copy_mode);
+    let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+        .expect("GPU renderer did not prepare the real copy-mode scene");
+    let cells = prepared
+        .cell_program()
+        .cells()
+        .map(|(_, _, cell)| cell)
+        .collect::<Vec<_>>();
+
     assert!(
-        prepared
-            .pane_text()
-            .contains("no live PTY grid is attached"),
-        "prepared empty plan did not retain the real scene display data"
+        cells
+            .iter()
+            .any(|cell| cell.selection == Some(CellSelection::Terminal)),
+        "real host selection did not reach the neutral GPU cell program"
+    );
+    assert!(
+        cells.iter().any(|cell| cell.cursor),
+        "real host copy cursor did not reach the neutral GPU cell program"
     );
 }
 
@@ -127,21 +265,7 @@ fn real_host_two_horizontal_empty_panes_reach_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare two horizontal Empty panes");
-    assert_eq!(prepared.panes().len(), 2);
-    assert_eq!(prepared.panes()[0].scene(), first);
-    assert_eq!(prepared.panes()[1].scene(), second);
-    for detail in &first_details {
-        assert!(prepared.panes()[0].pane_text().contains(detail));
-    }
-    for detail in &second_details {
-        assert!(prepared.panes()[1].pane_text().contains(detail));
-    }
-    assert!(
-        prepared
-            .panes()
-            .iter()
-            .all(|pane| pane.pane_surface().is_none())
-    );
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
 }
 
 #[test]
@@ -172,10 +296,7 @@ fn real_host_three_tiled_empty_panes_reach_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare three scene-resolved tiled panes");
-    assert_eq!(prepared.panes().len(), 3);
-    for (prepared, scene) in prepared.panes().iter().zip(&snapshot.scene.panes) {
-        assert_eq!(prepared.scene(), scene);
-    }
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
 }
 
 #[test]
@@ -203,10 +324,7 @@ fn real_host_two_ordered_floats_reach_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real ordered-float scene");
-    assert_eq!(prepared.panes().len(), 3);
-    for (prepared, scene) in prepared.panes().iter().zip(&snapshot.scene.panes) {
-        assert_eq!(prepared.scene(), scene);
-    }
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
 }
 
 #[test]
@@ -299,21 +417,7 @@ fn real_host_two_vertical_empty_panes_reach_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare two vertical Empty panes");
-    assert_eq!(prepared.panes().len(), 2);
-    assert_eq!(prepared.panes()[0].scene(), first);
-    assert_eq!(prepared.panes()[1].scene(), second);
-    for detail in &first_details {
-        assert!(prepared.panes()[0].pane_text().contains(detail));
-    }
-    for detail in &second_details {
-        assert!(prepared.panes()[1].pane_text().contains(detail));
-    }
-    assert!(
-        prepared
-            .panes()
-            .iter()
-            .all(|pane| pane.pane_surface().is_none())
-    );
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
 }
 
 #[test]
@@ -402,21 +506,7 @@ fn real_host_two_pane_floating_empty_layout_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the two-pane floating Empty layout");
-    assert_eq!(prepared.panes().len(), 2);
-    assert_eq!(prepared.panes()[0].scene(), first);
-    assert_eq!(prepared.panes()[1].scene(), second);
-    for detail in &first_details {
-        assert!(prepared.panes()[0].pane_text().contains(detail));
-    }
-    for detail in &second_details {
-        assert!(prepared.panes()[1].pane_text().contains(detail));
-    }
-    assert!(
-        prepared
-            .panes()
-            .iter()
-            .all(|pane| pane.pane_surface().is_none())
-    );
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
 }
 
 #[test]
@@ -465,17 +555,18 @@ fn real_host_two_horizontal_empty_panes_with_float_palette_reach_the_gpu_render_
 
     let snapshot = host.frame(frame_size);
     assert_eq!(snapshot.scene.panes.len(), 2);
-    assert!(matches!(
-        snapshot.scene.overlay,
-        Some(OverlayScene::Palette(_))
-    ));
+    let Some(OverlayScene::Palette(palette)) = &snapshot.scene.overlay else {
+        panic!("command transition did not produce the real Palette frame");
+    };
     assert_eq!(snapshot.scene.panes[0].area, SceneRect::new(0, 1, 40, 22));
     assert_eq!(snapshot.scene.panes[1].area, SceneRect::new(40, 1, 40, 22));
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the float command's intermediate Palette frame");
-    assert_eq!(prepared.panes().len(), 2);
-    assert!(prepared.has_palette());
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    let selected = palette.selected.expect("real Palette had no selected item");
+    assert_cell_program_contains(&prepared, palette.area, &palette.items[selected].label);
+    assert_cell_program_has_item_selection(&prepared, palette.area);
 }
 
 #[test]
@@ -511,28 +602,18 @@ fn real_host_two_horizontal_empty_palette_clips_long_wrapped_pane_detail() {
         .expect("GPU renderer did not prepare the real two-pane Palette frame");
     let first_inner = layout::pane_inner_rect(snapshot.scene.panes[0].area);
     assert!(
-        prepared.panes()[0].pane_text().chars().count() > usize::from(first_inner.width) * 4,
+        snapshot.scene.panes[0]
+            .detail_lines()
+            .iter()
+            .map(|line| line.chars().count())
+            .sum::<usize>()
+            > usize::from(first_inner.width) * 4,
         "real Empty detail was not long enough to wrap through the Palette area"
     );
-
-    let cell_width = 9.625;
-    let cell_height = 18.25;
-    let visible = prepared
-        .pane_text_visible_bounds(0, cell_width, cell_height)
-        .expect("first prepared pane should expose its visible pixel bounds");
-    let palette_left = (palette.area.x as f32 * cell_width).floor() as i32;
-    let palette_top = (palette.area.y as f32 * cell_height).floor() as i32;
-    let palette_right = (palette.area.right() as f32 * cell_width).ceil() as i32;
-    let palette_bottom = (palette.area.bottom() as f32 * cell_height).ceil() as i32;
-    assert!(
-        visible.iter().all(|bounds| {
-            bounds.right <= palette_left
-                || bounds.bottom <= palette_top
-                || bounds.left >= palette_right
-                || bounds.top >= palette_bottom
-        }),
-        "underlying pane text remains paintable through the fractional-pixel Palette: {visible:?}"
-    );
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    let selected = palette.selected.expect("real Palette had no selected item");
+    assert_cell_program_contains(&prepared, palette.area, &palette.items[selected].label);
+    assert_cell_program_has_item_selection(&prepared, palette.area);
 }
 
 #[test]
@@ -552,8 +633,7 @@ fn real_host_two_pane_stack_reaches_the_gpu_render_plan() {
     assert!(snapshot.scene.panes[0].stacked);
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real stacked pane");
-    assert_eq!(prepared.panes().len(), 1);
-    assert_eq!(prepared.panes()[0].scene(), &snapshot.scene.panes[0]);
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
 }
 
 #[test]
@@ -591,7 +671,9 @@ fn real_host_context_menu_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real context-menu scene");
-    assert_eq!(prepared.context_menu(), Some(menu));
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    assert_cell_program_contains(&prepared, menu.area, &menu.items[menu.selected].label);
+    assert_cell_program_has_item_selection(&prepared, menu.area);
 }
 
 #[test]
@@ -632,7 +714,12 @@ fn real_host_timeline_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real timeline scene");
-    assert_eq!(prepared.timeline(), Some(timeline));
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    let selected = timeline
+        .selected
+        .expect("real timeline had no selected item");
+    assert_cell_program_contains(&prepared, timeline.area, &timeline.items[selected].text);
+    assert_cell_program_has_item_selection(&prepared, timeline.area);
 }
 
 #[test]
@@ -669,7 +756,9 @@ fn real_host_session_map_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real session-map scene");
-    assert_eq!(prepared.session_map(), Some(map));
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    assert_cell_program_contains(&prepared, map.area, &map.rows[map.selected].label);
+    assert_cell_program_has_item_selection(&prepared, map.area);
 }
 
 #[test]
@@ -704,7 +793,9 @@ fn real_host_objective_prompt_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real objective-prompt scene");
-    assert_eq!(prepared.prompt(), Some(prompt));
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    assert_cell_program_contains(&prepared, prompt.area, &prompt.input);
+    assert_cell_program_has_cursor(&prepared, prompt.area);
 }
 
 #[test]
@@ -768,7 +859,10 @@ fn real_host_search_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real search scene");
-    assert_eq!(prepared.search(), Some(search));
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    assert_cell_program_contains(&prepared, search.area, &search.query);
+    assert_cell_program_contains(&prepared, search.area, &search.items[0].source);
+    assert_cell_program_has_item_selection(&prepared, search.area);
 }
 
 #[test]
@@ -809,7 +903,10 @@ fn real_host_help_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real help scene");
-    assert_eq!(prepared.help(), Some(help));
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    assert_cell_program_contains(&prepared, help.area, &help.query);
+    assert_cell_program_contains(&prepared, help.area, &help.items[0].label);
+    assert_cell_program_has_item_selection(&prepared, help.area);
 }
 
 #[test]
@@ -865,7 +962,10 @@ fn real_host_welcome_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real welcome scene");
-    assert_eq!(prepared.welcome(), Some(welcome));
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    assert_cell_program_contains(&prepared, welcome.area, &welcome.introduction);
+    assert_cell_program_contains(&prepared, welcome.area, "Command palette");
+    assert_cell_program_has_bold_style(&prepared, welcome.area);
 }
 
 #[test]
@@ -910,16 +1010,23 @@ fn real_host_pty_output_wakes_without_polling_and_reaches_a_frame() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real host frame");
-    assert_eq!(prepared.header_text(), snapshot.scene.header.text);
-    assert_eq!(prepared.pane_title(), snapshot.scene.panes[0].title);
-    assert_eq!(prepared.theme_name(), snapshot.theme.name);
-    assert!(!prepared.has_palette());
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
 
     host.handle_input(InputEvent::Key(Key::ctrl('p')));
     let palette_snapshot = host.frame(frame_size);
+    let Some(OverlayScene::Palette(palette)) = &palette_snapshot.scene.overlay else {
+        panic!("Ctrl+P did not produce the real Palette frame");
+    };
     let prepared_palette = prepare_scene(&palette_snapshot.scene, &palette_snapshot.theme)
         .expect("GPU renderer did not prepare the real command palette");
-    assert!(prepared_palette.has_palette());
+    assert_scene_reaches_cell_program(&prepared_palette, &palette_snapshot.scene);
+    let selected = palette.selected.expect("real Palette had no selected item");
+    assert_cell_program_contains(
+        &prepared_palette,
+        palette.area,
+        &palette.items[selected].label,
+    );
+    assert_cell_program_has_item_selection(&prepared_palette, palette.area);
 }
 
 #[test]
@@ -982,24 +1089,22 @@ fn real_host_task_pane_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real task pane");
-    assert!(
-        prepared
-            .pane_text()
-            .contains("command: printf TASK_PLAN_OK"),
-        "prepared task plan did not retain the real scene display data"
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    let pane = snapshot
+        .scene
+        .panes
+        .iter()
+        .find(|pane| matches!(pane.content, PaneContent::Task(_)))
+        .expect("real task pane disappeared before cell-program assertions");
+    let body = layout::pane_inner_rect(pane.area);
+    assert_cell_program_contains(&prepared, body, "command: printf TASK_PLAN_OK");
+    let output_row = body.y.saturating_add(pane.detail_lines().len() as u16);
+    assert_cell_program_contains(
+        &prepared,
+        SceneRect::new(body.x, output_row, body.width, 1),
+        "TASK_PLAN_OK",
     );
-    let output = prepared
-        .pane_surface()
-        .expect("prepared task plan did not retain the live output surface");
-    assert!(
-        output.rows.iter().any(|row| {
-            row.iter()
-                .map(|cell| cell.character)
-                .collect::<String>()
-                .contains("TASK_PLAN_OK")
-        }),
-        "prepared task plan did not retain the real task output"
-    );
+    assert_focused_pane_title_style(&prepared, pane);
 }
 
 #[test]
@@ -1028,10 +1133,17 @@ fn real_host_agent_pane_reaches_the_gpu_render_plan() {
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real agent pane");
-    assert!(
-        prepared
-            .pane_text()
-            .contains("objective: Inspect AGENT_PLAN_OK"),
-        "prepared agent plan did not retain the real scene display data"
+    assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+    let pane = snapshot
+        .scene
+        .panes
+        .iter()
+        .find(|pane| matches!(pane.content, PaneContent::Agent(_)))
+        .expect("real agent pane disappeared before cell-program assertions");
+    assert_cell_program_contains(
+        &prepared,
+        layout::pane_inner_rect(pane.area),
+        "objective: Inspect AGENT_PLAN_OK",
     );
+    assert_focused_pane_title_style(&prepared, pane);
 }

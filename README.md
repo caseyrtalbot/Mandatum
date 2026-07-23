@@ -271,11 +271,11 @@ crates/pty            PTY process lifecycle, I/O, resize, exit, byte events
 crates/terminal-vt    terminal parser adapter, grid, scrollback, capabilities
                       (parser stays behind TerminalAdapter)
 crates/scene          renderer-neutral scene contract: WorkspaceScene output
-                      model, pane layout math, neutral input types
+                      model, final cell compiler, layout math, neutral input
 crates/agent-runtime  agent connector contract, approval events, FakeConnector,
                       Claude CLI connector + the approval-bridge hook binary
 crates/workflows      task recipes, agent intent, failure-handoff policy
-crates/renderer       the ratatui frontend adapter: render(frame, &scene, &theme)
+crates/renderer       ratatui adapter over the shared neutral CellProgram
 crates/app            the workstation: deep RuntimeEngine over terminal/task/
                       agent registries, event loop, scene builder, timeline,
                       search, config, transactional save/restore

@@ -1,8 +1,7 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 underway; its layout/composition capability family is
-complete in the excluded adapter. Content/style and input/lifecycle parity
-remain.**
+Status: **Phase 3 underway; its layout/composition and content/style capability
+families are complete in the excluded adapter. Input/lifecycle parity remains.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, terminal, task, agent, and Empty panes, status
@@ -284,15 +283,11 @@ predicates. It validates usable bordered interiors, checked endpoints,
 workspace containment, and a 256-pane aggregate renderer ceiling; layout
 identity, flags, overlap, and draw order remain scene-owned.
 
-The displayed renderer now grows title/body glyph buffers with the scene and
-keeps a bounded high-water mark. Every pane paints an opaque base, and earlier
-title/body text is clipped in final pixel space against every later pane plus
-the current opaque overlay. Aggregate review caught and corrected two defects
-before completion: zero-pane preparation exposed panicking one-pane accessors,
-and only `floating` panes initially occluded lower text. Zero panes now fail
-with `SceneCompileError::NoVisiblePane`; ordered occlusion no longer consults a
-layout flag. Structural failures and resource limits use typed compile errors
-instead of topology-era error strings.
+At this family's original stop point, the displayed renderer grew title/body
+glyph buffers with the scene and clipped them against later opaque panes and
+the current overlay. Aggregate review corrected zero-pane preparation and
+non-floating overlap. The subsequent content/style family below replaced those
+per-pane paint resources with one final-topmost cell program.
 
 `./ci/gpu-spike.sh` passed 48 tests (two native-shell, twenty-two real-host, and
 twenty-four isolated-renderer) plus the renderer dependency-boundary scan.
@@ -303,6 +298,41 @@ Help over the five-pane composition. Screenshot inspection showed distinct
 three-pane buffers, correct stack representation, opaque later-pane
 composition, and no underlying text through the Help surface. Ctrl+Q exited 0
 and no native-spike process remained.
+
+Content/style capability-family verification (2026-07-23): focused
+RED/GREEN tracers established one renderer-neutral `CellProgram`, preserving
+the existing `SceneCell` contract while making glyph/wide-continuation
+occupancy, complete style, selection kind, and cursor explicit. The compiler
+owns terminal, task, agent, Empty, header/status chrome, pane border/title, and
+all eight overlay presentation rules. It applies scene paint order while
+compiling and retains only final topmost cells in deterministic row-major
+order, so memory is bounded by frame coverage even with many overlapping
+panes.
+
+Both the shipped ratatui renderer and excluded GPU renderer now translate that
+same program. The GPU path maps ANSI/indexed/RGB colors, built-in and custom
+semantic roles, bold, dim, italic, underline, inverse, hidden,
+strikethrough, terminal/item selection, cursor, and opaque replacement into
+background quads and styled glyph rows. `PreparedScene` contains no
+content-specific pane or overlay shadow plan.
+
+Aggregate review removed the obsolete ratatui modules, collapsed contradictory
+selection state, clipped huge/off-frame and degenerate-border paint, moved
+final-cell compaction into the shared compiler, added checked GPU pane/frame/
+paint-work/row-buffer ceilings, strengthened real-host tests against actual
+compiled content, and added warnings-denied all-target clippy to the spike
+gate. The final automated matrix passed 45 scene tests, 28 ratatui renderer
+tests, and 34 GPU-spike tests (two shell, twenty-three real-host, nine isolated
+GPU) plus formatting, clippy, and the renderer dependency-boundary scan.
+
+The final displayed 800x632 release matrix used custom `mandatum-light` roles
+and showed the real Empty fallback, successful task output with 256-color
+foreground/background plus bold/italic/underline/strikethrough, a fake agent
+waiting for approval, and an opaque Palette with custom selection and surface
+roles. No covered text leaked through. Escape closed the overlay, Ctrl+Q exited
+0, and no native-spike process remained. Input/lifecycle parity is next; true
+grapheme/wide-cell production, IME, Artifact Preview, production admission,
+and rollout remain separate.
 
 ## Verdict (read this first)
 
@@ -344,15 +374,16 @@ How the current boundary is enforced:
 | `gpu-renderer` + `src/gpu.rs` | paints only `WorkspaceScene` + `Theme`; its normal dependency tree cannot contain PTY or parser packages |
 | `src/bin/tui_probe.rs` | external terminal latency harness; not workstation state |
 
-`prepare_scene` is the window/GPU-free renderer seam used by the controlled
-integration test and by the displayed renderer. It compiles the real header,
-status, theme, every current pane content and overlay type, and every ordered
-pane record without recognizing a topology. The scene owns pane geometry,
-identity, flags, overlap, and order. The compiler checks only usable bordered
-interiors, checked workspace containment, and its explicit 256-pane resource
-ceiling. The displayed renderer uses dynamic per-pane title/body buffers, paints
-an opaque base for every pane, and converts text bounds to final pixels before
-subtracting every later pane and the current opaque overlay.
+`prepare_scene` is the window/GPU-free renderer seam used by controlled
+integration tests and by the displayed renderer. It validates usable bordered
+interiors, checked workspace containment, and explicit ceilings for panes,
+frame cells, compiled cells, and retained row buffers. `mandatum-scene` then
+compiles the real header, status, theme, every current pane content and overlay
+type, and every ordered pane record into one `CellProgram` without recognizing
+a topology. The scene owns pane geometry, identity, flags, overlap, order,
+opacity, chrome, text, selection, cursor, and style. The displayed renderer
+keeps the final topmost cell at each coordinate, paints background quads, and
+shapes styled glyph rows; it has no content- or overlay-specific shadow plan.
 
 The earlier `src/terminal.rs` and `src/scene_bridge.rs` architecture remains
 relevant only to the historical 2026-07-09 benchmark evidence below. Both files
@@ -567,16 +598,15 @@ panic, exit 0).
 - **No headless GPU presentation.** The real host-to-render-plan path is covered
   without a window, but device/surface acquisition and present still require the
   displayed smoke.
-- **Bold/dim/italic/underline are mostly ignored** in rendering (the style bits
-  are read; only inverse is honored). Colors and inverse render; weight/slant do
-  not yet map to font attributes.
+- **True wide-cell production is not implemented.** `CellProgram` has an
+  explicit `WideContinuation` occupancy and both adapters honor it, but current
+  scalar `SceneCell` surfaces do not yet emit grapheme-width metadata.
 
 ## What a production adapter would still need
 
-- **Complete content/style and input/lifecycle parity.** Layout composition is
-  generic. Production still needs a neutral cell program for full cursor,
-  selection, style, and wide-cell semantics, plus restore, hit-target, modifier,
-  pointer, scale-change, and shutdown parity.
+- **Complete input/lifecycle parity.** Layout/composition and content/style are
+  generic. Production still needs restore, hit-target, modifier, pointer,
+  scale-change, clipboard, and shutdown parity.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
@@ -588,9 +618,6 @@ panic, exit 0).
 - **DPI / scale-factor changes at runtime** (multi-monitor drag). The scale hook
   exists and recomputes font metrics, but was only exercised at the initial
   scale.
-- **Full SGR rendering**: bold/dim via font weight, italic via slant, underline
-  and strikethrough via glyphon decorations (the style bits are already carried
-  through from the parser).
 - **Robustness**: surface-lost/outdated reconfigure loop (currently skips the
   frame), GPU device-loss recovery, and native scheduling policy under mixed
   runtime-event floods.
@@ -718,16 +745,12 @@ from the terminal frontend's then-current 40 ms poll loop, which was later
 removed without GPU work. Phase 2 subsequently replaced the duplicate spike
 host with the real `FrontendHost` and completed the header, one-terminal,
 status, palette, neutral-input, wake, and typed-effect slice. Phase 3 is now
-underway: its first increments add real one-pane task metadata/live output,
-agent detail, the Empty fallback, the existing context menu, execution timeline,
-session map, objective prompt, session-output Search, generated Help, and
-generated Welcome without changing the scene or host contract. Its first two
-layout increments were superseded by one capability-family compiler over the
-complete ordered pane vector, with bounded dynamic resources and generic
-later-pane/overlay occlusion. A production wgpu adapter still needs
-content/style and input/lifecycle parity, Artifact Preview, correct advanced
-grapheme and IME behavior, runtime DPI, surface-loss recovery, and damage
-tracking.
+underway: its layout/composition family was superseded by one compiler over the
+complete ordered pane vector, and its content/style family now compiles every
+pane, chrome, and overlay surface into one renderer-neutral cell program shared
+by the ratatui and GPU adapters. A production wgpu adapter still needs
+input/lifecycle parity, Artifact Preview, correct advanced grapheme and IME
+behavior, runtime DPI, surface-loss recovery, and damage tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selects the

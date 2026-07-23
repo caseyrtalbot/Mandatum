@@ -101,19 +101,19 @@ self-instrumenting latency/frame-time measurement. Phase 2 then replaced that
 spike-local PTY/parser/input state machine with the product's real
 `FrontendHost`: winit emits neutral `InputEvent` values, the host's coalesced
 wake callback drives `EventLoopProxy`, typed clipboard effects return to the
-native shell, and the GPU renderer paints the real header, one terminal, task,
-agent, or Empty pane, status strip, command palette, context menu, and execution
-timeline plus the session map, objective prompt, session-output Search,
-generated Help and Welcome surfaces, and exactly two horizontally or vertically
-tiled Empty panes plus the default two-pane floating Empty topology at verified
-usable frame sizes from `FrameSnapshot` scene/theme data. Phase 3 remains
-underway; stacked, broader
-floating, dense, mixed-content, and three-plus-pane layouts, restore in the
-excluded native shell, and broader input parity are still explicit gaps.
+native shell, and the GPU renderer paints the real header, terminal, task,
+agent, and Empty panes, status strip, command palette, context menu, execution
+timeline, session map, objective prompt, session-output Search, and generated
+Help and Welcome surfaces from `FrameSnapshot` scene/theme data. Phase 3
+layout/composition and content/style parity are complete behind one
+`mandatum-scene::CellProgram`: tiled, stacked, zoomed, dense, overlapping,
+floating, mixed-content, and three-plus-pane scenes use the same path, as do
+semantic colors, current modifiers, selection, cursor, chrome, and every
+overlay. Restore and the broader input/lifecycle family remain explicit gaps.
 
 The adapter remains outside the Cargo workspace, product build, release
 artifacts, and merge gate. The opt-in `./ci/gpu-spike.sh` maintenance check runs
-spike-local format, locked all-target tests, and the renderer
+spike-local format, warnings-denied clippy, locked all-target tests, and the renderer
 dependency-boundary proof after scene-contract or spike changes. The paint path
 is a separate spike-local crate that cannot depend on the PTY or terminal
 parser. Full evidence:
@@ -199,12 +199,9 @@ platform effects, migrates the terminal shell first, and only then connects the
 excluded native adapter to real workstation state. Phases 1 and 2 are complete:
 the terminal and excluded native shells now exercise the same host, runtime,
 neutral input, scene, wake, and typed-effect boundaries. Phase 3 is underway:
-scene-only increments cover real one-pane task and agent content, the Empty
-fallback, context menu, execution timeline, session map, objective prompt, and
-session-output Search plus generated Help and Welcome, followed by exactly two
-horizontally or vertically tiled Empty panes and the default two-pane floating
-Empty topology at verified usable frame sizes. Restore in the excluded native
-shell, stacked, broader
-floating, dense, mixed-content, and three-plus-pane layouts, and broader input
-parity remain. Selecting the capability branch does not weaken the production
-conformance gate, and Artifact Preview remains unbuilt.
+layout/composition and content/style are complete capability families. The
+excluded renderer consumes one neutral whole-frame cell program for all current
+pane content, chrome, overlays, theme roles, modifiers, selection, cursor, and
+scene-owned composition. Input/lifecycle parity and native restore remain.
+Selecting the capability branch does not weaken the production conformance
+gate, and Artifact Preview remains unbuilt.
