@@ -129,7 +129,7 @@ pub struct AppState {
     /// While a mouse-capturing child owns the pointer: the pane its button
     /// press was forwarded to (and its inner rect for coordinates), so drags
     /// and the release reach the same child ([L5-GATE]).
-    pointer_forward: Option<(PaneId, SceneRect)>,
+    pointer_forward: Option<(PaneId, SceneRect, PointerEvent)>,
     /// Pointer-driven viewport scroll and selection for one pane.
     pointer_view: Option<PointerView>,
     /// The open right-click menu, if any (modal, like the palette).
@@ -429,8 +429,24 @@ impl AppState {
                 }
                 self.mark_redraw();
             }
+            InputEvent::Paste(text) if self.palette.is_some() => {
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.query.push_str(&text);
+                    palette.selected = 0;
+                }
+                self.mark_redraw();
+            }
+            InputEvent::Paste(text) if self.help_view.is_some() => {
+                if let Some(view) = self.help_view.as_mut() {
+                    view.query.push_str(&text);
+                    view.selected = 0;
+                }
+                self.mark_redraw();
+            }
             // Paste only reaches the shell in normal mode; copy mode, the
-            // context menu, and the session map own input while open.
+            // context menu, and the session map own input while open. Text
+            // overlays are handled above so their paste never leaks through
+            // to the obscured terminal.
             InputEvent::Paste(text)
                 if self.copy_mode.is_none()
                     && self.context_menu.is_none()
@@ -443,6 +459,8 @@ impl AppState {
             // reporting they forward to its PTY instead, unless the user
             // invokes explicit workspace control (alt, copy mode, menu).
             InputEvent::Pointer(pointer) => self.handle_pointer(pointer),
+            InputEvent::FocusLost => self.handle_focus_lost(),
+            InputEvent::FocusGained => self.mark_redraw(),
             _ => {}
         }
     }
@@ -456,6 +474,7 @@ impl AppState {
     }
 
     pub fn handle_terminal_resize(&mut self, columns: u16, rows: u16) {
+        self.cancel_pointer_gesture();
         self.terminal_size = Some((columns, rows));
         // Copy-mode coordinates address a specific grid geometry; a resize
         // reshapes the buffer, so leave copy mode rather than track moved coordinates.
@@ -465,7 +484,6 @@ impl AppState {
         // Pointer state addresses the old geometry too: selections and menu
         // anchors would point at moved cells, and any drag loses its frame.
         self.pointer_view = None;
-        self.pointer_drag = None;
         self.context_menu = None;
         if self.preserve_status_on_next_resize {
             let status = self.status.clone();
@@ -561,6 +579,20 @@ impl AppState {
             RuntimeInput::SendToTerminal(bytes) => self.write_to_focused_terminal(&bytes),
             RuntimeInput::Noop => {}
         }
+        self.mark_redraw();
+    }
+
+    /// Whether a neutral key is configured as explicit workspace control.
+    ///
+    /// Native shells use this before applying a platform convention such as
+    /// Command+V so a user binding always wins ahead of clipboard fallback.
+    pub(crate) fn key_is_workspace_chord(&self, key: Key) -> bool {
+        self.keymap.chord_action(key).is_some()
+    }
+
+    pub(crate) fn report_platform_error(&mut self, message: String) {
+        self.status = message;
+        self.preserve_status_on_next_resize = true;
         self.mark_redraw();
     }
 
@@ -681,6 +713,10 @@ impl AppState {
     }
 
     fn open_palette(&mut self) {
+        // Palette is a top-level input owner. Copy mode can still be active
+        // when the pointer opens the palette through the status strip, so
+        // close it here to keep key and paste routing on the same surface.
+        self.copy_mode = None;
         self.palette = Some(PaletteState::default());
         self.status = "command palette open".to_owned();
     }
@@ -2009,10 +2045,67 @@ impl AppState {
             PointerKind::Drag => self.handle_pointer_drag(pointer),
             PointerKind::Up => self.handle_pointer_up(pointer),
             PointerKind::Wheel { .. } => self.handle_pointer_wheel(pointer),
-            // No hover behavior outside the menu.
-            PointerKind::Move => return,
+            PointerKind::Move => {
+                if self.handle_pointer_move(pointer) {
+                    self.mark_redraw();
+                }
+                return;
+            }
         }
         self.mark_redraw();
+    }
+
+    /// Cancel gesture-local state when the platform window loses focus. A
+    /// completed pointer selection remains available to copy, but an
+    /// in-progress selection or child capture cannot survive a focus change.
+    fn handle_focus_lost(&mut self) {
+        self.cancel_pointer_gesture();
+        self.last_pane_click = None;
+        self.mark_redraw();
+    }
+
+    /// End platform-local pointer ownership without converting a workspace
+    /// drag into a completed gesture. A child that received a mouse press
+    /// still receives its matching release before capture is discarded.
+    pub(crate) fn cancel_pointer_gesture(&mut self) {
+        if let Some((pane_id, inner, last_pointer)) = self.pointer_forward.take() {
+            let release = PointerEvent {
+                kind: PointerKind::Up,
+                ..last_pointer
+            };
+            self.forward_captured_pointer(&pane_id, inner, &release);
+        }
+        if matches!(self.pointer_drag, Some(PointerDrag::Select { .. }))
+            && let Some(view) = self.pointer_view.as_mut()
+        {
+            view.selection = None;
+            if view.scroll_offset == 0 {
+                self.pointer_view = None;
+            }
+        }
+        self.pointer_drag = None;
+    }
+
+    pub(crate) fn pointer_move_needs_redraw(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
+    pub(crate) fn suspend_scene_interaction(&mut self) {
+        self.cancel_pointer_gesture();
+        self.hit_targets.clear();
+    }
+
+    /// Forward unbuttoned motion only when the child under the pointer asked
+    /// for any-event mouse reporting. Otherwise the workspace has no hover
+    /// behavior outside its modal context menu.
+    fn handle_pointer_move(&mut self, pointer: PointerEvent) -> bool {
+        let Some(target) = self.pointer_target(pointer.column, pointer.row) else {
+            return false;
+        };
+        let HitTargetKind::PaneBody(pane_id) = target.kind else {
+            return false;
+        };
+        self.try_forward_pointer(&pane_id, target.rect, &pointer)
     }
 
     /// The topmost hit target of the last built scene under a point: the
@@ -2169,7 +2262,7 @@ impl AppState {
         }
         // The child that received the press owns the rest of the gesture.
         if pointer.kind == PointerKind::Down {
-            self.pointer_forward = Some((pane_id.clone(), inner));
+            self.pointer_forward = Some((pane_id.clone(), inner, *pointer));
         }
         true
     }
@@ -2199,6 +2292,8 @@ impl AppState {
         }
         if pointer.kind == PointerKind::Up {
             self.pointer_forward = None;
+        } else if let Some(capture) = self.pointer_forward.as_mut() {
+            capture.2 = *pointer;
         }
     }
 
@@ -2281,7 +2376,7 @@ impl AppState {
 
     fn handle_pointer_drag(&mut self, pointer: PointerEvent) {
         // [L5-GATE] A child that captured the press keeps the whole gesture.
-        if let Some((pane_id, inner)) = self.pointer_forward.clone() {
+        if let Some((pane_id, inner, _)) = self.pointer_forward.clone() {
             self.forward_captured_pointer(&pane_id, inner, &pointer);
             return;
         }
@@ -2354,8 +2449,8 @@ impl AppState {
             Some((columns, rows)) => {
                 let area = workspace_scene_area(SceneSize::new(columns, rows));
                 (
-                    i32::from(area.width.saturating_sub(2)),
-                    i32::from(area.height.saturating_sub(2)),
+                    i32::from(area.width.saturating_sub(3)),
+                    i32::from(area.height.saturating_sub(3)),
                 )
             }
             None => (i32::from(u16::MAX), i32::from(u16::MAX)),
@@ -2387,8 +2482,8 @@ impl AppState {
         }
         let screen_x = pointer.column.saturating_sub(grab_dx).max(area.x);
         let screen_y = pointer.row.saturating_sub(grab_dy).max(area.y);
-        let x = (screen_x - area.x).min(area.width.saturating_sub(2));
-        let y = (screen_y - area.y).min(area.height.saturating_sub(2));
+        let x = (screen_x - area.x).min(area.width.saturating_sub(3));
+        let y = (screen_y - area.y).min(area.height.saturating_sub(3));
         match self.workspace.apply_action(CoreAction::MoveFloatingPane {
             pane_id: pane_id.clone(),
             x,
@@ -2424,7 +2519,7 @@ impl AppState {
 
     fn handle_pointer_up(&mut self, pointer: PointerEvent) {
         // [L5-GATE] Deliver the release to the child that got the press.
-        if let Some((pane_id, inner)) = self.pointer_forward.clone() {
+        if let Some((pane_id, inner, _)) = self.pointer_forward.clone() {
             self.forward_captured_pointer(&pane_id, inner, &pointer);
             return;
         }

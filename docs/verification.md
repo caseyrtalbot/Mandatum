@@ -960,6 +960,75 @@ screen understands the session state in ten seconds. Procedure:
    tests (`crates/app/src/scene_builder.rs`), and the header-in-scene
    parity tests (`crates/app/tests/frontend_parity.rs`).
 
+## Phase 3B Native Input/Lifecycle Capability (2026-07-23)
+
+Environment: macOS on Apple M4 Pro, one online LG ULTRAGEAR+ display, release
+native adapter launched from disposable project
+`/private/tmp/mandatum-phase3b-display.rY9TY2`. The adapter remained excluded
+from the product workspace/build/release surface.
+
+Automated and review evidence:
+
+- Focused RED/GREEN coverage exercises configured chord precedence, unbound
+  Super suppression, xterm baseline navigation/editing/F1-F24 modifiers, the
+  full conventional ASCII control family, Alt-as-Meta, native copy/paste
+  boundaries, child any-event motion, focus cancellation, child-capture
+  release, float edge/shrink containment, pointer selection/copy/scrollback,
+  startup restore of both visible terminal runtimes, resize, quit, idempotent
+  shutdown, finite scale-probe arguments, and tiny-frame suspension.
+- Three independent aggregate reviewers plus a final cold read found and drove
+  fixes for modifier loss, sticky child capture, focus-finalized selection,
+  stale/rejected hit targets, geometry-error string control flow, float
+  shrink/restore containment, duplicate Alt on BackTab, clipboard error
+  visibility, wheel axes, invalid scale values, and partial shutdown. The final
+  confidence-70-or-higher review was clean.
+- `./ci/gpu-spike.sh` passed formatting, warnings-denied all-target Clippy,
+  the renderer dependency-boundary scan, and 39 substantive tests: five native
+  shell, twenty-five real-host, and nine isolated renderer tests.
+- The post-documentation `./ci/gate.sh` passed root format, warnings-denied
+  Clippy, build, all workspace/unit/integration/doc tests (including 262 app
+  library and 36 scene library tests), L1/L2 plus GPU-admission conformance,
+  the app input-seam scan, and documentation trace.
+- The existing reduced-motion proof
+  `scene_builder::tests::reduced_motion_kills_the_pulse_and_no_other_motion_exists`
+  remains renderer-neutral: reduced motion holds the sole approval pulse steady,
+  and the scene is otherwise byte-identical.
+
+Displayed release matrix:
+
+- Ctrl+P and F1 opened the real Palette and generated Help using only keyboard
+  input; Escape closed both.
+- Cmd+V pasted `CLIPBOARD_PHASE3B_OK` through arboard and the neutral paste
+  boundary. A real pointer drag produced a visible 27-character selection;
+  Cmd+C cleared it, reported `copied 27 char(s) to clipboard`, and `pbpaste`
+  contained the selected shell text.
+- The real palette created a second terminal and saved the workspace. Ctrl+Q
+  exited with no native or child-shell process left. Relaunch restored the two
+  pane layout, recreated both PTYs, and displayed a fresh `Restored session`
+  marker in each pane.
+- Minimize/focus recovery cleared synthetic stuck modifiers; full-screen
+  resize repainted the two-pane workspace from 88x30 to 380x72 and returned
+  cleanly through Ctrl+Q.
+- Because this Mac exposes only one display, the bounded spike-only
+  `--scale-after 2 --scale-factor 1.5` tracer exercised the exact
+  `ScaleFactorChanged` transition without changing system settings. The
+  displayed grid recomputed from 88x30 to 57x20, both restored PTYs remained
+  visible, 16 frames presented, and JSON reported
+  `scale_probe_applied=true`; the process exited 0 at its deadline.
+
+Standing terminal regression procedure:
+
+- Fresh root release build plus `cargo run --release --bin tui_probe` produced
+  p50 11.77 ms / p95 14.68 ms / max 18.56 ms over 100 key-to-app-output
+  samples, zero misses. Host-terminal paint remains excluded.
+- Over a clean 30-second idle PTY run, process CPU time advanced from 0.04 s to
+  0.14 s: 0.10 s total, about 0.33% of one core, with no busy spin.
+
+Known boundary: the runtime scale transition is proven, but this one-display
+environment cannot prove cross-monitor movement. Advanced grapheme/wide-cell
+production, IME/dead-key composition, surface/device recovery, Artifact
+Preview, production GPU admission, packaging, and rollout remain later phases.
+
 ## Completion Rule
 
 Do not claim a task is complete until:

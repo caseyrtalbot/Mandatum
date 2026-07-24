@@ -328,13 +328,13 @@ surfaces (palette hints, context menu, help, first-run note, status strip)
 derive key text from the live keymap, and bare-key chords are rejected at
 the config boundary (L5).
 
-**Terminal key forwarding.** Shift+Tab reaches the focused child as the
-standard xterm BackTab sequence (`ESC [ Z`), including both neutral frontend
-representations (`BackTab` and Shift+Tab). An explicit workspace chord still
-wins before terminal fallback; BackTab is normalized to Shift+Tab while
-matching so a configured `ctrl+shift+tab` route behaves consistently with
-crossterm input. Enhanced modified-key protocols are not implied by this
-baseline sequence.
+**Terminal key forwarding.** The focused child receives the baseline
+`xterm-256color` character, control, navigation/editing, and F1-F24 families.
+Shift+Tab reaches it as BackTab (`ESC [ Z`) from either neutral representation;
+additional Alt/Control modifiers remain encoded. Alt acts as Meta, conventional
+control aliases are accepted, and configured workspace chords still win before
+terminal fallback or native clipboard conventions. Enhanced negotiated
+protocols such as CSI-u are not implied by this baseline.
 
 **Font scaling — honest limits.** The terminal frontend renders in the
 host terminal and therefore inherits its font, size, and zoom; scale text
@@ -343,8 +343,11 @@ font_scale` key: it could not do anything here, and a silently inert
 setting is worse than the loud unknown-key warning the config boundary
 gives today). A native GPU frontend owns its glyph rendering and therefore
 needs an explicit font, scale, DPI, and IME contract. Renderer-neutral product
-behavior remains authoritative, but the shared host/effect and text-input
-seams still require staged work; see the
+behavior remains authoritative. The excluded native shell now handles live
+scale changes through a single transition that cancels stale pointer ownership,
+updates glyph metrics, recomputes pointer cells, resizes the host/PTYs, and
+requires a successful new present before interaction resumes. Advanced IME,
+dead-key, grapheme, and multi-display support policy remains staged; see the
 [native GPU implementation plan](native-gpu-implementation-plan.md).
 
 Still planned: descriptive labels for non-terminal surfaces beyond the

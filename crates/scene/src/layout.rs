@@ -404,15 +404,25 @@ fn percentage_boundary(length: u16, percent: u16) -> u16 {
 }
 
 fn floating_rect(area: SceneRect, rect: &FloatingRect) -> SceneRect {
+    if area.is_empty() {
+        return SceneRect::new(area.x, area.y, 0, 0);
+    }
+    let minimum_width = area.width.min(3);
+    let minimum_height = area.height.min(3);
     let x = area
         .x
-        .saturating_add(rect.x.min(area.width.saturating_sub(1)));
+        .saturating_add(rect.x.min(area.width.saturating_sub(minimum_width)));
     let y = area
         .y
-        .saturating_add(rect.y.min(area.height.saturating_sub(1)));
-    let max_width = area.right().saturating_sub(x).max(1);
-    let max_height = area.bottom().saturating_sub(y).max(1);
-    SceneRect::new(x, y, rect.width.min(max_width), rect.height.min(max_height))
+        .saturating_add(rect.y.min(area.height.saturating_sub(minimum_height)));
+    let max_width = area.right().saturating_sub(x);
+    let max_height = area.bottom().saturating_sub(y);
+    SceneRect::new(
+        x,
+        y,
+        rect.width.clamp(minimum_width, max_width),
+        rect.height.clamp(minimum_height, max_height),
+    )
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: SceneRect) -> SceneRect {
@@ -581,7 +591,23 @@ mod tests {
     fn default_floating_pane_rect_clamps_inside_a_small_viewport() {
         assert_eq!(
             default_floating_pane_rect(SceneSize::new(6, 3)),
-            SceneRect::new(5, 1, 1, 1)
+            SceneRect::new(3, 1, 3, 1)
+        );
+    }
+
+    #[test]
+    fn restored_edge_float_keeps_a_usable_interior_after_shrink() {
+        assert_eq!(
+            floating_rect(
+                SceneRect::new(0, 0, 80, 24),
+                &FloatingRect {
+                    x: u16::MAX,
+                    y: u16::MAX,
+                    width: 96,
+                    height: 28,
+                },
+            ),
+            SceneRect::new(77, 21, 3, 3)
         );
     }
 

@@ -105,11 +105,15 @@ native shell, and the GPU renderer paints the real header, terminal, task,
 agent, and Empty panes, status strip, command palette, context menu, execution
 timeline, session map, objective prompt, session-output Search, and generated
 Help and Welcome surfaces from `FrameSnapshot` scene/theme data. Phase 3
-layout/composition and content/style parity are complete behind one
+layout/composition, content/style, and input/lifecycle parity are complete
+behind one
 `mandatum-scene::CellProgram`: tiled, stacked, zoomed, dense, overlapping,
 floating, mixed-content, and three-plus-pane scenes use the same path, as do
 semantic colors, current modifiers, selection, cursor, chrome, and every
-overlay. Restore and the broader input/lifecycle family remain explicit gaps.
+overlay. Configured chord precedence, xterm baseline key/modifier translation,
+native copy/paste, pointer drag/capture/passthrough, scrollback, focus/resize/
+scale transitions, startup restore, and clean shutdown all cross the real
+`FrontendHost` boundary.
 
 The adapter remains outside the Cargo workspace, product build, release
 artifacts, and merge gate. The opt-in `./ci/gpu-spike.sh` maintenance check runs
@@ -149,8 +153,8 @@ The spike
 succeeded (a real, measured latency win and a clean adapter), but a large
 share of the measured gap was the product's own 40 ms input poll loop, and
 a production GPU adapter still owes substantial work the spike skipped
-(multi-pane and broader-overlay scene binding, grapheme widths, IME, runtime DPI,
-surface-loss recovery, damage tracking).
+(Artifact Preview, grapheme widths, IME/dead-key composition, multi-display
+policy, surface/device recovery, and damage tracking).
 
 The poll-loop prediction was then confirmed: after the run loop became
 event-driven (docs/decisions.md, "Event-Driven Main Loop With Heartbeat And
@@ -198,10 +202,11 @@ keeps one `AppState`/`RuntimeEngine`, extracts a shared frontend host and typed
 platform effects, migrates the terminal shell first, and only then connects the
 excluded native adapter to real workstation state. Phases 1 and 2 are complete:
 the terminal and excluded native shells now exercise the same host, runtime,
-neutral input, scene, wake, and typed-effect boundaries. Phase 3 is underway:
-layout/composition and content/style are complete capability families. The
+neutral input, scene, wake, and typed-effect boundaries. Phase 3 is complete:
+layout/composition, content/style, and input/lifecycle are complete capability
+families. The
 excluded renderer consumes one neutral whole-frame cell program for all current
 pane content, chrome, overlays, theme roles, modifiers, selection, cursor, and
-scene-owned composition. Input/lifecycle parity and native restore remain.
+scene-owned composition. Artifact Preview is the exact next capability family.
 Selecting the capability branch does not weaken the production conformance
 gate, and Artifact Preview remains unbuilt.

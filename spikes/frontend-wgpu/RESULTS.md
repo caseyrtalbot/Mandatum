@@ -1,7 +1,8 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 underway; its layout/composition and content/style capability
-families are complete in the excluded adapter. Input/lifecycle parity remains.**
+Status: **Phase 3 complete in the excluded adapter across layout/composition,
+content/style, and input/lifecycle capability families. Artifact Preview is
+next; production GPU admission remains blocked.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, terminal, task, agent, and Empty panes, status
@@ -330,9 +331,32 @@ and showed the real Empty fallback, successful task output with 256-color
 foreground/background plus bold/italic/underline/strikethrough, a fake agent
 waiting for approval, and an opaque Palette with custom selection and surface
 roles. No covered text leaked through. Escape closed the overlay, Ctrl+Q exited
-0, and no native-spike process remained. Input/lifecycle parity is next; true
-grapheme/wide-cell production, IME, Artifact Preview, production admission,
-and rollout remain separate.
+0, and no native-spike process remained. The later Phase 3B matrix completed
+input/lifecycle parity; true grapheme/wide-cell production, IME, Artifact
+Preview, production admission, and rollout remain separate.
+
+Phase 3B input/lifecycle verification (2026-07-23): the opt-in GPU gate passed
+39 substantive tests (five native shell, twenty-five real-host, nine isolated
+renderer) plus formatting, warnings-denied Clippy, and the renderer dependency
+scan. The aggregate review corrected modifier/control aliases, native
+clipboard precedence and visible failures, pointer drag/capture/focus
+cancellation, wheel axes, stale/rejected hit targets, tiny-window suspension,
+float shrink/restore containment, scale argument validation, and shutdown
+ordering. The final confidence-70-or-higher cold read was clean.
+
+The displayed macOS release matrix used the real host and PTYs in a disposable
+project. Keyboard-only Palette/Help, native paste, pointer selection plus
+Cmd+C, two-pane creation/save, full-screen resize, focus/minimize recovery,
+Ctrl+Q cleanup, and two-PTY startup restore all passed. A bounded scale tracer
+ran the exact runtime scale transition, visibly recomputed the grid from 88x30
+to 57x20, presented 16 frames, logged `scale_probe_applied=true`, and exited 0.
+The standing terminal probe measured p50 11.77 ms / p95 14.68 ms / max
+18.56 ms over 100 key-to-app-output samples with zero misses; idle CPU advanced
+0.10 s over 30 seconds. This one-display Mac did not prove cross-monitor
+movement. Full commands, endpoints, and remaining boundaries are recorded in
+`docs/verification.md`. The synchronized post-documentation `./ci/gate.sh`
+passed all workspace tests, conformance, the app input-seam scan, and
+documentation trace.
 
 ## Verdict (read this first)
 
@@ -544,11 +568,15 @@ panic, exit 0).
   `FrameSnapshot` terminal surface.
 - The host's coalesced callback wakes winit through `EventLoopProxy<UserEvent>`;
   the spike has no second wake latch and does not interval-poll for PTY output.
-- Keyboard, pointer, wheel, resize, focus, and paste input cross into the host as
-  neutral `InputEvent` values. Product key-to-byte encoding, scrollback,
-  selection, command routing, and quit behavior remain behind the host.
-- Cmd+V reads arboard into `InputEvent::Paste`; typed
-  `FrontendEffect::SetClipboard` values are drained back to arboard.
+- Keyboard, pointer, wheel, resize, focus, and paste input cross into the host
+  as neutral `InputEvent` values. Configured workspace chords have first
+  refusal; the product encoder covers xterm baseline modifier, control, and
+  F1-F24 families. Scrollback, selection, command routing, and quit behavior
+  remain behind the host.
+- Exact Cmd+V fallback reads arboard into `InputEvent::Paste`; exact Cmd+C
+  fallback requests the app's selection copy; typed
+  `FrontendEffect::SetClipboard` values drain back to arboard. Clipboard
+  failures remain visible in the shared status strip.
 - The real scene header, focused pane and chrome, status strip, Ctrl+P command
   palette, context menu, execution timeline, session map, objective prompt,
   session-output Search, Help, and Welcome render from scene/theme data. Escape
@@ -560,12 +588,18 @@ panic, exit 0).
   changed-file detail from the same scene contract.
 - Real one-pane Empty scenes render the scene-composed cwd, restart generation,
   and no-live-grid detail without querying app or runtime state.
-- Window resize and scale changes recompute scene cell dimensions and send a
-  neutral resize to the host; the app/runtime owns PTY and parser resizing.
+- Pointer motion becomes drag while a button is held; focus/geometry changes
+  cancel workspace gestures, release child capture, and clear stale hit
+  targets. Unpresentable frames suppress pointer input until a successful
+  present.
+- Window resize and scale changes recompute glyph metrics and pointer cells,
+  then send a neutral resize to the host; the app/runtime owns PTY and parser
+  resizing. Restored workspaces recreate every visible terminal runtime.
 - ANSI color: 16-color, 256-color cube, grayscale ramp, and direct RGB, plus
   inverse (fg/bg swap). Rendered as GPU quad backgrounds + colored glyph runs.
-- Deterministic instrumentation with `--typing-bench`, `--flood`, and
-  `--exit-after N` (JSON summary to stdout).
+- Deterministic instrumentation with `--typing-bench`, `--flood`,
+  `--exit-after N`, and the bounded `--scale-after` / `--scale-factor`
+  lifecycle tracer (JSON summary to stdout).
 - Headless integration tests start a real PTY through `FrontendHost`, exercise
   supported pane and overlay routes through neutral input, and prepare the real
   product scenes through the renderer boundary.
@@ -604,20 +638,20 @@ panic, exit 0).
 
 ## What a production adapter would still need
 
-- **Complete input/lifecycle parity.** Layout/composition and content/style are
-  generic. Production still needs restore, hit-target, modifier, pointer,
-  scale-change, clipboard, and shutdown parity.
+- **Artifact Preview.** The selected pixel-native product capability remains
+  unbuilt; completing Phase 3 does not admit the adapter.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
 - **Correct wide-character and grapheme handling.** Unicode width, combining
   marks, and per-cell placement so the glyph grid and background grid never
   diverge.
-- **IME / composition, dead keys, and full modifier semantics** (Alt-as-Meta,
-  bracketed paste, mouse reporting passthrough when apps request it).
-- **DPI / scale-factor changes at runtime** (multi-monitor drag). The scale hook
-  exists and recomputes font metrics, but was only exercised at the initial
-  scale.
+- **IME / composition and dead keys.** The baseline Alt-as-Meta, bracketed
+  paste, modified keys, and child mouse reporting paths are complete; advanced
+  locale/composition semantics remain Phase 5.
+- **Multi-display support policy.** The runtime scale transition is exercised,
+  but this one-display Mac cannot prove cross-monitor movement or define the
+  eventual supported display matrix.
 - **Robustness**: surface-lost/outdated reconfigure loop (currently skips the
   frame), GPU device-loss recovery, and native scheduling policy under mixed
   runtime-event floods.
@@ -744,13 +778,15 @@ The comparison also exposed why the adapter did not ship. Much of the gap came
 from the terminal frontend's then-current 40 ms poll loop, which was later
 removed without GPU work. Phase 2 subsequently replaced the duplicate spike
 host with the real `FrontendHost` and completed the header, one-terminal,
-status, palette, neutral-input, wake, and typed-effect slice. Phase 3 is now
-underway: its layout/composition family was superseded by one compiler over the
-complete ordered pane vector, and its content/style family now compiles every
-pane, chrome, and overlay surface into one renderer-neutral cell program shared
-by the ratatui and GPU adapters. A production wgpu adapter still needs
-input/lifecycle parity, Artifact Preview, correct advanced grapheme and IME
-behavior, runtime DPI, surface-loss recovery, and damage tracking.
+status, palette, neutral-input, wake, and typed-effect slice. Phase 3 is
+complete: its layout/composition family was superseded by one compiler over the
+complete ordered pane vector; its content/style family compiles every pane,
+chrome, and overlay surface into one renderer-neutral cell program shared by
+the ratatui and GPU adapters; and its input/lifecycle family covers native
+key/modifier translation, clipboard, pointer, scrollback, focus, resize/scale,
+restore, and shutdown through the real host. A production wgpu adapter still
+needs Artifact Preview, correct advanced grapheme and IME behavior,
+surface/device recovery, and damage tracking.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selects the

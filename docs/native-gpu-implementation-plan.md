@@ -1,9 +1,7 @@
 # Native GPU Frontend Implementation Plan
 
-Status: capability branch accepted; Phases 1 and 2 complete; Phase 3 underway;
-its layout/composition and content/style capability families are complete in
-the excluded adapter, with input/lifecycle remaining; production GPU admission
-pending (2026-07-23).
+Status: capability branch accepted; Phases 1, 2, and 3 complete in the excluded
+adapter; production GPU admission pending (2026-07-23).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -458,7 +456,7 @@ cursor without content-specific paint branches. True grapheme/wide-cell
 production remains Phase 5; this family establishes the continuation seam
 without claiming width correctness.
 
-### Remaining Phase 3 capability family
+### Completed Phase 3 capability family
 
 Input/lifecycle parity:
 
@@ -469,9 +467,20 @@ Input/lifecycle parity:
 - native restore/startup behavior, scale changes, clipboard effects, and clean
   shutdown through the existing `FrontendHost` boundary.
 
-Exit gate: no unplanned `SceneCompileError` is reachable for a
-product-generated scene, and semantic/golden tests cover every scene and input
-enum variant.
+The native shell now preserves configurable workspace-chord precedence before
+platform clipboard fallback, translates the baseline xterm key/modifier
+families (including BackTab, Alt-as-Meta, control aliases, and F1-F24), and
+drives native paste, pointer drag/capture/passthrough, wheel scrollback,
+selection/copy, focus, resize, scale, restore, and quit through
+`FrontendHost`. Focus or geometry changes cancel workspace gestures and release
+child mouse capture; unpresentable frames clear hit targets and suppress pointer
+input until a valid present. Startup restore recreates every visible terminal
+runtime, and shutdown is idempotent.
+
+Exit gate met: no unplanned `SceneCompileError` is reachable for the covered
+product-generated scene/input matrix, and the exact automated, displayed,
+latency, idle-CPU, and shutdown evidence is recorded in
+[verification.md](verification.md).
 
 ## Phase 4 — Build The Artifact Preview Capability
 
@@ -609,13 +618,12 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Continue Phase 3 with the input/lifecycle capability family. Prove workspace
-chords before terminal fallback, BackTab and modifier translation, paste,
-pointer capture/passthrough, scrollback and selection, focus/resize/quit,
-keyboard-only and reduced-motion behavior, native restore/startup, runtime
-scale changes, clipboard effects, and clean shutdown through the existing
-`FrontendHost` boundary. Use focused RED/GREEN tracers for uncovered behavior,
-then one aggregate review, displayed matrix, documentation/gate/handoff cycle,
-and commit. Stop before building Artifact Preview, changing advanced
-grapheme/IME behavior, admitting production GPU dependencies, or altering
-release surfaces.
+Build Phase 4 as the Artifact Preview vertical capability family. Start with
+project-relative durable `ArtifactPaneIntent`, app-owned bounded PNG
+validation/decoding and live loading/ready/failed state, then carry one typed
+RGBA8 sRGB surface through `mandatum-scene`. The terminal adapter must paint a
+deterministic labeled fallback card; the excluded GPU adapter must upload and
+contain-fit the same scene-owned surface. Prove containment and symlink
+rejection, encoded/decoded byte and dimension ceilings, malformed input,
+revision/reload behavior, and visible failure states. Stop before advanced
+grapheme/IME work, production GPU admission, or release changes.

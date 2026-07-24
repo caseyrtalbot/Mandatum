@@ -7,7 +7,11 @@
 
 use std::{sync::Arc, time::Duration};
 
-use mandatum_scene::{SceneSize, Theme, WorkspaceScene, input::InputEvent};
+use mandatum_commands::CommandId;
+use mandatum_scene::{
+    SceneSize, Theme, WorkspaceScene,
+    input::{InputEvent, Key},
+};
 
 use crate::{
     app_shell::AppConfig,
@@ -61,6 +65,53 @@ impl FrontendHost {
     pub fn handle_input(&mut self, input: InputEvent) {
         if !self.shutdown_complete {
             self.app.handle_event(input);
+        }
+    }
+
+    /// Cancel any platform-owned pointer gesture before geometry changes.
+    pub fn cancel_pointer_gesture(&mut self) {
+        if !self.shutdown_complete {
+            self.app.cancel_pointer_gesture();
+        }
+    }
+
+    /// Pure pointer motion changes the scene only while a hover-owned overlay
+    /// is open; child any-event reporting wakes through the runtime queue.
+    pub fn pointer_move_needs_redraw(&self) -> bool {
+        !self.shutdown_complete && self.app.pointer_move_needs_redraw()
+    }
+
+    /// Reject hit targets from a frame the platform could not present.
+    pub fn suspend_scene_interaction(&mut self) {
+        if !self.shutdown_complete {
+            self.app.suspend_scene_interaction();
+        }
+    }
+
+    /// Report whether a neutral key is explicit workspace control.
+    ///
+    /// Platform shells consult this before applying native clipboard
+    /// conventions so configured command chords retain first refusal.
+    pub fn handles_workspace_key(&self, key: Key) -> bool {
+        !self.shutdown_complete && self.app.key_is_workspace_chord(key)
+    }
+
+    /// Request the product's renderer-neutral selection-copy behavior.
+    ///
+    /// Native shells call this only after a platform copy shortcut loses the
+    /// configurable workspace-chord preflight. Clipboard delivery still
+    /// returns through the ordinary FIFO [`FrontendEffect`] queue.
+    pub fn copy_selection(&mut self) {
+        if !self.shutdown_complete {
+            self.app.dispatch(CommandId::CopySelection);
+        }
+    }
+
+    /// Surface a recoverable native-shell integration failure in the shared
+    /// status strip rather than silently dropping the user's action.
+    pub fn report_platform_error(&mut self, message: impl Into<String>) {
+        if !self.shutdown_complete {
+            self.app.report_platform_error(message.into());
         }
     }
 
@@ -274,5 +325,64 @@ mod tests {
         assert!(host.shutdown());
         assert!(!host.shutdown());
         assert!(host.shutdown_complete);
+    }
+
+    #[test]
+    fn workspace_key_query_honors_configured_chords_and_shutdown() {
+        let mut config = AppConfig::default();
+        let super_v = Key::new(
+            KeyCode::Char('v'),
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        );
+        config
+            .keymap
+            .bind_chord(mandatum_commands::CommandId::ShowHelp, super_v);
+        let mut host = FrontendHost::new(config);
+
+        assert!(host.handles_workspace_key(super_v));
+        assert!(!host.handles_workspace_key(Key::plain(KeyCode::Char('v'))));
+        host.shutdown();
+        assert!(!host.handles_workspace_key(super_v));
+    }
+
+    #[test]
+    fn native_copy_request_stays_behind_the_effect_boundary() {
+        let mut host = FrontendHost::new(AppConfig::default());
+
+        host.copy_selection();
+        assert!(host.take_effects().is_empty());
+        let frame = host.frame(FRAME_SIZE);
+        assert!(frame.scene.status.text.contains("nothing is selected"));
+
+        host.shutdown();
+        host.copy_selection();
+        assert!(host.take_effects().is_empty());
+    }
+
+    #[test]
+    fn platform_errors_are_visible_and_ignored_after_shutdown() {
+        let mut host = FrontendHost::new(AppConfig::default());
+        host.report_platform_error("clipboard write failed");
+        assert!(
+            host.frame(FRAME_SIZE)
+                .scene
+                .status
+                .text
+                .contains("clipboard write failed")
+        );
+
+        host.shutdown();
+        host.report_platform_error("late failure");
+        assert!(
+            !host
+                .frame(FRAME_SIZE)
+                .scene
+                .status
+                .text
+                .contains("late failure")
+        );
     }
 }

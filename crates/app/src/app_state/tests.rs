@@ -468,6 +468,28 @@ fn floating_title_drag_moves_the_float() {
     let rect = &layout.floating()[0].rect;
     assert_eq!((rect.x, rect.y), (13, 7));
     assert!(state.status().contains("moved pane-2"));
+
+    state.last_pane_click = None;
+    let scene = state.build_scene(POINTER_FRAME);
+    let title = scene
+        .hit_targets
+        .iter()
+        .find(|target| {
+            matches!(
+                &target.kind,
+                HitTargetKind::PaneTitle(pane_id) if pane_id == &PaneId::new("pane-2")
+            )
+        })
+        .unwrap()
+        .rect;
+    send_pointer(&mut state, left(PointerKind::Down, title.x + 1, title.y));
+    send_pointer(&mut state, left(PointerKind::Drag, u16::MAX, u16::MAX));
+    send_pointer(&mut state, left(PointerKind::Up, u16::MAX, u16::MAX));
+    let rect = &state.workspace().active_session().layout().floating()[0].rect;
+    assert_eq!((rect.x, rect.y), (97, 25));
+    let scene = state.build_scene(POINTER_FRAME);
+    let floating = scene.panes.iter().find(|pane| pane.floating).unwrap();
+    assert_eq!((floating.area.width, floating.area.height), (3, 3));
 }
 
 #[test]
@@ -1158,6 +1180,62 @@ fn palette_backspace_edits_the_query() {
 }
 
 #[test]
+fn paste_filters_palette_instead_of_reaching_the_hidden_terminal() {
+    let mut state = state();
+    let size = SceneSize::new(100, 30);
+
+    state.handle_key(ctrl('p'));
+    state.handle_event(InputEvent::Paste("split pane".to_owned()));
+
+    let overlay = state.palette_overlay(size).unwrap();
+    assert_eq!(overlay.query, "split pane");
+    assert_eq!(overlay.selected, Some(0));
+    assert_eq!(state.status(), "command palette open");
+}
+
+#[test]
+fn paste_filters_help_instead_of_reaching_the_hidden_terminal() {
+    let mut state = state();
+    let size = SceneSize::new(100, 30);
+
+    state.dispatch(CommandId::ShowHelp);
+    state.handle_event(InputEvent::Paste("split pane".to_owned()));
+
+    let overlay = state.help_overlay_scene(size).unwrap();
+    assert_eq!(overlay.query, "split pane");
+    assert_eq!(overlay.selected, Some(0));
+    assert_eq!(state.status(), "help: type to filter, Esc close");
+}
+
+#[test]
+fn opening_palette_exits_copy_mode_before_keys_or_paste_are_routed() {
+    let mut state = live_state();
+    let size = SceneSize::new(100, 30);
+    state.handle_terminal_resize(size.width, size.height);
+
+    state.dispatch(CommandId::EnterCopyMode);
+    assert!(state.copy_mode_active());
+
+    // This is the state transition used by the pointer-clickable status strip.
+    state.open_palette();
+    assert!(!state.copy_mode_active());
+    state.handle_event(InputEvent::Paste("split pane".to_owned()));
+    state.handle_key(Key::new(
+        KeyCode::Char('x'),
+        Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        },
+    ));
+
+    let overlay = state.palette_overlay(size).unwrap();
+    assert_eq!(overlay.query, "split panex");
+    assert_eq!(state.status(), "command palette open");
+
+    state.shutdown();
+}
+
+#[test]
 fn command_errors_are_reported_as_status_instead_of_panicking() {
     let mut state = state();
 
@@ -1822,6 +1900,60 @@ fn child_capture_forwards_clicks_to_pty_without_focus_steal() {
     state.shutdown();
 }
 
+// [L5-GATE] A child requesting any-event mouse tracking receives unbuttoned
+// motion; the workspace does not need a hover behavior to keep terminal
+// passthrough complete.
+#[test]
+fn child_any_event_capture_forwards_unbuttoned_motion() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_id = PaneId::new("pane-1");
+    state.write_to_focused_terminal(b"printf '\\033[?1003h\\033[?1006h'\r");
+    let tracking = pump_runtime_until(&mut state, |state| {
+        state
+            .runtime
+            .terminals()
+            .get(&pane_id)
+            .is_some_and(|runtime| runtime.parser.mouse_mode().wants_mouse())
+    });
+    assert!(tracking, "child never enabled any-event mouse tracking");
+    state.build_scene(POINTER_FRAME);
+
+    send_pointer(&mut state, pointer_event(PointerKind::Move, None, 2, 3));
+    let echoed = pump_runtime_until(&mut state, |state| {
+        grid_text(state, &pane_id).contains("35;2;2M")
+    });
+    assert!(
+        echoed,
+        "unbuttoned motion never reached the child's PTY; grid: {}",
+        grid_text(&state, &pane_id)
+    );
+
+    state.shutdown();
+}
+
+#[test]
+fn focus_loss_releases_child_capture_without_completing_a_workspace_drag() {
+    let mut state = live_state_with_capturing_child();
+    let pane_id = PaneId::new("pane-1");
+
+    send_pointer(&mut state, left(PointerKind::Down, 2, 3));
+    assert!(state.pointer_forward.is_some());
+    state.handle_event(InputEvent::FocusLost);
+    assert!(state.pointer_forward.is_none());
+
+    let echoed = pump_runtime_until(&mut state, |state| {
+        grid_text(state, &pane_id).contains("0;2;2m")
+    });
+    assert!(
+        echoed,
+        "focus loss did not release the child's mouse capture; grid: {}",
+        grid_text(&state, &pane_id)
+    );
+
+    state.shutdown();
+}
+
 // [L5-GATE] alt+click is always explicit workspace control, even over a
 // mouse-capturing child.
 #[test]
@@ -2002,6 +2134,30 @@ fn pointer_drag_selects_cells_and_copy_selection_copies_them() {
     assert!(state.take_frontend_effects().is_empty());
     assert!(state.pane_view_state(&pane_id).selection.is_none());
 
+    state.shutdown();
+}
+
+#[test]
+fn focus_loss_cancels_in_progress_pointer_selection() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    state.build_scene(POINTER_FRAME);
+
+    send_pointer(&mut state, left(PointerKind::Down, 5, 5));
+    assert!(state.pointer_drag.is_some());
+    state.handle_event(InputEvent::FocusLost);
+    assert!(state.pointer_drag.is_none());
+    assert!(state.pointer_forward.is_none());
+    assert!(state.pane_view_state(&pane_id).selection.is_none());
+
+    // A stale drag/release from the old platform gesture is inert.
+    send_pointer(&mut state, left(PointerKind::Drag, 12, 5));
+    send_pointer(&mut state, left(PointerKind::Up, 12, 5));
+    assert!(state.pane_view_state(&pane_id).selection.is_none());
+
+    state.handle_event(InputEvent::FocusGained);
     state.shutdown();
 }
 

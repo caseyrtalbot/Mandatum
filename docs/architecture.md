@@ -262,7 +262,14 @@ The explicit `WideContinuation` occupancy is the Phase 5 seam; current scene
 surfaces still carry scalar cells and do not claim grapheme-width correctness.
 Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
-state remain frontend-local.
+state remain frontend-local. Phase 3 input/lifecycle parity is complete in the
+excluded shell: configured workspace chords have first refusal before native
+copy/paste fallback; the neutral key seam covers xterm baseline modifiers and
+control aliases; pointer drag, child capture, any-event motion, scrollback,
+selection, focus cancellation, resize, runtime scale changes, restore, and
+clean shutdown all cross the shared host boundary. A frame that cannot be
+presented clears app hit targets and suppresses pointer input until the next
+successful present.
 
 A native shell may own a window, platform wake handle, DPI/IME state,
 clipboard integration, GPU surface/device resources, glyph caches, and paint
@@ -270,10 +277,10 @@ scheduling. It may not own a second PTY/parser path, command router, approval
 model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
-Phase 3 is underway. Its layout/composition and content/style capability
-families are complete; input/lifecycle parity remains. Artifact Preview is the
-next dedicated product-capability phase, before hardening, measurement,
-production GPU admission, or rollout.
+Phase 3 is complete across layout/composition, content/style, and
+input/lifecycle capability families. Artifact Preview is the exact next
+dedicated product-capability phase, before hardening, measurement, production
+GPU admission, or rollout.
 
 ### `workflows`
 

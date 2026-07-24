@@ -40,16 +40,23 @@ engine-side crate, so parser types cannot leak past this interface.
 Frontend adapters emit neutral `scene::input::Key` values. After explicit
 workspace chords are resolved, `crates/app/src/input.rs` encodes the remaining
 keys for the focused child under the `TERM=xterm-256color` contract used by
-terminal and task runtimes. This includes plain Tab (`HT`) and Shift+Tab /
-BackTab (`CSI Z`). Frontend differences are normalized at this seam: crossterm
-reports Shift+Tab as BackTab with the Shift modifier, while another adapter may
-emit Tab with Shift.
+terminal and task runtimes. The baseline covers characters, the complete
+conventional ASCII control family and numeric/punctuation aliases, Enter,
+Backspace, Tab/BackTab, navigation/editing keys, and F1-F24. Alt prefixes
+character/control and one-byte families as Meta; CSI/SS3 families carry
+Shift/Alt/Control in xterm modifier parameters. Frontend differences are
+normalized at this seam: crossterm reports Shift+Tab as BackTab with the Shift
+modifier, while another adapter may emit Tab with Shift. BackTab's inherent
+Shift is not double-counted, while additional Alt/Control modifiers remain
+distinguishable.
 
 Mode-dependent or negotiated keyboard extensions such as modifyOtherKeys or
 CSI-u require an explicit terminal capability before they can be claimed; the
 baseline encoder must not invent them. Explicit workspace-control chords are
 resolved before byte encoding, preserving L5 without shadowing configured
-commands.
+commands. An unbound platform Super chord is dropped rather than leaking its
+character into the child; native Command+C/Command+V fallbacks run only after
+that configurable chord preflight.
 
 ## Optional Backends
 

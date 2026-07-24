@@ -2159,8 +2159,9 @@ Consequences:
   instructions, or more than 4,096 retained row buffers;
 - these are adapter resource limits, not product layout meaning;
 - `./ci/gpu-spike.sh` now includes warnings-denied all-target clippy;
-- input/lifecycle parity is the next Phase 3 family; wide/grapheme production
-  and IME remain Phase 5, and production GPU admission remains blocked.
+- input/lifecycle parity was the next Phase 3 family and is completed by the
+  following decision; wide/grapheme production and IME remain Phase 5, and
+  production GPU admission remains blocked.
 
 Verification: focused RED/GREEN tracers cover terminal style/selection/cursor,
 mixed pane content, every overlay, final-cell opacity, narrow pane/overlay
@@ -2172,3 +2173,48 @@ unbounded replacement storage, degenerate-border leakage, contradictory
 selection state, and missing spike clippy coverage. The exact automated and
 displayed evidence is recorded in `docs/verification.md`; `./ci/gate.sh`
 remains the final completion gate.
+
+## Accepted: Native Input And Lifecycle Stay Behind FrontendHost
+
+Status: accepted (2026-07-23)
+
+Decision: Phase 3 input/lifecycle parity uses the existing `FrontendHost` as
+the only product boundary. The winit shell translates platform key, pointer,
+focus, geometry, and clipboard events, owns pressed-button and surface/scale
+state, and schedules paint. Configurable command resolution, terminal byte
+encoding, selection/scrollback, runtime restore/reconciliation, and shutdown
+remain in app/runtime layers.
+
+Native Command+C and Command+V are exact platform fallbacks only after the
+configured workspace keymap has first refusal. The shared terminal encoder
+owns the baseline `xterm-256color` key/modifier/control families. Focus or
+geometry transitions cancel workspace gestures and release a child mouse
+capture before stale coordinates are discarded. A native frame that cannot be
+presented clears shared hit targets and suppresses pointer input until a valid
+frame presents. Renderer-neutral float layout preserves a 3x3 bordered area
+whenever the workspace has room, including after restore or shrink.
+
+Rationale: native conventions belong at the platform edge, but duplicating
+command routing, terminal semantics, selection, recovery, or runtime ownership
+would recreate the parallel-product failure Phase 2 removed. Interaction must
+also resolve against what the user actually saw, never a rejected or
+geometry-stale frame.
+
+Consequences:
+
+- exact native clipboard conventions remain configurable-chord-safe;
+- unbound Super chords do not leak into child terminals;
+- Alt-as-Meta and the baseline modified-key/control families are frontend
+  neutral, while advanced IME/dead-key/grapheme behavior remains Phase 5;
+- child any-event motion, button capture, scrollback, selection, focus
+  cancellation, resize, scale, restore, and idempotent shutdown use the real
+  host;
+- the spike-only bounded scale tracer exercises the same transition as
+  `ScaleFactorChanged` without changing system display settings;
+- Artifact Preview is the exact next capability family; production GPU
+  dependencies and release admission remain blocked.
+
+Verification: focused tests, the aggregate multi-agent review, the 39-test GPU
+matrix, the displayed macOS release matrix, the standing terminal latency and
+idle-CPU procedure, and the post-documentation merge gate are recorded in
+`docs/verification.md`.

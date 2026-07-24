@@ -14,7 +14,7 @@ use std::{
 use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
 use mandatum_gpu_renderer_spike::{GpuText, SceneCompileError};
 use mandatum_scene::{
-    SceneSize,
+    SceneSize, WorkspaceScene,
     input::{
         InputEvent, Key as InputKey, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind,
     },
@@ -25,6 +25,7 @@ use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
+    platform::modifier_supplement::KeyEventExtModifierSupplement,
     window::{Window, WindowId},
 };
 
@@ -39,6 +40,8 @@ struct Config {
     exit_after: Option<f64>,
     typing_bench: bool,
     flood: bool,
+    scale_after: Option<f64>,
+    scale_factor: f32,
 }
 
 fn parse_config() -> Config {
@@ -46,6 +49,8 @@ fn parse_config() -> Config {
         exit_after: None,
         typing_bench: false,
         flood: false,
+        scale_after: None,
+        scale_factor: 1.5,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -55,10 +60,33 @@ fn parse_config() -> Config {
             }
             "--typing-bench" => config.typing_bench = true,
             "--flood" => config.flood = true,
+            "--scale-after" => {
+                config.scale_after = args.next().and_then(|value| parse_scale_delay(&value));
+            }
+            "--scale-factor" => {
+                config.scale_factor = args
+                    .next()
+                    .and_then(|value| parse_scale_factor(&value))
+                    .unwrap_or(config.scale_factor);
+            }
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
     config
+}
+
+fn parse_scale_delay(value: &str) -> Option<f64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && (0.0..=3600.0).contains(seconds))
+}
+
+fn parse_scale_factor(value: &str) -> Option<f32> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|scale| scale.is_finite() && (0.25..=8.0).contains(scale))
 }
 
 #[derive(Debug)]
@@ -68,8 +96,53 @@ enum UserEvent {
 
 enum PlatformAction {
     Input(InputEvent),
-    Paste,
+    PasteShortcut(InputKey),
+    CopyShortcut(InputKey),
     Ignore,
+}
+
+#[derive(Default)]
+struct PressedPointerButtons {
+    left: bool,
+    middle: bool,
+    right: bool,
+}
+
+impl PressedPointerButtons {
+    fn set(&mut self, button: PointerButton, pressed: bool) {
+        match button {
+            PointerButton::Left => self.left = pressed,
+            PointerButton::Middle => self.middle = pressed,
+            PointerButton::Right => self.right = pressed,
+        }
+    }
+
+    fn active(&self) -> Option<PointerButton> {
+        if self.left {
+            Some(PointerButton::Left)
+        } else if self.middle {
+            Some(PointerButton::Middle)
+        } else if self.right {
+            Some(PointerButton::Right)
+        } else {
+            None
+        }
+    }
+
+    fn all(&self) -> Vec<PointerButton> {
+        [
+            (self.left, PointerButton::Left),
+            (self.middle, PointerButton::Middle),
+            (self.right, PointerButton::Right),
+        ]
+        .into_iter()
+        .filter_map(|(pressed, button)| pressed.then_some(button))
+        .collect()
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 struct App {
@@ -96,25 +169,38 @@ struct App {
     next_inject: Instant,
     inject_letter: u8,
     modifiers: ModifiersState,
+    mouse_pixels: Option<(f64, f64)>,
     mouse_cell: (u16, u16),
+    pressed_pointer_buttons: PressedPointerButtons,
+    wheel_cell_remainder: (f64, f64),
+    scene_presentable: bool,
+    scale_probe_at: Option<Instant>,
+    scale_probe_applied: bool,
 }
 
 impl App {
-    fn new(config: Config, proxy: EventLoopProxy<UserEvent>, mut app_config: AppConfig) -> Self {
-        // Phase 2 proves one fresh terminal slice. Full restore/overlay parity
-        // remains a Phase 3 concern, but the real host still owns the policy.
-        app_config.restore_on_startup = false;
+    fn new(config: Config, proxy: EventLoopProxy<UserEvent>, app_config: AppConfig) -> Self {
         let wake_proxy = proxy.clone();
-        let host = FrontendHost::new_with_wake_callback(app_config, move || {
+        let mut host = FrontendHost::new_with_wake_callback(app_config, move || {
             let _ = wake_proxy.send_event(UserEvent::Wake);
         });
         let now = Instant::now();
+        let scale_probe_at = config
+            .scale_after
+            .map(|seconds| now + Duration::from_secs_f64(seconds));
+        let clipboard = match arboard::Clipboard::new() {
+            Ok(clipboard) => Some(clipboard),
+            Err(error) => {
+                host.report_platform_error(format!("clipboard unavailable: {error}"));
+                None
+            }
+        };
         Self {
             config,
             host,
             window: None,
             gpu: None,
-            clipboard: arboard::Clipboard::new().ok(),
+            clipboard,
             input_to_present: Samples::new(),
             frame_ms: Samples::new(),
             pending_inputs: VecDeque::new(),
@@ -130,7 +216,13 @@ impl App {
             next_inject: now,
             inject_letter: b'a',
             modifiers: ModifiersState::empty(),
+            mouse_pixels: None,
             mouse_cell: (0, 0),
+            pressed_pointer_buttons: PressedPointerButtons::default(),
+            wheel_cell_remainder: (0.0, 0.0),
+            scene_presentable: false,
+            scale_probe_at,
+            scale_probe_applied: false,
         }
     }
 
@@ -143,16 +235,25 @@ impl App {
     fn scene_size(&self) -> Option<SceneSize> {
         let gpu = self.gpu.as_ref()?;
         let (width, height) = gpu.surface_size();
-        Some(SceneSize::new(
-            ((width as f32 / gpu.cell_w()).floor() as u16).max(1),
-            ((height as f32 / gpu.cell_h()).floor() as u16).max(1),
-        ))
+        scene_size_from_metrics(width, height, gpu.cell_w(), gpu.cell_h())
     }
 
     fn resize_host(&mut self) {
         if let Some(size) = self.scene_size() {
             self.host.handle_input(InputEvent::Resize(size));
         }
+    }
+
+    fn apply_scale_factor(&mut self, scale_factor: f32) {
+        self.scene_presentable = false;
+        self.cancel_pointer_gesture();
+        self.host.suspend_scene_interaction();
+        if let Some(gpu) = &mut self.gpu {
+            gpu.set_scale(scale_factor);
+        }
+        self.refresh_mouse_cell();
+        self.resize_host();
+        self.request_redraw();
     }
 
     fn send_input(&mut self, input: InputEvent, measured: bool, at: Instant) {
@@ -173,7 +274,13 @@ impl App {
             match effect {
                 FrontendEffect::SetClipboard(text) => {
                     if let Some(clipboard) = &mut self.clipboard {
-                        let _ = clipboard.set_text(text);
+                        if let Err(error) = clipboard.set_text(text) {
+                            self.host
+                                .report_platform_error(format!("clipboard write failed: {error}"));
+                        }
+                    } else {
+                        self.host
+                            .report_platform_error("clipboard write failed: clipboard unavailable");
                     }
                 }
             }
@@ -190,14 +297,21 @@ impl App {
     }
 
     fn render_frame(&mut self) -> Result<(), SceneCompileError> {
+        self.scene_presentable = false;
         let Some(size) = self.scene_size() else {
+            self.host.suspend_scene_interaction();
             return Ok(());
         };
         let snapshot = self.host.frame(size);
+        if scene_is_suspended_by_tiled_minimum(&snapshot.scene) {
+            self.host.suspend_scene_interaction();
+            return Ok(());
+        }
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(());
         };
         if let Some(present) = gpu.render(&snapshot.scene, &snapshot.theme)? {
+            self.scene_presentable = true;
             if let Some(last) = self.last_present {
                 let frame_ms = present.duration_since(last).as_secs_f64() * 1000.0;
                 if frame_ms < IDLE_FRAME_CUTOFF_MS {
@@ -212,6 +326,8 @@ impl App {
                 }
                 self.dirty_from_runtime = false;
             }
+        } else {
+            self.host.suspend_scene_interaction();
         }
         Ok(())
     }
@@ -249,9 +365,10 @@ impl App {
             return;
         }
         let mut notes = format!(
-            "host=FrontendHost present=Fifo(vsync) typing_bench={} flood={} input_samples={} frame_samples={}",
+            "host=FrontendHost present=Fifo(vsync) typing_bench={} flood={} scale_probe_applied={} input_samples={} frame_samples={}",
             self.config.typing_bench,
             self.config.flood,
+            self.scale_probe_applied,
             self.input_to_present.len(),
             self.frame_ms.len(),
         );
@@ -287,6 +404,7 @@ impl App {
     }
 
     fn update_mouse_cell(&mut self, x: f64, y: f64) {
+        self.mouse_pixels = Some((x, y));
         let Some(gpu) = &self.gpu else {
             return;
         };
@@ -301,7 +419,21 @@ impl App {
         );
     }
 
+    fn refresh_mouse_cell(&mut self) {
+        if let Some((x, y)) = self.mouse_pixels {
+            self.update_mouse_cell(x, y);
+        }
+    }
+
     fn pointer_input(&mut self, kind: PointerKind, button: Option<PointerButton>) {
+        if !self.scene_presentable || self.scene_size().is_none() {
+            return;
+        }
+        self.send_pointer_input(kind, button);
+    }
+
+    fn send_pointer_input(&mut self, kind: PointerKind, button: Option<PointerButton>) {
+        let redraw = kind != PointerKind::Move || self.host.pointer_move_needs_redraw();
         let (column, row) = self.mouse_cell;
         let input = InputEvent::Pointer(PointerEvent {
             kind,
@@ -310,7 +442,82 @@ impl App {
             row,
             mods: neutral_modifiers(self.modifiers),
         });
+        self.host.handle_input(input);
+        self.apply_effects();
+        if redraw {
+            self.request_redraw();
+        }
+    }
+
+    fn pointer_motion(&mut self) {
+        match self.pressed_pointer_buttons.active() {
+            Some(button) => self.pointer_input(PointerKind::Drag, Some(button)),
+            None => self.pointer_input(PointerKind::Move, None),
+        }
+    }
+
+    fn pointer_button(&mut self, state: ElementState, button: PointerButton) {
+        match state {
+            ElementState::Pressed => {
+                if self.pressed_pointer_buttons.active().is_some() {
+                    return;
+                }
+                self.pressed_pointer_buttons.set(button, true);
+                self.pointer_input(PointerKind::Down, Some(button));
+            }
+            ElementState::Released => {
+                if self.pressed_pointer_buttons.all().contains(&button) {
+                    self.send_pointer_input(PointerKind::Up, Some(button));
+                    self.pressed_pointer_buttons.set(button, false);
+                }
+            }
+        }
+    }
+
+    fn pointer_wheel(&mut self, delta: MouseScrollDelta) {
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let (dx, dy) = match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                self.wheel_cell_remainder = (0.0, 0.0);
+                ((-x).round() as i16, (-y).round() as i16)
+            }
+            MouseScrollDelta::PixelDelta(position) => {
+                self.wheel_cell_remainder.0 += -position.x / f64::from(gpu.cell_w());
+                self.wheel_cell_remainder.1 += -position.y / f64::from(gpu.cell_h());
+                let dx = self.wheel_cell_remainder.0.trunc();
+                let dy = self.wheel_cell_remainder.1.trunc();
+                self.wheel_cell_remainder.0 -= dx;
+                self.wheel_cell_remainder.1 -= dy;
+                (dx as i16, dy as i16)
+            }
+        };
+        if dx != 0 {
+            self.pointer_input(PointerKind::Wheel { dx, dy: 0 }, None);
+        }
+        if dy != 0 {
+            self.pointer_input(PointerKind::Wheel { dx: 0, dy }, None);
+        }
+    }
+
+    fn focus_changed(&mut self, focused: bool) {
+        if !focused {
+            self.pressed_pointer_buttons.clear();
+            self.modifiers = ModifiersState::empty();
+            self.wheel_cell_remainder = (0.0, 0.0);
+        }
+        let input = if focused {
+            InputEvent::FocusGained
+        } else {
+            InputEvent::FocusLost
+        };
         self.send_input(input, false, Instant::now());
+    }
+
+    fn cancel_pointer_gesture(&mut self) {
+        self.pressed_pointer_buttons.clear();
+        self.host.cancel_pointer_gesture();
     }
 }
 
@@ -392,23 +599,28 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Resized(size) => {
+                self.scene_presentable = false;
+                self.cancel_pointer_gesture();
+                self.host.suspend_scene_interaction();
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize_surface(size.width, size.height);
                 }
+                self.refresh_mouse_cell();
                 self.resize_host();
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.set_scale(scale_factor as f32);
-                }
-                self.resize_host();
-                self.request_redraw();
+                self.apply_scale_factor(scale_factor as f32);
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let now = Instant::now();
-                match translate_key(&event.logical_key, self.modifiers) {
+                let key = key_for_platform_translation(
+                    &event.logical_key,
+                    &event.key_without_modifiers(),
+                    self.modifiers,
+                );
+                match translate_key(&key, self.modifiers) {
                     PlatformAction::Input(input) => {
                         let measured = matches!(
                             input,
@@ -424,11 +636,33 @@ impl ApplicationHandler<UserEvent> for App {
                         );
                         self.send_input(input, measured, now);
                     }
-                    PlatformAction::Paste => {
-                        if let Some(clipboard) = &mut self.clipboard
-                            && let Ok(text) = clipboard.get_text()
-                        {
-                            self.send_input(InputEvent::Paste(text), false, now);
+                    PlatformAction::PasteShortcut(shortcut) => {
+                        if self.host.handles_workspace_key(shortcut) {
+                            self.send_input(InputEvent::Key(shortcut), false, now);
+                        } else if let Some(clipboard) = &mut self.clipboard {
+                            match clipboard.get_text() {
+                                Ok(text) => {
+                                    self.send_input(InputEvent::Paste(text), false, now);
+                                }
+                                Err(error) => self.host.report_platform_error(format!(
+                                    "clipboard read failed: {error}"
+                                )),
+                            }
+                            self.request_redraw();
+                        } else {
+                            self.host.report_platform_error(
+                                "clipboard read failed: clipboard unavailable",
+                            );
+                            self.request_redraw();
+                        }
+                    }
+                    PlatformAction::CopyShortcut(shortcut) => {
+                        if self.host.handles_workspace_key(shortcut) {
+                            self.send_input(InputEvent::Key(shortcut), false, now);
+                        } else {
+                            self.host.copy_selection();
+                            self.apply_effects();
+                            self.request_redraw();
                         }
                     }
                     PlatformAction::Ignore => {}
@@ -437,41 +671,29 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.update_mouse_cell(position.x, position.y);
-                self.pointer_input(PointerKind::Move, None);
+                self.pointer_motion();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(button) = neutral_button(button) {
-                    let kind = match state {
-                        ElementState::Pressed => PointerKind::Down,
-                        ElementState::Released => PointerKind::Up,
-                    };
-                    self.pointer_input(kind, Some(button));
+                    self.pointer_button(state, button);
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let dy = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -(y * 3.0).round() as i16,
-                    MouseScrollDelta::PixelDelta(position) => {
-                        let cell_height = self.gpu.as_ref().map_or(16.0, |gpu| gpu.cell_h());
-                        -(position.y / f64::from(cell_height)).round() as i16
-                    }
-                };
-                if dy != 0 {
-                    self.pointer_input(PointerKind::Wheel { dx: 0, dy }, None);
-                }
-            }
-            WindowEvent::Focused(true) => {
-                self.send_input(InputEvent::FocusGained, false, Instant::now());
-            }
-            WindowEvent::Focused(false) => {
-                self.send_input(InputEvent::FocusLost, false, Instant::now());
-            }
+            WindowEvent::MouseWheel { delta, .. } => self.pointer_wheel(delta),
+            WindowEvent::Focused(focused) => self.focus_changed(focused),
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        if self
+            .scale_probe_at
+            .is_some_and(|scale_probe_at| now >= scale_probe_at)
+        {
+            self.scale_probe_at = None;
+            self.scale_probe_applied = true;
+            self.apply_scale_factor(self.config.scale_factor);
+        }
         if self.deadline.is_some_and(|deadline| now >= deadline) {
             self.host.shutdown();
             self.print_summary();
@@ -488,6 +710,9 @@ impl ApplicationHandler<UserEvent> for App {
         let mut next = self.deadline.map_or(self.next_heartbeat, |deadline| {
             deadline.min(self.next_heartbeat)
         });
+        if let Some(scale_probe_at) = self.scale_probe_at {
+            next = next.min(scale_probe_at);
+        }
         if self.config.typing_bench && self.injected < INJECT_TOTAL {
             next = next.min(self.next_inject);
         }
@@ -518,18 +743,51 @@ fn neutral_button(button: MouseButton) -> Option<PointerButton> {
     }
 }
 
+fn scene_size_from_metrics(
+    width: u32,
+    height: u32,
+    cell_width: f32,
+    cell_height: f32,
+) -> Option<SceneSize> {
+    if !cell_width.is_finite()
+        || !cell_height.is_finite()
+        || cell_width <= 0.0
+        || cell_height <= 0.0
+    {
+        return None;
+    }
+    let columns = (width as f32 / cell_width).floor() as u16;
+    let rows = (height as f32 / cell_height).floor() as u16;
+    // One pane needs a 3x3 bordered interior between the one-row header and
+    // status strips. Suspend scene production while a minimized/tiny window
+    // cannot satisfy that structural contract.
+    (columns >= 3 && rows >= 5).then(|| SceneSize::new(columns, rows))
+}
+
 fn translate_key(key: &Key, modifiers: ModifiersState) -> PlatformAction {
     let mods = neutral_modifiers(modifiers);
-    if mods.super_key && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("v")) {
-        return PlatformAction::Paste;
+    let exact_platform_shortcut = mods.super_key && !mods.shift && !mods.control && !mods.alt;
+    if exact_platform_shortcut
+        && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("v"))
+    {
+        return PlatformAction::PasteShortcut(InputKey::new(KeyCode::Char('v'), mods));
     }
-    if mods.super_key && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("c")) {
-        return PlatformAction::Ignore;
+    if exact_platform_shortcut
+        && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("c"))
+    {
+        return PlatformAction::CopyShortcut(InputKey::new(KeyCode::Char('c'), mods));
     }
 
     let code = match key {
         Key::Named(named) => named_key_code(*named, mods.shift),
-        Key::Character(value) => value.chars().next().map(KeyCode::Char),
+        Key::Character(value) => value.chars().next().map(|character| {
+            let character = if mods.shift && character.is_ascii_lowercase() {
+                character.to_ascii_uppercase()
+            } else {
+                character
+            };
+            KeyCode::Char(character)
+        }),
         _ => None,
     };
     code.map_or(PlatformAction::Ignore, |code| {
@@ -566,12 +824,99 @@ fn named_key_code(key: NamedKey, shift: bool) -> Option<KeyCode> {
         NamedKey::F10 => KeyCode::Function(10),
         NamedKey::F11 => KeyCode::Function(11),
         NamedKey::F12 => KeyCode::Function(12),
+        NamedKey::F13 => KeyCode::Function(13),
+        NamedKey::F14 => KeyCode::Function(14),
+        NamedKey::F15 => KeyCode::Function(15),
+        NamedKey::F16 => KeyCode::Function(16),
+        NamedKey::F17 => KeyCode::Function(17),
+        NamedKey::F18 => KeyCode::Function(18),
+        NamedKey::F19 => KeyCode::Function(19),
+        NamedKey::F20 => KeyCode::Function(20),
+        NamedKey::F21 => KeyCode::Function(21),
+        NamedKey::F22 => KeyCode::Function(22),
+        NamedKey::F23 => KeyCode::Function(23),
+        NamedKey::F24 => KeyCode::Function(24),
         _ => return None,
     })
 }
 
 fn run_exit_code(fatal_error: Option<&str>) -> i32 {
     if fatal_error.is_some() { 2 } else { 0 }
+}
+
+fn scene_is_suspended_by_tiled_minimum(scene: &WorkspaceScene) -> bool {
+    scene.panes.iter().any(|pane| {
+        pane_geometry_is_suspended(
+            pane.floating,
+            pane.area.width,
+            pane.area.height,
+            scene.size.width,
+            scene.size.height,
+        )
+    })
+}
+
+fn pane_geometry_is_suspended(
+    floating: bool,
+    pane_width: u16,
+    pane_height: u16,
+    frame_width: u16,
+    frame_height: u16,
+) -> bool {
+    let unusable = pane_width < 3 || pane_height < 3;
+    unusable && (!floating || frame_width < 11 || frame_height < 9)
+}
+
+fn key_for_platform_translation(
+    logical: &Key,
+    without_modifiers: &Key,
+    modifiers: ModifiersState,
+) -> Key {
+    if !(modifiers.alt_key() || modifiers.super_key()) {
+        return logical.clone();
+    }
+    if !modifiers.shift_key() {
+        return without_modifiers.clone();
+    }
+    // winit exposes a fully modified logical key and a key with every
+    // modifier removed, but no "remove Option, preserve Shift" value. Rebuild
+    // the xterm ASCII Shift layer here so macOS Option remains Meta instead of
+    // producing alternate/dead characters. Non-ASCII composition stays Phase 5.
+    match without_modifiers {
+        Key::Character(value) => {
+            let shifted: String = value.chars().map(shift_meta_character).collect();
+            Key::Character(shifted.into())
+        }
+        _ => without_modifiers.clone(),
+    }
+}
+
+fn shift_meta_character(character: char) -> char {
+    match character {
+        '`' => '~',
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        ascii if ascii.is_ascii_lowercase() => ascii.to_ascii_uppercase(),
+        other => other,
+    }
 }
 
 fn main() {
@@ -615,6 +960,9 @@ fn main() {
     if let Err(error) = event_loop.run_app(&mut app) {
         app.fatal_error = Some(format!("event loop error: {error}"));
     }
+    // `process::exit` skips Drop, so finalize explicitly before deriving a
+    // nonzero process status from any recoverable event-loop failure.
+    app.host.shutdown();
     app.print_summary();
     let exit_code = run_exit_code(app.fatal_error.as_deref());
     if exit_code != 0 {
@@ -624,9 +972,13 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_exit_code, translate_key};
+    use super::{
+        PlatformAction, PressedPointerButtons, key_for_platform_translation,
+        pane_geometry_is_suspended, parse_scale_delay, parse_scale_factor, run_exit_code,
+        scene_size_from_metrics, translate_key,
+    };
     use mandatum_scene::input::{InputEvent, Key as InputKey, KeyCode, Modifiers};
-    use winit::keyboard::{Key, ModifiersState};
+    use winit::keyboard::{Key, ModifiersState, NamedKey};
 
     #[test]
     fn winit_key_is_neutral_before_it_reaches_the_host() {
@@ -645,5 +997,167 @@ mod tests {
     fn fatal_runs_return_nonzero_and_clean_runs_return_zero() {
         assert_eq!(run_exit_code(Some("unsupported scene")), 2);
         assert_eq!(run_exit_code(None), 0);
+        assert_eq!(parse_scale_delay("2"), Some(2.0));
+        assert_eq!(parse_scale_delay("-1"), None);
+        assert_eq!(parse_scale_delay("NaN"), None);
+        assert_eq!(parse_scale_factor("1.5"), Some(1.5));
+        assert_eq!(parse_scale_factor("0"), None);
+        assert_eq!(parse_scale_factor("inf"), None);
+    }
+
+    #[test]
+    fn native_key_translation_covers_backtab_alt_super_and_extended_functions() {
+        let cases = [
+            (
+                Key::Named(NamedKey::Tab),
+                ModifiersState::SHIFT,
+                InputKey::new(
+                    KeyCode::BackTab,
+                    Modifiers {
+                        shift: true,
+                        ..Modifiers::NONE
+                    },
+                ),
+            ),
+            (
+                Key::Character("x".into()),
+                ModifiersState::ALT,
+                InputKey::new(KeyCode::Char('x'), Modifiers::ALT),
+            ),
+            (
+                Key::Character("x".into()),
+                ModifiersState::ALT | ModifiersState::SHIFT,
+                InputKey::new(
+                    KeyCode::Char('X'),
+                    Modifiers {
+                        alt: true,
+                        shift: true,
+                        ..Modifiers::NONE
+                    },
+                ),
+            ),
+            (
+                Key::Character("!".into()),
+                ModifiersState::ALT | ModifiersState::SHIFT,
+                InputKey::new(
+                    KeyCode::Char('!'),
+                    Modifiers {
+                        alt: true,
+                        shift: true,
+                        ..Modifiers::NONE
+                    },
+                ),
+            ),
+            (
+                Key::Named(NamedKey::F24),
+                ModifiersState::empty(),
+                InputKey::plain(KeyCode::Function(24)),
+            ),
+        ];
+        for (platform, modifiers, expected) in cases {
+            let PlatformAction::Input(InputEvent::Key(actual)) =
+                translate_key(&platform, modifiers)
+            else {
+                panic!("native key did not become neutral input");
+            };
+            assert_eq!(actual, expected);
+        }
+
+        let PlatformAction::PasteShortcut(shortcut) =
+            translate_key(&Key::Character("v".into()), ModifiersState::SUPER)
+        else {
+            panic!("Command+V did not retain its neutral key for chord preflight");
+        };
+        assert_eq!(
+            shortcut,
+            InputKey::new(
+                KeyCode::Char('v'),
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                }
+            )
+        );
+
+        let PlatformAction::Input(InputEvent::Key(modified_super)) = translate_key(
+            &Key::Character("C".into()),
+            ModifiersState::SUPER | ModifiersState::SHIFT,
+        ) else {
+            panic!("modified Command+C incorrectly used the native copy fallback");
+        };
+        assert_eq!(
+            modified_super,
+            InputKey::new(
+                KeyCode::Char('C'),
+                Modifiers {
+                    shift: true,
+                    super_key: true,
+                    ..Modifiers::NONE
+                }
+            )
+        );
+
+        assert_eq!(
+            key_for_platform_translation(
+                &Key::Character("¡".into()),
+                &Key::Character("1".into()),
+                ModifiersState::ALT | ModifiersState::SHIFT,
+            ),
+            Key::Character("!".into())
+        );
+
+        let PlatformAction::CopyShortcut(shortcut) =
+            translate_key(&Key::Character("c".into()), ModifiersState::SUPER)
+        else {
+            panic!("Command+C did not retain its neutral key for chord preflight");
+        };
+        assert_eq!(
+            shortcut,
+            InputKey::new(
+                KeyCode::Char('c'),
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn pressed_pointer_state_distinguishes_drag_from_motion_and_resets() {
+        let mut buttons = PressedPointerButtons::default();
+        assert_eq!(buttons.active(), None);
+        buttons.set(mandatum_scene::input::PointerButton::Left, true);
+        assert_eq!(
+            buttons.active(),
+            Some(mandatum_scene::input::PointerButton::Left)
+        );
+        buttons.set(mandatum_scene::input::PointerButton::Left, false);
+        assert_eq!(buttons.active(), None);
+        buttons.set(mandatum_scene::input::PointerButton::Right, true);
+        assert_eq!(
+            buttons.all(),
+            vec![mandatum_scene::input::PointerButton::Right]
+        );
+        buttons.clear();
+        assert_eq!(buttons.active(), None);
+    }
+
+    #[test]
+    fn pixel_metrics_suspend_tiny_frames_and_recompute_grid_after_scale() {
+        assert_eq!(
+            scene_size_from_metrics(800, 600, 10.0, 20.0),
+            Some(mandatum_scene::SceneSize::new(80, 30))
+        );
+        assert_eq!(
+            scene_size_from_metrics(800, 600, 20.0, 40.0),
+            Some(mandatum_scene::SceneSize::new(40, 15))
+        );
+        assert_eq!(scene_size_from_metrics(20, 40, 10.0, 20.0), None);
+        assert_eq!(scene_size_from_metrics(800, 600, 0.0, 20.0), None);
+        assert!(pane_geometry_is_suspended(false, 2, 3, 80, 24));
+        assert!(!pane_geometry_is_suspended(false, 3, 3, 80, 24));
+        assert!(pane_geometry_is_suspended(true, 2, 3, 10, 8));
+        assert!(!pane_geometry_is_suspended(true, 2, 3, 80, 24));
     }
 }

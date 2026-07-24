@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mandatum_app::{AppConfig, FrontendHost};
+use mandatum_app::{AppConfig, FrameSnapshot, FrontendEffect, FrontendHost};
 use mandatum_gpu_renderer_spike::{PreparedScene, prepare_scene};
 use mandatum_scene::{
     CellOccupancy, CellSelection, HitTargetKind, OverlayScene, PaneContent, SceneRect, SceneSize,
@@ -18,6 +18,43 @@ use mandatum_scene::{
 fn dispatch_palette_command(host: &mut FrontendHost, key: char) {
     host.handle_input(InputEvent::Key(Key::ctrl('p')));
     host.handle_input(InputEvent::Key(Key::plain(KeyCode::Char(key))));
+}
+
+fn wait_for_frame(
+    host: &mut FrontendHost,
+    wake_rx: &mpsc::Receiver<()>,
+    size: SceneSize,
+    predicate: impl Fn(&FrameSnapshot) -> bool,
+) -> FrameSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if wake_rx.recv_timeout(Duration::from_millis(20)).is_ok() {
+            while host.drain_runtime() > 0 {}
+        }
+        host.heartbeat();
+        let snapshot = host.frame(size);
+        if predicate(&snapshot) {
+            return snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "real host did not reach the expected frame before the deadline"
+        );
+    }
+}
+
+fn terminal_pane(
+    snapshot: &FrameSnapshot,
+) -> (&mandatum_scene::PaneScene, &mandatum_scene::TerminalSurface) {
+    snapshot
+        .scene
+        .panes
+        .iter()
+        .find_map(|pane| match &pane.content {
+            PaneContent::Terminal(surface) => Some((pane, surface)),
+            _ => None,
+        })
+        .expect("real host frame did not contain a terminal pane")
 }
 
 fn assert_scene_reaches_cell_program(prepared: &PreparedScene, scene: &WorkspaceScene) {
@@ -510,7 +547,7 @@ fn real_host_two_pane_floating_empty_layout_reaches_the_gpu_render_plan() {
 }
 
 #[test]
-fn real_host_default_float_resize_enforces_usable_pane_interiors() {
+fn real_host_default_float_resize_preserves_usable_pane_interiors() {
     let mut host = FrontendHost::new(AppConfig {
         spawn_pty: false,
         ..AppConfig::default()
@@ -536,9 +573,14 @@ fn real_host_default_float_resize_enforces_usable_pane_interiors() {
         host.handle_input(InputEvent::Resize(below_minimum));
         let below_snapshot = host.frame(below_minimum);
         assert!(
-            prepare_scene(&below_snapshot.scene, &below_snapshot.theme).is_err(),
-            "GPU renderer admitted an unusable default float at {below_minimum:?}"
+            below_snapshot
+                .scene
+                .panes
+                .iter()
+                .all(|pane| pane.area.width >= 3 && pane.area.height >= 3)
         );
+        prepare_scene(&below_snapshot.scene, &below_snapshot.theme)
+            .expect("GPU renderer rejected a float normalized after shrink");
     }
 }
 
@@ -1146,4 +1188,201 @@ fn real_host_agent_pane_reaches_the_gpu_render_plan() {
         "objective: Inspect AGENT_PLAN_OK",
     );
     assert_focused_pane_title_style(&prepared, pane);
+}
+
+#[test]
+fn real_host_pointer_selection_copy_and_wheel_scrollback_reach_the_gpu_boundary() {
+    let project = DisposableProject::new("pointer-lifecycle");
+    let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    let mut host = FrontendHost::new_with_wake_callback(
+        AppConfig {
+            project_path: project.path.clone(),
+            workspace_file: project.path.join("workspace.json"),
+            shell_program: "/bin/sh".to_owned(),
+            spawn_pty: true,
+            ..AppConfig::default()
+        },
+        move || {
+            let _ = wake_tx.try_send(());
+        },
+    );
+    let size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(size));
+    host.handle_input(InputEvent::Paste("echo SELECT_ME\r".to_owned()));
+
+    let snapshot = wait_for_frame(&mut host, &wake_rx, size, |snapshot| {
+        let (_, surface) = terminal_pane(snapshot);
+        surface.rows.iter().any(|row| {
+            let text = row.iter().map(|cell| cell.character).collect::<String>();
+            text.trim_end().ends_with("SELECT_ME") && !text.contains("echo")
+        })
+    });
+    let (pane, surface) = terminal_pane(&snapshot);
+    let inner = layout::pane_inner_rect(pane.area);
+    let (row, text) = surface
+        .rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, cells)| {
+            let text = cells.iter().map(|cell| cell.character).collect::<String>();
+            (text.trim_end().ends_with("SELECT_ME") && !text.contains("echo"))
+                .then_some((row, text))
+        })
+        .expect("printed selection marker was not visible");
+    let column = text.find("SELECT_ME").expect("selection marker column") as u16;
+    let start = (inner.x + column, inner.y + row as u16);
+    let pointer = |kind, column| {
+        InputEvent::Pointer(PointerEvent {
+            kind,
+            button: Some(PointerButton::Left),
+            column,
+            row: start.1,
+            mods: Modifiers::NONE,
+        })
+    };
+    host.handle_input(pointer(PointerKind::Down, start.0));
+    host.handle_input(pointer(PointerKind::Drag, start.0 + 8));
+    host.handle_input(pointer(PointerKind::Up, start.0 + 8));
+
+    let selected = host.frame(size);
+    let prepared = prepare_scene(&selected.scene, &selected.theme)
+        .expect("pointer selection did not prepare through the GPU boundary");
+    assert!(
+        prepared
+            .cell_program()
+            .cells()
+            .any(|(_, _, cell)| cell.selection == Some(CellSelection::Terminal)),
+        "pointer drag did not reach final selected cells"
+    );
+
+    host.copy_selection();
+    assert_eq!(
+        host.take_effects(),
+        vec![FrontendEffect::SetClipboard("SELECT_ME".to_owned())]
+    );
+    assert!(host.take_effects().is_empty());
+
+    host.handle_input(InputEvent::Paste(
+        "i=1; while [ $i -le 80 ]; do echo LINE_$i; i=$((i+1)); done\r".to_owned(),
+    ));
+    let scrolled_ready = wait_for_frame(&mut host, &wake_rx, size, |snapshot| {
+        terminal_pane(snapshot).1.scrollback_len > 10
+    });
+    let body = layout::pane_inner_rect(terminal_pane(&scrolled_ready).0.area);
+    let wheel = |dy| {
+        InputEvent::Pointer(PointerEvent {
+            kind: PointerKind::Wheel { dx: 0, dy },
+            button: None,
+            column: body.x,
+            row: body.y,
+            mods: Modifiers::NONE,
+        })
+    };
+    host.handle_input(wheel(-1));
+    let scrolled = host.frame(size);
+    assert_eq!(terminal_pane(&scrolled).1.scroll_offset, 3);
+    assert!(scrolled.scene.status.text.contains("scrollback"));
+    host.handle_input(wheel(1));
+    let live = host.frame(size);
+    assert_eq!(terminal_pane(&live).1.scroll_offset, 0);
+    assert!(live.scene.status.text.contains("following live output"));
+
+    assert!(host.shutdown());
+    assert!(!host.shutdown());
+}
+
+#[test]
+fn real_host_startup_restore_recreates_processes_then_resizes_and_quits_cleanly() {
+    let project = DisposableProject::new("startup-restore");
+    let workspace_file = project.path.join("workspace.json");
+    let size = SceneSize::new(80, 24);
+
+    let mut first = FrontendHost::new(AppConfig {
+        project_path: project.path.clone(),
+        workspace_file: workspace_file.clone(),
+        spawn_pty: false,
+        restore_on_startup: false,
+        ..AppConfig::default()
+    });
+    first.handle_input(InputEvent::Resize(size));
+    dispatch_palette_command(&mut first, 'v');
+    dispatch_palette_command(&mut first, 'w');
+    assert!(workspace_file.exists(), "workspace save did not reach disk");
+    assert_eq!(first.frame(size).scene.panes.len(), 2);
+    first.shutdown();
+
+    let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    let mut restored = FrontendHost::new_with_wake_callback(
+        AppConfig {
+            project_path: project.path.clone(),
+            workspace_file,
+            shell_program: "/bin/cat".to_owned(),
+            spawn_pty: true,
+            restore_on_startup: true,
+            ..AppConfig::default()
+        },
+        move || {
+            let _ = wake_tx.try_send(());
+        },
+    );
+    restored.handle_input(InputEvent::Resize(size));
+    let restored_frame = restored.frame(size);
+    assert_eq!(restored_frame.scene.panes.len(), 2);
+    assert_eq!(
+        restored_frame
+            .scene
+            .panes
+            .iter()
+            .filter(|pane| matches!(pane.content, PaneContent::Terminal(_)))
+            .count(),
+        2,
+        "startup restore did not recreate both terminal processes"
+    );
+    assert!(
+        restored_frame
+            .scene
+            .status
+            .text
+            .contains("workspace restored"),
+        "startup restore status was lost: {}",
+        restored_frame.scene.status.text
+    );
+
+    restored.handle_input(InputEvent::Paste("RESTORED_PROCESS_OK\n".to_owned()));
+    let echoed = wait_for_frame(&mut restored, &wake_rx, size, |snapshot| {
+        snapshot.scene.panes.iter().any(|pane| {
+            let PaneContent::Terminal(surface) = &pane.content else {
+                return false;
+            };
+            surface.rows.iter().any(|row| {
+                row.iter()
+                    .map(|cell| cell.character)
+                    .collect::<String>()
+                    .contains("RESTORED_PROCESS_OK")
+            })
+        })
+    });
+    assert_eq!(echoed.scene.panes.len(), 2);
+    assert_eq!(
+        echoed
+            .scene
+            .panes
+            .iter()
+            .filter(|pane| matches!(pane.content, PaneContent::Terminal(_)))
+            .count(),
+        2
+    );
+
+    let resized = SceneSize::new(100, 30);
+    restored.handle_input(InputEvent::Resize(resized));
+    let resized_frame = restored.frame(resized);
+    assert_eq!(resized_frame.scene.size, resized);
+    assert_eq!(resized_frame.scene.panes.len(), 2);
+    restored.handle_input(InputEvent::FocusLost);
+    restored.handle_input(InputEvent::FocusGained);
+    restored.handle_input(InputEvent::Key(Key::ctrl('q')));
+    assert!(restored.should_quit());
+    assert!(restored.shutdown());
+    assert!(!restored.shutdown());
+    assert_eq!(restored.drain_runtime(), 0);
 }

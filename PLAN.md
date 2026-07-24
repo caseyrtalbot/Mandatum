@@ -125,10 +125,16 @@ more useful without pretending the wider vision is finished:
   including semantic colors, all current style modifiers, terminal/item
   selection, cursor, opacity, and an explicit wide-continuation seam.
   `mandatum-scene` remains the sole owner of layout and presentation meaning.
-  Input/lifecycle parity is the next Phase 3 family. Artifact Preview then
-  becomes a dedicated product-capability phase before hardening, measurement,
-  admission, or release work. Production GPU dependencies and release
-  admission remain blocked.
+  Phase 3 input/lifecycle parity is complete too: the native shell preserves
+  configured workspace-chord precedence, complete xterm baseline key/modifier
+  encoding, native copy/paste, pointer drag/capture/passthrough, wheel
+  scrollback, focus/resize/scale transitions, startup restore, and idempotent
+  shutdown through `FrontendHost`. Tiny or unpresentable frames suspend pointer
+  interaction until a valid frame is presented, while malformed large
+  geometry remains visible as a fatal adapter error. Artifact Preview is now
+  the exact next dedicated product-capability phase before hardening,
+  measurement, admission, or release work. Production GPU dependencies and
+  release admission remain blocked.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.
