@@ -5,7 +5,7 @@
 //! session facts — never blank, never noisy.
 
 use mandatum_core::{AgentStatus, PaneId, PaneKind, Session};
-use mandatum_scene::{AttentionSegment, HeaderScene, SceneRect};
+use mandatum_scene::{AttentionSegment, HeaderScene, SceneRect, cell_program::display_width};
 
 use crate::app_state::AppState;
 
@@ -128,9 +128,9 @@ pub(crate) fn header_scene(state: &AppState, area: SceneRect) -> HeaderScene {
                 text.push_str(" ·");
             }
             text.push(' ');
-            let start = text.chars().count() as u16;
+            let start = u16::try_from(display_width(&text)).unwrap_or(u16::MAX);
             text.push_str(&item.label);
-            let width = item.label.chars().count() as u16;
+            let width = u16::try_from(display_width(&item.label)).unwrap_or(u16::MAX);
             let x = area.x.saturating_add(start);
             let clamped_width = width.min(area.right().saturating_sub(x));
             attention.push(AttentionSegment {
@@ -154,5 +154,18 @@ pub(crate) fn header_scene(state: &AppState, area: SceneRect) -> HeaderScene {
         connector_label: state.agent_connector_label().to_owned(),
         text,
         attention,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mandatum_scene::cell_program::display_width;
+
+    #[test]
+    fn unicode_header_prefix_and_attention_label_use_display_columns() {
+        let prefix = " 界e\u{301} | ";
+        let label = "👩\u{200d}💻 blocked";
+        assert_eq!(display_width(prefix), 7);
+        assert_eq!(display_width(label), 10);
     }
 }

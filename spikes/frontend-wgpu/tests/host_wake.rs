@@ -11,7 +11,10 @@ use mandatum_gpu_renderer_spike::{PreparedScene, prepare_scene};
 use mandatum_scene::{
     ArtifactState, CellOccupancy, CellSelection, HitTargetKind, OverlayScene, PaneContent,
     SceneRect, SceneSize, WorkspaceScene,
-    input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
+    input::{
+        CompositionEvent, InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent,
+        PointerKind, TextRange,
+    },
     layout,
 };
 
@@ -90,10 +93,16 @@ fn cell_program_text(prepared: &PreparedScene, area: SceneRect) -> String {
     let mut text = String::new();
     for y in area.y..area.bottom().min(program.size().height) {
         for x in area.x..area.right().min(program.size().width) {
-            text.push(match program.cell_at(x, y).map(|cell| cell.occupancy) {
-                Some(CellOccupancy::Glyph(character)) => character,
-                Some(CellOccupancy::WideContinuation) | None => ' ',
-            });
+            match program.cell_at(x, y).map(|cell| &cell.occupancy) {
+                Some(CellOccupancy::Grapheme(grapheme)) => text.push_str(grapheme),
+                Some(CellOccupancy::WideContinuation) | None => {}
+            };
+            if matches!(
+                program.cell_at(x, y).map(|cell| &cell.occupancy),
+                Some(CellOccupancy::WideContinuation) | None
+            ) {
+                text.push(' ');
+            }
         }
         text.push('\n');
     }
@@ -221,6 +230,64 @@ fn real_host_empty_pane_reaches_the_gpu_render_plan() {
         "no live PTY grid is attached",
     );
     assert_focused_pane_title_style(&prepared, pane);
+}
+
+#[test]
+fn real_host_advanced_text_ime_preedit_and_commit_reach_the_gpu_plan() {
+    let mut host = FrontendHost::new(AppConfig {
+        spawn_pty: false,
+        ..AppConfig::default()
+    });
+    let frame_size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(frame_size));
+    host.handle_input(InputEvent::Key(Key::ctrl('p')));
+    host.handle_input(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "界e\u{301}".into(),
+        cursor: Some(TextRange {
+            start: 0,
+            end: "界e\u{301}".len(),
+        }),
+    }));
+
+    let preedit = host.frame(frame_size);
+    let input = preedit
+        .scene
+        .text_input
+        .as_ref()
+        .expect("palette exposes its active text input");
+    assert_eq!(
+        input.preedit.as_ref().map(|preedit| preedit.text.as_str()),
+        Some("界e\u{301}")
+    );
+    let prepared = prepare_scene(&preedit.scene, &preedit.theme)
+        .expect("GPU renderer accepts neutral IME preedit cells");
+    assert!(
+        prepared
+            .cell_program()
+            .cells()
+            .any(|(_, _, cell)| cell.style.underline && cell.cursor),
+        "preedit underline/cursor semantics reached the shared cell program"
+    );
+
+    host.handle_input(InputEvent::Composition(CompositionEvent::Preedit {
+        text: String::new(),
+        cursor: None,
+    }));
+    host.handle_input(InputEvent::Composition(CompositionEvent::Commit(
+        "界e\u{301}".into(),
+    )));
+    let committed = host.frame(frame_size);
+    let Some(OverlayScene::Palette(palette)) = &committed.scene.overlay else {
+        panic!("palette remains the locked composition target");
+    };
+    assert_eq!(palette.query, "界e\u{301}");
+    assert!(
+        committed
+            .scene
+            .text_input
+            .as_ref()
+            .is_some_and(|input| input.preedit.is_none())
+    );
 }
 
 #[test]
@@ -1149,7 +1216,7 @@ fn real_host_pty_output_wakes_without_polling_and_reaches_a_frame() {
             .rows
             .iter()
             .flatten()
-            .any(|cell| cell.character == 'G'),
+            .any(|cell| cell.grapheme_text() == "G"),
         "real PTY output did not reach the host frame"
     );
 
@@ -1207,7 +1274,7 @@ fn real_host_task_pane_reaches_the_gpu_render_plan() {
             task.output.as_ref().is_some_and(|surface| {
                 surface.rows.iter().any(|row| {
                     row.iter()
-                        .map(|cell| cell.character)
+                        .map(mandatum_scene::SceneCell::grapheme_text)
                         .collect::<String>()
                         .contains("TASK_PLAN_OK")
                 })
@@ -1316,7 +1383,10 @@ fn real_host_pointer_selection_copy_and_wheel_scrollback_reach_the_gpu_boundary(
     let snapshot = wait_for_frame(&mut host, &wake_rx, size, |snapshot| {
         let (_, surface) = terminal_pane(snapshot);
         surface.rows.iter().any(|row| {
-            let text = row.iter().map(|cell| cell.character).collect::<String>();
+            let text = row
+                .iter()
+                .map(mandatum_scene::SceneCell::grapheme_text)
+                .collect::<String>();
             text.trim_end().ends_with("SELECT_ME") && !text.contains("echo")
         })
     });
@@ -1327,7 +1397,10 @@ fn real_host_pointer_selection_copy_and_wheel_scrollback_reach_the_gpu_boundary(
         .iter()
         .enumerate()
         .find_map(|(row, cells)| {
-            let text = cells.iter().map(|cell| cell.character).collect::<String>();
+            let text = cells
+                .iter()
+                .map(mandatum_scene::SceneCell::grapheme_text)
+                .collect::<String>();
             (text.trim_end().ends_with("SELECT_ME") && !text.contains("echo"))
                 .then_some((row, text))
         })
@@ -1459,7 +1532,7 @@ fn real_host_startup_restore_recreates_processes_then_resizes_and_quits_cleanly(
             };
             surface.rows.iter().any(|row| {
                 row.iter()
-                    .map(|cell| cell.character)
+                    .map(mandatum_scene::SceneCell::grapheme_text)
                     .collect::<String>()
                     .contains("RESTORED_PROCESS_OK")
             })

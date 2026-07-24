@@ -35,9 +35,9 @@ fn paint_program_cell(target: &mut ratatui::buffer::Cell, cell: &ProgramCell, th
     // The program already contains the final topmost cell. Ratatui's
     // `set_style` patches existing state, so clear before translating it.
     target.reset();
-    match cell.occupancy {
-        CellOccupancy::Glyph(character) => {
-            target.set_char(character);
+    match &cell.occupancy {
+        CellOccupancy::Grapheme(grapheme) => {
+            target.set_symbol(grapheme);
         }
         CellOccupancy::WideContinuation => {
             // A continuation occupies this cell but contributes no glyph.
@@ -155,6 +155,7 @@ mod tests {
             focused_pane: PaneId::new("pane-1"),
             hit_targets: Vec::new(),
             copy_mode: false,
+            text_input: None,
         }
     }
 
@@ -194,7 +195,9 @@ mod tests {
                 .map(|row| {
                     (0..4)
                         .map(|column| SceneCell {
-                            character: row.chars().nth(column).unwrap_or(' '),
+                            occupancy: CellOccupancy::Grapheme(
+                                row.chars().nth(column).unwrap_or(' ').to_string(),
+                            ),
                             style: SceneCellStyle::default(),
                         })
                         .collect()
@@ -246,7 +249,7 @@ mod tests {
         };
         let mut surface = text_surface(&["x"]);
         surface.rows[0][0] = SceneCell {
-            character: 'x',
+            occupancy: CellOccupancy::Grapheme('x'.to_string()),
             style: terminal_style,
         };
         surface.cursor = Some(SurfacePosition::new(0, 0));
@@ -259,7 +262,7 @@ mod tests {
 
         let program = compile_cell_program(&workspace, &theme);
         let compiled = program.cell_at(1, 2).expect("inner cell is compiled");
-        assert_eq!(compiled.occupancy, CellOccupancy::Glyph('x'));
+        assert_eq!(compiled.occupancy, CellOccupancy::Grapheme('x'.to_string()));
         assert_eq!(compiled.selection, Some(CellSelection::Terminal));
         assert!(compiled.cursor);
 
@@ -297,6 +300,35 @@ mod tests {
         assert_eq!(target.symbol(), " ");
         assert_eq!(target.bg, Color::Rgb(4, 5, 6));
         assert!(!target.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn advanced_text_adapter_writes_complete_graphemes_and_clears_continuations() {
+        let mut grapheme_target = ratatui::buffer::Cell::new("x");
+        let grapheme = ProgramCell {
+            occupancy: CellOccupancy::Grapheme("e\u{301}".to_owned()),
+            style: SceneCellStyle::default(),
+            selection: None,
+            cursor: false,
+            raster_layer: None,
+        };
+        paint_program_cell(&mut grapheme_target, &grapheme, &Theme::default());
+        assert_eq!(grapheme_target.symbol(), "e\u{301}");
+
+        let mut surface = text_surface(&["      "]);
+        surface.rows[0] = vec![
+            SceneCell::grapheme("界", SceneCellStyle::default()),
+            SceneCell::wide_continuation(SceneCellStyle::default()),
+            SceneCell::grapheme("👩\u{200d}💻", SceneCellStyle::default()),
+            SceneCell::wide_continuation(SceneCellStyle::default()),
+        ];
+        let workspace = scene(vec![pane(PaneContent::Terminal(surface))]);
+        let terminal = draw(&workspace);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((1, 2)).unwrap().symbol(), "界");
+        assert_eq!(buffer.cell((2, 2)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((3, 2)).unwrap().symbol(), "👩\u{200d}💻");
+        assert_eq!(buffer.cell((4, 2)).unwrap().symbol(), " ");
     }
 
     #[test]
@@ -457,7 +489,7 @@ mod tests {
                 .map(|_| {
                     (0..38)
                         .map(|_| SceneCell {
-                            character: 'X',
+                            occupancy: CellOccupancy::Grapheme('X'.to_string()),
                             style: SceneCellStyle::default(),
                         })
                         .collect()

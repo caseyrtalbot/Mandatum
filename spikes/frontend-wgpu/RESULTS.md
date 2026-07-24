@@ -625,13 +625,11 @@ panic, exit 0).
 - **Naive per-frame rebuild.** Full-screen rich-text is reassembled and reshaped
   every frame. No damage tracking, no glyph-run cache. This is why the flood
   sits at 40 fps rather than 60.
-- **Monospace alignment is font-metric based, not grid-snapped per glyph.** Cell
-  width is measured once from a shaped run and columns are laid out by
-  cosmic-text line layout. It holds for standard monospace ASCII; wide
-  characters (CJK, emoji) and zero-width/combining marks are not width-corrected,
-  so a line mixing widths can drift from the background quad grid.
-- **No IME / dead keys / composition.** Input uses `KeyEvent.logical_key` and
-  named keys directly; there is no `Ime` event handling.
+- **Glyphs are grid-anchored, not terminal-font guaranteed.** Each grapheme is
+  clipped to its declared one- or two-cell span at shared fractional pixel
+  boundaries. A missing glyph may still use the configured font system's
+  fallback, so exact aesthetics vary by installed fonts even though cell
+  geometry remains bounded.
 - **Latency correlation is heuristic.** One pending input is correlated per
   runtime-driven present under a FIFO-echo assumption. At 30/sec with sub-frame
   echo this is effectively 1:1, but non-PTY runtime events or batched echoes
@@ -639,9 +637,10 @@ panic, exit 0).
 - **No headless GPU presentation.** The real host-to-render-plan path is covered
   without a window, but device/surface acquisition and present still require the
   displayed smoke.
-- **True wide-cell production is not implemented.** `CellProgram` has an
-  explicit `WideContinuation` occupancy and both adapters honor it, but current
-  scalar `SceneCell` surfaces do not yet emit grapheme-width metadata.
+- **IME coverage is platform-bounded.** Neutral preedit/commit/cancel, dead-key
+  composition, caret placement, focus cancellation, and overlay routing are
+  implemented. The displayed Mac had one active keyboard/input-source path, so
+  the full locale/input-source matrix remains future platform qualification.
 
 ## What a production adapter would still need
 
@@ -651,12 +650,6 @@ panic, exit 0).
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
-- **Correct wide-character and grapheme handling.** Unicode width, combining
-  marks, and per-cell placement so the glyph grid and background grid never
-  diverge.
-- **IME / composition and dead keys.** The baseline Alt-as-Meta, bracketed
-  paste, modified keys, and child mouse reporting paths are complete; advanced
-  locale/composition semantics remain Phase 5.
 - **Multi-display support policy.** The runtime scale transition is exercised,
   but this one-display Mac cannot prove cross-monitor movement or define the
   eventual supported display matrix.
@@ -832,8 +825,45 @@ key-to-present.
   review was clean.
 
 This completes the selected pixel-native capability, not production
-admission. Advanced grapheme/IME work is Phase 5; device/surface recovery,
-multi-display proof, production dependencies, packaging, and rollout remain.
+admission. Phase 5 advanced text/IME is complete; device/surface recovery,
+multi-display proof, structured measurement/soak, production dependencies,
+packaging, and rollout remain.
+
+## Phase 5 Advanced Text And IME Verification (2026-07-23)
+
+- Terminal cells, scene cells, and the final cell program now carry bounded
+  extended grapheme strings plus explicit wide continuations. Writes, erases,
+  edits, resize, copy, search scalar-range snapping, selection, cursor, wrapping,
+  truncation, and both adapters preserve the same display-width contract.
+- The GPU plan owns one buffer per visible grapheme, anchors it to exact cell
+  coordinates, retains decorated spaces, clips glyphs to declared spans, and
+  uses shared fractional pixel boundaries so adjacent spans never overlap.
+- `InputEvent::Composition` carries preedit with a validated UTF-8 range,
+  one-shot commit, and cancel. `AppState` locks composition to the active
+  terminal, prompt, palette, search, timeline, or Help target; modal, pointer,
+  paste, key, focus, and shutdown transitions cancel without leaking text.
+- The winit shell translates platform IME events only while focused and
+  allowed, supplies the candidate/caret rectangle, treats multi-scalar
+  characters as one commit, keeps left Option for native dead keys, and uses
+  right Option as terminal Meta. Font family, size, and runtime scale are
+  bounded native-only settings.
+- Three independent correctness, boundary/security, and acceptance reviews
+  drove fixes for late-commit ordering, unfocused IME re-enable, public-scene
+  validation, buffer admission, copy/search/wrap/scrollback wide edges,
+  placeholder clearing, decorated spaces, glyph overhang, attention geometry,
+  and fractional span overlap. All three final reruns returned no finding.
+- The current-code displayed macOS matrix showed terminal and Command Palette
+  preedit, a single committed `é`, focus-loss cancellation followed by plain
+  `e`, mixed `A界é👩‍💻Z` output, Menlo 16 at runtime scale 1.25, resize from
+  66×23 to 99×29, and clean Ctrl+Q exit. The one-display host did not claim a
+  cross-monitor or full installed-input-source matrix.
+- The standing terminal probe measured p50 14.58 ms / p95 16.67 ms / max
+  18.28 ms over 100 samples with zero misses. A clean 30-second idle window
+  advanced CPU time by 0.28 seconds (about 0.93% of one core).
+
+Phase 6 surface/device recovery, explicit failure modes, resize/scale storms,
+structured symmetric measurement, and soak evidence is next. The spike remains
+excluded from production dependencies, packaging, and release.
 
 
 ## Correction note (2026-07-10)

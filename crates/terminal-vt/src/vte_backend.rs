@@ -12,7 +12,7 @@ use vte::{Params, Parser, Perform};
 
 use crate::{
     CellStyle, Color, MouseMode, MouseTracking, TerminalAdapter, TerminalAdapterError,
-    TerminalCapabilities, TerminalGrid, TerminalSize, TerminalUpdate,
+    TerminalCapabilities, TerminalGrid, TerminalSize, TerminalUpdate, grid::GraphemeWrite,
 };
 
 pub struct VteTerminalAdapter {
@@ -547,22 +547,29 @@ impl TerminalState {
 impl Perform for TerminalState {
     fn print(&mut self, character: char) {
         self.dirty = true;
-        if self.wrap_pending {
-            self.wrap_pending = false;
-            self.carriage_return();
-            self.line_feed();
-        }
         let pen = self.pen;
-        let at_last = {
-            let grid = self.active_grid_mut();
-            grid.put_styled(character, pen);
-            let at_last = grid.cursor_at_last_column();
-            if !at_last {
-                grid.move_cursor_right();
+        let wrap_pending = self.wrap_pending;
+        let write = self
+            .active_grid_mut()
+            .write_printable(character, wrap_pending);
+        match write {
+            GraphemeWrite::Extended { at_edge } => {
+                self.wrap_pending = at_edge;
             }
-            at_last
-        };
-        self.wrap_pending = at_last;
+            GraphemeWrite::New { grapheme, width } => {
+                let remaining = self
+                    .active_grid()
+                    .size()
+                    .columns()
+                    .saturating_sub(self.active_grid().cursor().column());
+                if self.wrap_pending || u16::from(width) > remaining {
+                    self.wrap_pending = false;
+                    self.carriage_return();
+                    self.line_feed();
+                }
+                self.wrap_pending = self.active_grid_mut().put_grapheme(grapheme, width, pen);
+            }
+        }
     }
 
     fn execute(&mut self, byte: u8) {
@@ -901,5 +908,115 @@ mod tests {
         // OSC title set + DCS-ish sequence should be swallowed, not printed.
         adapter.feed(b"\x1b]0;my title\x07hi").unwrap();
         assert_eq!(trimmed(&adapter), vec!["hi"]);
+    }
+
+    #[test]
+    fn advanced_text_mixed_graphemes_keep_terminal_columns() {
+        use crate::{GridPosition, TerminalCellOccupancy};
+
+        let input = "A界e\u{301}👩\u{200d}💻Z";
+        let mut adapter = adapter(12, 1);
+        for byte in input.as_bytes() {
+            adapter.feed(std::slice::from_ref(byte)).unwrap();
+        }
+
+        let occupancy = |column| {
+            adapter
+                .grid()
+                .cell(GridPosition::new(0, column))
+                .expect("fixture cell")
+                .occupancy()
+                .clone()
+        };
+        assert_eq!(occupancy(0), TerminalCellOccupancy::Grapheme("A".into()));
+        assert_eq!(occupancy(1), TerminalCellOccupancy::Grapheme("界".into()));
+        assert_eq!(occupancy(2), TerminalCellOccupancy::WideContinuation);
+        assert_eq!(
+            occupancy(3),
+            TerminalCellOccupancy::Grapheme("e\u{301}".into())
+        );
+        assert_eq!(
+            occupancy(4),
+            TerminalCellOccupancy::Grapheme("👩\u{200d}💻".into())
+        );
+        assert_eq!(occupancy(5), TerminalCellOccupancy::WideContinuation);
+        assert_eq!(occupancy(6), TerminalCellOccupancy::Grapheme("Z".into()));
+        assert_eq!(adapter.grid().cursor().column(), 7);
+        assert!(adapter.grid().row_text(0).unwrap().starts_with(input));
+    }
+
+    #[test]
+    fn advanced_text_wide_write_wraps_before_last_column() {
+        use crate::{GridPosition, TerminalCellOccupancy};
+
+        let mut adapter = adapter(4, 2);
+        adapter.feed("abc界".as_bytes()).unwrap();
+
+        assert_eq!(adapter.grid().row_text(0).unwrap(), "abc ");
+        assert!(matches!(
+            adapter
+                .grid()
+                .cell(GridPosition::new(1, 0))
+                .unwrap()
+                .occupancy(),
+            TerminalCellOccupancy::Grapheme(grapheme) if grapheme == "界"
+        ));
+        assert!(matches!(
+            adapter
+                .grid()
+                .cell(GridPosition::new(1, 1))
+                .unwrap()
+                .occupancy(),
+            TerminalCellOccupancy::WideContinuation
+        ));
+        assert_eq!(adapter.grid().cursor().column(), 2);
+    }
+
+    #[test]
+    fn advanced_text_overwrite_or_erase_repairs_the_whole_wide_pair() {
+        use crate::{GridPosition, TerminalCellOccupancy};
+
+        let mut overwritten = adapter(4, 1);
+        overwritten.feed("界\x1b[1;2HX".as_bytes()).unwrap();
+        assert_eq!(overwritten.grid().row_text(0).unwrap(), " X  ");
+        assert!(matches!(
+            overwritten
+                .grid()
+                .cell(GridPosition::new(0, 0))
+                .unwrap()
+                .occupancy(),
+            TerminalCellOccupancy::Grapheme(grapheme) if grapheme == " "
+        ));
+
+        let mut erased = adapter(4, 1);
+        erased.feed("界\x1b[1;2H\x1b[X".as_bytes()).unwrap();
+        assert_eq!(erased.grid().row_text(0).unwrap(), "    ");
+        assert!(matches!(
+            erased
+                .grid()
+                .cell(GridPosition::new(0, 1))
+                .unwrap()
+                .occupancy(),
+            TerminalCellOccupancy::Grapheme(grapheme) if grapheme == " "
+        ));
+    }
+
+    #[test]
+    fn advanced_text_pathological_combining_chain_stays_cell_bounded() {
+        use crate::TerminalCellOccupancy;
+
+        let mut adapter = adapter(80, 8);
+        let input = format!("a{}", "\u{301}".repeat(600));
+        adapter.feed(input.as_bytes()).unwrap();
+
+        for row in 0..adapter.grid().size().rows() {
+            for column in 0..adapter.grid().size().columns() {
+                if let Some(cell) = adapter.grid().cell(crate::GridPosition::new(row, column))
+                    && let TerminalCellOccupancy::Grapheme(grapheme) = cell.occupancy()
+                {
+                    assert!(grapheme.len() <= 256);
+                }
+            }
+        }
     }
 }

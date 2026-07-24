@@ -52,4 +52,6 @@ png = "0.18"
 # preserve_order keeps config-file key order so "later binding wins"
 # means document order, not alphabetical order.
 toml = { version = "0.8", features = ["preserve_order"] }
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
 vte = "0.15"

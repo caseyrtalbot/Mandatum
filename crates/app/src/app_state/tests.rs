@@ -54,6 +54,129 @@ fn ctrl(code: char) -> Key {
     Key::ctrl(code)
 }
 
+#[test]
+fn ime_preedit_is_transient_and_commit_updates_the_locked_palette_once() {
+    let mut state = state();
+    state.handle_key(ctrl('p'));
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "界e\u{301}".into(),
+        cursor: Some(TextRange {
+            start: 0,
+            end: "界e\u{301}".len(),
+        }),
+    }));
+
+    let scene = state.build_scene(POINTER_FRAME);
+    let Some(mandatum_scene::OverlayScene::Palette(palette)) = &scene.overlay else {
+        panic!("palette must stay open");
+    };
+    assert!(
+        palette.query.is_empty(),
+        "preedit is not committed filter text"
+    );
+    let text_input = scene.text_input.expect("palette text input scene");
+    assert_eq!(
+        text_input
+            .preedit
+            .as_ref()
+            .map(|preedit| preedit.text.as_str()),
+        Some("界e\u{301}")
+    );
+
+    // Winit clears the visible preedit immediately before Commit. The locked
+    // target survives that empty event.
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: String::new(),
+        cursor: None,
+    }));
+    state.handle_event(InputEvent::Composition(CompositionEvent::Commit(
+        "界e\u{301}".into(),
+    )));
+    let palette = state
+        .palette_overlay(POINTER_FRAME)
+        .expect("palette remains open");
+    assert_eq!(palette.query, "界e\u{301}");
+    assert_eq!(state.workspace().active_session().panes().len(), 1);
+}
+
+#[test]
+fn ime_invalid_range_cancels_visually_without_mutating_the_target() {
+    let mut state = state();
+    state.handle_key(ctrl('p'));
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "old".into(),
+        cursor: None,
+    }));
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "é".into(),
+        cursor: Some(TextRange { start: 1, end: 2 }),
+    }));
+
+    let scene = state.build_scene(POINTER_FRAME);
+    assert!(
+        scene
+            .text_input
+            .as_ref()
+            .is_some_and(|input| input.preedit.is_none())
+    );
+    assert!(
+        state
+            .palette_overlay(POINTER_FRAME)
+            .unwrap()
+            .query
+            .is_empty()
+    );
+    state.handle_event(InputEvent::Composition(CompositionEvent::Commit(
+        "late".into(),
+    )));
+    assert!(
+        state
+            .palette_overlay(POINTER_FRAME)
+            .unwrap()
+            .query
+            .is_empty(),
+        "late commit after an invalid preedit is rejected"
+    );
+}
+
+#[test]
+fn ime_preedit_survives_resize_and_reanchors_to_the_resized_overlay() {
+    let mut state = state();
+    state.handle_key(ctrl('p'));
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "界".into(),
+        cursor: None,
+    }));
+    let before = state
+        .build_scene(SceneSize::new(80, 24))
+        .text_input
+        .expect("preedit before resize");
+
+    state.handle_event(InputEvent::Resize(SceneSize::new(120, 40)));
+    let after = state
+        .build_scene(SceneSize::new(120, 40))
+        .text_input
+        .expect("preedit after resize");
+
+    assert_eq!(after.preedit, before.preedit);
+    assert_ne!(after.area, before.area);
+}
+
+#[test]
+fn composition_events_round_trip_through_the_neutral_input_contract() {
+    let input = InputEvent::Composition(CompositionEvent::Preedit {
+        text: "e\u{301}界".into(),
+        cursor: Some(TextRange {
+            start: 0,
+            end: "e\u{301}".len(),
+        }),
+    });
+    let encoded = serde_json::to_string(&input).expect("serialize composition input");
+    let decoded: InputEvent =
+        serde_json::from_str(&encoded).expect("deserialize composition input");
+    assert_eq!(decoded, input);
+}
+
 struct TestWorkspaceDir {
     path: PathBuf,
 }
@@ -1835,6 +1958,102 @@ fn grid_text(state: &AppState, pane_id: &PaneId) -> String {
         .get(pane_id)
         .map(|runtime| runtime.parser.grid().snapshot().join("\n"))
         .unwrap_or_default()
+}
+
+#[test]
+fn ime_terminal_preedit_sends_no_bytes_and_commit_sends_full_text() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    let before = grid_text(&state, &pane_id);
+
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "啊👩\u{200d}💻".into(),
+        cursor: None,
+    }));
+    for _ in 0..5 {
+        state.tick_runtime();
+    }
+    assert_eq!(
+        grid_text(&state, &pane_id),
+        before,
+        "preedit must not write child bytes"
+    );
+
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: String::new(),
+        cursor: None,
+    }));
+    state.handle_event(InputEvent::Composition(CompositionEvent::Commit(
+        "printf 'IME_啊_👩\u{200d}💻\\n'\r".into(),
+    )));
+    assert!(pump_runtime_until(&mut state, |state| {
+        grid_text(state, &pane_id).contains("IME_啊_👩\u{200d}💻")
+    }));
+    state.shutdown();
+}
+
+#[test]
+fn ime_late_commit_after_modal_or_focus_change_never_leaks_to_terminal() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+
+    state.dispatch(CommandId::SearchSession);
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "late".into(),
+        cursor: None,
+    }));
+    state.handle_key(key(KeyCode::Escape));
+    state.handle_event(InputEvent::Composition(CompositionEvent::Commit(
+        "SHOULD_NOT_LEAK\r".into(),
+    )));
+    for _ in 0..10 {
+        state.tick_runtime();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!grid_text(&state, &pane_id).contains("SHOULD_NOT_LEAK"));
+
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "focus".into(),
+        cursor: None,
+    }));
+    state.handle_event(InputEvent::FocusLost);
+    state.handle_event(InputEvent::Composition(CompositionEvent::Commit(
+        "FOCUS_LEAK\r".into(),
+    )));
+    for _ in 0..10 {
+        state.tick_runtime();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!grid_text(&state, &pane_id).contains("FOCUS_LEAK"));
+    state.shutdown();
+}
+
+#[test]
+fn ime_native_cancel_then_focus_loss_rejects_a_late_commit() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "focus".into(),
+        cursor: None,
+    }));
+    state.handle_event(InputEvent::Composition(CompositionEvent::Cancel));
+    state.handle_event(InputEvent::FocusLost);
+    state.handle_event(InputEvent::Composition(CompositionEvent::Commit(
+        "NATIVE_ORDER_LEAK\r".into(),
+    )));
+    for _ in 0..10 {
+        state.tick_runtime();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!grid_text(&state, &pane_id).contains("NATIVE_ORDER_LEAK"));
+    state.shutdown();
 }
 
 /// Two live panes, pane-1's child tracking the mouse (SGR), pane-2
@@ -4111,7 +4330,11 @@ fn search_jumps_a_terminal_pane_to_the_matched_scrollback_row() {
     let visible: String = surface
         .rows
         .iter()
-        .map(|row| row.iter().map(|cell| cell.character).collect::<String>())
+        .map(|row| {
+            row.iter()
+                .map(mandatum_scene::SceneCell::grapheme_text)
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(

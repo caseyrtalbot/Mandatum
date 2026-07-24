@@ -136,8 +136,12 @@ more useful without pretending the wider vision is finished:
   opens each changed source through no-follow descriptor traversal, bounds and
   decodes it into typed RGBA8 scene data, ratatui paints the deterministic
   fallback, and the excluded GPU adapter contain-fits the texture with checked
-  aggregate admission and occlusion. Phase 5 advanced grapheme/IME correctness
-  is next. Production GPU dependencies and release admission remain blocked.
+  aggregate admission and occlusion. Phase 5 advanced text and IME is complete:
+  terminal snapshots, scenes, both adapters, and native input now share an
+  extended-grapheme/wide-cell contract; the native shell carries neutral
+  preedit/commit/cancel with left-Option composition and right-Option Meta.
+  Phase 6 hardening and measurement is next. Production GPU dependencies and
+  release admission remain blocked.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.

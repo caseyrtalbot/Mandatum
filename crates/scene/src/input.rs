@@ -15,9 +15,46 @@ pub enum InputEvent {
     Key(Key),
     Pointer(PointerEvent),
     Paste(String),
+    Composition(CompositionEvent),
     Resize(SceneSize),
     FocusGained,
     FocusLost,
+}
+
+/// Renderer-neutral IME/dead-key lifecycle.
+///
+/// Composition is deliberately distinct from paste: preedit is transient
+/// presentation, commit inserts text exactly once into the locked active text
+/// surface, and cancel inserts nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompositionEvent {
+    Preedit {
+        text: String,
+        /// UTF-8 byte range reported by the platform IME.
+        cursor: Option<TextRange>,
+    },
+    Commit(String),
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl TextRange {
+    pub fn new(text: &str, start: usize, end: usize) -> Option<Self> {
+        (start <= end
+            && end <= text.len()
+            && text.is_char_boundary(start)
+            && text.is_char_boundary(end))
+        .then_some(Self { start, end })
+    }
+
+    pub fn is_valid_for(self, text: &str) -> bool {
+        Self::new(text, self.start, self.end).is_some()
+    }
 }
 
 /// A key press with modifiers.

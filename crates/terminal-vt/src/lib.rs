@@ -150,29 +150,54 @@ pub struct CellStyle {
     pub strikethrough: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What occupies one terminal grid cell.
+///
+/// A grapheme is stored once in its leading cell. A double-width grapheme
+/// reserves the following cell with `WideContinuation`, so erasure,
+/// selection, cursor placement, and both frontends agree on the same columns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalCellOccupancy {
+    Grapheme(String),
+    WideContinuation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalCell {
-    character: char,
+    occupancy: TerminalCellOccupancy,
     style: CellStyle,
 }
 
 impl TerminalCell {
     pub fn blank() -> Self {
         Self {
-            character: ' ',
+            occupancy: TerminalCellOccupancy::Grapheme(" ".to_owned()),
             style: CellStyle::default(),
         }
     }
 
     pub fn styled(character: char, style: CellStyle) -> Self {
-        Self { character, style }
+        Self::grapheme(character.to_string(), style)
+    }
+
+    pub fn grapheme(grapheme: String, style: CellStyle) -> Self {
+        Self {
+            occupancy: TerminalCellOccupancy::Grapheme(grapheme),
+            style,
+        }
+    }
+
+    pub fn wide_continuation(style: CellStyle) -> Self {
+        Self {
+            occupancy: TerminalCellOccupancy::WideContinuation,
+            style,
+        }
     }
 
     /// A blank cell that keeps the given background, used when erasing regions so
     /// a painted background color survives a clear.
     pub fn blank_with_background(style: CellStyle) -> Self {
         Self {
-            character: ' ',
+            occupancy: TerminalCellOccupancy::Grapheme(" ".to_owned()),
             style: CellStyle {
                 background: style.background,
                 ..CellStyle::default()
@@ -180,8 +205,17 @@ impl TerminalCell {
         }
     }
 
+    /// Compatibility scalar for callers that only need plain snapshots.
+    /// Grapheme-aware callers should use [`Self::occupancy`].
     pub fn character(&self) -> char {
-        self.character
+        match &self.occupancy {
+            TerminalCellOccupancy::Grapheme(grapheme) => grapheme.chars().next().unwrap_or(' '),
+            TerminalCellOccupancy::WideContinuation => ' ',
+        }
+    }
+
+    pub fn occupancy(&self) -> &TerminalCellOccupancy {
+        &self.occupancy
     }
 
     pub fn style(&self) -> CellStyle {

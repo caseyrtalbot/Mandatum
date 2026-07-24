@@ -7,16 +7,17 @@
 use mandatum_agent_runtime::RiskLevel;
 use mandatum_core::{AgentPaneIntent, PaneId, PaneKind, PaneSpec, Session, TaskPaneIntent};
 use mandatum_scene::{
-    AgentApprovalPrompt, AgentContent, EmptyContent, HeaderScene, HitTarget, HitTargetKind,
-    OverlayScene, PaneContent, PaneScene, PaneSceneKind, SceneCell, SceneCellStyle, SceneColor,
-    SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent, TerminalSurface,
-    WorkspaceScene,
+    AgentApprovalPrompt, AgentContent, CellOccupancy, EmptyContent, HeaderScene, HitTarget,
+    HitTargetKind, OverlayScene, PaneContent, PaneScene, PaneSceneKind, PreeditScene, SceneCell,
+    SceneCellStyle, SceneColor, SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent,
+    TerminalSurface, TextInputKind, TextInputScene, WorkspaceScene,
+    cell_program::display_width,
     layout::{self, PaneLayout},
 };
-use mandatum_terminal_vt::{CellStyle, Color as VtColor, TerminalGrid};
+use mandatum_terminal_vt::{CellStyle, Color as VtColor, TerminalCellOccupancy, TerminalGrid};
 
 use crate::{
-    app_state::{AppState, agent_status_label},
+    app_state::{AppState, CompositionTarget, agent_status_label},
     attention::header_scene,
     terminal_runtime::resolve_pane_cwd,
 };
@@ -78,6 +79,7 @@ pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScen
     // session facts. Composed here so `&WorkspaceScene` alone paints a frame.
     let header = header_scene(state, layout::header_rect(size));
     let hit_targets = hit_targets(workspace, &panes, &header, size, overlay.as_ref());
+    let text_input = text_input_scene(state, &panes, overlay.as_ref());
 
     WorkspaceScene {
         size,
@@ -91,7 +93,106 @@ pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScen
         focused_pane: session.focused_pane_id().clone(),
         hit_targets,
         copy_mode: state.copy_mode_active(),
+        text_input,
     }
+}
+
+fn text_input_scene(
+    state: &AppState,
+    panes: &[PaneScene],
+    overlay: Option<&OverlayScene>,
+) -> Option<TextInputScene> {
+    let target = state.current_composition_target()?;
+    let preedit = state
+        .composition_preedit_for(&target)
+        .map(|(text, cursor)| PreeditScene {
+            text: text.to_owned(),
+            cursor,
+        });
+
+    let (area, kind) = match &target {
+        CompositionTarget::Terminal(pane_id) => {
+            let pane = panes.iter().find(|pane| &pane.id == pane_id)?;
+            let PaneContent::Terminal(surface) = &pane.content else {
+                return None;
+            };
+            let cursor = surface.cursor?;
+            let visible_row = cursor.row.checked_sub(surface.first_row)?;
+            let inner = layout::pane_inner_rect(pane.area);
+            if visible_row >= usize::from(inner.height) {
+                return None;
+            }
+            let column = cursor.column.min(inner.width.saturating_sub(1));
+            let style = surface
+                .rows
+                .get(visible_row)
+                .and_then(|row| row.get(usize::from(column)))
+                .map_or_else(SceneCellStyle::default, |cell| cell.style);
+            let x = inner.x.saturating_add(column);
+            (
+                SceneRect::new(
+                    x,
+                    inner.y.saturating_add(visible_row as u16),
+                    inner.right().saturating_sub(x),
+                    1,
+                ),
+                TextInputKind::Terminal { style },
+            )
+        }
+        CompositionTarget::Prompt => {
+            let OverlayScene::Prompt(prompt) = overlay? else {
+                return None;
+            };
+            overlay_text_input_area(prompt.area, &prompt.input)
+        }
+        CompositionTarget::Timeline => {
+            let OverlayScene::Timeline(timeline) = overlay? else {
+                return None;
+            };
+            overlay_text_input_area(timeline.area, &timeline.query)
+        }
+        CompositionTarget::Search => {
+            let OverlayScene::Search(search) = overlay? else {
+                return None;
+            };
+            overlay_text_input_area(search.area, &search.query)
+        }
+        CompositionTarget::Palette => {
+            let OverlayScene::Palette(palette) = overlay? else {
+                return None;
+            };
+            overlay_text_input_area(palette.area, &palette.query)
+        }
+        CompositionTarget::Help => {
+            let OverlayScene::Help(help) = overlay? else {
+                return None;
+            };
+            overlay_text_input_area(help.area, &help.query)
+        }
+    };
+
+    Some(TextInputScene {
+        area,
+        kind,
+        preedit,
+    })
+}
+
+fn overlay_text_input_area(area: SceneRect, input: &str) -> (SceneRect, TextInputKind) {
+    let inner = layout::pane_inner_rect(area);
+    let column = 2usize
+        .saturating_add(display_width(input))
+        .min(usize::from(inner.width.saturating_sub(1))) as u16;
+    let x = inner.x.saturating_add(column);
+    (
+        SceneRect::new(
+            x,
+            inner.y,
+            inner.right().saturating_sub(x),
+            inner.height.min(1),
+        ),
+        TextInputKind::Overlay,
+    )
 }
 
 /// The status strip text: state-only app status plus the permanent
@@ -322,15 +423,33 @@ fn terminal_surface(
     let rows = (0..view_rows)
         .map(|line| {
             let absolute_row = first_row + line;
-            (0..columns)
+            let mut row = (0..columns)
                 .map(|column| {
                     let cell = grid.history_cell(absolute_row, column).unwrap_or_default();
                     SceneCell {
-                        character: cell.character(),
+                        occupancy: match cell.occupancy() {
+                            TerminalCellOccupancy::Grapheme(grapheme) => {
+                                CellOccupancy::Grapheme(grapheme.clone())
+                            }
+                            TerminalCellOccupancy::WideContinuation => {
+                                CellOccupancy::WideContinuation
+                            }
+                        },
                         style: scene_cell_style(cell.style()),
                     }
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            if columns < grid.size().columns()
+                && grid
+                    .history_cell(absolute_row, columns)
+                    .is_some_and(|cell| {
+                        matches!(cell.occupancy(), TerminalCellOccupancy::WideContinuation)
+                    })
+                && let Some(last) = row.last_mut()
+            {
+                last.occupancy = CellOccupancy::Grapheme("\u{fffd}".to_owned());
+            }
+            row
         })
         .collect();
 
@@ -520,6 +639,7 @@ mod tests {
     use mandatum_commands::CommandId;
     use mandatum_core::AgentStatus;
     use mandatum_scene::input::{InputEvent, Key, KeyCode};
+    use mandatum_terminal_vt::{TerminalParser, TerminalSize};
 
     use super::*;
     use crate::app_shell::AppConfig;
@@ -581,13 +701,24 @@ mod tests {
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|cell| cell.character)
+                    .map(SceneCell::grapheme_text)
                     .collect::<String>()
                     .trim_end()
                     .to_owned()
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn narrowed_terminal_surface_replaces_a_truncated_wide_pair() {
+        let mut parser = TerminalParser::new(TerminalSize::new(4, 1).unwrap());
+        parser.feed_pty_bytes("界X".as_bytes()).unwrap();
+        let surface = terminal_surface(parser.grid(), PaneViewState::default(), 1, 1);
+        assert_eq!(
+            surface.rows[0][0].occupancy,
+            CellOccupancy::Grapheme("\u{fffd}".to_owned())
+        );
     }
 
     #[test]

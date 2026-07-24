@@ -113,7 +113,11 @@ semantic colors, current modifiers, selection, cursor, chrome, and every
 overlay. Configured chord precedence, xterm baseline key/modifier translation,
 native copy/paste, pointer drag/capture/passthrough, scrollback, focus/resize/
 scale transitions, startup restore, and clean shutdown all cross the real
-`FrontendHost` boundary.
+`FrontendHost` boundary. Phase 4 adds bounded Artifact Preview pixels without
+renderer filesystem authority. Phase 5 completes the shared text contract:
+terminal snapshots and the cell program carry extended grapheme clusters and
+wide continuations, both adapters anchor glyphs to declared cell spans, and
+neutral preedit/commit/cancel composition targets the active text surface.
 
 The adapter remains outside the Cargo workspace, product build, release
 artifacts, and merge gate. The opt-in `./ci/gpu-spike.sh` maintenance check runs
@@ -152,9 +156,9 @@ Recorded in [`docs/decisions.md`](decisions.md#accepted-gpu-frontend-spike-verdi
 The spike
 succeeded (a real, measured latency win and a clean adapter), but a large
 share of the measured gap was the product's own 40 ms input poll loop, and
-a production GPU adapter still owes substantial work the spike skipped
-(Artifact Preview, grapheme widths, IME/dead-key composition, multi-display
-policy, surface/device recovery, and damage tracking).
+a production GPU adapter still owes Phase 6 hardening and evidence:
+multi-display policy, surface/device recovery, structured symmetric
+measurement, soak/resize proof, and profiling-justified damage tracking.
 
 The poll-loop prediction was then confirmed: after the run loop became
 event-driven (docs/decisions.md, "Event-Driven Main Loop With Heartbeat And
@@ -181,10 +185,9 @@ native input-to-photon result nor production-admission evidence.
 
 The wgpu adapter stays warm behind the scene contract, with its probe
 (`spikes/frontend-wgpu/src/bin/tui_probe.rs`) kept as the product's standing
-latency-regression harness. Production admission remains gated on the selected
-pixel-native capability (Artifact Preview), or on a separately accepted
-sub-20 ms symmetric end-to-end latency goal; Phase 2 host integration alone is
-not admission evidence.
+latency-regression harness. Production admission remains gated on Phase 6
+hardening and accepted symmetric evidence; the completed product capability and
+host integration alone are not admission evidence.
 
 The selected capability branch is now implemented: an Artifact Preview Pane
 displays a task- or agent-produced project-relative PNG as a typed pixel-native
@@ -194,6 +197,14 @@ live cache; durable core state holds intent only. The latency branch is not
 selected. Completing this product trigger is still not production admission:
 the GPU adapter remains unshipped and excluded from the product
 workspace/build/release.
+
+Advanced text is complete in the excluded path. One bounded grapheme occupies a
+declared one- or two-cell span; explicit continuation cells prevent selection,
+cursor, search, wrapping, and clipping from splitting wide text. The native
+shell exposes bounded font family/size/scale settings, positions the platform
+IME caret from scene geometry, keeps left Option for native dead keys, and
+reserves right Option for terminal Meta. Composition remains transient and
+renderer-neutral; it is never represented as paste or durable workspace state.
 
 ## Implementation Plan
 
@@ -211,5 +222,7 @@ pane content, chrome, overlays, theme roles, modifiers, selection, cursor, and
 scene-owned composition. Phase 4 adds the bounded artifact surface and
 final-cell raster markers to that same contract; the excluded adapter uploads,
 contain-fits, and clips it without gaining product-state ownership. Phase 5
-advanced grapheme/IME correctness is next. Completing Artifact Preview does not
-weaken the production conformance gate or admit the GPU dependency tree.
+adds shared grapheme/wide-cell occupancy and neutral IME composition across the
+real host. Both phases are complete. Phase 6 hardening and symmetric
+measurement is next. None of this weakens the production conformance gate or
+admits the GPU dependency tree.

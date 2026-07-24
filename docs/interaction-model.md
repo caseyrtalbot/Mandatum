@@ -357,8 +357,12 @@ needs an explicit font, scale, DPI, and IME contract. Renderer-neutral product
 behavior remains authoritative. The excluded native shell now handles live
 scale changes through a single transition that cancels stale pointer ownership,
 updates glyph metrics, recomputes pointer cells, resizes the host/PTYs, and
-requires a successful new present before interaction resumes. Advanced IME,
-dead-key, grapheme, and multi-display support policy remains staged; see the
+requires a successful new present before interaction resumes. It also validates
+native-only font family/size settings, keeps left Option for dead-key
+composition and right Option for terminal Meta, and routes renderer-neutral
+preedit/commit/cancel to the active text surface. Grapheme/wide-cell and IME
+correctness are complete; multi-display qualification and surface/device
+hardening remain staged in the
 [native GPU implementation plan](native-gpu-implementation-plan.md).
 
 Still planned: descriptive labels for non-terminal surfaces beyond the

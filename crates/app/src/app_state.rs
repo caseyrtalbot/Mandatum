@@ -21,7 +21,11 @@ use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind, PaletteOverlay,
     PaneSceneKind, PromptOverlay, SceneRect, SceneSize, SearchOverlay, SessionMapOverlay, Theme,
     TimelineOverlay, WelcomeOverlay, WorkspaceScene,
-    input::{InputEvent, Key, KeyCode, PointerButton, PointerEvent, PointerKind},
+    cell_program::scalar_range_to_columns,
+    input::{
+        CompositionEvent, InputEvent, Key, KeyCode, PointerButton, PointerEvent, PointerKind,
+        TextRange,
+    },
     layout::{
         context_menu_rect, help_overlay_rect, layout_separators, palette_item_window,
         palette_overlay_rect, pane_content_rect, pane_inner_rect, prompt_rect, welcome_rect,
@@ -78,6 +82,23 @@ use crate::{
 /// shell loop; the reader-side flow gates bound how much can queue at all.
 const DRAIN_EVENT_BUDGET: usize = 256;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CompositionTarget {
+    Prompt,
+    Timeline,
+    Search,
+    Palette,
+    Help,
+    Terminal(PaneId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActiveComposition {
+    target: CompositionTarget,
+    text: String,
+    cursor: Option<TextRange>,
+}
+
 pub struct AppState {
     workspace: Workspace,
     artifacts: ArtifactPreviewStore,
@@ -113,6 +134,11 @@ pub struct AppState {
     first_run_note: bool,
     /// The open Set-agent-objective prompt, if any (modal).
     objective_prompt: Option<TextPrompt>,
+    /// Transient IME preedit locked to the surface where it began.
+    active_composition: Option<ActiveComposition>,
+    /// A surface change cancelled preedit; one late platform commit must be
+    /// dropped instead of retargeted to the newly exposed surface.
+    reject_next_composition_commit: bool,
     keymap: Keymap,
     theme: Theme,
     reduced_motion: bool,
@@ -192,6 +218,8 @@ impl AppState {
             help_view: None,
             first_run_note: false,
             objective_prompt: None,
+            active_composition: None,
+            reject_next_composition_commit: false,
             keymap: config.keymap,
             theme: config.theme,
             reduced_motion: config.reduced_motion,
@@ -403,6 +431,18 @@ impl AppState {
     }
 
     pub fn handle_event(&mut self, event: InputEvent) {
+        if matches!(
+            &event,
+            InputEvent::Key(_)
+                | InputEvent::Paste(_)
+                | InputEvent::Pointer(PointerEvent {
+                    kind: PointerKind::Down | PointerKind::Wheel { .. },
+                    ..
+                })
+                | InputEvent::FocusLost
+        ) {
+            self.cancel_composition_and_reject_commit();
+        }
         // The first-run note dismisses on any action — a key, a paste, or a
         // pointer press — and the action itself proceeds normally (the note
         // is never modal). Resize and pointer motion are not actions.
@@ -411,6 +451,9 @@ impl AppState {
                 event,
                 InputEvent::Key(_)
                     | InputEvent::Paste(_)
+                    | InputEvent::Composition(
+                        CompositionEvent::Preedit { .. } | CompositionEvent::Commit(_)
+                    )
                     | InputEvent::Pointer(PointerEvent {
                         kind: PointerKind::Down | PointerKind::Wheel { .. },
                         ..
@@ -421,6 +464,7 @@ impl AppState {
         }
         match event {
             InputEvent::Key(key) => self.handle_key(key),
+            InputEvent::Composition(composition) => self.handle_composition(composition),
             InputEvent::Resize(size) => self.handle_terminal_resize(size.width, size.height),
             // Text-input overlays receive pasted text into their input.
             InputEvent::Paste(text) if self.objective_prompt.is_some() => {
@@ -475,6 +519,167 @@ impl AppState {
             InputEvent::FocusLost => self.handle_focus_lost(),
             InputEvent::FocusGained => self.mark_redraw(),
             _ => {}
+        }
+    }
+
+    fn handle_composition(&mut self, event: CompositionEvent) {
+        match event {
+            CompositionEvent::Preedit { text, cursor } => {
+                if cursor.is_some_and(|range| !range.is_valid_for(&text)) {
+                    self.cancel_composition_and_reject_commit();
+                    self.mark_redraw();
+                    return;
+                }
+                if text.is_empty() {
+                    if let Some(active) = self.active_composition.as_mut() {
+                        active.text.clear();
+                        active.cursor = None;
+                    }
+                    self.mark_redraw();
+                    return;
+                }
+
+                let current = self.current_composition_target();
+                self.reject_next_composition_commit = false;
+                match self.active_composition.as_mut() {
+                    Some(active) if current.as_ref() == Some(&active.target) => {
+                        active.text = text;
+                        active.cursor = cursor;
+                    }
+                    Some(_) => {
+                        // The surface changed while the platform still held a
+                        // composition. Drop it; never retarget a later commit.
+                        self.active_composition = None;
+                        self.reject_next_composition_commit = true;
+                        return;
+                    }
+                    None => {
+                        let Some(target) = current else {
+                            return;
+                        };
+                        self.active_composition = Some(ActiveComposition {
+                            target,
+                            text,
+                            cursor,
+                        });
+                    }
+                }
+                self.mark_redraw();
+            }
+            CompositionEvent::Commit(text) => {
+                let target = match self.active_composition.take() {
+                    Some(active)
+                        if self.current_composition_target().as_ref() == Some(&active.target) =>
+                    {
+                        active.target
+                    }
+                    Some(_) => return,
+                    None => {
+                        if std::mem::take(&mut self.reject_next_composition_commit) {
+                            return;
+                        }
+                        let Some(target) = self.current_composition_target() else {
+                            return;
+                        };
+                        target
+                    }
+                };
+                self.reject_next_composition_commit = false;
+                if !text.is_empty() {
+                    self.commit_composed_text(&target, &text);
+                }
+                self.mark_redraw();
+            }
+            CompositionEvent::Cancel => {
+                if self.active_composition.take().is_some() {
+                    self.reject_next_composition_commit = true;
+                }
+                self.mark_redraw();
+            }
+        }
+    }
+
+    fn commit_composed_text(&mut self, target: &CompositionTarget, text: &str) {
+        match target {
+            CompositionTarget::Prompt => {
+                if let Some(prompt) = self.objective_prompt.as_mut() {
+                    prompt.input_mut().push_str(text);
+                }
+            }
+            CompositionTarget::Timeline => {
+                if let Some(view) = self.timeline_view.as_mut() {
+                    view.push_query(text, now_ms());
+                }
+            }
+            CompositionTarget::Search => {
+                if let Some(view) = self.search_view.as_mut() {
+                    view.query.push_str(text);
+                    view.refresh();
+                }
+            }
+            CompositionTarget::Palette => {
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.query.push_str(text);
+                    palette.selected = 0;
+                }
+            }
+            CompositionTarget::Help => {
+                if let Some(view) = self.help_view.as_mut() {
+                    view.query.push_str(text);
+                    view.selected = 0;
+                }
+            }
+            CompositionTarget::Terminal(pane_id)
+                if self.workspace.active_session().focused_pane_id() == pane_id =>
+            {
+                self.write_to_focused_terminal(text.as_bytes());
+            }
+            CompositionTarget::Terminal(_) => {}
+        }
+    }
+
+    pub(crate) fn current_composition_target(&self) -> Option<CompositionTarget> {
+        if self.context_menu.is_some() || self.session_map.is_some() || self.copy_mode.is_some() {
+            return None;
+        }
+        if self.objective_prompt.is_some() {
+            return Some(CompositionTarget::Prompt);
+        }
+        if self.timeline_view.is_some() {
+            return Some(CompositionTarget::Timeline);
+        }
+        if self.search_view.is_some() {
+            return Some(CompositionTarget::Search);
+        }
+        if self.palette.is_some() {
+            return Some(CompositionTarget::Palette);
+        }
+        if self.help_view.is_some() {
+            return Some(CompositionTarget::Help);
+        }
+
+        let session = self.workspace.active_session();
+        let pane_id = session.focused_pane_id();
+        session
+            .pane(pane_id)
+            .is_some_and(|pane| matches!(pane.kind(), PaneKind::Terminal { .. }))
+            .then(|| pane_id.clone())
+            .filter(|pane_id| self.runtime.has_terminal(pane_id))
+            .map(CompositionTarget::Terminal)
+    }
+
+    pub(crate) fn composition_preedit_for(
+        &self,
+        target: &CompositionTarget,
+    ) -> Option<(&str, Option<TextRange>)> {
+        self.active_composition.as_ref().and_then(|active| {
+            (&active.target == target).then_some((active.text.as_str(), active.cursor))
+        })
+    }
+
+    fn cancel_composition_and_reject_commit(&mut self) {
+        if self.active_composition.take().is_some() {
+            self.reject_next_composition_commit = true;
         }
     }
 
@@ -1080,6 +1285,8 @@ impl AppState {
     }
 
     pub fn shutdown(&mut self) {
+        self.active_composition = None;
+        self.reject_next_composition_commit = false;
         self.artifacts.shutdown();
         self.runtime.shutdown_all();
         self.status = "terminal sessions stopped".to_owned();
@@ -2103,6 +2310,7 @@ impl AppState {
     /// completed pointer selection remains available to copy, but an
     /// in-progress selection or child capture cannot survive a focus change.
     fn handle_focus_lost(&mut self) {
+        self.active_composition = None;
         self.cancel_pointer_gesture();
         self.last_pane_click = None;
         self.mark_redraw();
@@ -3316,13 +3524,21 @@ impl AppState {
             grid.row_text((target_row - scrollback_len) as u16)
         };
         let row_intact = !scrolled_out
-            && current_text.is_some_and(|text| text.trim_end() == expected_text.trim_end());
-        // Select the matched span so the row is visibly marked; the buffer
-        // stores one char per cell, so char indices are columns.
+            && current_text
+                .as_ref()
+                .is_some_and(|text| text.trim_end() == expected_text.trim_end());
+        // Search highlighting is expressed as Unicode-scalar indices while
+        // terminal selection is physical grid columns. Convert through the
+        // renderer-neutral display-width policy so combining and wide
+        // graphemes select their complete footprint.
         let selection = match (match_indices.first(), match_indices.last()) {
             (Some(&first), Some(&last)) if row_intact && columns > 0 => {
                 let clamp = |index: usize| (index.min(usize::from(columns) - 1)) as u16;
-                Some(((target_row, clamp(first)), (target_row, clamp(last))))
+                let text = current_text.as_deref().unwrap_or_default();
+                let (start, end_exclusive) =
+                    scalar_range_to_columns(text, first, last.saturating_add(1));
+                let end = end_exclusive.saturating_sub(1);
+                Some(((target_row, clamp(start)), (target_row, clamp(end))))
             }
             _ => None,
         };

@@ -37,7 +37,8 @@ pub use surface::{RasterSurface, SceneCell, SurfacePosition, TerminalSurface};
 pub use theme::Theme;
 pub use workspace::{
     AttentionSegment, ContextMenuEntry, ContextMenuOverlay, HeaderScene, HelpEntry, HelpOverlay,
-    HitTarget, HitTargetKind, OverlayScene, PaletteEntry, PaletteOverlay, PromptOverlay,
-    SESSION_MAP_FOCUS_GLYPH, SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow,
-    StatusScene, TimelineEntry, TimelineOverlay, WelcomeEntry, WelcomeOverlay, WorkspaceScene,
+    HitTarget, HitTargetKind, OverlayScene, PaletteEntry, PaletteOverlay, PreeditScene,
+    PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SearchEntry, SearchOverlay, SessionMapOverlay,
+    SessionMapRow, StatusScene, TextInputKind, TextInputScene, TimelineEntry, TimelineOverlay,
+    WelcomeEntry, WelcomeOverlay, WorkspaceScene,
 };

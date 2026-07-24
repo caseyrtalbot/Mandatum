@@ -12,17 +12,21 @@ use std::{
 };
 
 use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
-use mandatum_gpu_renderer_spike::{GpuText, SceneCompileError};
+use mandatum_gpu_renderer_spike::{GpuText, NativeTextSettings, SceneCompileError};
 use mandatum_scene::{
     SceneSize, WorkspaceScene,
     input::{
-        InputEvent, Key as InputKey, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind,
+        CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, PointerButton,
+        PointerEvent, PointerKind, TextRange,
     },
 };
 use stats::Samples;
+#[cfg(target_os = "macos")]
+use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    dpi::{PhysicalPosition, PhysicalSize},
+    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     platform::modifier_supplement::KeyEventExtModifierSupplement,
@@ -42,15 +46,20 @@ struct Config {
     flood: bool,
     scale_after: Option<f64>,
     scale_factor: f32,
+    text_settings: NativeTextSettings,
 }
 
 fn parse_config() -> Config {
+    let defaults = NativeTextSettings::default();
+    let mut font_family = defaults.family().to_owned();
+    let mut font_size = defaults.font_size();
     let mut config = Config {
         exit_after: None,
         typing_bench: false,
         flood: false,
         scale_after: None,
         scale_factor: 1.5,
+        text_settings: defaults,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -69,9 +78,21 @@ fn parse_config() -> Config {
                     .and_then(|value| parse_scale_factor(&value))
                     .unwrap_or(config.scale_factor);
             }
+            "--font-family" => {
+                if let Some(family) = args.next().and_then(|value| parse_font_family(&value)) {
+                    font_family = family;
+                }
+            }
+            "--font-size" => {
+                if let Some(size) = args.next().and_then(|value| parse_font_size(&value)) {
+                    font_size = size;
+                }
+            }
             other => eprintln!("ignoring unknown arg: {other}"),
         }
     }
+    config.text_settings =
+        NativeTextSettings::new(font_family, font_size).expect("validated native text arguments");
     config
 }
 
@@ -87,6 +108,19 @@ fn parse_scale_factor(value: &str) -> Option<f32> {
         .parse::<f32>()
         .ok()
         .filter(|scale| scale.is_finite() && (0.25..=8.0).contains(scale))
+}
+
+fn parse_font_family(value: &str) -> Option<String> {
+    let family = value.trim();
+    (!family.is_empty() && family.len() <= 128 && !family.chars().any(char::is_control))
+        .then(|| family.to_owned())
+}
+
+fn parse_font_size(value: &str) -> Option<f32> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|size| size.is_finite() && (6.0..=72.0).contains(size))
 }
 
 #[derive(Debug)]
@@ -176,6 +210,8 @@ struct App {
     scene_presentable: bool,
     scale_probe_at: Option<Instant>,
     scale_probe_applied: bool,
+    window_focused: bool,
+    ime_allowed: bool,
 }
 
 impl App {
@@ -223,6 +259,8 @@ impl App {
             scene_presentable: false,
             scale_probe_at,
             scale_probe_applied: false,
+            window_focused: false,
+            ime_allowed: false,
         }
     }
 
@@ -248,8 +286,11 @@ impl App {
         self.scene_presentable = false;
         self.cancel_pointer_gesture();
         self.host.suspend_scene_interaction();
-        if let Some(gpu) = &mut self.gpu {
-            gpu.set_scale(scale_factor);
+        if let Some(gpu) = &mut self.gpu
+            && let Err(error) = gpu.set_scale(scale_factor)
+        {
+            self.fatal_error = Some(error);
+            return;
         }
         self.refresh_mouse_cell();
         self.resize_host();
@@ -299,14 +340,17 @@ impl App {
     fn render_frame(&mut self) -> Result<(), SceneCompileError> {
         self.scene_presentable = false;
         let Some(size) = self.scene_size() else {
+            self.cancel_and_disable_ime();
             self.host.suspend_scene_interaction();
             return Ok(());
         };
         let snapshot = self.host.frame(size);
         if scene_is_suspended_by_tiled_minimum(&snapshot.scene) {
+            self.cancel_and_disable_ime();
             self.host.suspend_scene_interaction();
             return Ok(());
         }
+        self.sync_ime(&snapshot.scene);
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(());
         };
@@ -397,6 +441,7 @@ impl App {
         if !self.host.should_quit() {
             return false;
         }
+        self.cancel_and_disable_ime();
         self.host.shutdown();
         self.print_summary();
         event_loop.exit();
@@ -502,7 +547,9 @@ impl App {
     }
 
     fn focus_changed(&mut self, focused: bool) {
+        self.window_focused = focused;
         if !focused {
+            self.cancel_and_disable_ime();
             self.pressed_pointer_buttons.clear();
             self.modifiers = ModifiersState::empty();
             self.wheel_cell_remainder = (0.0, 0.0);
@@ -513,6 +560,50 @@ impl App {
             InputEvent::FocusLost
         };
         self.send_input(input, false, Instant::now());
+    }
+
+    fn sync_ime(&mut self, scene: &WorkspaceScene) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        if !self.window_focused {
+            return;
+        }
+        let Some(text_input) = &scene.text_input else {
+            if self.ime_allowed {
+                window.set_ime_allowed(false);
+                self.ime_allowed = false;
+            }
+            return;
+        };
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        if !self.ime_allowed {
+            window.set_ime_allowed(true);
+            self.ime_allowed = true;
+        }
+        window.set_ime_cursor_area(
+            PhysicalPosition::new(
+                (f32::from(text_input.area.x) * gpu.cell_w()).round() as i32,
+                (f32::from(text_input.area.y) * gpu.cell_h()).round() as i32,
+            ),
+            PhysicalSize::new(
+                (f32::from(text_input.area.width.max(1)) * gpu.cell_w()).round() as u32,
+                gpu.cell_h().round() as u32,
+            ),
+        );
+    }
+
+    fn cancel_and_disable_ime(&mut self) {
+        if self.ime_allowed {
+            if let Some(window) = &self.window {
+                window.set_ime_allowed(false);
+            }
+            self.ime_allowed = false;
+        }
+        self.host
+            .handle_input(InputEvent::Composition(CompositionEvent::Cancel));
     }
 
     fn cancel_pointer_gesture(&mut self) {
@@ -529,7 +620,11 @@ impl ApplicationHandler<UserEvent> for App {
         let window = match event_loop
             .create_window(Window::default_attributes().with_title("Mandatum GPU Host Spike"))
         {
-            Ok(window) => std::sync::Arc::new(window),
+            Ok(window) => {
+                #[cfg(target_os = "macos")]
+                window.set_option_as_alt(OptionAsAlt::OnlyRight);
+                std::sync::Arc::new(window)
+            }
             Err(error) => {
                 self.fatal_error = Some(format!("no window (headless?): {error}"));
                 self.print_summary();
@@ -537,7 +632,10 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
-        let gpu = match pollster::block_on(GpuText::new(window.clone())) {
+        let gpu = match pollster::block_on(GpuText::new(
+            window.clone(),
+            self.config.text_settings.clone(),
+        )) {
             Ok(gpu) => gpu,
             Err(error) => {
                 self.fatal_error = Some(error);
@@ -578,6 +676,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
+                self.cancel_and_disable_ime();
                 self.host.shutdown();
                 self.print_summary();
                 event_loop.exit();
@@ -589,6 +688,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if let Err(error) = self.render_frame() {
                     self.fatal_error = Some(format!("unsupported GPU spike scene: {error}"));
+                    self.cancel_and_disable_ime();
                     self.host.shutdown();
                     self.print_summary();
                     event_loop.exit();
@@ -613,6 +713,24 @@ impl ApplicationHandler<UserEvent> for App {
                 self.apply_scale_factor(scale_factor as f32);
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::Ime(Ime::Disabled)
+                if ime_event_is_accepted(self.window_focused, self.ime_allowed) =>
+            {
+                self.ime_allowed = false;
+                self.send_input(
+                    InputEvent::Composition(CompositionEvent::Cancel),
+                    false,
+                    Instant::now(),
+                );
+            }
+            WindowEvent::Ime(ime)
+                if ime_event_is_accepted(self.window_focused, self.ime_allowed) =>
+            {
+                if let Some(composition) = translate_ime(ime) {
+                    self.send_input(InputEvent::Composition(composition), false, Instant::now());
+                }
+            }
+            WindowEvent::Ime(_) => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let now = Instant::now();
                 let key = key_for_platform_translation(
@@ -695,6 +813,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.apply_scale_factor(self.config.scale_factor);
         }
         if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.cancel_and_disable_ime();
             self.host.shutdown();
             self.print_summary();
             event_loop.exit();
@@ -720,6 +839,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.cancel_and_disable_ime();
         self.host.shutdown();
         self.print_summary();
     }
@@ -777,6 +897,17 @@ fn translate_key(key: &Key, modifiers: ModifiersState) -> PlatformAction {
     {
         return PlatformAction::CopyShortcut(InputKey::new(KeyCode::Char('c'), mods));
     }
+    if let Key::Character(value) = key
+        && value.chars().nth(1).is_some()
+    {
+        return if !mods.control && !mods.alt && !mods.super_key {
+            PlatformAction::Input(InputEvent::Composition(CompositionEvent::Commit(
+                value.to_string(),
+            )))
+        } else {
+            PlatformAction::Ignore
+        };
+    }
 
     let code = match key {
         Key::Named(named) => named_key_code(*named, mods.shift),
@@ -795,11 +926,34 @@ fn translate_key(key: &Key, modifiers: ModifiersState) -> PlatformAction {
     })
 }
 
+fn translate_ime(ime: Ime) -> Option<CompositionEvent> {
+    match ime {
+        Ime::Enabled => None,
+        Ime::Disabled => Some(CompositionEvent::Cancel),
+        Ime::Commit(text) => Some(CompositionEvent::Commit(text)),
+        Ime::Preedit(text, cursor) => {
+            let cursor = match cursor {
+                Some((start, end)) => match TextRange::new(&text, start, end) {
+                    Some(range) => Some(range),
+                    None => return Some(CompositionEvent::Cancel),
+                },
+                None => None,
+            };
+            Some(CompositionEvent::Preedit { text, cursor })
+        }
+    }
+}
+
+fn ime_event_is_accepted(window_focused: bool, ime_allowed: bool) -> bool {
+    window_focused && ime_allowed
+}
+
 fn named_key_code(key: NamedKey, shift: bool) -> Option<KeyCode> {
     Some(match key {
         NamedKey::Enter => KeyCode::Enter,
         NamedKey::Escape => KeyCode::Escape,
         NamedKey::Backspace => KeyCode::Backspace,
+        NamedKey::Space => KeyCode::Char(' '),
         NamedKey::Tab if shift => KeyCode::BackTab,
         NamedKey::Tab => KeyCode::Tab,
         NamedKey::ArrowUp => KeyCode::Up,
@@ -962,6 +1116,7 @@ fn main() {
     }
     // `process::exit` skips Drop, so finalize explicitly before deriving a
     // nonzero process status from any recoverable event-loop failure.
+    app.cancel_and_disable_ime();
     app.host.shutdown();
     app.print_summary();
     let exit_code = run_exit_code(app.fatal_error.as_deref());
@@ -973,12 +1128,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        PlatformAction, PressedPointerButtons, key_for_platform_translation,
-        pane_geometry_is_suspended, parse_scale_delay, parse_scale_factor, run_exit_code,
-        scene_size_from_metrics, translate_key,
+        PlatformAction, PressedPointerButtons, ime_event_is_accepted, key_for_platform_translation,
+        pane_geometry_is_suspended, parse_font_family, parse_font_size, parse_scale_delay,
+        parse_scale_factor, run_exit_code, scene_size_from_metrics, translate_ime, translate_key,
     };
-    use mandatum_scene::input::{InputEvent, Key as InputKey, KeyCode, Modifiers};
-    use winit::keyboard::{Key, ModifiersState, NamedKey};
+    use mandatum_scene::input::{
+        CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, TextRange,
+    };
+    use winit::{
+        event::Ime,
+        keyboard::{Key, ModifiersState, NamedKey},
+    };
 
     #[test]
     fn winit_key_is_neutral_before_it_reaches_the_host() {
@@ -994,6 +1154,45 @@ mod tests {
     }
 
     #[test]
+    fn ime_events_translate_without_paste_or_scalar_truncation() {
+        assert!(ime_event_is_accepted(true, true));
+        assert!(!ime_event_is_accepted(false, true));
+        assert!(!ime_event_is_accepted(true, false));
+        assert_eq!(translate_ime(Ime::Enabled), None);
+        assert_eq!(
+            translate_ime(Ime::Preedit("e\u{301}".into(), Some((0, 3)))),
+            Some(CompositionEvent::Preedit {
+                text: "e\u{301}".into(),
+                cursor: Some(TextRange { start: 0, end: 3 }),
+            })
+        );
+        assert_eq!(
+            translate_ime(Ime::Commit("啊不👩\u{200d}💻".into())),
+            Some(CompositionEvent::Commit("啊不👩\u{200d}💻".into()))
+        );
+        assert_eq!(translate_ime(Ime::Disabled), Some(CompositionEvent::Cancel));
+        assert_eq!(
+            translate_ime(Ime::Preedit("é".into(), Some((1, 2)))),
+            Some(CompositionEvent::Cancel),
+            "invalid UTF-8 byte boundaries fail closed"
+        );
+        let PlatformAction::Input(input) = translate_key(
+            &Key::Character("e\u{301}👩\u{200d}💻".into()),
+            ModifiersState::empty(),
+        ) else {
+            panic!("multi-scalar logical key did not become neutral input");
+        };
+        assert_eq!(
+            input,
+            InputEvent::Composition(CompositionEvent::Commit("e\u{301}👩\u{200d}💻".into()))
+        );
+        assert!(matches!(
+            translate_key(&Key::Character("ab".into()), ModifiersState::CONTROL),
+            PlatformAction::Ignore
+        ));
+    }
+
+    #[test]
     fn fatal_runs_return_nonzero_and_clean_runs_return_zero() {
         assert_eq!(run_exit_code(Some("unsupported scene")), 2);
         assert_eq!(run_exit_code(None), 0);
@@ -1003,6 +1202,15 @@ mod tests {
         assert_eq!(parse_scale_factor("1.5"), Some(1.5));
         assert_eq!(parse_scale_factor("0"), None);
         assert_eq!(parse_scale_factor("inf"), None);
+        assert_eq!(
+            parse_font_family("Berkeley Mono").as_deref(),
+            Some("Berkeley Mono")
+        );
+        assert_eq!(parse_font_family(" \n "), None);
+        assert_eq!(parse_font_size("15.5"), Some(15.5));
+        assert_eq!(parse_font_size("5"), None);
+        assert_eq!(parse_font_size("73"), None);
+        assert_eq!(parse_font_size("NaN"), None);
     }
 
     #[test]
@@ -1047,6 +1255,11 @@ mod tests {
                         ..Modifiers::NONE
                     },
                 ),
+            ),
+            (
+                Key::Named(NamedKey::Space),
+                ModifiersState::empty(),
+                InputKey::plain(KeyCode::Char(' ')),
             ),
             (
                 Key::Named(NamedKey::F24),

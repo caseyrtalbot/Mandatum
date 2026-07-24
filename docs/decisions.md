@@ -2271,3 +2271,61 @@ read drove the boundary fixes and ended clean. The displayed release matrix
 proved landscape and portrait contain-fit, explicit reload, Help occlusion,
 full-screen resize, visible missing-file failure, and clean Ctrl+Q exit. Exact
 commands and counts are in `docs/verification.md`.
+
+## Accepted: Grapheme Cells And IME Composition Stay Neutral
+
+Status: accepted (2026-07-23)
+
+Decision: Phase 5 replaces scalar cell occupancy with a bounded extended
+grapheme string in the terminal snapshot and renderer-neutral cell program.
+Width-two graphemes own a following `WideContinuation`; grid mutation repairs
+that pair atomically. The scene compiler accepts exactly one nonempty grapheme
+cluster of display width one or two and fails closed for malformed public scene
+input. Copy, search, selection, cursor, wrapping, clipping, and both adapters
+consume those same declared cell spans.
+
+`InputEvent::Composition` is the only IME boundary: preedit carries text plus a
+validated UTF-8 cursor range, commit inserts once into the locked active text
+target, and cancel clears transient state. Composition is neither paste nor
+durable workspace intent. Focus, modal, pointer, paste, ordinary key, and
+shutdown transitions cancel it; one late commit from a canceled platform
+sequence is ignored. The native shell enables platform IME only for a focused
+eligible target and derives the candidate rectangle from scene cell geometry.
+On macOS, left Option remains native dead-key/IME input and right Option is
+terminal Meta.
+
+Context: the earlier `Glyph(char)` cell program and direct logical-key path
+could neither preserve combining/ZWJ sequences nor model platform preedit.
+Letting each renderer infer width or composition would split cursor, selection,
+overlay routing, and clipping authority across frontends. Treating composition
+as paste would also bypass target locking and paste-specific policy.
+
+Rationale: segmentation, display width, and transient composition are
+renderer-neutral text semantics. The terminal engine must own grid invariants;
+the app must own which product surface receives text; the native shell should
+own only platform event translation, focus/enablement, caret placement, and
+native font/scale settings.
+
+Consequences:
+
+- `mandatum-scene` may depend on pure Unicode segmentation and width crates in
+  addition to `mandatum-core` and serde; it still has no terminal, GPU, or
+  platform dependency;
+- one grapheme is capped at 256 UTF-8 bytes, public scene input is normalized
+  before compilation, and pathological GPU frames are rejected before buffer
+  allocation;
+- the GPU renderer creates one anchored buffer per visible grapheme, retains
+  decorated spaces, and clips glyphs to shared fractional pixel boundaries;
+- native font family, size, and runtime scale are validated shell settings and
+  do not add inert terminal-frontend configuration;
+- the one-display macOS matrix proves runtime scale/resize but does not claim
+  cross-monitor or every installed locale/input source;
+- Phase 6 hardening and symmetric measurement is next; production GPU
+  admission, packaging, and rollout remain blocked.
+
+Verification: focused terminal, scene, app, renderer, and native-shell tests
+cover combining, CJK, emoji ZWJ, wide-edge repair, copy/search/selection/cursor,
+preedit/commit/cancel, late commits, modal/focus routing, scale and glyph-span
+geometry. Three independent review tracks drove boundary corrections and ended
+clean. The displayed macOS matrix and exact gate/latency evidence are recorded
+in `docs/verification.md`.

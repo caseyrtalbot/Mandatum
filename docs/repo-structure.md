@@ -81,12 +81,13 @@ exposure, snapshots. `[L4-GATE]` conformance tests live in
 
 `mandatum-scene`: the renderer-neutral frontend contract. `WorkspaceScene`
 output model (geometry, pane content, terminal and bounded artifact surfaces,
-overlays,
+overlays, transient text composition,
 header/status, hit targets), its final-topmost whole-frame cell compiler
-(`cell_program.rs` plus private `cell_program/` modules), all pane-rect layout
+(`cell_program.rs` plus private `cell_program/` modules, including
+`text_input.rs`), all pane-rect layout
 math (`layout.rs`), semantic themes (`theme.rs`), and the neutral input event
-types (`input.rs`). Engine-side: deps are `mandatum-core` + serde only (L1
-gate).
+types (`input.rs`). Engine-side: deps are `mandatum-core`, serde, and pure
+Unicode segmentation/width policy crates (L1 gate).
 
 ### `crates/agent-runtime`
 
@@ -163,8 +164,9 @@ history (see docs/workflows.md for what remains unbuilt here).
 
 ```text
 spikes/frontend-wgpu/   excluded winit shell over mandatum-app FrontendHost,
-                        neutral input translation, GPU presentation (including
-                        bounded Artifact Preview texture upload/contain-fit),
+                        neutral key/composition input translation, grapheme-
+                        anchored GPU presentation (including bounded Artifact
+                        Preview texture upload/contain-fit),
                         and the tui_probe latency harness; its gpu-renderer/
                         member is a scene-only paint crate; RESULTS.md is the
                         evidence record

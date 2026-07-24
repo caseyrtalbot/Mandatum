@@ -4,7 +4,8 @@ use crate::{
     TerminalSurface, Theme,
 };
 
-use super::primitives::{bordered_inner_rect, foreground};
+use super::primitives::{bordered_inner_rect, bounded_grapheme, display_width, foreground};
+use unicode_segmentation::UnicodeSegmentation;
 
 impl Compiler {
     pub(super) fn paint_pane(
@@ -160,19 +161,40 @@ impl Compiler {
                 let Some(y) = area.y.checked_add(target_row as u16) else {
                     continue;
                 };
-                self.paint_cell(
-                    x,
-                    y,
-                    ProgramCell {
-                        occupancy: CellOccupancy::Glyph(cell.character),
-                        style: cell.style,
-                        selection: surface
-                            .selection_contains(absolute_row, column as u16)
-                            .then_some(CellSelection::Terminal),
-                        cursor: surface.cursor_at(absolute_row, column as u16),
-                        raster_layer: None,
-                    },
-                );
+                let selected_here = surface.selection_contains(absolute_row, column as u16);
+                let cursor_here = surface.cursor_at(absolute_row, column as u16);
+                match &cell.occupancy {
+                    CellOccupancy::Grapheme(grapheme) => {
+                        let declared_wide = row.get(column + 1).is_some_and(|next| {
+                            matches!(next.occupancy, CellOccupancy::WideContinuation)
+                        });
+                        let (mut grapheme, measured_width) = bounded_grapheme(grapheme);
+                        let wide = measured_width == 2
+                            && declared_wide
+                            && column + 1 < usize::from(area.width);
+                        if measured_width == 2 && !wide {
+                            grapheme = "\u{fffd}".to_owned();
+                        }
+                        let selected = selected_here
+                            || (wide
+                                && surface.selection_contains(absolute_row, column as u16 + 1));
+                        let cursor = cursor_here
+                            || (wide && surface.cursor_at(absolute_row, column as u16 + 1));
+                        self.paint_grapheme(
+                            x,
+                            y,
+                            grapheme,
+                            if wide { 2 } else { 1 },
+                            cell.style,
+                            selected.then_some(CellSelection::Terminal),
+                            cursor,
+                            None,
+                        );
+                    }
+                    CellOccupancy::WideContinuation => {
+                        // The leading cell paints this pair atomically.
+                    }
+                }
             }
         }
     }
@@ -230,8 +252,7 @@ fn pane_title(pane: &PaneScene) -> String {
 
 fn fit_line(text: &str, width: u16) -> String {
     let width = usize::from(width);
-    let characters = text.chars().collect::<Vec<_>>();
-    if characters.len() <= width {
+    if display_width(text) <= width {
         return text.to_owned();
     }
     if width == 0 {
@@ -240,11 +261,34 @@ fn fit_line(text: &str, width: u16) -> String {
     if width == 1 {
         return "…".to_owned();
     }
-    let tail_len = (width - 1) / 2;
-    let head_len = width - 1 - tail_len;
-    let mut fitted = characters[..head_len].iter().collect::<String>();
+    let graphemes = text
+        .graphemes(true)
+        .map(bounded_grapheme)
+        .collect::<Vec<_>>();
+    let tail_width = (width - 1) / 2;
+    let head_width = width - 1 - tail_width;
+    let mut fitted = String::new();
+    let mut used = 0usize;
+    for (grapheme, grapheme_width) in &graphemes {
+        if used.saturating_add(*grapheme_width) > head_width {
+            break;
+        }
+        fitted.push_str(grapheme);
+        used += grapheme_width;
+    }
     fitted.push('…');
-    fitted.extend(&characters[characters.len() - tail_len..]);
+    let mut tail = Vec::new();
+    let mut used = 0usize;
+    for (grapheme, grapheme_width) in graphemes.iter().rev() {
+        if used.saturating_add(*grapheme_width) > tail_width {
+            break;
+        }
+        tail.push(grapheme);
+        used += grapheme_width;
+    }
+    for grapheme in tail.into_iter().rev() {
+        fitted.push_str(grapheme);
+    }
     fitted
 }
 
@@ -253,7 +297,7 @@ fn wrap_line(text: &str, width: u16) -> Vec<String> {
     if width == 0 {
         return Vec::new();
     }
-    if text.chars().count() <= width {
+    if display_width(text) <= width {
         return vec![text.to_owned()];
     }
 
@@ -261,7 +305,7 @@ fn wrap_line(text: &str, width: u16) -> Vec<String> {
     let mut current = String::new();
     for word in text.split_whitespace() {
         let separator = usize::from(!current.is_empty());
-        if current.chars().count() + separator + word.chars().count() <= width {
+        if display_width(&current) + separator + display_width(word) <= width {
             if !current.is_empty() {
                 current.push(' ');
             }
@@ -271,11 +315,15 @@ fn wrap_line(text: &str, width: u16) -> Vec<String> {
         if !current.is_empty() {
             rows.push(std::mem::take(&mut current));
         }
-        let mut remaining = word.chars().collect::<Vec<_>>();
-        while remaining.len() > width {
-            rows.push(remaining.drain(..width).collect());
+        let segments = wrap_word(word, width);
+        let last = segments.len().saturating_sub(1);
+        for (index, segment) in segments.into_iter().enumerate() {
+            if index < last {
+                rows.push(segment);
+            } else {
+                current = segment;
+            }
         }
-        current.extend(remaining);
     }
     if !current.is_empty() {
         rows.push(current);
@@ -284,4 +332,45 @@ fn wrap_line(text: &str, width: u16) -> Vec<String> {
         rows.push(String::new());
     }
     rows
+}
+
+fn wrap_word(word: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for grapheme in word.graphemes(true) {
+        let (mut grapheme, mut grapheme_width) = bounded_grapheme(grapheme);
+        if grapheme_width > width {
+            grapheme = "\u{fffd}".to_owned();
+            grapheme_width = 1;
+        }
+        if current_width > 0 && current_width.saturating_add(grapheme_width) > width {
+            rows.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push_str(&grapheme);
+        current_width += grapheme_width;
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fit_line, wrap_line};
+    use crate::cell_program::display_width;
+
+    #[test]
+    fn fitting_and_wrapping_never_split_graphemes_or_exceed_columns() {
+        let fitted = fit_line("ab界e\u{301}👩\u{200d}💻xyz", 7);
+        assert!(display_width(&fitted) <= 7);
+        assert!(!fitted.starts_with('\u{301}'));
+
+        let rows = wrap_line("界界界 e\u{301}e\u{301} 👩\u{200d}💻x", 3);
+        assert!(rows.iter().all(|row| display_width(row) <= 3));
+        assert!(rows.iter().any(|row| row.contains("e\u{301}")));
+        assert!(rows.iter().any(|row| row.contains("👩\u{200d}💻")));
+    }
 }

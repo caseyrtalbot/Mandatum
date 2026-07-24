@@ -155,23 +155,24 @@ Owns renderer-neutral presentation:
 
 - pane bounds and all pane-rect layout math (`scene::layout`)
 - tiled, stacked, floating, and zoomed surfaces
-- terminal grid surfaces (`TerminalSurface`: windowed styled cells, cursor,
-  scrollback viewport, selection)
-- the whole-frame renderer-neutral `CellProgram`: glyph or wide-continuation
-  occupancy, complete cell style, selection kind, cursor, and scene paint order
+- terminal grid surfaces (`TerminalSurface`: windowed styled extended
+  graphemes, wide-cell continuations, cursor, scrollback viewport, selection)
+- the whole-frame renderer-neutral `CellProgram`: extended-grapheme or
+  wide-continuation occupancy, complete cell style, selection kind, cursor,
+  transient text composition, and scene paint order
 - task and agent summaries (`PaneContent`)
 - command palette view model
 - status strips
 - overlays
 - hit targets
-- neutral input event types (`scene::input`: keys, pointer, paste, resize,
-  focus; the app consumes these exclusively; the terminal frontend
+- neutral input event types (`scene::input`: keys, composition, pointer, paste,
+  resize, focus; the app consumes these exclusively; the terminal frontend
   translates crossterm events into them in `crates/app/src/frontend.rs`)
 
 The scene layer is the interface between product state and frontend adapters.
-It is an engine-side crate (deps: `mandatum-core` + serde only) and never
-depends on the terminal engine; the app's `scene_builder` converts engine
-grids into scene surfaces.
+It is an engine-side crate (deps: `mandatum-core`, serde, and pure Unicode
+segmentation/width policy only) and never depends on the terminal engine; the
+app's `scene_builder` converts engine grids into scene surfaces.
 
 ### Frontend Adapters
 
@@ -258,16 +259,25 @@ terminal, task, agent,
 Empty, chrome, every overlay, tiled/stacked/zoomed/mixed-content/dense/floating
 compositions, built-in and custom theme roles, all current style modifiers,
 terminal/item selection, and cursor without frontend presentation branches.
-The explicit `WideContinuation` occupancy is the Phase 5 seam; current scene
-text surfaces still carry scalar cells and do not claim grapheme-width
-correctness. Artifact panes add a separate typed path: durable core state holds
+`Grapheme(String)` plus explicit `WideContinuation` is the shared text
+contract. The terminal engine repairs wide-cell invariants after writes,
+erases, edits, and resize; the compiler rejects malformed or over-budget public
+graphemes; both adapters anchor each visible grapheme to the same declared
+one- or two-cell span. Selection, search ranges, wrapping, cursor, and clipping
+therefore operate on grapheme columns rather than scalar indices. Artifact
+panes add a separate typed path: durable core state holds
 only project-relative `ArtifactPaneIntent`, app live state owns safe file
 opening/PNG decode/cache, and `mandatum-scene` carries immutable bounded RGBA8
 sRGB pixels plus loading/ready/failed state. `ProgramCell::raster_layer` marks
 only final-topmost artifact body cells, so the GPU adapter can clip pixels
 without learning pane or overlay composition; cell-only adapters ignore it and
 retain the deterministic text fallback.
-Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
+Transient composition is renderer-neutral too. `FrontendHost` accepts
+preedit/commit/cancel, `AppState` locks composition to the active terminal or
+overlay text target, and focus/modal/pointer transitions cancel it. The native
+shell owns platform IME enablement and caret geometry only. On macOS, left
+Option remains available to dead-key composition and right Option is terminal
+Meta. Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
 state remain frontend-local. Phase 3 input/lifecycle parity is complete in the
 excluded shell: configured workspace chords have first refusal before native
@@ -285,10 +295,10 @@ model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 Phase 3 is complete across layout/composition, content/style, and
-input/lifecycle capability families. Phase 4 Artifact Preview is complete
-without admitting GPU dependencies into the product workspace. Phase 5
-advanced grapheme and IME correctness is next, before hardening, measurement,
-production GPU admission, or rollout.
+input/lifecycle capability families. Phase 4 Artifact Preview and Phase 5
+advanced text/IME are complete without admitting GPU dependencies into the
+product workspace. Phase 6 hardening and symmetric measurement is next, before
+production GPU admission or rollout.
 
 ### `workflows`
 

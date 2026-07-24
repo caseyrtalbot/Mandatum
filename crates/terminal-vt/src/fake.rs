@@ -9,7 +9,7 @@
 
 use crate::{
     CellStyle, TerminalAdapter, TerminalAdapterError, TerminalCapabilities, TerminalGrid,
-    TerminalSize, TerminalUpdate,
+    TerminalSize, TerminalUpdate, grid::GraphemeWrite,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,16 +68,25 @@ impl FakeTerminalAdapter {
     }
 
     fn apply_printable(&mut self, character: char) {
-        if self.wrap_pending {
-            self.newline();
-            self.wrap_pending = false;
-        }
-
-        self.grid.put_styled(character, CellStyle::default());
-        if self.grid.cursor_at_last_column() {
-            self.wrap_pending = true;
-        } else {
-            self.grid.move_cursor_right();
+        let write = self.grid.write_printable(character, self.wrap_pending);
+        match write {
+            GraphemeWrite::Extended { at_edge } => {
+                self.wrap_pending = at_edge;
+            }
+            GraphemeWrite::New { grapheme, width } => {
+                let remaining = self
+                    .grid
+                    .size()
+                    .columns()
+                    .saturating_sub(self.grid.cursor().column());
+                if self.wrap_pending || u16::from(width) > remaining {
+                    self.newline();
+                    self.wrap_pending = false;
+                }
+                self.wrap_pending = self
+                    .grid
+                    .put_grapheme(grapheme, width, CellStyle::default());
+            }
         }
     }
 

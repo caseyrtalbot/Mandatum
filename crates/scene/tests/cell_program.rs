@@ -4,11 +4,12 @@ use mandatum_scene::{
     AgentApprovalPrompt, AgentContent, AgentStatus, ArtifactContent, ArtifactFit, ArtifactState,
     AttentionSegment, CellOccupancy, CellSelection, ContextMenuEntry, ContextMenuOverlay,
     EmptyContent, HeaderScene, HelpEntry, HelpOverlay, HitTarget, HitTargetKind, OverlayScene,
-    PaletteEntry, PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind, PromptOverlay,
-    RasterSurface, SceneCell, SceneCellStyle, SceneColor, SceneRect, SceneSize, SearchEntry,
-    SearchOverlay, SessionMapOverlay, SessionMapRow, StatusScene, SurfacePosition, TaskContent,
-    TerminalSurface, Theme, TimelineEntry, TimelineOverlay, WelcomeEntry, WelcomeOverlay,
-    WorkspaceScene, compile_cell_program,
+    PaletteEntry, PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind, PreeditScene,
+    PromptOverlay, RasterSurface, SceneCell, SceneCellStyle, SceneColor, SceneRect, SceneSize,
+    SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow, StatusScene, SurfacePosition,
+    TaskContent, TerminalSurface, TextInputKind, TextInputScene, Theme, TimelineEntry,
+    TimelineOverlay, WelcomeEntry, WelcomeOverlay, WorkspaceScene, compile_cell_program,
+    input::TextRange,
 };
 
 #[test]
@@ -49,7 +50,7 @@ fn whole_frame_cell_program_preserves_terminal_cell_style_selection_and_copy_cur
             zoomed: false,
             content: PaneContent::Terminal(TerminalSurface {
                 rows: vec![vec![SceneCell {
-                    character: 'X',
+                    occupancy: CellOccupancy::Grapheme('X'.to_string()),
                     style,
                 }]],
                 first_row: 0,
@@ -68,6 +69,7 @@ fn whole_frame_cell_program_preserves_terminal_cell_style_selection_and_copy_cur
         focused_pane: pane_id,
         hit_targets: Vec::new(),
         copy_mode: true,
+        text_input: None,
     };
 
     let program = compile_cell_program(&scene, &Theme::default());
@@ -75,7 +77,10 @@ fn whole_frame_cell_program_preserves_terminal_cell_style_selection_and_copy_cur
         .cell_at(1, 2)
         .expect("pane-inner terminal cell is present in the whole-frame program");
 
-    assert_eq!(terminal_cell.occupancy, CellOccupancy::Glyph('X'));
+    assert_eq!(
+        terminal_cell.occupancy,
+        CellOccupancy::Grapheme('X'.to_string())
+    );
     assert_ne!(
         terminal_cell.occupancy,
         CellOccupancy::WideContinuation,
@@ -209,12 +214,13 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
         focused_pane: task_id,
         hit_targets: Vec::new(),
         copy_mode: false,
+        text_input: None,
     };
 
     let program = compile_cell_program(&scene, &theme);
 
     let header = program.cell_at(1, 0).expect("header base cell");
-    assert_eq!(header.occupancy, CellOccupancy::Glyph('M'));
+    assert_eq!(header.occupancy, CellOccupancy::Grapheme('M'.to_string()));
     assert_eq!(
         header.style,
         SceneCellStyle {
@@ -225,7 +231,10 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
     );
 
     let attention = program.cell_at(12, 0).expect("attention segment cell");
-    assert_eq!(attention.occupancy, CellOccupancy::Glyph('a'));
+    assert_eq!(
+        attention.occupancy,
+        CellOccupancy::Grapheme('a'.to_string())
+    );
     assert_eq!(
         attention.style,
         SceneCellStyle {
@@ -237,31 +246,46 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
     );
 
     let border = program.cell_at(0, 2).expect("task pane border cell");
-    assert_eq!(border.occupancy, CellOccupancy::Glyph('│'));
+    assert_eq!(border.occupancy, CellOccupancy::Grapheme('│'.to_string()));
     assert_eq!(border.style.foreground, theme.pane_border);
 
     let focused_suffix = program.cell_at(9, 1).expect("focused title suffix");
-    assert_eq!(focused_suffix.occupancy, CellOccupancy::Glyph('f'));
+    assert_eq!(
+        focused_suffix.occupancy,
+        CellOccupancy::Grapheme('f'.to_string())
+    );
     assert_eq!(focused_suffix.style.foreground, theme.focus_title);
     assert!(focused_suffix.style.bold);
 
     let failed_status = program.cell_at(1, 5).expect("failed task status row");
-    assert_eq!(failed_status.occupancy, CellOccupancy::Glyph('r'));
+    assert_eq!(
+        failed_status.occupancy,
+        CellOccupancy::Grapheme('r'.to_string())
+    );
     assert_eq!(failed_status.style.foreground, theme.attention);
     assert!(failed_status.style.bold);
 
     let agent_status = program.cell_at(41, 3).expect("agent status row");
-    assert_eq!(agent_status.occupancy, CellOccupancy::Glyph('s'));
+    assert_eq!(
+        agent_status.occupancy,
+        CellOccupancy::Grapheme('s'.to_string())
+    );
     assert_eq!(agent_status.style.foreground, theme.agent_waiting);
     assert!(agent_status.style.bold);
 
     let approval_header = program.cell_at(41, 6).expect("approval header row");
-    assert_eq!(approval_header.occupancy, CellOccupancy::Glyph('a'));
+    assert_eq!(
+        approval_header.occupancy,
+        CellOccupancy::Grapheme('a'.to_string())
+    );
     assert_eq!(approval_header.style.foreground, theme.attention);
     assert!(approval_header.style.bold, "pulse-on emphasizes the header");
 
     let approval_scope = program.cell_at(41, 7).expect("approval scope row");
-    assert_eq!(approval_scope.occupancy, CellOccupancy::Glyph('s'));
+    assert_eq!(
+        approval_scope.occupancy,
+        CellOccupancy::Grapheme('s'.to_string())
+    );
     assert_eq!(approval_scope.style.foreground, theme.attention);
     assert!(
         !approval_scope.style.bold,
@@ -269,10 +293,13 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
     );
 
     let empty_detail = program.cell_at(21, 9).expect("Empty detail row");
-    assert_eq!(empty_detail.occupancy, CellOccupancy::Glyph('c'));
+    assert_eq!(
+        empty_detail.occupancy,
+        CellOccupancy::Grapheme('c'.to_string())
+    );
 
     let status = program.cell_at(0, 29).expect("status leading cell");
-    assert_eq!(status.occupancy, CellOccupancy::Glyph(' '));
+    assert_eq!(status.occupancy, CellOccupancy::Grapheme(' '.to_string()));
     assert_eq!(status.style.foreground, theme.status);
 
     let opaque_blank = program
@@ -280,7 +307,7 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
         .expect("later pane owns every covered interior cell");
     assert_eq!(
         opaque_blank.occupancy,
-        CellOccupancy::Glyph(' '),
+        CellOccupancy::Grapheme(' '.to_string()),
         "the later pane clears the earlier agent glyph at this cell"
     );
 }
@@ -327,7 +354,7 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
                 rows: vec![
                     vec![
                         SceneCell {
-                            character: 'X',
+                            occupancy: CellOccupancy::Grapheme('X'.to_string()),
                             style: SceneCellStyle::default(),
                         };
                         58
@@ -371,12 +398,16 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
         focused_pane: pane_id,
         hit_targets: vec![item_target.clone()],
         copy_mode: false,
+        text_input: None,
     };
 
     let program = compile_cell_program(&scene, &theme);
 
     let opaque_surface = program.cell_at(48, 11).expect("opaque palette cell");
-    assert_eq!(opaque_surface.occupancy, CellOccupancy::Glyph(' '));
+    assert_eq!(
+        opaque_surface.occupancy,
+        CellOccupancy::Grapheme(' '.to_string())
+    );
     assert_eq!(
         opaque_surface.style,
         SceneCellStyle {
@@ -388,17 +419,20 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     );
 
     let border = program.cell_at(10, 5).expect("palette border cell");
-    assert_eq!(border.occupancy, CellOccupancy::Glyph('│'));
+    assert_eq!(border.occupancy, CellOccupancy::Grapheme('│'.to_string()));
     assert_eq!(border.style.foreground, theme.palette_border);
     assert_eq!(border.style.background, theme.overlay_background);
 
     let title = program.cell_at(12, 4).expect("palette title cell");
-    assert_eq!(title.occupancy, CellOccupancy::Glyph('C'));
+    assert_eq!(title.occupancy, CellOccupancy::Grapheme('C'.to_string()));
     assert_eq!(title.style.foreground, theme.overlay_foreground);
     assert_eq!(title.style.background, theme.overlay_background);
 
     let placeholder = program.cell_at(13, 5).expect("empty-query placeholder");
-    assert_eq!(placeholder.occupancy, CellOccupancy::Glyph('l'));
+    assert_eq!(
+        placeholder.occupancy,
+        CellOccupancy::Grapheme('l'.to_string())
+    );
     assert!(placeholder.style.dim);
     assert!(!placeholder.cursor);
 
@@ -406,7 +440,7 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     let matched = program
         .cell_at(item_target.rect.x + 1, item_target.rect.y)
         .expect("matched label cell aligned with PaletteItem target");
-    assert_eq!(matched.occupancy, CellOccupancy::Glyph('S'));
+    assert_eq!(matched.occupancy, CellOccupancy::Grapheme('S'.to_string()));
     assert!(matched.style.bold);
     assert!(matched.style.underline);
     assert!(matched.style.inverse);
@@ -414,21 +448,37 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     assert_eq!(matched.selection, Some(CellSelection::Item));
 
     let key_hint = program.cell_at(24, 6).expect("palette key hint");
-    assert_eq!(key_hint.occupancy, CellOccupancy::Glyph('v'));
+    assert_eq!(key_hint.occupancy, CellOccupancy::Grapheme('v'.to_string()));
     assert!(key_hint.style.dim);
 
     let detail = program.cell_at(27, 6).expect("palette detail");
-    assert_eq!(detail.occupancy, CellOccupancy::Glyph('l'));
+    assert_eq!(detail.occupancy, CellOccupancy::Grapheme('l'.to_string()));
     assert!(detail.style.dim);
 
     let disabled = program.cell_at(12, 7).expect("disabled palette row");
-    assert_eq!(disabled.occupancy, CellOccupancy::Glyph('S'));
+    assert_eq!(disabled.occupancy, CellOccupancy::Grapheme('S'.to_string()));
     assert!(disabled.style.dim);
     assert_eq!(disabled.selection, None);
 
     let footer = program.cell_at(12, 12).expect("palette footer");
-    assert_eq!(footer.occupancy, CellOccupancy::Glyph('e'));
+    assert_eq!(footer.occupancy, CellOccupancy::Grapheme('e'.to_string()));
     assert!(footer.style.dim);
+
+    let mut composing_scene = scene.clone();
+    composing_scene.text_input = Some(TextInputScene {
+        area: SceneRect::new(13, 5, 36, 1),
+        kind: TextInputKind::Overlay,
+        preedit: Some(PreeditScene {
+            text: "界".to_owned(),
+            cursor: None,
+        }),
+    });
+    let composing_program = compile_cell_program(&composing_scene, &theme);
+    assert_eq!(
+        composing_program.cell_at(15, 5).unwrap().occupancy,
+        CellOccupancy::Grapheme(" ".to_owned()),
+        "overlay preedit clears the empty-query placeholder row"
+    );
 
     let mut typed_scene = scene;
     let Some(OverlayScene::Palette(palette)) = typed_scene.overlay.as_mut() else {
@@ -439,7 +489,10 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     let query_cursor = typed_program
         .cell_at(15, 5)
         .expect("non-empty query cursor cell");
-    assert_eq!(query_cursor.occupancy, CellOccupancy::Glyph(' '));
+    assert_eq!(
+        query_cursor.occupancy,
+        CellOccupancy::Grapheme(' '.to_string())
+    );
     assert!(query_cursor.cursor);
 }
 
@@ -482,7 +535,7 @@ fn scene_with_overlay(overlay: OverlayScene, hit_targets: Vec<HitTarget>) -> Wor
                 rows: vec![
                     vec![
                         SceneCell {
-                            character: 'X',
+                            occupancy: CellOccupancy::Grapheme('X'.to_string()),
                             style: SceneCellStyle::default(),
                         };
                         58
@@ -505,6 +558,7 @@ fn scene_with_overlay(overlay: OverlayScene, hit_targets: Vec<HitTarget>) -> Wor
         focused_pane: pane_id,
         hit_targets,
         copy_mode: false,
+        text_input: None,
     }
 }
 
@@ -563,11 +617,11 @@ fn every_remaining_overlay_variant_uses_the_shared_opaque_shell() {
     for overlay in overlays {
         let program = compile_cell_program(&scene_with_overlay(overlay, Vec::new()), &theme);
         let blank = program.cell_at(53, 12).expect("opaque overlay blank");
-        assert_eq!(blank.occupancy, CellOccupancy::Glyph(' '));
+        assert_eq!(blank.occupancy, CellOccupancy::Grapheme(' '.to_string()));
         assert_eq!(blank.style.foreground, theme.overlay_foreground);
         assert_eq!(blank.style.background, theme.overlay_background);
         let border = program.cell_at(5, 4).expect("shared overlay border");
-        assert_eq!(border.occupancy, CellOccupancy::Glyph('│'));
+        assert_eq!(border.occupancy, CellOccupancy::Grapheme('│'.to_string()));
         assert_eq!(border.style.foreground, theme.palette_border);
         assert_eq!(border.style.background, theme.overlay_background);
     }
@@ -594,11 +648,11 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     let label = program
         .cell_at(context_target.rect.x + 1, context_target.rect.y)
         .expect("context label inside its hit target");
-    assert_eq!(label.occupancy, CellOccupancy::Glyph('O'));
+    assert_eq!(label.occupancy, CellOccupancy::Grapheme('O'.to_string()));
     assert_eq!(label.selection, Some(CellSelection::Item));
     assert!(label.style.inverse);
     let chord = program.cell_at(47, 4).expect("right-aligned context chord");
-    assert_eq!(chord.occupancy, CellOccupancy::Glyph('c'));
+    assert_eq!(chord.occupancy, CellOccupancy::Grapheme('c'.to_string()));
     assert!(chord.style.dim);
 
     let timeline_target = HitTarget {
@@ -625,10 +679,13 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     let glyph = program
         .cell_at(timeline_target.rect.x + 1, timeline_target.rect.y)
         .expect("timeline glyph inside its hit target");
-    assert_eq!(glyph.occupancy, CellOccupancy::Glyph('▶'));
+    assert_eq!(glyph.occupancy, CellOccupancy::Grapheme('▶'.to_string()));
     assert_eq!(glyph.selection, Some(CellSelection::Item));
     let timestamp = program.cell_at(13, 5).expect("timeline timestamp");
-    assert_eq!(timestamp.occupancy, CellOccupancy::Glyph('2'));
+    assert_eq!(
+        timestamp.occupancy,
+        CellOccupancy::Grapheme('2'.to_string())
+    );
     assert!(timestamp.style.dim);
     assert!(
         program
@@ -668,14 +725,17 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     );
     let program = compile_cell_program(&search, &theme);
     let source = program.cell_at(7, 5).expect("first grouped source");
-    assert_eq!(source.occupancy, CellOccupancy::Glyph('s'));
+    assert_eq!(source.occupancy, CellOccupancy::Grapheme('s'.to_string()));
     assert!(source.style.dim);
     let elided_source = program.cell_at(7, 6).expect("repeated source elision");
-    assert_eq!(elided_source.occupancy, CellOccupancy::Glyph(' '));
+    assert_eq!(
+        elided_source.occupancy,
+        CellOccupancy::Grapheme(' '.to_string())
+    );
     let matched = program
         .cell_at(14, search_target.rect.y)
         .expect("matched result inside its hit target");
-    assert_eq!(matched.occupancy, CellOccupancy::Glyph('O'));
+    assert_eq!(matched.occupancy, CellOccupancy::Grapheme('O'.to_string()));
     assert!(matched.style.bold);
     assert!(matched.style.underline);
     assert_eq!(matched.selection, Some(CellSelection::Item));
@@ -714,10 +774,10 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     let focus = program
         .cell_at(map_target.rect.x, map_target.rect.y)
         .expect("focused map row inside its hit target");
-    assert_eq!(focus.occupancy, CellOccupancy::Glyph('●'));
+    assert_eq!(focus.occupancy, CellOccupancy::Grapheme('●'.to_string()));
     assert_eq!(focus.selection, Some(CellSelection::Item));
     let state = program.cell_at(18, 5).expect("session-map state");
-    assert_eq!(state.occupancy, CellOccupancy::Glyph('r'));
+    assert_eq!(state.occupancy, CellOccupancy::Grapheme('r'.to_string()));
     assert!(state.style.dim);
     assert!(program.cell_at(7, 13).expect("map footer").style.dim);
 }
@@ -739,11 +799,11 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
     let program = compile_cell_program(&prompt, &theme);
     assert_eq!(
         program.cell_at(7, 3).expect("prompt title").occupancy,
-        CellOccupancy::Glyph('O')
+        CellOccupancy::Grapheme('O'.to_string())
     );
     assert_eq!(
         program.cell_at(8, 4).expect("prompt input").occupancy,
-        CellOccupancy::Glyph('f')
+        CellOccupancy::Grapheme('f'.to_string())
     );
     assert!(program.cell_at(11, 4).expect("prompt cursor").cursor);
     assert!(program.cell_at(7, 13).expect("prompt footer").style.dim);
@@ -772,13 +832,13 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
     let program = compile_cell_program(&help, &theme);
     assert!(program.cell_at(10, 4).expect("help query cursor").cursor);
     let heading = program.cell_at(7, 5).expect("help heading");
-    assert_eq!(heading.occupancy, CellOccupancy::Glyph('L'));
+    assert_eq!(heading.occupancy, CellOccupancy::Grapheme('L'.to_string()));
     assert!(heading.style.bold);
     let entry = program.cell_at(9, 6).expect("help entry");
-    assert_eq!(entry.occupancy, CellOccupancy::Glyph('S'));
+    assert_eq!(entry.occupancy, CellOccupancy::Grapheme('S'.to_string()));
     assert_eq!(entry.selection, Some(CellSelection::Item));
     let keys = program.cell_at(16, 6).expect("help key hint");
-    assert_eq!(keys.occupancy, CellOccupancy::Glyph('c'));
+    assert_eq!(keys.occupancy, CellOccupancy::Grapheme('c'.to_string()));
     assert!(keys.style.dim);
     assert!(program.cell_at(7, 13).expect("help footer").style.dim);
 
@@ -802,10 +862,10 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
     );
     let program = compile_cell_program(&welcome, &theme);
     let intro = program.cell_at(6, 4).expect("welcome introduction");
-    assert_eq!(intro.occupancy, CellOccupancy::Glyph('W'));
+    assert_eq!(intro.occupancy, CellOccupancy::Grapheme('W'.to_string()));
     assert!(intro.style.bold);
     let key = program.cell_at(8, 6).expect("welcome key");
-    assert_eq!(key.occupancy, CellOccupancy::Glyph('F'));
+    assert_eq!(key.occupancy, CellOccupancy::Grapheme('F'.to_string()));
     assert_eq!(key.style.foreground, theme.palette_border);
     assert!(key.style.bold);
     assert_eq!(
@@ -813,10 +873,13 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
             .cell_at(16, 6)
             .expect("welcome description")
             .occupancy,
-        CellOccupancy::Glyph('H')
+        CellOccupancy::Grapheme('H'.to_string())
     );
     let dismissal = program.cell_at(6, 9).expect("welcome dismissal");
-    assert_eq!(dismissal.occupancy, CellOccupancy::Glyph('P'));
+    assert_eq!(
+        dismissal.occupancy,
+        CellOccupancy::Grapheme('P'.to_string())
+    );
     assert!(dismissal.style.dim);
 }
 
@@ -854,7 +917,7 @@ fn huge_chrome_and_overlay_rectangles_only_emit_in_frame_cells() {
             .cell_at(3, 2)
             .expect("clipped overlay content")
             .occupancy,
-        CellOccupancy::Glyph('W')
+        CellOccupancy::Grapheme('W'.to_string())
     );
 }
 
@@ -889,7 +952,7 @@ fn narrow_pane_content_never_overwrites_or_escapes_its_border() {
                     rows: vec![
                         vec![
                             SceneCell {
-                                character: 'X',
+                                occupancy: CellOccupancy::Grapheme('X'.to_string()),
                                 style: SceneCellStyle::default(),
                             };
                             8
@@ -912,12 +975,13 @@ fn narrow_pane_content_never_overwrites_or_escapes_its_border() {
             focused_pane: pane_id,
             hit_targets: Vec::new(),
             copy_mode: false,
+            text_input: None,
         };
 
         let program = compile_cell_program(&scene, &Theme::default());
         assert!(
             program.cells().all(|(x, y, cell)| {
-                area.contains(x, y) && cell.occupancy != CellOccupancy::Glyph('X')
+                area.contains(x, y) && cell.occupancy != CellOccupancy::Grapheme('X'.to_string())
             }),
             "{width}x{height} pane content must remain behind its border"
         );
@@ -952,7 +1016,7 @@ fn many_full_frame_replacements_compact_to_final_topmost_cells() {
             .cell_at(1, 1)
             .expect("final overlay owner")
             .occupancy,
-        CellOccupancy::Glyph('F')
+        CellOccupancy::Grapheme('F'.to_string())
     );
     assert_eq!(
         program.cells().map(|(x, y, _)| (x, y)).collect::<Vec<_>>(),
@@ -1030,6 +1094,7 @@ fn ready_artifact_marks_only_its_final_visible_body_cells() {
         focused_pane: artifact_id,
         hit_targets: Vec::new(),
         copy_mode: false,
+        text_input: None,
     };
 
     let program = compile_cell_program(&scene, &Theme::default());
@@ -1157,7 +1222,7 @@ fn every_degenerate_overlay_keeps_content_inside_its_true_border() {
                         .cell_at(area.x, area.y + 1)
                         .expect("left border")
                         .occupancy,
-                    CellOccupancy::Glyph('│')
+                    CellOccupancy::Grapheme('│'.to_string())
                 );
                 if width == 2 {
                     assert_eq!(
@@ -1165,7 +1230,7 @@ fn every_degenerate_overlay_keeps_content_inside_its_true_border() {
                             .cell_at(area.x + 1, area.y + 1)
                             .expect("right border")
                             .occupancy,
-                        CellOccupancy::Glyph('│')
+                        CellOccupancy::Grapheme('│'.to_string())
                     );
                 }
             }
@@ -1175,9 +1240,160 @@ fn every_degenerate_overlay_keeps_content_inside_its_true_border() {
                         .cell_at(area.x + 1, area.y + 1)
                         .expect("bottom border")
                         .occupancy,
-                    CellOccupancy::Glyph('─')
+                    CellOccupancy::Grapheme('─'.to_string())
                 );
             }
         }
     }
+}
+
+#[test]
+fn advanced_text_terminal_graphemes_keep_wide_marks_and_occlude_atomically() {
+    let pane_id = PaneId::new("pane-advanced-text");
+    let row = vec![
+        SceneCell::grapheme("A", SceneCellStyle::default()),
+        SceneCell::grapheme("界", SceneCellStyle::default()),
+        SceneCell::wide_continuation(SceneCellStyle::default()),
+        SceneCell::grapheme("e\u{301}", SceneCellStyle::default()),
+        SceneCell::grapheme("👩\u{200d}💻", SceneCellStyle::default()),
+        SceneCell::wide_continuation(SceneCellStyle::default()),
+        SceneCell::grapheme("two clusters", SceneCellStyle::default()),
+        SceneCell::grapheme("", SceneCellStyle::default()),
+        SceneCell::grapheme("界", SceneCellStyle::default()),
+    ];
+    let mut scene = WorkspaceScene {
+        size: SceneSize::new(12, 5),
+        header: HeaderScene {
+            area: SceneRect::new(0, 0, 12, 1),
+            workspace_name: "Mandatum".into(),
+            session_name: "main".into(),
+            pane_count: 1,
+            focused_pane: pane_id.clone(),
+            zoomed: false,
+            connector_label: "none".into(),
+            text: "Mandatum".into(),
+            attention: Vec::new(),
+        },
+        panes: vec![PaneScene {
+            id: pane_id.clone(),
+            title: "shell".into(),
+            kind: PaneSceneKind::Terminal,
+            area: SceneRect::new(0, 1, 12, 3),
+            focused: true,
+            floating: false,
+            stacked: false,
+            zoomed: false,
+            content: PaneContent::Terminal(TerminalSurface {
+                rows: vec![row],
+                first_row: 0,
+                cursor: Some(SurfacePosition::new(0, 5)),
+                scroll_offset: 0,
+                scrollback_len: 0,
+                selection: Some((SurfacePosition::new(0, 2), SurfacePosition::new(0, 2))),
+                copy_cursor: None,
+            }),
+        }],
+        overlay: None,
+        status: StatusScene {
+            area: SceneRect::new(0, 4, 12, 1),
+            text: "ready".into(),
+        },
+        focused_pane: pane_id,
+        hit_targets: Vec::new(),
+        copy_mode: false,
+        text_input: None,
+    };
+
+    let program = compile_cell_program(&scene, &Theme::default());
+    let cjk = program.cell_at(2, 2).expect("wide lead");
+    let cjk_tail = program.cell_at(3, 2).expect("wide continuation");
+    assert_eq!(cjk.occupancy, CellOccupancy::Grapheme("界".to_owned()));
+    assert_eq!(cjk_tail.occupancy, CellOccupancy::WideContinuation);
+    assert_eq!(cjk.selection, Some(CellSelection::Terminal));
+    assert_eq!(cjk_tail.selection, Some(CellSelection::Terminal));
+    let emoji = program.cell_at(5, 2).expect("emoji lead");
+    let emoji_tail = program.cell_at(6, 2).expect("emoji continuation");
+    assert!(emoji.cursor && emoji_tail.cursor);
+    for x in 7..=9 {
+        assert_eq!(
+            program.cell_at(x, 2).unwrap().occupancy,
+            CellOccupancy::Grapheme("\u{fffd}".to_owned()),
+            "invalid public scene graphemes fail closed at the compiler boundary"
+        );
+    }
+
+    scene.overlay = Some(OverlayScene::ContextMenu(ContextMenuOverlay {
+        area: SceneRect::new(3, 2, 1, 1),
+        items: Vec::new(),
+        selected: 0,
+    }));
+    let occluded = compile_cell_program(&scene, &Theme::default());
+    assert!(
+        occluded.cell_at(2, 2).is_none(),
+        "covering either half removes the complete earlier grapheme"
+    );
+    assert!(
+        !matches!(
+            occluded.cell_at(3, 2).map(|cell| &cell.occupancy),
+            Some(CellOccupancy::WideContinuation)
+        ),
+        "overlay cannot leave an orphan continuation"
+    );
+}
+
+#[test]
+fn advanced_text_prompt_cursor_uses_display_columns() {
+    let overlay = OverlayScene::Prompt(PromptOverlay {
+        area: SceneRect::new(1, 1, 10, 4),
+        title: "Compose".into(),
+        input: "界e\u{301}".into(),
+        footer: "Enter".into(),
+    });
+    let scene = scene_with_overlay(overlay, Vec::new());
+    let program = compile_cell_program(&scene, &Theme::default());
+
+    let inner = SceneRect::new(2, 2, 8, 2);
+    assert!(
+        program
+            .cell_at(inner.x + 5, inner.y)
+            .is_some_and(|cell| cell.cursor),
+        "prefix width 2 + CJK width 2 + combining grapheme width 1"
+    );
+}
+
+#[test]
+fn advanced_text_ime_preedit_compiles_underlined_graphemes_and_cursor() {
+    let overlay = OverlayScene::Prompt(PromptOverlay {
+        area: SceneRect::new(1, 1, 12, 4),
+        title: "Compose".into(),
+        input: String::new(),
+        footer: "Enter".into(),
+    });
+    let mut scene = scene_with_overlay(overlay, Vec::new());
+    scene.text_input = Some(TextInputScene {
+        area: SceneRect::new(4, 2, 7, 1),
+        kind: TextInputKind::Overlay,
+        preedit: Some(PreeditScene {
+            text: "界e\u{301}".into(),
+            cursor: Some(TextRange {
+                start: 0,
+                end: "界e\u{301}".len(),
+            }),
+        }),
+    });
+
+    let program = compile_cell_program(&scene, &Theme::default());
+    let wide = program.cell_at(4, 2).expect("preedit wide lead");
+    let continuation = program.cell_at(5, 2).expect("preedit continuation");
+    assert_eq!(wide.occupancy, CellOccupancy::Grapheme("界".to_owned()));
+    assert_eq!(continuation.occupancy, CellOccupancy::WideContinuation);
+    assert!(wide.style.underline && continuation.style.underline);
+    assert_eq!(
+        program.cell_at(6, 2).unwrap().occupancy,
+        CellOccupancy::Grapheme("e\u{301}".to_owned())
+    );
+    assert!(
+        program.cell_at(7, 2).is_some_and(|cell| cell.cursor),
+        "preedit cursor uses display columns, not scalar count"
+    );
 }

@@ -395,12 +395,16 @@ version = "0.2.0"
 dependencies = [
  "mandatum-core",
  "serde",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
 name = "mandatum-terminal-vt"
 version = "0.2.0"
 dependencies = [
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
  "vte",
 ]
 

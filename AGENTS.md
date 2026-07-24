@@ -41,7 +41,8 @@ loses its documentation or its gate.
 
 - `mandatum-scene` owns the renderer-neutral contract: the `WorkspaceScene`
   output model, all pane-rect layout math (`scene::layout`), and the neutral
-  input types (`scene::input`). It depends on `mandatum-core` and serde only.
+  input types (`scene::input`). It depends only on `mandatum-core`, serde, and
+  pure Unicode segmentation/width policy crates.
   `&WorkspaceScene` alone must suffice to paint a frame; frontends never
   compute layout or derive chrome.
 - `mandatum-renderer` is one frontend adapter: a single

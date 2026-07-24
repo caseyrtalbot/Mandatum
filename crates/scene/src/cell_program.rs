@@ -7,21 +7,23 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{SceneCellStyle, SceneSize, Theme, WorkspaceScene};
 
 mod overlays;
 mod panes;
 mod primitives;
+mod text_input;
+
+pub use primitives::{display_width, scalar_range_to_columns};
 
 /// What occupies one terminal-sized position in the cell program.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CellOccupancy {
-    Glyph(char),
+    /// Exactly one extended grapheme cluster in its leading grid cell.
+    Grapheme(String),
     /// The cell is occupied by the leading glyph immediately before it.
-    ///
-    /// Current terminal surfaces do not yet emit continuation metadata. The
-    /// explicit variant gives Phase 5 a truthful seam without changing the
-    /// existing [`crate::SceneCell`] contract.
     WideContinuation,
 }
 
@@ -34,7 +36,7 @@ pub enum CellSelection {
 }
 
 /// One renderer-neutral cell after scene cursor and selection semantics apply.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgramCell {
     pub occupancy: CellOccupancy,
     pub style: SceneCellStyle,
@@ -47,8 +49,12 @@ pub struct ProgramCell {
 
 impl ProgramCell {
     fn glyph(character: char, style: SceneCellStyle) -> Self {
+        Self::grapheme(character.to_string(), style)
+    }
+
+    fn grapheme(grapheme: String, style: SceneCellStyle) -> Self {
         Self {
-            occupancy: CellOccupancy::Glyph(character),
+            occupancy: CellOccupancy::Grapheme(grapheme),
             style,
             selection: None,
             cursor: false,
@@ -101,6 +107,9 @@ pub fn compile_cell_program(scene: &WorkspaceScene, theme: &Theme) -> CellProgra
     compiler.paint_status(scene, theme);
     if let Some(overlay) = &scene.overlay {
         compiler.paint_overlay(overlay, theme);
+    }
+    if let Some(text_input) = &scene.text_input {
+        compiler.paint_text_input(text_input, theme);
     }
 
     compiler.program

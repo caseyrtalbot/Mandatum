@@ -27,9 +27,50 @@ const BASE_FONT_PT: f32 = 15.0;
 const MAX_GPU_PANES: usize = 256;
 const MAX_GPU_FRAME_CELLS: usize = 262_144;
 const MAX_GPU_CELL_INSTRUCTIONS: usize = 4_000_000;
-const MAX_GPU_ROW_BUFFERS: usize = 4_096;
+const MAX_GPU_ROWS: usize = 4_096;
+const MAX_GPU_TEXT_BUFFERS: usize = 32_768;
 const MAX_GPU_RASTER_DIMENSION: usize = 4_096;
 const MAX_GPU_RASTER_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeTextSettings {
+    family: String,
+    font_size: f32,
+}
+
+impl Default for NativeTextSettings {
+    fn default() -> Self {
+        Self {
+            family: "monospace".to_owned(),
+            font_size: BASE_FONT_PT,
+        }
+    }
+}
+
+impl NativeTextSettings {
+    pub fn new(family: impl Into<String>, font_size: f32) -> Result<Self, String> {
+        let family = family.into();
+        let family = family.trim();
+        if family.is_empty() || family.len() > 128 || family.chars().any(char::is_control) {
+            return Err("font family must be 1..=128 visible characters".to_owned());
+        }
+        if !font_size.is_finite() || !(6.0..=72.0).contains(&font_size) {
+            return Err("font size must be finite and between 6 and 72 points".to_owned());
+        }
+        Ok(Self {
+            family: family.to_owned(),
+            font_size,
+        })
+    }
+
+    pub fn family(&self) -> &str {
+        &self.family
+    }
+
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SceneCompileError {
@@ -204,11 +245,7 @@ fn validate_precompile_resources(scene: &WorkspaceScene) -> Result<(), SceneComp
         });
     };
     enforce_resource_limit("frame cells", frame_cells, MAX_GPU_FRAME_CELLS)?;
-    enforce_resource_limit(
-        "row buffers",
-        usize::from(scene.size.height),
-        MAX_GPU_ROW_BUFFERS,
-    )?;
+    enforce_resource_limit("frame rows", usize::from(scene.size.height), MAX_GPU_ROWS)?;
     validate_raster_resources(scene)?;
 
     // The cell compiler retains only final topmost cells, but it still visits
@@ -378,15 +415,19 @@ fn validate_compiled_program(program: &CellProgram) -> Result<(), SceneCompileEr
     let instructions = program.cells().count();
     enforce_resource_limit("cell instructions", instructions, MAX_GPU_CELL_INSTRUCTIONS)?;
 
-    let mut occupied_rows = vec![false; usize::from(program.size().height)];
-    for (_, y, _) in program.cells() {
-        occupied_rows[usize::from(y)] = true;
-    }
-    let row_buffers = occupied_rows
-        .into_iter()
-        .filter(|occupied| *occupied)
+    let text_buffers = program
+        .cells()
+        .filter(|(_, _, cell)| {
+            matches!(
+                &cell.occupancy,
+                CellOccupancy::Grapheme(grapheme)
+                    if (grapheme != " " || cell.style.underline || cell.style.strikethrough)
+                        && grapheme != "\r"
+                        && grapheme != "\n"
+            )
+        })
         .count();
-    enforce_resource_limit("row buffers", row_buffers, MAX_GPU_ROW_BUFFERS)
+    enforce_resource_limit("text buffers", text_buffers, MAX_GPU_TEXT_BUFFERS)
 }
 
 fn enforce_resource_limit(
@@ -476,9 +517,9 @@ impl RowBufferPool {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ResolvedCell {
-    glyph: char,
+    grapheme: String,
     foreground: [u8; 4],
     background: [u8; 4],
     bold: bool,
@@ -496,8 +537,8 @@ struct GlyphStyle {
     strikethrough: bool,
 }
 
-impl From<ResolvedCell> for GlyphStyle {
-    fn from(cell: ResolvedCell) -> Self {
+impl From<&ResolvedCell> for GlyphStyle {
+    fn from(cell: &ResolvedCell) -> Self {
         Self {
             foreground: cell.foreground,
             bold: cell.bold,
@@ -512,6 +553,7 @@ impl From<ResolvedCell> for GlyphStyle {
 struct ProgramRow {
     y: u16,
     x: u16,
+    width: u8,
     text: String,
     runs: Vec<(std::ops::Range<usize>, GlyphStyle)>,
 }
@@ -627,17 +669,20 @@ fn resolve_program_cell(cell: &ProgramCell, theme: &Theme) -> ResolvedCell {
         std::mem::swap(&mut foreground, &mut background);
     }
 
-    let glyph = if cell.style.hidden {
-        ' '
+    let grapheme = if cell.style.hidden {
+        " ".to_owned()
     } else {
-        match cell.occupancy {
-            CellOccupancy::Glyph('\r' | '\n') | CellOccupancy::WideContinuation => ' ',
-            CellOccupancy::Glyph(character) => character,
+        match &cell.occupancy {
+            CellOccupancy::Grapheme(grapheme) if grapheme == "\r" || grapheme == "\n" => {
+                " ".to_owned()
+            }
+            CellOccupancy::WideContinuation => String::new(),
+            CellOccupancy::Grapheme(grapheme) => grapheme.clone(),
         }
     };
     let alpha = if cell.style.dim { 150 } else { 255 };
     ResolvedCell {
-        glyph,
+        grapheme,
         foreground: [foreground[0], foreground[1], foreground[2], alpha],
         background: [background[0], background[1], background[2], 255],
         bold: cell.style.bold,
@@ -655,50 +700,31 @@ fn prepare_cell_program(program: &CellProgram, theme: &Theme) -> PreparedCellPro
 
     let cells = topmost
         .iter()
-        .map(|(&(y, x), &cell)| (x, y, cell))
+        .map(|(&(y, x), cell)| (x, y, cell.clone()))
         .collect::<Vec<_>>();
-    let mut rows_by_y: BTreeMap<u16, Vec<(u16, ResolvedCell)>> = BTreeMap::new();
-    for (&(y, x), &cell) in &topmost {
-        rows_by_y.entry(y).or_default().push((x, cell));
-    }
-    let rows = rows_by_y
-        .into_iter()
-        .filter_map(|(y, cells)| {
-            let first_x = cells.first()?.0;
-            let last_x = cells.last()?.0;
-            let by_x = cells.into_iter().collect::<BTreeMap<_, _>>();
-            let fallback = ResolvedCell {
-                glyph: ' ',
-                foreground: [DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2], 255],
-                background: [DEFAULT_BG[0], DEFAULT_BG[1], DEFAULT_BG[2], 255],
-                bold: false,
-                italic: false,
-                underline: false,
-                strikethrough: false,
+    let rows = topmost
+        .iter()
+        .filter_map(|(&(y, x), cell)| {
+            if cell.grapheme.is_empty()
+                || (cell.grapheme == " " && !cell.underline && !cell.strikethrough)
+            {
+                return None;
+            }
+            let width = if topmost
+                .get(&(y, x.saturating_add(1)))
+                .is_some_and(|next| next.grapheme.is_empty())
+            {
+                2
+            } else {
+                1
             };
-            let mut text = String::new();
-            let mut runs = Vec::new();
-            let mut run_start = 0;
-            let mut run_style = None;
-            for x in first_x..=last_x {
-                let cell = by_x.get(&x).copied().unwrap_or(fallback);
-                let style = GlyphStyle::from(cell);
-                if run_style != Some(style) {
-                    if let Some(previous) = run_style.replace(style) {
-                        runs.push((run_start..text.len(), previous));
-                    }
-                    run_start = text.len();
-                }
-                text.push(cell.glyph);
-            }
-            if let Some(style) = run_style {
-                runs.push((run_start..text.len(), style));
-            }
+            let style = GlyphStyle::from(cell);
             Some(ProgramRow {
                 y,
-                x: first_x,
-                text,
-                runs,
+                x,
+                width,
+                text: cell.grapheme.clone(),
+                runs: vec![(0..cell.grapheme.len(), style)],
             })
         })
         .collect();
@@ -706,8 +732,8 @@ fn prepare_cell_program(program: &CellProgram, theme: &Theme) -> PreparedCellPro
     PreparedCellProgram { cells, rows }
 }
 
-fn glyph_attrs(style: GlyphStyle) -> Attrs<'static> {
-    let mut attrs = Attrs::new().family(Family::Monospace).color(GColor::rgba(
+fn glyph_attrs<'a>(style: GlyphStyle, family: &'a str) -> Attrs<'a> {
+    let mut attrs = Attrs::new().family(font_family(family)).color(GColor::rgba(
         style.foreground[0],
         style.foreground[1],
         style.foreground[2],
@@ -761,15 +787,22 @@ pub struct GpuText {
     row_buffers: RowBufferPool,
 
     scale: f32,
+    base_font_size: f32,
+    font_family: String,
     font_size: f32,
     cell_w: f32,
     cell_h: f32,
 }
 
 impl GpuText {
-    pub async fn new(window: Arc<Window>) -> Result<Self, String> {
+    pub async fn new(
+        window: Arc<Window>,
+        text_settings: NativeTextSettings,
+    ) -> Result<Self, String> {
+        NativeTextSettings::new(text_settings.family.clone(), text_settings.font_size)?;
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
+        validate_scale(scale)?;
 
         let instance = wgpu::Instance::default();
         let surface = instance
@@ -1009,10 +1042,10 @@ impl GpuText {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
-        let font_size = (BASE_FONT_PT * scale).round();
+        let font_size = (text_settings.font_size * scale).round();
         let line_height = (font_size * 1.3).round();
         let metrics = Metrics::new(font_size, line_height);
-        let cell_w = measure_cell_width(&mut font_system, metrics);
+        let cell_w = measure_cell_width(&mut font_system, metrics, &text_settings.family);
         let cell_h = line_height;
 
         Ok(Self {
@@ -1040,6 +1073,8 @@ impl GpuText {
             text_renderer,
             row_buffers: RowBufferPool::new(),
             scale,
+            base_font_size: text_settings.font_size,
+            font_family: text_settings.family,
             font_size,
             cell_w,
             cell_h,
@@ -1064,17 +1099,19 @@ impl GpuText {
         self.surface.configure(&self.device, &self.config);
     }
 
-    pub fn set_scale(&mut self, scale: f32) {
+    pub fn set_scale(&mut self, scale: f32) -> Result<(), String> {
+        validate_scale(scale)?;
         if (scale - self.scale).abs() < f32::EPSILON {
-            return;
+            return Ok(());
         }
         self.scale = scale;
-        self.font_size = (BASE_FONT_PT * scale).round();
+        self.font_size = (self.base_font_size * scale).round();
         let line_height = (self.font_size * 1.3).round();
         let metrics = Metrics::new(self.font_size, line_height);
         self.row_buffers.set_metrics(metrics);
-        self.cell_w = measure_cell_width(&mut self.font_system, metrics);
+        self.cell_w = measure_cell_width(&mut self.font_system, metrics, &self.font_family);
         self.cell_h = line_height;
+        Ok(())
     }
 
     fn sync_raster_cache(&mut self, artifacts: &[PreparedArtifact]) {
@@ -1200,16 +1237,18 @@ impl GpuText {
         }
 
         for (buffer, row) in self.row_buffers.rows.iter_mut().zip(program.rows.iter()) {
-            let width = row.text.chars().count() as f32 * self.cell_w;
+            let width = f32::from(row.width) * self.cell_w;
             buffer.set_wrap(Wrap::None);
             buffer.set_size(Some(width.max(1.0)), Some(self.cell_h));
-            let spans = row
-                .runs
-                .iter()
-                .map(|(range, style)| (&row.text[range.clone()], glyph_attrs(*style)));
+            let spans = row.runs.iter().map(|(range, style)| {
+                (
+                    &row.text[range.clone()],
+                    glyph_attrs(*style, &self.font_family),
+                )
+            });
             buffer.set_rich_text(
                 spans,
-                &Attrs::new().family(Family::Monospace),
+                &Attrs::new().family(font_family(&self.font_family)),
                 Shaping::Advanced,
                 None,
             );
@@ -1290,12 +1329,15 @@ impl GpuText {
                 left,
                 top,
                 scale: 1.0,
-                bounds: TextBounds {
-                    left: left.floor() as i32,
-                    top: top.floor() as i32,
-                    right: self.config.width as i32,
-                    bottom: (top + self.cell_h).ceil() as i32,
-                },
+                bounds: glyph_text_bounds(
+                    row.x,
+                    row.y,
+                    row.width,
+                    self.cell_w,
+                    self.cell_h,
+                    self.config.width,
+                    self.config.height,
+                ),
                 default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
                 custom_glyphs: &[],
             }
@@ -1474,8 +1516,6 @@ fn cell_clip_scissor(
     // conversion for adjacent clips prevents fractional cell metrics from
     // creating a one-pixel overlap where a lower artifact could bleed through
     // a later opaque pane.
-    let pixel_boundary =
-        |position: f32, maximum: u32| (position - 0.5).ceil().clamp(0.0, maximum as f32) as u32;
     let left = pixel_boundary(f32::from(clip.x) * cell_width, surface_width);
     let top = pixel_boundary(f32::from(clip.y) * cell_height, surface_height);
     let right = pixel_boundary(f32::from(clip.right()) * cell_width, surface_width);
@@ -1483,11 +1523,37 @@ fn cell_clip_scissor(
     (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
 }
 
+fn glyph_text_bounds(
+    x: u16,
+    y: u16,
+    width: u8,
+    cell_width: f32,
+    cell_height: f32,
+    surface_width: u32,
+    surface_height: u32,
+) -> TextBounds {
+    let left = f32::from(x) * cell_width;
+    let top = f32::from(y) * cell_height;
+    TextBounds {
+        left: pixel_boundary(left, surface_width) as i32,
+        top: pixel_boundary(top, surface_height) as i32,
+        right: pixel_boundary(
+            left + f32::from(width.clamp(1, 2)) * cell_width,
+            surface_width,
+        ) as i32,
+        bottom: pixel_boundary(top + cell_height, surface_height) as i32,
+    }
+}
+
+fn pixel_boundary(position: f32, maximum: u32) -> u32 {
+    (position - 0.5).ceil().clamp(0.0, maximum as f32) as u32
+}
+
 /// Measure a monospace advance width by shaping a run of identical glyphs and
 /// dividing the laid-out line width by the glyph count.
-fn measure_cell_width(font_system: &mut FontSystem, metrics: Metrics) -> f32 {
+fn measure_cell_width(font_system: &mut FontSystem, metrics: Metrics, family: &str) -> f32 {
     let mut buffer = Buffer::new(font_system, metrics);
-    let mono = Attrs::new().family(Family::Monospace);
+    let mono = Attrs::new().family(font_family(family));
     buffer.set_text("MMMMMMMMMMMMMMMMMMMM", &mono, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     let width = buffer
@@ -1496,6 +1562,22 @@ fn measure_cell_width(font_system: &mut FontSystem, metrics: Metrics) -> f32 {
         .map(|run| run.line_w)
         .unwrap_or(metrics.font_size * 0.6);
     (width / 20.0).max(1.0)
+}
+
+fn validate_scale(scale: f32) -> Result<(), String> {
+    if scale.is_finite() && (0.25..=8.0).contains(&scale) {
+        Ok(())
+    } else {
+        Err("display scale must be finite and between 0.25 and 8.0".to_owned())
+    }
+}
+
+fn font_family(family: &str) -> Family<'_> {
+    if family.eq_ignore_ascii_case("monospace") {
+        Family::Monospace
+    } else {
+        Family::Name(family)
+    }
 }
 
 fn bytes_of<T: Copy>(value: &T) -> &[u8] {
@@ -1881,7 +1963,7 @@ mod tests {
             ..Theme::default()
         };
         let cell = ProgramCell {
-            occupancy: CellOccupancy::Glyph('X'),
+            occupancy: CellOccupancy::Grapheme('X'.to_string()),
             style: mandatum_scene::SceneCellStyle {
                 foreground: SceneColor::Rgb(1, 2, 3),
                 background: SceneColor::Rgb(4, 5, 6),
@@ -1899,7 +1981,7 @@ mod tests {
         };
 
         let resolved = resolve_program_cell(&cell, &theme);
-        assert_eq!(resolved.glyph, 'X');
+        assert_eq!(resolved.grapheme, "X");
         assert_eq!(resolved.foreground, [1, 2, 3, 150]);
         assert_eq!(resolved.background, [90, 91, 92, 255]);
         assert!(resolved.bold);
@@ -1907,7 +1989,7 @@ mod tests {
         assert!(resolved.underline);
         assert!(resolved.strikethrough);
 
-        let attrs = glyph_attrs(GlyphStyle::from(resolved));
+        let attrs = glyph_attrs(GlyphStyle::from(&resolved), "monospace");
         assert_eq!(attrs.weight, Weight::BOLD);
         assert_eq!(attrs.style, FontStyle::Italic);
         assert_eq!(attrs.text_decoration.underline, UnderlineStyle::Single);
@@ -1917,7 +1999,7 @@ mod tests {
     #[test]
     fn base_inverse_terminal_selection_fallback_and_cursor_reverse_once_by_presence() {
         let cell = ProgramCell {
-            occupancy: CellOccupancy::Glyph('X'),
+            occupancy: CellOccupancy::Grapheme('X'.to_string()),
             style: mandatum_scene::SceneCellStyle {
                 foreground: SceneColor::Rgb(1, 2, 3),
                 background: SceneColor::Rgb(4, 5, 6),
@@ -1940,7 +2022,7 @@ mod tests {
     #[test]
     fn item_selection_uses_compiled_style_and_hidden_or_continuation_cells_are_blank() {
         let item = ProgramCell {
-            occupancy: CellOccupancy::Glyph('I'),
+            occupancy: CellOccupancy::Grapheme('I'.to_string()),
             style: mandatum_scene::SceneCellStyle {
                 foreground: SceneColor::Rgb(1, 2, 3),
                 background: SceneColor::Rgb(4, 5, 6),
@@ -1952,7 +2034,7 @@ mod tests {
             raster_layer: None,
         };
         let hidden = ProgramCell {
-            occupancy: CellOccupancy::Glyph('H'),
+            occupancy: CellOccupancy::Grapheme('H'.to_string()),
             style: mandatum_scene::SceneCellStyle {
                 hidden: true,
                 ..mandatum_scene::SceneCellStyle::default()
@@ -1972,10 +2054,13 @@ mod tests {
         let resolved_item = resolve_program_cell(&item, &Theme::default());
         assert_eq!(resolved_item.foreground, [4, 5, 6, 255]);
         assert_eq!(resolved_item.background, [1, 2, 3, 255]);
-        assert_eq!(resolve_program_cell(&hidden, &Theme::default()).glyph, ' ');
         assert_eq!(
-            resolve_program_cell(&continuation, &Theme::default()).glyph,
-            ' '
+            resolve_program_cell(&hidden, &Theme::default()).grapheme,
+            " "
+        );
+        assert_eq!(
+            resolve_program_cell(&continuation, &Theme::default()).grapheme,
+            ""
         );
     }
 
@@ -1985,7 +2070,7 @@ mod tests {
             rows: vec![
                 vec![
                     SceneCell {
-                        character: 'X',
+                        occupancy: CellOccupancy::Grapheme('X'.to_string()),
                         style: mandatum_scene::SceneCellStyle::default(),
                     };
                     20
@@ -2018,11 +2103,86 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(final_cells.len(), 1);
-        assert_eq!(final_cells[0].2.glyph, ' ');
+        assert_eq!(final_cells[0].2.grapheme, " ");
         assert_eq!(
             final_cells[0].2.background,
             [DEFAULT_BG[0], DEFAULT_BG[1], DEFAULT_BG[2], 255]
         );
+    }
+
+    #[test]
+    fn advanced_text_graphemes_are_anchored_to_declared_cell_spans() {
+        let decorated_space = mandatum_scene::SceneCellStyle {
+            underline: true,
+            ..mandatum_scene::SceneCellStyle::default()
+        };
+        let surface = TerminalSurface {
+            rows: vec![vec![
+                SceneCell::grapheme("A", mandatum_scene::SceneCellStyle::default()),
+                SceneCell::grapheme("界", mandatum_scene::SceneCellStyle::default()),
+                SceneCell::wide_continuation(mandatum_scene::SceneCellStyle::default()),
+                SceneCell::grapheme("e\u{301}", mandatum_scene::SceneCellStyle::default()),
+                SceneCell::grapheme("👩\u{200d}💻", mandatum_scene::SceneCellStyle::default()),
+                SceneCell::wide_continuation(mandatum_scene::SceneCellStyle::default()),
+                SceneCell::grapheme(" ", decorated_space),
+            ]],
+            ..TerminalSurface::default()
+        };
+        let pane = pane(PaneSceneKind::Terminal, PaneContent::Terminal(surface));
+        let scene = scene(vec![pane]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(prepared.cell_program(), &theme);
+        let inner = layout::pane_inner_rect(scene.panes[0].area);
+        let runs = translated
+            .rows
+            .iter()
+            .filter(|row| row.y == inner.y)
+            .map(|row| (row.x, row.width, row.text.as_str()))
+            .collect::<Vec<_>>();
+
+        for expected in [
+            (inner.x, 1, "A"),
+            (inner.x + 1, 2, "界"),
+            (inner.x + 3, 1, "e\u{301}"),
+            (inner.x + 4, 2, "👩\u{200d}💻"),
+            (inner.x + 6, 1, " "),
+        ] {
+            assert!(
+                runs.contains(&expected),
+                "missing grid-anchored grapheme {expected:?}; got {runs:?}"
+            );
+        }
+        assert!(
+            runs.iter().all(|(_, _, text)| !text.is_empty()),
+            "continuations reserve cells but never become shaped glyph runs"
+        );
+    }
+
+    #[test]
+    fn native_text_settings_validate_at_the_renderer_boundary() {
+        assert!(NativeTextSettings::new("Menlo", 16.0).is_ok());
+        assert!(NativeTextSettings::new("", 16.0).is_err());
+        assert!(NativeTextSettings::new("bad\nfamily", 16.0).is_err());
+        assert!(NativeTextSettings::new("Menlo", 0.0).is_err());
+        assert!(NativeTextSettings::new("Menlo", f32::NAN).is_err());
+        assert!(validate_scale(1.5).is_ok());
+        assert!(validate_scale(0.0).is_err());
+        assert!(validate_scale(f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn glyph_raster_bounds_are_clipped_to_the_declared_cell_span() {
+        let narrow = glyph_text_bounds(3, 2, 1, 9.5, 18.0, 100, 100);
+        assert_eq!((narrow.left, narrow.right), (28, 38));
+        let wide = glyph_text_bounds(3, 2, 2, 9.5, 18.0, 100, 100);
+        assert_eq!((wide.left, wide.right), (28, 47));
+        let adjacent = glyph_text_bounds(5, 2, 1, 9.5, 18.0, 100, 100);
+        assert_eq!(wide.right, adjacent.left);
+        let next_row = glyph_text_bounds(5, 3, 1, 9.5, 18.0, 100, 100);
+        assert_eq!(adjacent.bottom, next_row.top);
+        let edge = glyph_text_bounds(10, 2, 2, 9.5, 18.0, 100, 100);
+        assert_eq!(edge.right, 100);
     }
 
     fn terminal_content() -> PaneContent {
@@ -2073,6 +2233,7 @@ mod tests {
             focused_pane,
             hit_targets: Vec::new(),
             copy_mode: false,
+            text_input: None,
         }
     }
 
@@ -2086,6 +2247,56 @@ mod tests {
         let inner = layout::pane_inner_rect(scene.panes[0].area);
         assert!(prepared.cell_program().cell_at(inner.x, inner.y).is_some());
         assert_eq!(scene.status.text, "test status");
+    }
+
+    #[test]
+    fn dense_normal_terminal_stays_within_the_text_buffer_budget() {
+        let rows =
+            vec![
+                vec![SceneCell::grapheme("X", mandatum_scene::SceneCellStyle::default()); 118];
+                36
+            ];
+        let mut dense = scene(vec![pane(
+            PaneSceneKind::Terminal,
+            PaneContent::Terminal(TerminalSurface {
+                rows,
+                ..TerminalSurface::default()
+            }),
+        )]);
+        dense.size = SceneSize::new(120, 40);
+        dense.header.area = SceneRect::new(0, 0, 120, 1);
+        dense.status.area = SceneRect::new(0, 39, 120, 1);
+        dense.panes[0].area = SceneRect::new(0, 1, 120, 38);
+        prepare_scene(&dense, &Theme::default())
+            .expect("a dense ordinary 120x40 terminal must remain renderable");
+    }
+
+    #[test]
+    fn pathological_dense_terminal_hits_the_explicit_text_buffer_budget() {
+        let rows =
+            vec![
+                vec![SceneCell::grapheme("X", mandatum_scene::SceneCellStyle::default()); 510];
+                66
+            ];
+        let mut dense = scene(vec![pane(
+            PaneSceneKind::Terminal,
+            PaneContent::Terminal(TerminalSurface {
+                rows,
+                ..TerminalSurface::default()
+            }),
+        )]);
+        dense.size = SceneSize::new(512, 70);
+        dense.header.area = SceneRect::new(0, 0, 512, 1);
+        dense.status.area = SceneRect::new(0, 69, 512, 1);
+        dense.panes[0].area = SceneRect::new(0, 1, 512, 68);
+        assert!(matches!(
+            prepare_scene(&dense, &Theme::default()).unwrap_err(),
+            SceneCompileError::ResourceLimit {
+                resource: "text buffers",
+                actual,
+                maximum: MAX_GPU_TEXT_BUFFERS,
+            } if actual > MAX_GPU_TEXT_BUFFERS
+        ));
     }
 
     #[test]
@@ -2230,7 +2441,7 @@ mod tests {
         oversized_frame.size = SceneSize::new(513, 512);
 
         let mut too_many_rows = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
-        too_many_rows.size = SceneSize::new(3, (MAX_GPU_ROW_BUFFERS + 1) as u16);
+        too_many_rows.size = SceneSize::new(3, (MAX_GPU_ROWS + 1) as u16);
         too_many_rows.panes[0].area = SceneRect::new(0, 1, 3, 3);
 
         let mut instruction_heavy = scene(
@@ -2256,9 +2467,9 @@ mod tests {
         assert_eq!(
             prepare_scene(&too_many_rows, &Theme::default()).unwrap_err(),
             SceneCompileError::ResourceLimit {
-                resource: "row buffers",
-                actual: MAX_GPU_ROW_BUFFERS + 1,
-                maximum: MAX_GPU_ROW_BUFFERS,
+                resource: "frame rows",
+                actual: MAX_GPU_ROWS + 1,
+                maximum: MAX_GPU_ROWS,
             }
         );
         assert!(matches!(

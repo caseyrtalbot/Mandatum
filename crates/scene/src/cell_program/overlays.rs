@@ -1,4 +1,7 @@
-use super::{CellSelection, Compiler, ProgramCell};
+use super::{
+    CellSelection, Compiler, ProgramCell,
+    primitives::{bounded_grapheme, display_width},
+};
 use crate::{
     ContextMenuOverlay, HelpOverlay, OverlayScene, PaletteOverlay, PromptOverlay,
     SESSION_MAP_FOCUS_GLYPH, SceneCellStyle, SceneColor, SceneRect, SearchOverlay,
@@ -6,6 +9,7 @@ use crate::{
 };
 
 use super::primitives::bordered_inner_rect;
+use unicode_segmentation::UnicodeSegmentation;
 
 impl Compiler {
     pub(super) fn paint_overlay(&mut self, overlay: &OverlayScene, theme: &Theme) {
@@ -32,30 +36,29 @@ impl Compiler {
             let selected = menu.selected == index;
             let line_style = selected_item_style(surface, selected, theme);
             let label = format!(" {}", item.label);
-            let label_width = label.chars().count();
-            let hint_width = item.chord_hint.chars().count() + 1;
+            let label_width = display_width(&label);
+            let hint_width = display_width(&item.chord_hint) + 1;
             let padding = usize::from(inner.width)
                 .saturating_sub(label_width + hint_width)
                 .max(1);
             let y = inner.y.saturating_add(index as u16);
             let mut column = 0usize;
-            for character in label.chars().chain(" ".repeat(padding).chars()) {
-                self.paint_overlay_character(inner, column, y, character, line_style, selected);
-                column += 1;
+            let leading = format!("{label}{}", " ".repeat(padding));
+            for grapheme in leading.graphemes(true) {
+                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, line_style, selected);
             }
-            for character in item.chord_hint.chars() {
-                self.paint_overlay_character(
+            for grapheme in item.chord_hint.graphemes(true) {
+                self.paint_overlay_grapheme(
                     inner,
-                    column,
+                    &mut column,
                     y,
-                    character,
+                    grapheme,
                     SceneCellStyle {
                         dim: true,
                         ..line_style
                     },
                     selected,
                 );
-                column += 1;
             }
         }
     }
@@ -90,27 +93,24 @@ impl Compiler {
             let line_style = selected_item_style(surface, selected, theme);
             let y = inner.y.saturating_add(1).saturating_add(row as u16);
             let mut column = 0usize;
-            for character in format!(" {} ", item.glyph).chars() {
-                self.paint_overlay_character(inner, column, y, character, line_style, selected);
-                column += 1;
+            for grapheme in format!(" {} ", item.glyph).graphemes(true) {
+                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, line_style, selected);
             }
-            for character in format!("{:>10}  ", item.when).chars() {
-                self.paint_overlay_character(
+            for grapheme in format!("{:>10}  ", item.when).graphemes(true) {
+                self.paint_overlay_grapheme(
                     inner,
-                    column,
+                    &mut column,
                     y,
-                    character,
+                    grapheme,
                     SceneCellStyle {
                         dim: true,
                         ..line_style
                     },
                     selected,
                 );
-                column += 1;
             }
-            for character in item.text.chars() {
-                self.paint_overlay_character(inner, column, y, character, line_style, selected);
-                column += 1;
+            for grapheme in item.text.graphemes(true) {
+                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, line_style, selected);
             }
         }
         self.paint_overlay_footer(inner, &timeline.footer, surface);
@@ -151,7 +151,7 @@ impl Compiler {
         {
             let item = &search.items[index];
             let source = if previous_source == Some(item.source.as_str()) {
-                " ".repeat(item.source.chars().count())
+                " ".repeat(display_width(&item.source))
             } else {
                 item.source.clone()
             };
@@ -160,28 +160,31 @@ impl Compiler {
             let line_style = selected_item_style(surface, selected, theme);
             let y = inner.y.saturating_add(1).saturating_add(row as u16);
             let mut column = 0usize;
-            for character in format!(" {source}  ").chars() {
-                self.paint_overlay_character(
+            for grapheme in format!(" {source}  ").graphemes(true) {
+                self.paint_overlay_grapheme(
                     inner,
-                    column,
+                    &mut column,
                     y,
-                    character,
+                    grapheme,
                     SceneCellStyle {
                         dim: true,
                         ..line_style
                     },
                     selected,
                 );
-                column += 1;
             }
-            for (position, character) in item.text.chars().enumerate() {
+            let mut scalar_position = 0usize;
+            for grapheme in item.text.graphemes(true) {
                 let mut cell_style = line_style;
-                if item.match_indices.contains(&position) {
+                let scalar_len = grapheme.chars().count();
+                if item.match_indices.iter().any(|index| {
+                    (*index >= scalar_position) && (*index < scalar_position + scalar_len)
+                }) {
                     cell_style.bold = true;
                     cell_style.underline = true;
                 }
-                self.paint_overlay_character(inner, column, y, character, cell_style, selected);
-                column += 1;
+                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, cell_style, selected);
+                scalar_position += scalar_len;
             }
         }
         self.paint_overlay_footer(inner, &search.footer, surface);
@@ -202,47 +205,44 @@ impl Compiler {
                 " "
             };
             let mut column = 0usize;
-            for character in format!(
+            for grapheme in format!(
                 "{marker}{}{} {}",
                 "  ".repeat(usize::from(item.depth)),
                 item.glyph,
                 item.label
             )
-            .chars()
+            .graphemes(true)
             {
-                self.paint_overlay_character(inner, column, y, character, line_style, selected);
-                column += 1;
+                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, line_style, selected);
             }
             if !item.state.is_empty() {
-                for character in format!("  {}", item.state).chars() {
-                    self.paint_overlay_character(
+                for grapheme in format!("  {}", item.state).graphemes(true) {
+                    self.paint_overlay_grapheme(
                         inner,
-                        column,
+                        &mut column,
                         y,
-                        character,
+                        grapheme,
                         SceneCellStyle {
                             dim: true,
                             ..line_style
                         },
                         selected,
                     );
-                    column += 1;
                 }
             }
             if !item.badges.is_empty() {
-                for character in format!("  [{}]", item.badges).chars() {
-                    self.paint_overlay_character(
+                for grapheme in format!("  [{}]", item.badges).graphemes(true) {
+                    self.paint_overlay_grapheme(
                         inner,
-                        column,
+                        &mut column,
                         y,
-                        character,
+                        grapheme,
                         SceneCellStyle {
                             dim: true,
                             ..line_style
                         },
                         selected,
                     );
-                    column += 1;
                 }
             }
         }
@@ -266,7 +266,7 @@ impl Compiler {
             surface,
         );
         let cursor_column = 2usize
-            .saturating_add(prompt.input.chars().count())
+            .saturating_add(display_width(&prompt.input))
             .min(usize::from(inner.width.saturating_sub(1)));
         let mut cursor = ProgramCell::glyph(' ', surface);
         cursor.cursor = true;
@@ -308,34 +308,32 @@ impl Compiler {
                 format!("   {}", item.label)
             };
             let mut column = 0usize;
-            for character in label.chars() {
-                self.paint_overlay_character(
+            for grapheme in label.graphemes(true) {
+                self.paint_overlay_grapheme(
                     inner,
-                    column,
+                    &mut column,
                     y,
-                    character,
+                    grapheme,
                     SceneCellStyle {
                         bold: item.heading,
                         ..line_style
                     },
                     selected,
                 );
-                column += 1;
             }
             if !item.keys.is_empty() {
-                for character in format!("  {}", item.keys).chars() {
-                    self.paint_overlay_character(
+                for grapheme in format!("  {}", item.keys).graphemes(true) {
+                    self.paint_overlay_grapheme(
                         inner,
-                        column,
+                        &mut column,
                         y,
-                        character,
+                        grapheme,
                         SceneCellStyle {
                             dim: true,
                             ..line_style
                         },
                         selected,
                     );
-                    column += 1;
                 }
             }
         }
@@ -359,7 +357,7 @@ impl Compiler {
         let key_width = welcome
             .entries
             .iter()
-            .map(|entry| entry.keys.chars().count())
+            .map(|entry| display_width(&entry.keys))
             .max()
             .unwrap_or(0);
         for (index, entry) in welcome.entries.iter().enumerate() {
@@ -369,17 +367,16 @@ impl Compiler {
             }
             let y = inner.y.saturating_add(row as u16);
             let mut column = 0usize;
-            for character in "  ".chars() {
-                self.paint_overlay_character(inner, column, y, character, surface, false);
-                column += 1;
+            for grapheme in "  ".graphemes(true) {
+                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, surface, false);
             }
-            let padding = key_width.saturating_sub(entry.keys.chars().count());
-            for character in format!("{}{}", entry.keys, " ".repeat(padding)).chars() {
-                self.paint_overlay_character(
+            let padding = key_width.saturating_sub(display_width(&entry.keys));
+            for grapheme in format!("{}{}", entry.keys, " ".repeat(padding)).graphemes(true) {
+                self.paint_overlay_grapheme(
                     inner,
-                    column,
+                    &mut column,
                     y,
-                    character,
+                    grapheme,
                     SceneCellStyle {
                         foreground: theme.palette_border,
                         bold: true,
@@ -387,11 +384,9 @@ impl Compiler {
                     },
                     false,
                 );
-                column += 1;
             }
-            for character in format!("  {}", entry.description).chars() {
-                self.paint_overlay_character(inner, column, y, character, surface, false);
-                column += 1;
+            for grapheme in format!("  {}", entry.description).graphemes(true) {
+                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, surface, false);
             }
         }
         let dismissal_row = welcome.entries.len().saturating_add(3);
@@ -459,7 +454,7 @@ impl Compiler {
         }
         self.paint_text(input_area, query, surface);
         let cursor_column = 2usize
-            .saturating_add(query.chars().count())
+            .saturating_add(display_width(query))
             .min(usize::from(inner.width.saturating_sub(1)));
         let mut cursor = ProgramCell::glyph(' ', surface);
         cursor.cursor = true;
@@ -533,7 +528,7 @@ impl Compiler {
                 surface,
             );
             let cursor_column = 2usize
-                .saturating_add(palette.query.chars().count())
+                .saturating_add(display_width(&palette.query))
                 .min(usize::from(inner.width.saturating_sub(1)));
             let mut cursor = ProgramCell::glyph(' ', surface);
             cursor.cursor = true;
@@ -572,34 +567,42 @@ impl Compiler {
 
             let y = inner.y.saturating_add(1).saturating_add(row as u16);
             let mut column = 0usize;
-            self.paint_overlay_character(inner, column, y, ' ', line_style, selected);
-            column += 1;
-            for (position, character) in item.label.chars().enumerate() {
+            self.paint_overlay_grapheme(inner, &mut column, y, " ", line_style, selected);
+            let mut scalar_position = 0usize;
+            for grapheme in item.label.graphemes(true) {
                 let mut cell_style = line_style;
-                if item.match_indices.contains(&position) {
+                let scalar_len = grapheme.chars().count();
+                if item.match_indices.iter().any(|index| {
+                    (*index >= scalar_position) && (*index < scalar_position + scalar_len)
+                }) {
                     cell_style.bold = true;
                     cell_style.underline = true;
                 }
-                self.paint_overlay_character(inner, column, y, character, cell_style, selected);
-                column += 1;
+                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, cell_style, selected);
+                scalar_position += scalar_len;
             }
             if let Some(hint) = &item.key_hint {
-                for character in format!("  {hint}").chars() {
+                for grapheme in format!("  {hint}").graphemes(true) {
                     let cell_style = SceneCellStyle {
                         dim: true,
                         ..line_style
                     };
-                    self.paint_overlay_character(inner, column, y, character, cell_style, selected);
-                    column += 1;
+                    self.paint_overlay_grapheme(
+                        inner,
+                        &mut column,
+                        y,
+                        grapheme,
+                        cell_style,
+                        selected,
+                    );
                 }
             }
-            for character in format!("  {}", item.detail).chars() {
+            for grapheme in format!("  {}", item.detail).graphemes(true) {
                 let cell_style = SceneCellStyle {
                     dim: true,
                     ..line_style
                 };
-                self.paint_overlay_character(inner, column, y, character, cell_style, selected);
-                column += 1;
+                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, cell_style, selected);
             }
         }
 
@@ -617,21 +620,29 @@ impl Compiler {
         }
     }
 
-    fn paint_overlay_character(
+    fn paint_overlay_grapheme(
         &mut self,
         area: SceneRect,
-        column: usize,
+        column: &mut usize,
         y: u16,
-        character: char,
+        grapheme: &str,
         cell_style: SceneCellStyle,
         selected: bool,
     ) {
-        if column >= usize::from(area.width) {
-            return;
+        let (grapheme, width) = bounded_grapheme(grapheme);
+        if width <= usize::from(area.width).saturating_sub(*column) {
+            self.paint_grapheme(
+                area.x.saturating_add(*column as u16),
+                y,
+                grapheme,
+                width as u8,
+                cell_style,
+                selected.then_some(CellSelection::Item),
+                false,
+                None,
+            );
         }
-        let mut cell = ProgramCell::glyph(character, cell_style);
-        cell.selection = selected.then_some(CellSelection::Item);
-        self.paint_cell(area.x.saturating_add(column as u16), y, cell);
+        *column = column.saturating_add(width);
     }
 }
 

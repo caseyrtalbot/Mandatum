@@ -105,7 +105,11 @@ fn surface_rows(surface: &TerminalSurface) -> Vec<String> {
     surface
         .rows
         .iter()
-        .map(|row| row.iter().map(|cell| cell.character).collect::<String>())
+        .map(|row| {
+            row.iter()
+                .map(mandatum_scene::SceneCell::grapheme_text)
+                .collect::<String>()
+        })
         .collect()
 }
 

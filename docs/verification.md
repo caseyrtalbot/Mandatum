@@ -1094,6 +1094,85 @@ does not admit the winit/wgpu dependency tree to production. Phase 5 advanced
 grapheme/wide-cell/IME correctness, multi-display proof, surface/device-loss
 hardening, production admission, installer/release work, and rollout remain.
 
+## Phase 5 Advanced Text And IME Capability (2026-07-23)
+
+Environment: macOS on Apple M4 Pro with one attached display. The displayed
+adapter used the excluded debug native/GPU binary with Menlo 16 and its bounded
+runtime scale tracer. The release terminal probe used the shipped
+ratatui/crossterm frontend. No GPU dependency entered the product workspace,
+installer, or release.
+
+Contract and automated evidence:
+
+- `mandatum-terminal-vt` preserves bounded extended grapheme clusters,
+  combining/ZWJ extension, atomic width-two placement and continuation repair
+  across write/erase/edit/resize, and safe replacement at grid edges.
+- `mandatum-scene` validates one nonempty grapheme of display width one or two,
+  compiles explicit continuations, and aligns wrapping, truncation, selection,
+  cursor, attention geometry, and scalar search ranges to grapheme columns.
+  Invalid public-scene graphemes fail closed.
+- The ratatui adapter emits the full grapheme symbol and clears continuation
+  cells. The excluded GPU adapter owns one anchored buffer per visible
+  grapheme, retains decorated spaces, bounds frame rows and text buffers
+  separately, validates font/scale at the renderer boundary, and clips glyphs
+  to adjacent non-overlapping fractional cell spans.
+- `InputEvent::Composition` round-trips preedit with a validated UTF-8 cursor
+  range, commit, and cancel. App tests cover every eligible text target,
+  modal/pointer/key/paste/focus cancellation, target locking, resize
+  re-anchoring, exact cancel-before-focus-loss ordering, and one ignored late
+  platform commit.
+- Winit tests cover neutral IME translation, invalid ranges, multi-scalar
+  commit without paste/scalar truncation, named Space, baseline modifiers,
+  pointer state, runtime scale, font bounds, and fatal/clean exit status.
+- `./ci/gpu-spike.sh` passed formatting, warnings-denied all-target Clippy,
+  the renderer dependency-boundary scan, and 53 substantive tests: six native
+  shell, twenty-seven real-host, and twenty isolated renderer tests.
+- The post-documentation `./ci/gate.sh` reported `GATE GREEN`, including 280
+  app library tests, 38 scene library tests, 14 cell-program integration tests,
+  30 renderer tests, 23 terminal-engine tests, the remaining workspace/unit/
+  integration/doc suites, L1/L2 and GPU-admission conformance, the app input
+  seam, and documentation traceability.
+- Three independent correctness, boundary/security, and acceptance review
+  tracks drove fixes for late-commit ordering, unfocused IME re-enable,
+  public-scene validation, GPU buffer admission, copy/search/wrap/scrollback
+  wide edges, Command Palette placeholder clearing, decorated spaces, glyph
+  overhang, attention geometry, and fractional span overlap. All three final
+  reruns returned no finding.
+
+Displayed macOS matrix:
+
+- Left Option+E showed underlined preedit at the real terminal caret; E
+  committed one `é`. The Command Palette showed the same preedit at its input
+  row without its placeholder leaking underneath.
+- Starting a dead-key preedit, moving focus to Terminal, and returning canceled
+  the composition. The next E inserted plain `e`, proving no stale preedit or
+  late commit leaked across focus loss.
+- The real shell displayed mixed `A界é👩‍💻Z` output with the CJK glyph,
+  decomposed combining grapheme, emoji ZWJ sequence, following ASCII, cursor,
+  and cell backgrounds remaining aligned.
+- Menlo 16 rendered through the native-only font settings. Runtime scale 1.25
+  and a window resize recomputed the grid from 66×23 to 99×29 while preserving
+  the active scene and composition geometry.
+- Ctrl+Q exited the native app with status 0 and the exact process absent.
+- This one-display, current-input-source run does not claim cross-monitor
+  movement, a visible candidate popup, or every installed locale/input source.
+
+Standing terminal regression procedure:
+
+- `cargo build -p mandatum-app --release` succeeded.
+- `cd spikes/frontend-wgpu && cargo run --release --bin tui_probe` measured
+  p50 14.58 ms / p95 16.67 ms / max 18.28 ms over 100 key-to-app-output
+  samples with zero misses. Host-terminal paint is excluded by design.
+- In a clean release PTY idle window, process CPU advanced from 0.55 s to
+  0.83 s over exactly 30 seconds: 0.28 s, about 0.93% of one core, with no busy
+  spin.
+
+Remaining boundary: Phase 5 is complete, but this does not admit production
+GPU dependencies. Phase 6 still owes surface/device recovery, explicit
+out-of-memory/no-adapter/no-display outcomes, multi-display and resize/scale
+storms, structured symmetric measurement, and soak evidence before any
+admission decision. Packaging, release changes, and rollout remain later.
+
 ## Completion Rule
 
 Do not claim a task is complete until:

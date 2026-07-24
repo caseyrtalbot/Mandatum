@@ -5,7 +5,9 @@ use mandatum_core::{PaneId, SplitAxis};
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{SceneRect, SceneSize};
+use crate::input::TextRange;
 use crate::pane::PaneScene;
+use crate::style::SceneCellStyle;
 
 /// One frame of renderable workspace state. `&WorkspaceScene` alone must
 /// suffice to paint a frame: the header and status strips carry their own
@@ -23,6 +25,31 @@ pub struct WorkspaceScene {
     /// Whether the workspace is in copy mode (one pane's surface carries the
     /// copy cursor and selection).
     pub copy_mode: bool,
+    /// Active renderer-neutral text-input caret and transient IME preedit.
+    /// This is live presentation state and is never durable workspace intent.
+    #[serde(default)]
+    pub text_input: Option<TextInputScene>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextInputScene {
+    /// One-row region beginning at the active caret and extending to the
+    /// surface's right edge.
+    pub area: SceneRect,
+    pub kind: TextInputKind,
+    pub preedit: Option<PreeditScene>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextInputKind {
+    Terminal { style: SceneCellStyle },
+    Overlay,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreeditScene {
+    pub text: String,
+    pub cursor: Option<TextRange>,
 }
 
 /// The attention strip at the top of the frame. Never blank: when something

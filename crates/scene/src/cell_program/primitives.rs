@@ -1,5 +1,9 @@
 use super::{CellSelection, Compiler, ProgramCell};
-use crate::{SceneCellStyle, SceneColor, SceneRect, Theme, WorkspaceScene};
+use crate::{CellOccupancy, SceneCellStyle, SceneColor, SceneRect, Theme, WorkspaceScene};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+const MAX_GRAPHEME_BYTES: usize = 256;
 
 impl Compiler {
     pub(super) fn paint_header(&mut self, scene: &WorkspaceScene, theme: &Theme) {
@@ -88,12 +92,23 @@ impl Compiler {
         if area.is_empty() {
             return;
         }
-        for (column, character) in text.chars().take(usize::from(area.width)).enumerate() {
-            self.paint_cell(
-                area.x.saturating_add(column as u16),
+        let mut column = 0u16;
+        for grapheme in text.graphemes(true) {
+            let (grapheme, width) = bounded_grapheme(grapheme);
+            if width > usize::from(area.width.saturating_sub(column)) {
+                break;
+            }
+            self.paint_grapheme(
+                area.x.saturating_add(column),
                 area.y,
-                ProgramCell::glyph(character, cell_style),
+                grapheme,
+                width as u8,
+                cell_style,
+                None,
+                false,
+                None,
             );
+            column = column.saturating_add(width as u16);
         }
     }
 
@@ -127,10 +142,23 @@ impl Compiler {
         }
         let y = area.y.saturating_add(row as u16);
         let visible = self.clipped_rect(SceneRect::new(area.x, y, area.width, 1));
-        for (column, character) in text.chars().take(usize::from(visible.width)).enumerate() {
-            let mut cell = ProgramCell::glyph(character, cell_style);
-            cell.selection = selected.then_some(CellSelection::Item);
-            self.paint_cell(visible.x.saturating_add(column as u16), y, cell);
+        let mut column = 0u16;
+        for grapheme in text.graphemes(true) {
+            let (grapheme, width) = bounded_grapheme(grapheme);
+            if width > usize::from(visible.width.saturating_sub(column)) {
+                break;
+            }
+            self.paint_grapheme(
+                visible.x.saturating_add(column),
+                y,
+                grapheme,
+                width as u8,
+                cell_style,
+                selected.then_some(CellSelection::Item),
+                false,
+                None,
+            );
+            column = column.saturating_add(width as u16);
         }
     }
 
@@ -152,7 +180,124 @@ impl Compiler {
         if x >= self.program.size.width || y >= self.program.size.height {
             return;
         }
+        self.remove_cell_span(x, y);
         self.program.cells.insert((y, x), cell);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn paint_grapheme(
+        &mut self,
+        x: u16,
+        y: u16,
+        grapheme: String,
+        width: u8,
+        style: SceneCellStyle,
+        selection: Option<CellSelection>,
+        cursor: bool,
+        raster_layer: Option<u16>,
+    ) {
+        if x >= self.program.size.width || y >= self.program.size.height {
+            return;
+        }
+        let width = width.clamp(1, 2);
+        if width == 2 && x.saturating_add(1) >= self.program.size.width {
+            self.paint_cell(
+                x,
+                y,
+                ProgramCell {
+                    occupancy: CellOccupancy::Grapheme("\u{fffd}".to_owned()),
+                    style,
+                    selection,
+                    cursor,
+                    raster_layer,
+                },
+            );
+            return;
+        }
+
+        self.remove_cell_span(x, y);
+        if width == 2 {
+            self.remove_cell_span(x + 1, y);
+        }
+        self.program.cells.insert(
+            (y, x),
+            ProgramCell {
+                occupancy: CellOccupancy::Grapheme(grapheme),
+                style,
+                selection,
+                cursor,
+                raster_layer,
+            },
+        );
+        if width == 2 {
+            self.program.cells.insert(
+                (y, x + 1),
+                ProgramCell {
+                    occupancy: CellOccupancy::WideContinuation,
+                    style,
+                    selection,
+                    cursor,
+                    raster_layer,
+                },
+            );
+        }
+    }
+
+    fn remove_cell_span(&mut self, x: u16, y: u16) {
+        let Some(existing) = self.program.cells.get(&(y, x)) else {
+            return;
+        };
+        match existing.occupancy {
+            CellOccupancy::WideContinuation => {
+                if let Some(lead) = x.checked_sub(1) {
+                    self.program.cells.remove(&(y, lead));
+                }
+            }
+            CellOccupancy::Grapheme(_) => {
+                if self
+                    .program
+                    .cells
+                    .get(&(y, x.saturating_add(1)))
+                    .is_some_and(|cell| matches!(cell.occupancy, CellOccupancy::WideContinuation))
+                {
+                    self.program.cells.remove(&(y, x.saturating_add(1)));
+                }
+            }
+        }
+        self.program.cells.remove(&(y, x));
+    }
+
+    pub(super) fn mark_cursor(&mut self, x: u16, y: u16, style: SceneCellStyle) {
+        if x >= self.program.size.width || y >= self.program.size.height {
+            return;
+        }
+        let lead = if self
+            .program
+            .cells
+            .get(&(y, x))
+            .is_some_and(|cell| matches!(cell.occupancy, CellOccupancy::WideContinuation))
+        {
+            x.saturating_sub(1)
+        } else {
+            x
+        };
+        let wide = self
+            .program
+            .cells
+            .get(&(y, lead.saturating_add(1)))
+            .is_some_and(|cell| matches!(cell.occupancy, CellOccupancy::WideContinuation));
+        if let Some(cell) = self.program.cells.get_mut(&(y, lead)) {
+            cell.cursor = true;
+            cell.style = style;
+        } else {
+            let mut cursor = ProgramCell::glyph(' ', style);
+            cursor.cursor = true;
+            self.program.cells.insert((y, lead), cursor);
+        }
+        if wide && let Some(cell) = self.program.cells.get_mut(&(y, lead + 1)) {
+            cell.cursor = true;
+            cell.style = style;
+        }
     }
 }
 
@@ -182,5 +327,74 @@ fn style(foreground: SceneColor, background: SceneColor) -> SceneCellStyle {
         foreground,
         background,
         ..SceneCellStyle::default()
+    }
+}
+
+pub fn display_width(text: &str) -> usize {
+    text.graphemes(true)
+        .map(|grapheme| bounded_grapheme(grapheme).1)
+        .sum()
+}
+
+/// Convert a Unicode-scalar range into the complete display-column span of
+/// every grapheme it touches.
+pub fn scalar_range_to_columns(
+    text: &str,
+    scalar_start: usize,
+    scalar_end: usize,
+) -> (usize, usize) {
+    if scalar_start >= scalar_end {
+        let prefix = text.chars().take(scalar_start).collect::<String>();
+        let column = display_width(&prefix);
+        return (column, column);
+    }
+
+    let mut scalar = 0usize;
+    let mut column = 0usize;
+    let mut start_column = None;
+    let mut end_column = None;
+    for grapheme in text.graphemes(true) {
+        let scalar_len = grapheme.chars().count();
+        let next_scalar = scalar.saturating_add(scalar_len);
+        let width = bounded_grapheme(grapheme).1;
+        let next_column = column.saturating_add(width);
+        if scalar_start < next_scalar && scalar_end > scalar {
+            start_column.get_or_insert(column);
+            end_column = Some(next_column);
+        }
+        scalar = next_scalar;
+        column = next_column;
+    }
+    let end = end_column.unwrap_or(column);
+    (start_column.unwrap_or(end), end)
+}
+
+pub(super) fn bounded_grapheme(grapheme: &str) -> (String, usize) {
+    if grapheme.is_empty()
+        || grapheme.len() > MAX_GRAPHEME_BYTES
+        || grapheme.graphemes(true).count() != 1
+    {
+        return ("\u{fffd}".to_owned(), 1);
+    }
+    let width = UnicodeWidthStr::width(grapheme);
+    if width == 0 {
+        (format!("\u{25cc}{grapheme}"), 1)
+    } else if width > 2 {
+        ("\u{fffd}".to_owned(), 1)
+    } else {
+        (grapheme.to_owned(), width)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scalar_range_to_columns;
+
+    #[test]
+    fn scalar_ranges_snap_to_complete_grapheme_columns() {
+        let text = "e\u{301}界X";
+        assert_eq!(scalar_range_to_columns(text, 1, 2), (0, 1));
+        assert_eq!(scalar_range_to_columns(text, 2, 3), (1, 3));
+        assert_eq!(scalar_range_to_columns(text, 3, 4), (3, 4));
     }
 }

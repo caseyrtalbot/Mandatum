@@ -5,20 +5,43 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::style::SceneCellStyle;
+use crate::{CellOccupancy, style::SceneCellStyle};
 
 /// One styled cell of terminal content.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SceneCell {
-    pub character: char,
+    pub occupancy: CellOccupancy,
     pub style: SceneCellStyle,
 }
 
 impl Default for SceneCell {
     fn default() -> Self {
         Self {
-            character: ' ',
+            occupancy: CellOccupancy::Grapheme(" ".to_owned()),
             style: SceneCellStyle::default(),
+        }
+    }
+}
+
+impl SceneCell {
+    pub fn grapheme(grapheme: impl Into<String>, style: SceneCellStyle) -> Self {
+        Self {
+            occupancy: CellOccupancy::Grapheme(grapheme.into()),
+            style,
+        }
+    }
+
+    pub fn wide_continuation(style: SceneCellStyle) -> Self {
+        Self {
+            occupancy: CellOccupancy::WideContinuation,
+            style,
+        }
+    }
+
+    pub fn grapheme_text(&self) -> &str {
+        match &self.occupancy {
+            CellOccupancy::Grapheme(grapheme) => grapheme,
+            CellOccupancy::WideContinuation => "",
         }
     }
 }

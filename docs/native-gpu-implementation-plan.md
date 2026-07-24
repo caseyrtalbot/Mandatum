@@ -438,13 +438,13 @@ documentation update, full gate, handoff, and commit complete the entire
 capability family.
 
 Content/style capability family complete (2026-07-23): `mandatum-scene`
-preserves the existing `SceneCell` contract and compiles the whole frame into a
-renderer-neutral `CellProgram`. A program cell has one occupancy
-(`Glyph(char)` or explicit `WideContinuation`), complete `SceneCellStyle`, one
-selection kind when selected, and a cursor mark. The compiler owns all current
-presentation rules for terminal, task, agent, Empty, header attention, status,
-pane chrome, and every overlay. Later opaque cells replace earlier scene-order
-paint.
+compiles the whole frame into a renderer-neutral `CellProgram`. At that Phase 3
+stop point a program cell used `Glyph(char)` or explicit `WideContinuation`;
+Phase 5 below supersedes it with bounded grapheme occupancy. Complete
+`SceneCellStyle`, one selection kind when selected, and a cursor mark remain.
+The compiler owns all current presentation rules for terminal, task, agent,
+Empty, header attention, status, pane chrome, and every overlay. Later opaque
+cells replace earlier scene-order paint.
 
 The shipped ratatui renderer is now a thin translation of that program; its
 orphaned pane/surface/overlay implementations are removed. The excluded GPU
@@ -452,9 +452,8 @@ renderer validates structural and checked aggregate-resource limits, then
 translates the same topmost cells into background quads and styled glyph rows.
 It maps ANSI/indexed/RGB colors, custom and built-in semantic roles, bold, dim,
 italic, underline, inverse, hidden, strikethrough, terminal/item selection, and
-cursor without content-specific paint branches. True grapheme/wide-cell
-production remains Phase 5; this family establishes the continuation seam
-without claiming width correctness.
+cursor without content-specific paint branches. This family established the
+continuation seam that Phase 5 later completed with grapheme-width correctness.
 
 ### Completed Phase 3 capability family
 
@@ -533,6 +532,17 @@ Dependency: Phase 3 neutral cell semantics and Phase 4.
 
 Exit gate: fixtures and visual checks prove cell alignment, selection, cursor,
 IME, and scaling across the supported platform matrix.
+
+Exit gate met. Terminal snapshots and the neutral cell program carry bounded
+extended grapheme clusters plus explicit wide continuations. Grid mutation,
+copy/search/selection, wrapping, cursor, both adapters, and GPU clipping share
+the same one- or two-cell width policy. The input contract carries transient
+preedit, one-shot commit, and cancel; `AppState` locks composition to the active
+terminal or overlay text target and cancels it on focus/modal/pointer changes.
+The winit shell supplies IME caret geometry, ignores IME while unfocused, keeps
+left Option for native composition, and reserves right Option for terminal
+Meta. Native font family, size, and scale are bounded shell settings. Automated,
+review, latency, and displayed evidence is in `verification.md`.
 
 ## Phase 6 — Harden And Measure
 
@@ -633,9 +643,10 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Build Phase 5 as the advanced text and IME capability family. Complete
-grapheme clusters, combining marks, wide-cell placement, fallback, cursor, and
-selection alignment over the existing neutral continuation seam; then add a
-renderer-neutral IME preedit/commit/cancel contract and prove it through the
-real host. Stop before production GPU admission, device-loss hardening,
-installer/release changes, or rollout.
+Build Phase 6 as one hardening-and-measurement capability family. Add
+deterministic surface outdated/lost reconfiguration, device-loss recreation,
+explicit out-of-memory/no-adapter/no-display outcomes, and resize/scale-storm
+coverage. Then emit structured platform/GPU/display/workload/sample/miss/
+percentile evidence and run the accepted soak/resize/latency matrix. Add cache
+or damage-tracking complexity only when that profiling justifies it. Stop before
+production GPU admission, installer/release changes, or rollout.

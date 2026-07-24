@@ -5,4 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
 vte = { workspace = true }

@@ -137,7 +137,7 @@ impl CopyModeState {
 
         let mut lines = Vec::new();
         for row in start_row..=end_row {
-            let (from, to) = if start_row == end_row {
+            let (mut from, to) = if start_row == end_row {
                 (start_col, end_col)
             } else if row == start_row {
                 (start_col, last_column)
@@ -146,14 +146,26 @@ impl CopyModeState {
             } else {
                 (0, last_column)
             };
+            if grid.history_cell(row, from).is_some_and(|cell| {
+                matches!(
+                    cell.occupancy(),
+                    mandatum_terminal_vt::TerminalCellOccupancy::WideContinuation
+                )
+            }) {
+                from = from.saturating_sub(1);
+            }
 
             let mut line = String::new();
             for column in from..=to {
-                let character = grid
-                    .history_cell(row, column)
-                    .map(|cell| cell.character())
-                    .unwrap_or(' ');
-                line.push(character);
+                match grid.history_cell(row, column) {
+                    Some(cell) => match cell.occupancy() {
+                        mandatum_terminal_vt::TerminalCellOccupancy::Grapheme(grapheme) => {
+                            line.push_str(grapheme);
+                        }
+                        mandatum_terminal_vt::TerminalCellOccupancy::WideContinuation => {}
+                    },
+                    None => line.push(' '),
+                }
             }
             lines.push(line.trim_end().to_owned());
         }
@@ -190,6 +202,23 @@ mod tests {
         state.set_anchor();
         state.move_right(4, parser.grid()); // cursor over "hello"[..=4]
         assert_eq!(state.selected_text(parser.grid()), "hello");
+    }
+
+    #[test]
+    fn selecting_only_a_wide_continuation_copies_the_complete_grapheme() {
+        let parser = grid_with(&["界X"], 4, 1);
+        let grid = parser.grid();
+        let mut state = CopyModeState::enter(PaneId::new("pane-1"), grid);
+        state.cursor_col = 1;
+        state.set_anchor();
+        assert_eq!(state.selected_text(grid), "界");
+
+        state.anchor = Some((state.cursor_row, 2));
+        assert_eq!(
+            state.selected_text(grid),
+            "界X",
+            "reversed selection normalizes the continuation to its lead"
+        );
     }
 
     #[test]
