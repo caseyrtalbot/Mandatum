@@ -344,6 +344,22 @@ developer unfamiliar with the current implementation can identify:
   hits, zero evictions, and zero rejections. Row-level damage remains deferred.
   With source and active docs synchronized, `./ci/gate.sh` reported
   `GATE GREEN`.
+- **2026-07-24:** Work 5 made native Casey's local interactive default without
+  changing the installed terminal or any tracked distribution surface.
+  Interactive zsh resolved `mandatum`, `mandatum-native`, and
+  `mandatum-terminal` through the new local functions; native
+  `--font-info` returned the bundled JetBrains Mono 13 profile from
+  `/private/tmp` without changing the caller directory, and the terminal
+  escape hatch returned `mandatum 0.2.0`. The installed terminal SHA-256
+  remained
+  `b53a3238aead593344ec3f25ce421bef2e4efcb4a6e5af61dec7fc5d07968dd2`.
+  Locked release builds for both binaries, 16 native-shell tests, five terminal
+  distribution tests, and conformance passed. The interactive `mandatum`
+  launcher displayed the real native window and exited cleanly through Ctrl+Q;
+  `mandatum-terminal` displayed the maintained terminal frontend and restored
+  the host terminal through Ctrl+Q. The first post-documentation
+  `./ci/gate.sh` run reported `GATE GREEN`; the synchronized rerun after this
+  evidence entry also reported `GATE GREEN` and is the completion authority.
 
 ## Completion Rule
 

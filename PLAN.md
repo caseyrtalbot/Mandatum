@@ -36,8 +36,10 @@ failed preflight cannot start restore or PTY work.
 The production native shell and renderer now live in the root workspace as
 `mandatum-native` and `mandatum-native-renderer`. The native dependency
 boundary is fail-closed, `ci/native-frontend.sh` retains product and lab
-regressions, and `./ci/gate.sh` invokes it. The default launcher remains a
-later daily-driver decision.
+regressions, and `./ci/gate.sh` invokes it. Casey's interactive zsh now routes
+`mandatum` and `mandatum-native` through the native development command while
+`mandatum-terminal` remains the explicit terminal escape hatch. The installed
+terminal binary and non-interactive command resolution remain untouched.
 
 ## Ordered Work
 
@@ -91,12 +93,15 @@ Median whole-frame preparation changed from 3.436/4.393 ms p50/p95 to
 3.388/4.107 ms. The remaining profile does not justify row-level damage
 tracking in this slice.
 
-### 5. Make native the local default
+### 5. Make native the local default — complete
 
-Casey daily-drives native with an explicit terminal escape hatch. Daily use
-sets the functional hardening queue. This slice does not touch the installer,
+Casey's interactive shell makes native the no-argument `mandatum` default and
+also exposes it explicitly as `mandatum-native`. `mandatum-terminal` executes
+the unchanged installed terminal release for SSH, recovery, help, version, and
+update operations. Non-interactive shells retain the installed terminal
+command, so the local daily-driver choice does not mutate the installer,
 updater, release workflow, archives, rollout, public GitHub presentation, or
-visual materials.
+visual materials. Daily use now sets the functional hardening queue.
 
 ### Concluding build phase — shelved
 

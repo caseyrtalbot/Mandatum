@@ -2817,3 +2817,45 @@ Consequences:
   reopen the shelved visual-material roadmap;
 - the concluding build phase incorporates the deferred public and visual work
   together.
+
+## Casey-Local Interactive Shell Selects Native Without Replacing The Terminal Tool
+
+Status: accepted (2026-07-24)
+
+Decision: Casey's interactive zsh defines `mandatum-native` as the existing
+absolute-manifest native development command, routes the no-argument
+`mandatum` name through it, and exposes `mandatum-terminal` as an explicit call
+to the unchanged installed terminal release. The launcher does not change
+directories, so the caller's current project remains the workspace context.
+Non-interactive shells continue resolving `/Users/caseytalbot/.local/bin/mandatum`.
+
+Context: the production workspace already owned the stable
+`cargo run -p mandatum-native --bin mandatum-native` seam, while Casey's PATH
+contained only the installed `mandatum` terminal release. Replacing or renaming
+that file would couple a personal daily-driver switch to the frozen installer,
+updater, archive, and automation contract.
+
+Rationale: an interactive-shell route is the narrow local-only boundary. It
+makes the native product Casey's ordinary local launch without changing a
+tracked executable, Cargo target, installer destination, updater lookup,
+release archive, or non-interactive command used by automation.
+
+Consequences:
+
+- interactive `mandatum` and `mandatum-native` launch the native product;
+- `mandatum-terminal` retains terminal help, version, update, SSH, headless,
+  and recovery behavior;
+- the installed terminal binary stays byte-identical and future terminal
+  updates do not overwrite the interactive native routing;
+- native help/version parity is not invented in this slice; terminal
+  information and update operations remain explicit through
+  `mandatum-terminal`;
+- public/distribution and visual surfaces remain deferred.
+
+Verification: a clean interactive zsh resolved all three names as functions,
+`mandatum --font-info` returned the bundled JetBrains Mono profile from the
+native package while preserving `/private/tmp` as the caller directory, and
+`mandatum-terminal --version` returned `mandatum 0.2.0`. Focused native and
+terminal release builds, 16 native shell tests, five terminal distribution
+tests, and conformance passed. The final repository gate and displayed launch
+checks are recorded in `docs/verification.md`.

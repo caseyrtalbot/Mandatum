@@ -61,9 +61,10 @@ Standing procedures and current dated runs live in
 
 ## Known Implementation Gaps
 
-These are work, not reasons to resist the direction:
-
-- Native is not yet the default launcher.
+The planned local-launcher gap is closed. Concrete functional failures found
+through daily native use become the next hardening work; they are not reasons
+to restore the retired admission ceremony or pull forward the shelved public
+and visual phase.
 
 ## Work 1 — Reorder Startup — Complete
 
@@ -306,12 +307,23 @@ Exit: accepted face, palette, and row-run behavior is displayed and gated; the
 bounded cache shows a measurable shaping-cost reduction without an unbounded
 entry or accounted-byte resource.
 
-## Work 5 — Make Native The Local Default
+## Work 5 — Make Native The Local Default — Complete
 
-- Make native Casey's default launcher.
-- Keep an explicit terminal escape hatch.
-- Let daily use determine the hardening queue.
-- Fix concrete failures as product bugs; do not recreate pre-certification.
+Completed on 2026-07-24.
+
+- Casey's interactive zsh routes `mandatum` and `mandatum-native` through the
+  stable native development command without changing the caller's working
+  directory.
+- `mandatum-terminal` executes the untouched
+  `/Users/caseytalbot/.local/bin/mandatum` terminal release as the explicit
+  recovery, SSH, help, version, and update escape hatch.
+- Non-interactive shells continue resolving the installed terminal command.
+  The installer/updater contract therefore remains intact and can still
+  replace its own binary without undoing the interactive native default.
+- The original terminal binary's SHA-256 stayed
+  `b53a3238aead593344ec3f25ce421bef2e4efcb4a6e5af61dec7fc5d07968dd2`.
+- Daily use now determines the functional hardening queue. Concrete failures
+  are product bugs; they do not recreate pre-certification.
 
 Interim Work 5 is functional only. Do not change the installer, updater,
 release workflow, archives, rollout, public GitHub presentation, or visual
@@ -376,10 +388,8 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Begin Work 5 by making the native shell Casey's default local launcher while
-preserving an explicit terminal escape hatch. Inventory only the current
-development command and the local `mandatum` and `mandatum-native` executable
-seams. Choose one narrow local-only default-launch seam. If that cannot be done
-without changing tracked public-distribution surfaces, stop and report the
-boundary. Do not touch visual materials, the installer, updater, release
-workflow, archives, rollout, or public GitHub presentation.
+Daily-drive the native launcher. When the first concrete functional failure
+appears, reproduce it, fix the smallest owning product seam, and add a
+regression before moving to another failure. Do not pull visual materials, the
+installer, updater, release workflow, archives, rollout, or public GitHub
+presentation out of the concluding build phase.

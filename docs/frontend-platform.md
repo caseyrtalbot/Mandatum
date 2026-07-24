@@ -113,9 +113,11 @@ The ordered work is:
    — complete.
 3. Compare text quality directly with Ghostty — complete; the focused
    typography contract is accepted.
-4. Accepted font, palette, and row-run foundation — complete. Add a bounded
-   generation-aware shaping cache and profile it.
-5. Make native Casey's default and build the feel roadmap through daily use.
+4. Accepted font, palette, and row-run foundation plus the bounded
+   generation-aware shaping cache — complete and profiled.
+5. Make native Casey's local interactive default with an explicit terminal
+   escape hatch — complete. Daily use now supplies concrete functional
+   hardening work.
 
 The authoritative detail is
 [`docs/native-gpu-implementation-plan.md`](native-gpu-implementation-plan.md).
@@ -132,7 +134,7 @@ accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
 
 ## Current Implementation Drift
 
-Native is not yet the default launcher, and the renderer has no bounded shaping
-cache. Cache and profile the accepted row-run unit before considering row
-damage. These are ordered product tasks, not reasons to return to the retired
-product posture.
+The ordered launcher and shaping-cache gaps are closed. Row damage remains
+unjustified by the measured preparation profile. Concrete failures found
+through daily native use are the active functional queue; public-distribution
+and visual-material work remains shelved until the concluding build phase.
