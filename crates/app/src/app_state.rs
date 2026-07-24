@@ -1250,8 +1250,12 @@ impl AppState {
     /// the loop in here forever: the shell always gets back to draw() and
     /// the redraw-cap check between drains.
     pub(crate) fn drain_events(&mut self) -> usize {
+        self.drain_events_bounded(DRAIN_EVENT_BUDGET)
+    }
+
+    pub(crate) fn drain_events_bounded(&mut self, budget: usize) -> usize {
         let mut drained = 0;
-        for _ in 0..DRAIN_EVENT_BUDGET {
+        for _ in 0..budget.min(DRAIN_EVENT_BUDGET) {
             if self.should_quit {
                 break;
             }

@@ -297,8 +297,12 @@ its stop/go gate are in
 Phase 3 is complete across layout/composition, content/style, and
 input/lifecycle capability families. Phase 4 Artifact Preview and Phase 5
 advanced text/IME are complete without admitting GPU dependencies into the
-product workspace. Phase 6 hardening and symmetric measurement is next, before
-production GPU admission or rollout.
+product workspace. Phase 6 hardening and measurement is complete in the
+excluded adapter: typed surface/device recovery, explicit failure outcomes,
+bounded event-loop work, resize/scale stress, and structured paired evidence
+remain behind the same `FrontendHost` and `WorkspaceScene` boundaries. The
+long-duration soak, multi-display matrix, dependency admission, and rollout
+remain Phase 7 work.
 
 ### `workflows`
 

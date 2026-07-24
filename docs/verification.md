@@ -1167,11 +1167,88 @@ Standing terminal regression procedure:
   0.83 s over exactly 30 seconds: 0.28 s, about 0.93% of one core, with no busy
   spin.
 
-Remaining boundary: Phase 5 is complete, but this does not admit production
-GPU dependencies. Phase 6 still owes surface/device recovery, explicit
-out-of-memory/no-adapter/no-display outcomes, multi-display and resize/scale
-storms, structured symmetric measurement, and soak evidence before any
-admission decision. Packaging, release changes, and rollout remain later.
+Boundary at the Phase 5 stop point: this did not admit production GPU
+dependencies. Surface/device recovery, explicit failure outcomes, stress, and
+structured symmetric evidence were then owned by Phase 6; packaging, release
+changes, and rollout remained later.
+
+## Phase 6 Harden And Measure Capability (2026-07-24)
+
+Environment: macOS arm64 on Apple M4 Pro with one LG display at 85 Hz. The
+native adapter remained excluded from the product workspace, installer,
+release, and ordinary merge gate throughout.
+
+Automated and live hardening evidence:
+
+- Renderer tests cover surface timeout/occlusion policy, outdated/lost
+  reconfiguration, generation-stamped device-loss callbacks, both fault
+  priority arrival orders, explicit startup classifications, out-of-memory,
+  aggregate buffer admission, and retained resource high-water bounds.
+- The native shell recreates the device and surface without a second product
+  state machine. Its reference harness creates an isolated temporary project,
+  uses `/bin/sh`, spawns a real PTY, disables restore, and does not inherit the
+  current project configuration.
+- `FrontendHost::drain_runtime_bounded` lets the native shell use a 16-event
+  paint slice without changing the shipped terminal's 256-event default.
+  Continuous event batches service deadlines, stress cadence, memory samples,
+  and faults without relying solely on `about_to_wait`; watchdog events are
+  acknowledged before orderly shutdown.
+- The structured evidence schema records platform/adapter/refresh, workload,
+  font/scale, first usable frame, raw samples and percentiles, misses, stress
+  applies/presents, RSS trend, injected-fault recovery, lifecycle generations,
+  occlusion, and resource high-water marks. Active-soak occlusion fails closed.
+- The 1,000-change resize/scale reference run completed 1,000 issued, observed,
+  applied, and presented actions with zero cadence or stress misses. First
+  usable frame was 336.86 ms.
+- Injected surface-outdated, surface-lost, and device-lost runs each completed
+  with a post-recovery present. The out-of-memory run exited nonzero with an
+  explicit `out_of_memory` result. No-adapter and no-display classifications
+  are deterministic unit evidence; the reference Mac was not reconfigured to
+  force those real startup failures.
+
+Symmetric acquisition:
+
+- The driver uses identical targeted Accessibility keyboard events, focus/reset
+  verification, `mach_absolute_time` start points, and ScreenCaptureKit
+  WindowServer-frame endpoints for the native and terminal windows.
+- Three alternating paired trials acquired 1,000 samples per frontend per
+  trial on display 3 at 85 Hz. Native p95 was 62.19, 61.14, and 62.54 ms;
+  terminal p95 was 84.05, 76.12, and 84.14 ms. The third terminal trial used
+  1,004 attempts to acquire 1,000 samples, recording four misses and one reset
+  retry with no reset failure.
+- Acquisition completed, but the separate proposed admission decision failed:
+  native p95 was not below 20 ms, only two of three pairs improved p95 by at
+  least 25%, and the terminal path was not zero-miss across all trials.
+
+Soak boundary and acceptance:
+
+- Repeated long soak attempts exposed genuine defects: continuous winit-event
+  traffic starved timer service, 256-event synchronous drains blocked the UI
+  for multiple seconds, watchdog acknowledgement could be preempted, and a
+  locked macOS session produced only honest occlusion skips. Each code defect
+  was corrected and independently rechecked.
+- No clean admission-grade 30-minute run or multi-display matrix is claimed.
+  Those are Phase 7 production-admission requirements. Phase 6 is accepted as
+  an excluded hardening refactor because further long runs cannot change the
+  already-failed admission verdict.
+
+Final verification:
+
+- `./ci/gpu-spike.sh` passed format, warnings-denied all-target Clippy, the
+  renderer dependency scan, 19 native-shell tests, 27 real-host tests, and 25
+  isolated-renderer tests.
+- `cargo test -p mandatum-app` passed 281 app tests plus the binary,
+  distribution, frontend-parity, terminal-smoke, and documentation suites.
+- The post-fix `./ci/gate.sh` reported `GATE GREEN`, including format,
+  warnings-denied Clippy, build, all workspace tests, L1/L2 and GPU-admission
+  conformance, the app input seam, and documentation traceability.
+- Three independent final correctness, boundary/security, and acceptance
+  rechecks returned no finding.
+
+Remaining boundary: Phase 6 completion does not admit any GPU dependency.
+Phase 7 remains blocked on an explicit production decision plus the clean
+long-soak, multi-display, latency, dependency-boundary, packaging, and rollout
+evidence named in the native GPU implementation plan.
 
 ## Completion Rule
 

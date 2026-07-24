@@ -153,12 +153,12 @@ implementation rather than current architecture.
 ### Verdict: the terminal frontend stays v1
 
 Recorded in [`docs/decisions.md`](decisions.md#accepted-gpu-frontend-spike-verdict--terminal-frontend-stays-v1).
-The spike
-succeeded (a real, measured latency win and a clean adapter), but a large
-share of the measured gap was the product's own 40 ms input poll loop, and
-a production GPU adapter still owes Phase 6 hardening and evidence:
-multi-display policy, surface/device recovery, structured symmetric
-measurement, soak/resize proof, and profiling-justified damage tracking.
+The original spike succeeded as an adapter experiment, but a large share of
+its measured gap was the product's own 40 ms input poll loop. Phase 6 has since
+completed surface/device recovery, structured symmetric acquisition, and
+resize/stress tooling in the excluded adapter. A production GPU adapter still
+owes the Phase 7 admission decision, clean long soak, multi-display/support
+matrix, and dependency/release proof.
 
 The poll-loop prediction was then confirmed: after the run loop became
 event-driven (docs/decisions.md, "Event-Driven Main Loop With Heartbeat And
@@ -185,9 +185,10 @@ native input-to-photon result nor production-admission evidence.
 
 The wgpu adapter stays warm behind the scene contract, with its probe
 (`spikes/frontend-wgpu/src/bin/tui_probe.rs`) kept as the product's standing
-latency-regression harness. Production admission remains gated on Phase 6
-hardening and accepted symmetric evidence; the completed product capability and
-host integration alone are not admission evidence.
+latency-regression harness. Production admission remains gated on the Phase 7
+decision and its deferred soak, matrix, dependency, packaging, and rollout
+evidence; the completed product capability, host integration, and Phase 6
+hardening alone are not admission evidence.
 
 The selected capability branch is now implemented: an Artifact Preview Pane
 displays a task- or agent-produced project-relative PNG as a typed pixel-native
@@ -223,6 +224,7 @@ scene-owned composition. Phase 4 adds the bounded artifact surface and
 final-cell raster markers to that same contract; the excluded adapter uploads,
 contain-fits, and clips it without gaining product-state ownership. Phase 5
 adds shared grapheme/wide-cell occupancy and neutral IME composition across the
-real host. Both phases are complete. Phase 6 hardening and symmetric
-measurement is next. None of this weakens the production conformance gate or
-admits the GPU dependency tree.
+real host. Phase 6 adds typed recovery/failure outcomes, bounded scheduling,
+resize/stress tooling, and symmetric evidence. All six phases are complete in
+the excluded adapter. None of this weakens the production conformance gate or
+admits the GPU dependency tree; Phase 7 admission is next.

@@ -1,8 +1,9 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phases 3 and 4 are complete in the excluded adapter. Layout,
-content/style, input/lifecycle, and bounded Artifact Preview all cross the real
-host; production GPU admission remains blocked.**
+Status: **Phases 1–6 are complete in the excluded adapter. Shared-host
+integration, layout/content/input parity, bounded Artifact Preview, advanced
+text/IME, and GPU hardening all cross the real host; production GPU admission
+remains blocked.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, terminal, task, agent, and Empty panes, status
@@ -787,9 +788,11 @@ the ratatui and GPU adapters; and its input/lifecycle family covers native
 key/modifier translation, clipboard, pointer, scrollback, focus, resize/scale,
 restore, and shutdown through the real host. Phase 4 adds the bounded typed
 Artifact Preview surface, safe app loader, terminal fallback, and GPU
-contain-fit/cache path. A production wgpu adapter still needs correct advanced
-grapheme and IME behavior, surface/device recovery, damage tracking, dependency
-admission, and release integration.
+contain-fit/cache path. Phases 5 and 6 subsequently completed advanced
+grapheme/IME behavior, surface/device recovery, bounded scheduling, stress, and
+structured measurement. A production wgpu adapter still needs an explicit
+Phase 7 admission decision plus the deferred soak, support matrix, dependency,
+packaging, and rollout proof.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
 a sub-20 ms end-to-end target. The later Artifact Preview decision selected the
@@ -861,9 +864,53 @@ packaging, and rollout remain.
   18.28 ms over 100 samples with zero misses. A clean 30-second idle window
   advanced CPU time by 0.28 seconds (about 0.93% of one core).
 
-Phase 6 surface/device recovery, explicit failure modes, resize/scale storms,
-structured symmetric measurement, and soak evidence is next. The spike remains
-excluded from production dependencies, packaging, and release.
+At the Phase 5 stop point, Phase 6 surface/device recovery, explicit failure
+modes, resize/scale stress, and structured symmetric measurement were next. The
+following section records their completion and the remaining admission
+boundary.
+
+## Phase 6 Harden And Measure Verification (2026-07-24)
+
+- Surface outdated/lost paths reconfigure deterministically. Device-loss
+  recreation advances generation-stamped device/surface state and rejects
+  callbacks from destroyed generations. Out-of-memory, no-adapter, no-display,
+  validation, and internal failures retain explicit classifications.
+- The native shell drains at most 16 runtime events per paint slice while the
+  shipped terminal keeps its existing 256-event policy. Scheduled deadlines,
+  memory sampling, fault injection, and stress cadence are serviced across
+  continuous event batches; watchdog acknowledgement precedes orderly shutdown.
+- Structured JSON records platform, adapter, refresh, workload, first frame,
+  samples, misses, percentiles, stress accounting, memory, fault recovery, and
+  lifecycle generations/high-water marks. Occlusion during an active soak fails
+  closed instead of becoming positive evidence.
+- The 1,000-change reference exercise issued, applied, and presented all 1,000
+  resize/scale actions with zero cadence or stress misses. First usable frame
+  was 336.86 ms on the 85 Hz reference display.
+- Injected surface-outdated, surface-lost, and device-lost probes each produced
+  a post-recovery present; injected out-of-memory exited nonzero with the
+  explicit `out_of_memory` outcome.
+- Three paired 1,000-sample acquisitions completed on display 3 at 85 Hz.
+  Native p95 was 62.19, 61.14, and 62.54 ms; terminal p95 was 84.05, 76.12,
+  and 84.14 ms. The third terminal trial recovered four misses and one reset
+  retry without a reset failure.
+- The acquisition is valid Phase 6 evidence but fails the separate proposed
+  admission bar: native p95 is not below 20 ms, only two pairs improve p95 by
+  at least 25%, and the terminal path was not zero-miss across all trials.
+- Long soak attempts were diagnostically useful: they exposed continuous-event
+  starvation, multi-second 256-event drain slices, watchdog ordering, and
+  screen-lock occlusion. Those defects were corrected and reviewed. No clean
+  admission-grade 30-minute soak or multi-display matrix is claimed; both remain
+  Phase 7 requirements.
+- `./ci/gpu-spike.sh` passed 19 native-shell, 27 real-host, and 25 renderer
+  tests. The full post-fix `./ci/gate.sh` reported `GATE GREEN`, including 281
+  app tests and all workspace, integration, conformance, and documentation
+  trace suites. Three final correctness, boundary/security, and acceptance
+  rechecks returned no finding.
+
+Phase 6 is complete as an excluded hardening refactor. The adapter remains out
+of the product workspace, installer, release, and ordinary merge gate.
+Production admission cannot proceed until Phase 7 accepts the remaining soak,
+platform-matrix, latency, dependency-boundary, and rollout evidence.
 
 
 ## Correction note (2026-07-10)

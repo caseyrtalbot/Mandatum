@@ -3,8 +3,8 @@
 // rendered by glyphon. All rendering is per-frame from WorkspaceScene.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -72,6 +72,177 @@ impl NativeTextSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuStartupErrorKind {
+    NoDisplay,
+    NoAdapter,
+    DeviceRequest,
+    InvalidConfiguration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuStartupError {
+    kind: GpuStartupErrorKind,
+    message: String,
+}
+
+impl GpuStartupError {
+    pub fn no_display(message: impl Into<String>) -> Self {
+        Self {
+            kind: GpuStartupErrorKind::NoDisplay,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> GpuStartupErrorKind {
+        self.kind
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for GpuStartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stage = match self.kind {
+            GpuStartupErrorKind::NoDisplay => "no display",
+            GpuStartupErrorKind::NoAdapter => "no GPU adapter",
+            GpuStartupErrorKind::DeviceRequest => "GPU device request failed",
+            GpuStartupErrorKind::InvalidConfiguration => "invalid GPU configuration",
+        };
+        write!(f, "{stage}: {}", self.message)
+    }
+}
+
+impl std::error::Error for GpuStartupError {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuAdapterMetadata {
+    pub name: String,
+    pub backend: &'static str,
+    pub device_type: &'static str,
+    pub driver: String,
+    pub driver_info: String,
+    pub vendor: u32,
+    pub device: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuFrameSkip {
+    Timeout,
+    Occluded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuSurfaceRecovery {
+    Outdated,
+    Lost,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GpuDeviceLossReason {
+    Unknown,
+    Destroyed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GpuRenderOutcome {
+    Presented(Instant),
+    Skipped(GpuFrameSkip),
+    SurfaceReconfigured(GpuSurfaceRecovery),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuFaultInjection {
+    SurfaceOutdated,
+    SurfaceLost,
+    DeviceLost,
+    OutOfMemory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuFaultInjectionResult {
+    SurfaceReconfigured(GpuSurfaceRecovery),
+    FaultQueued,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuLifecycleSnapshot {
+    pub device_generation: u64,
+    pub surface_generation: u64,
+    pub surface_reconfigurations: u64,
+    pub device_recreations: u64,
+    pub injected_faults: u64,
+    pub quad_capacity_floats: usize,
+    pub raster_capacity_floats: usize,
+    pub text_row_capacity: usize,
+    pub raster_cache_entries: usize,
+    pub raster_cache_entries_high_water: usize,
+    pub raster_cache_bytes: usize,
+    pub raster_cache_bytes_high_water: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum GpuRenderError {
+    Scene(SceneCompileError),
+    OutOfMemory {
+        message: String,
+    },
+    DeviceLost {
+        reason: GpuDeviceLossReason,
+        message: String,
+    },
+    Validation {
+        message: String,
+    },
+    Internal {
+        message: String,
+    },
+    SurfaceValidation,
+    SurfaceRecreation {
+        message: String,
+    },
+    TextAtlasFull,
+    TextRender {
+        message: String,
+    },
+    FaultInjection {
+        message: String,
+    },
+}
+
+impl std::fmt::Display for GpuRenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Scene(error) => error.fmt(f),
+            Self::OutOfMemory { message } => write!(f, "GPU out of memory: {message}"),
+            Self::DeviceLost { reason, message } => {
+                write!(f, "GPU device lost ({reason:?}): {message}")
+            }
+            Self::Validation { message } => write!(f, "GPU validation error: {message}"),
+            Self::Internal { message } => write!(f, "internal GPU error: {message}"),
+            Self::SurfaceValidation => f.write_str("GPU surface validation failed"),
+            Self::SurfaceRecreation { message } => {
+                write!(f, "GPU surface recreation failed: {message}")
+            }
+            Self::TextAtlasFull => f.write_str("GPU text atlas is full"),
+            Self::TextRender { message } => write!(f, "GPU text render failed: {message}"),
+            Self::FaultInjection { message } => {
+                write!(f, "GPU fault injection failed: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GpuRenderError {}
+
+impl From<SceneCompileError> for GpuRenderError {
+    fn from(error: SceneCompileError) -> Self {
+        Self::Scene(error)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum SceneCompileError {
     NoVisiblePane,
@@ -106,6 +277,8 @@ impl std::fmt::Display for SceneCompileError {
         }
     }
 }
+
+impl std::error::Error for SceneCompileError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedArtifact {
@@ -505,7 +678,6 @@ impl RowBufferPool {
         }
     }
 
-    #[cfg(test)]
     fn len(&self) -> usize {
         self.rows.len()
     }
@@ -754,11 +926,173 @@ fn glyph_attrs<'a>(style: GlyphStyle, family: &'a str) -> Attrs<'a> {
     attrs
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupFailureStage {
+    Configuration,
+    Surface,
+    Adapter,
+    Device,
+}
+
+fn startup_error(stage: StartupFailureStage, message: impl Into<String>) -> GpuStartupError {
+    let kind = match stage {
+        StartupFailureStage::Configuration => GpuStartupErrorKind::InvalidConfiguration,
+        StartupFailureStage::Surface => GpuStartupErrorKind::NoDisplay,
+        StartupFailureStage::Adapter => GpuStartupErrorKind::NoAdapter,
+        StartupFailureStage::Device => GpuStartupErrorKind::DeviceRequest,
+    };
+    GpuStartupError {
+        kind,
+        message: message.into(),
+    }
+}
+
+#[derive(Debug)]
+struct GpuFaultState {
+    active_device_generation: u64,
+    pending: Option<GpuRenderError>,
+}
+
+type GpuFaultSlot = Arc<Mutex<GpuFaultState>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UncapturedErrorKind {
+    OutOfMemory,
+    Validation,
+    Internal,
+}
+
+fn uncaptured_gpu_error(kind: UncapturedErrorKind, message: String) -> GpuRenderError {
+    match kind {
+        UncapturedErrorKind::OutOfMemory => GpuRenderError::OutOfMemory { message },
+        UncapturedErrorKind::Validation => GpuRenderError::Validation { message },
+        UncapturedErrorKind::Internal => GpuRenderError::Internal { message },
+    }
+}
+
+fn device_lost_error(reason: wgpu::DeviceLostReason, message: String) -> GpuRenderError {
+    let reason = match reason {
+        wgpu::DeviceLostReason::Unknown => GpuDeviceLossReason::Unknown,
+        wgpu::DeviceLostReason::Destroyed => GpuDeviceLossReason::Destroyed,
+    };
+    GpuRenderError::DeviceLost { reason, message }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfaceAcquireSignal {
+    Timeout,
+    Occluded,
+    Outdated,
+    Lost,
+    Validation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfaceAcquireDirective {
+    Skip(GpuFrameSkip),
+    Recover(GpuSurfaceRecovery),
+    FailValidation,
+}
+
+fn surface_acquire_directive(signal: SurfaceAcquireSignal) -> SurfaceAcquireDirective {
+    match signal {
+        SurfaceAcquireSignal::Timeout => SurfaceAcquireDirective::Skip(GpuFrameSkip::Timeout),
+        SurfaceAcquireSignal::Occluded => SurfaceAcquireDirective::Skip(GpuFrameSkip::Occluded),
+        SurfaceAcquireSignal::Outdated => {
+            SurfaceAcquireDirective::Recover(GpuSurfaceRecovery::Outdated)
+        }
+        SurfaceAcquireSignal::Lost => SurfaceAcquireDirective::Recover(GpuSurfaceRecovery::Lost),
+        SurfaceAcquireSignal::Validation => SurfaceAcquireDirective::FailValidation,
+    }
+}
+
+fn injected_surface_recovery(injection: GpuFaultInjection) -> Option<GpuSurfaceRecovery> {
+    match injection {
+        GpuFaultInjection::SurfaceOutdated => Some(GpuSurfaceRecovery::Outdated),
+        GpuFaultInjection::SurfaceLost => Some(GpuSurfaceRecovery::Lost),
+        GpuFaultInjection::DeviceLost | GpuFaultInjection::OutOfMemory => None,
+    }
+}
+
+fn gpu_fault_priority(fault: &GpuRenderError) -> u8 {
+    match fault {
+        GpuRenderError::OutOfMemory { .. } => 4,
+        GpuRenderError::DeviceLost { .. } => 3,
+        GpuRenderError::Internal { .. } => 2,
+        GpuRenderError::Validation { .. } => 1,
+        _ => 0,
+    }
+}
+
+fn record_gpu_fault(slot: &GpuFaultSlot, generation: u64, fault: GpuRenderError) {
+    let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.active_device_generation != generation {
+        return;
+    }
+
+    let should_replace = state
+        .pending
+        .as_ref()
+        .is_none_or(|pending| gpu_fault_priority(&fault) > gpu_fault_priority(pending));
+    if should_replace {
+        state.pending = Some(fault);
+    }
+}
+
+fn has_gpu_fault(slot: &GpuFaultSlot, generation: u64) -> bool {
+    let state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.active_device_generation == generation && state.pending.is_some()
+}
+
+fn take_gpu_fault(slot: &GpuFaultSlot, generation: u64) -> Option<GpuRenderError> {
+    let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    (state.active_device_generation == generation)
+        .then(|| state.pending.take())
+        .flatten()
+}
+
+fn retire_gpu_generation(slot: &GpuFaultSlot, next_generation: u64) {
+    let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.active_device_generation = next_generation;
+    state.pending = None;
+}
+
+fn adapter_metadata(info: wgpu::AdapterInfo) -> GpuAdapterMetadata {
+    let device_type = match info.device_type {
+        wgpu::DeviceType::Other => "other",
+        wgpu::DeviceType::IntegratedGpu => "integrated-gpu",
+        wgpu::DeviceType::DiscreteGpu => "discrete-gpu",
+        wgpu::DeviceType::VirtualGpu => "virtual-gpu",
+        wgpu::DeviceType::Cpu => "cpu",
+    };
+    GpuAdapterMetadata {
+        name: info.name,
+        backend: info.backend.to_str(),
+        device_type,
+        driver: info.driver,
+        driver_info: info.driver_info,
+        vendor: info.vendor,
+        device: info.device,
+    }
+}
+
 pub struct GpuText {
+    instance: wgpu::Instance,
+    window: Arc<Window>,
     surface: wgpu::Surface<'static>,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    adapter_metadata: GpuAdapterMetadata,
+    device_fault: GpuFaultSlot,
+    device_generation: u64,
+    surface_generation: u64,
+    surface_reconfigurations: u64,
+    device_recreations: u64,
+    injected_faults: u64,
+    raster_cache_entries_high_water: usize,
+    raster_cache_bytes_high_water: usize,
 
     // Solid-quad pipeline.
     quad_pipeline: wgpu::RenderPipeline,
@@ -798,16 +1132,26 @@ impl GpuText {
     pub async fn new(
         window: Arc<Window>,
         text_settings: NativeTextSettings,
-    ) -> Result<Self, String> {
-        NativeTextSettings::new(text_settings.family.clone(), text_settings.font_size)?;
+    ) -> Result<Self, GpuStartupError> {
+        Self::new_with_device_generation(window, text_settings, 1).await
+    }
+
+    async fn new_with_device_generation(
+        window: Arc<Window>,
+        text_settings: NativeTextSettings,
+        device_generation: u64,
+    ) -> Result<Self, GpuStartupError> {
+        NativeTextSettings::new(text_settings.family.clone(), text_settings.font_size)
+            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
-        validate_scale(scale)?;
+        validate_scale(scale)
+            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
 
         let instance = wgpu::Instance::default();
         let surface = instance
             .create_surface(window.clone())
-            .map_err(|e| format!("create_surface: {e}"))?;
+            .map_err(|error| startup_error(StartupFailureStage::Surface, error.to_string()))?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -816,14 +1160,47 @@ impl GpuText {
                 apply_limit_buckets: false,
             })
             .await
-            .map_err(|e| format!("no GPU adapter: {e}"))?;
+            .map_err(|error| startup_error(StartupFailureStage::Adapter, error.to_string()))?;
+        let adapter_metadata = adapter_metadata(adapter.get_info());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("mandatum-spike-device"),
                 ..Default::default()
             })
             .await
-            .map_err(|e| format!("request_device: {e}"))?;
+            .map_err(|error| startup_error(StartupFailureStage::Device, error.to_string()))?;
+
+        let device_fault = Arc::new(Mutex::new(GpuFaultState {
+            active_device_generation: device_generation,
+            pending: None,
+        }));
+        let uncaptured_fault = device_fault.clone();
+        device.on_uncaptured_error(Arc::new(move |error| {
+            let (kind, message) = match error {
+                wgpu::Error::OutOfMemory { source } => {
+                    (UncapturedErrorKind::OutOfMemory, source.to_string())
+                }
+                wgpu::Error::Validation { description, .. } => {
+                    (UncapturedErrorKind::Validation, description)
+                }
+                wgpu::Error::Internal { description, .. } => {
+                    (UncapturedErrorKind::Internal, description)
+                }
+            };
+            record_gpu_fault(
+                &uncaptured_fault,
+                device_generation,
+                uncaptured_gpu_error(kind, message),
+            );
+        }));
+        let lost_fault = device_fault.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            record_gpu_fault(
+                &lost_fault,
+                device_generation,
+                device_lost_error(reason, message),
+            );
+        });
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -831,14 +1208,26 @@ impl GpuText {
             .iter()
             .copied()
             .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .ok_or_else(|| {
+                startup_error(
+                    StartupFailureStage::Configuration,
+                    "surface exposes no texture formats",
+                )
+            })?;
+        let alpha_mode = caps.alpha_modes.first().copied().ok_or_else(|| {
+            startup_error(
+                StartupFailureStage::Configuration,
+                "surface exposes no alpha modes",
+            )
+        })?;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             color_space: wgpu::SurfaceColorSpace::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -1049,10 +1438,22 @@ impl GpuText {
         let cell_h = line_height;
 
         Ok(Self {
+            instance,
+            window,
             surface,
+            adapter,
             device,
             queue,
             config,
+            adapter_metadata,
+            device_fault,
+            device_generation,
+            surface_generation: 1,
+            surface_reconfigurations: 0,
+            device_recreations: 0,
+            injected_faults: 0,
+            raster_cache_entries_high_water: 0,
+            raster_cache_bytes_high_water: 0,
             quad_pipeline,
             unit_buf,
             inst_buf,
@@ -1093,6 +1494,110 @@ impl GpuText {
         (self.config.width, self.config.height)
     }
 
+    pub fn adapter_metadata(&self) -> &GpuAdapterMetadata {
+        &self.adapter_metadata
+    }
+
+    pub fn lifecycle_snapshot(&self) -> GpuLifecycleSnapshot {
+        let raster_cache_bytes = self
+            .raster_cache
+            .values()
+            .map(|raster| raster.rgba8.len())
+            .sum();
+        GpuLifecycleSnapshot {
+            device_generation: self.device_generation,
+            surface_generation: self.surface_generation,
+            surface_reconfigurations: self.surface_reconfigurations,
+            device_recreations: self.device_recreations,
+            injected_faults: self.injected_faults,
+            quad_capacity_floats: self.inst_capacity_floats,
+            raster_capacity_floats: self.raster_inst_capacity_floats,
+            text_row_capacity: self.row_buffers.len(),
+            raster_cache_entries: self.raster_cache.len(),
+            raster_cache_entries_high_water: self.raster_cache_entries_high_water,
+            raster_cache_bytes,
+            raster_cache_bytes_high_water: self.raster_cache_bytes_high_water,
+        }
+    }
+
+    /// Drive the excluded frontend's displayed fault matrix through the same
+    /// renderer paths used by real surface and device failures.
+    pub fn inject_fault(
+        &mut self,
+        injection: GpuFaultInjection,
+    ) -> Result<GpuFaultInjectionResult, GpuRenderError> {
+        if let Some(recovery) = injected_surface_recovery(injection) {
+            self.recover_surface(recovery)?;
+            self.injected_faults = self.injected_faults.saturating_add(1);
+            return Ok(GpuFaultInjectionResult::SurfaceReconfigured(recovery));
+        }
+        let result: Result<GpuFaultInjectionResult, GpuRenderError> = match injection {
+            GpuFaultInjection::OutOfMemory => {
+                record_gpu_fault(
+                    &self.device_fault,
+                    self.device_generation,
+                    GpuRenderError::OutOfMemory {
+                        message: "fault injection".to_owned(),
+                    },
+                );
+                Ok(GpuFaultInjectionResult::FaultQueued)
+            }
+            GpuFaultInjection::DeviceLost => {
+                self.device.destroy();
+                let _ = self.device.poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(Duration::from_secs(1)),
+                });
+                if !has_gpu_fault(&self.device_fault, self.device_generation) {
+                    return Err(GpuRenderError::FaultInjection {
+                        message:
+                            "device destroy did not invoke the generation-stamped loss callback"
+                                .to_owned(),
+                    });
+                }
+                Ok(GpuFaultInjectionResult::FaultQueued)
+            }
+            GpuFaultInjection::SurfaceOutdated | GpuFaultInjection::SurfaceLost => {
+                unreachable!("surface injections return above")
+            }
+        };
+        let result = result?;
+        self.injected_faults = self.injected_faults.saturating_add(1);
+        Ok(result)
+    }
+
+    /// Rebuild every GPU-owned resource after device loss while preserving
+    /// only the window and renderer settings. Product state remains owned by
+    /// the caller and can submit its next `WorkspaceScene` to the replacement.
+    pub async fn recreate_device(&mut self) -> Result<(), GpuStartupError> {
+        let (width, height) = self.surface_size();
+        let scale = self.scale;
+        let next_device_generation = self.device_generation.saturating_add(1);
+        let next_surface_generation = self.surface_generation.saturating_add(1);
+        let next_device_recreations = self.device_recreations.saturating_add(1);
+        let text_settings = NativeTextSettings::new(self.font_family.clone(), self.base_font_size)
+            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
+        let mut replacement = Self::new_with_device_generation(
+            self.window.clone(),
+            text_settings,
+            next_device_generation,
+        )
+        .await?;
+        replacement.resize_surface(width, height);
+        replacement
+            .set_scale(scale)
+            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
+        replacement.surface_generation = next_surface_generation;
+        replacement.surface_reconfigurations = self.surface_reconfigurations;
+        replacement.device_recreations = next_device_recreations;
+        replacement.injected_faults = self.injected_faults;
+        replacement.raster_cache_entries_high_water = self.raster_cache_entries_high_water;
+        replacement.raster_cache_bytes_high_water = self.raster_cache_bytes_high_water;
+        retire_gpu_generation(&self.device_fault, next_device_generation);
+        *self = replacement;
+        Ok(())
+    }
+
     pub fn resize_surface(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
@@ -1112,6 +1617,45 @@ impl GpuText {
         self.cell_w = measure_cell_width(&mut self.font_system, metrics, &self.font_family);
         self.cell_h = line_height;
         Ok(())
+    }
+
+    fn recover_surface(&mut self, recovery: GpuSurfaceRecovery) -> Result<(), GpuRenderError> {
+        if recovery == GpuSurfaceRecovery::Lost {
+            let surface = self
+                .instance
+                .create_surface(self.window.clone())
+                .map_err(|error| GpuRenderError::SurfaceRecreation {
+                    message: error.to_string(),
+                })?;
+            let capabilities = surface.get_capabilities(&self.adapter);
+            if !capabilities.formats.contains(&self.config.format)
+                || !capabilities.alpha_modes.contains(&self.config.alpha_mode)
+            {
+                return Err(GpuRenderError::SurfaceRecreation {
+                    message: "replacement surface is incompatible with the active GPU pipelines"
+                        .to_owned(),
+                });
+            }
+            self.surface = surface;
+            self.surface_generation = self.surface_generation.saturating_add(1);
+        }
+        self.surface.configure(&self.device, &self.config);
+        self.surface_reconfigurations = self.surface_reconfigurations.saturating_add(1);
+        Ok(())
+    }
+
+    fn handle_surface_signal(
+        &mut self,
+        signal: SurfaceAcquireSignal,
+    ) -> Result<GpuRenderOutcome, GpuRenderError> {
+        match surface_acquire_directive(signal) {
+            SurfaceAcquireDirective::Skip(reason) => Ok(GpuRenderOutcome::Skipped(reason)),
+            SurfaceAcquireDirective::Recover(recovery) => {
+                self.recover_surface(recovery)?;
+                Ok(GpuRenderOutcome::SurfaceReconfigured(recovery))
+            }
+            SurfaceAcquireDirective::FailValidation => Err(GpuRenderError::SurfaceValidation),
+        }
     }
 
     fn sync_raster_cache(&mut self, artifacts: &[PreparedArtifact]) {
@@ -1199,20 +1743,31 @@ impl GpuText {
                 },
             );
         }
+        self.raster_cache_entries_high_water = self
+            .raster_cache_entries_high_water
+            .max(self.raster_cache.len());
+        let cached_bytes = self
+            .raster_cache
+            .values()
+            .map(|raster| raster.rgba8.len())
+            .sum();
+        self.raster_cache_bytes_high_water = self.raster_cache_bytes_high_water.max(cached_bytes);
     }
 
     /// Render one frame from a `WorkspaceScene`. Consumes only scene types: the
     /// visible cells, styles, cursor/selection marks, and status come from the
     /// scene, never from a grid or parser. Returns the instant right after
-    /// `present()` for input-to-present measurement. `Ok(None)` means the
-    /// swapchain frame could not be acquired; invalid geometry or resource
-    /// limits return a visible adapter error instead of being skipped or
-    /// panicking.
+    /// `present()` for input-to-present measurement. Transient occlusion and
+    /// timeouts, deterministic surface recovery, scene-contract failures, and
+    /// fatal device faults are distinct typed outcomes.
     pub fn render(
         &mut self,
         scene: &WorkspaceScene,
         theme: &Theme,
-    ) -> Result<Option<Instant>, SceneCompileError> {
+    ) -> Result<GpuRenderOutcome, GpuRenderError> {
+        if let Some(fault) = take_gpu_fault(&self.device_fault, self.device_generation) {
+            return Err(fault);
+        }
         let prepared = prepare_scene(scene, theme)?;
         let program = prepare_cell_program(prepared.cell_program(), theme);
         self.sync_raster_cache(prepared.artifacts());
@@ -1355,13 +1910,33 @@ impl GpuText {
             )
             .is_err()
         {
-            return Ok(None);
+            if let Some(fault) = take_gpu_fault(&self.device_fault, self.device_generation) {
+                return Err(fault);
+            }
+            return Err(GpuRenderError::TextAtlasFull);
         }
 
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            _ => return Ok(None),
+        if let Some(fault) = take_gpu_fault(&self.device_fault, self.device_generation) {
+            return Err(fault);
+        }
+        let (frame, reconfigure_after_present) = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
+            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                return self.handle_surface_signal(SurfaceAcquireSignal::Timeout);
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                return self.handle_surface_signal(SurfaceAcquireSignal::Occluded);
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                return self.handle_surface_signal(SurfaceAcquireSignal::Outdated);
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                return self.handle_surface_signal(SurfaceAcquireSignal::Lost);
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return self.handle_surface_signal(SurfaceAcquireSignal::Validation);
+            }
         };
         let view = frame
             .texture
@@ -1369,7 +1944,7 @@ impl GpuText {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
+        let text_render_error = {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("frame"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1425,13 +2000,23 @@ impl GpuText {
                 }
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             }
-            let _ = self
+            let result = self
                 .text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass);
+            result.err()
+        };
+        if let Some(error) = text_render_error {
+            return Err(GpuRenderError::TextRender {
+                message: error.to_string(),
+            });
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
-        Ok(Some(Instant::now()))
+        let present = Instant::now();
+        if reconfigure_after_present {
+            self.recover_surface(GpuSurfaceRecovery::Outdated)?;
+        }
+        Ok(GpuRenderOutcome::Presented(present))
     }
 }
 
@@ -1666,6 +2251,262 @@ mod tests {
 
         pool.ensure_len(2, &mut font_system, metrics);
         assert_eq!(pool.len(), 5);
+    }
+
+    #[test]
+    fn startup_failures_have_stable_visible_classifications() {
+        for (stage, kind, label) in [
+            (
+                StartupFailureStage::Surface,
+                GpuStartupErrorKind::NoDisplay,
+                "no display",
+            ),
+            (
+                StartupFailureStage::Adapter,
+                GpuStartupErrorKind::NoAdapter,
+                "no GPU adapter",
+            ),
+            (
+                StartupFailureStage::Device,
+                GpuStartupErrorKind::DeviceRequest,
+                "GPU device request failed",
+            ),
+            (
+                StartupFailureStage::Configuration,
+                GpuStartupErrorKind::InvalidConfiguration,
+                "invalid GPU configuration",
+            ),
+        ] {
+            let error = startup_error(stage, "fault injected");
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.message(), "fault injected");
+            assert_eq!(error.to_string(), format!("{label}: fault injected"));
+        }
+
+        let no_window = GpuStartupError::no_display("window creation failed");
+        assert_eq!(no_window.kind(), GpuStartupErrorKind::NoDisplay);
+        assert_eq!(
+            no_window.to_string(),
+            "no display: window creation failed".to_owned()
+        );
+    }
+
+    #[test]
+    fn surface_acquire_faults_map_to_deterministic_retry_policy() {
+        assert_eq!(
+            surface_acquire_directive(SurfaceAcquireSignal::Timeout),
+            SurfaceAcquireDirective::Skip(GpuFrameSkip::Timeout)
+        );
+        assert_eq!(
+            surface_acquire_directive(SurfaceAcquireSignal::Occluded),
+            SurfaceAcquireDirective::Skip(GpuFrameSkip::Occluded)
+        );
+        assert_eq!(
+            surface_acquire_directive(SurfaceAcquireSignal::Outdated),
+            SurfaceAcquireDirective::Recover(GpuSurfaceRecovery::Outdated)
+        );
+        assert_eq!(
+            surface_acquire_directive(SurfaceAcquireSignal::Lost),
+            SurfaceAcquireDirective::Recover(GpuSurfaceRecovery::Lost)
+        );
+        assert_eq!(
+            surface_acquire_directive(SurfaceAcquireSignal::Validation),
+            SurfaceAcquireDirective::FailValidation
+        );
+        assert_eq!(
+            injected_surface_recovery(GpuFaultInjection::SurfaceOutdated),
+            Some(GpuSurfaceRecovery::Outdated)
+        );
+        assert_eq!(
+            injected_surface_recovery(GpuFaultInjection::SurfaceLost),
+            Some(GpuSurfaceRecovery::Lost)
+        );
+        assert_eq!(
+            injected_surface_recovery(GpuFaultInjection::DeviceLost),
+            None
+        );
+        assert_eq!(
+            injected_surface_recovery(GpuFaultInjection::OutOfMemory),
+            None
+        );
+    }
+
+    #[test]
+    fn uncaptured_out_of_memory_and_device_loss_remain_explicit() {
+        assert_eq!(
+            uncaptured_gpu_error(
+                UncapturedErrorKind::OutOfMemory,
+                "heap exhausted".to_owned()
+            ),
+            GpuRenderError::OutOfMemory {
+                message: "heap exhausted".to_owned()
+            }
+        );
+        assert_eq!(
+            uncaptured_gpu_error(UncapturedErrorKind::Validation, "bad binding".to_owned()),
+            GpuRenderError::Validation {
+                message: "bad binding".to_owned()
+            }
+        );
+        assert_eq!(
+            uncaptured_gpu_error(UncapturedErrorKind::Internal, "driver fault".to_owned()),
+            GpuRenderError::Internal {
+                message: "driver fault".to_owned()
+            }
+        );
+        assert_eq!(
+            device_lost_error(wgpu::DeviceLostReason::Unknown, "reset".to_owned()),
+            GpuRenderError::DeviceLost {
+                reason: GpuDeviceLossReason::Unknown,
+                message: "reset".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn higher_priority_fault_wins_in_both_arrival_orders() {
+        let slot = Arc::new(Mutex::new(GpuFaultState {
+            active_device_generation: 7,
+            pending: None,
+        }));
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::Validation {
+                message: "validation first".to_owned(),
+            },
+        );
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::OutOfMemory {
+                message: "oom second".to_owned(),
+            },
+        );
+        assert_eq!(
+            take_gpu_fault(&slot, 7),
+            Some(GpuRenderError::OutOfMemory {
+                message: "oom second".to_owned()
+            })
+        );
+
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::OutOfMemory {
+                message: "oom first".to_owned(),
+            },
+        );
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::Validation {
+                message: "validation second".to_owned(),
+            },
+        );
+        assert_eq!(
+            take_gpu_fault(&slot, 7),
+            Some(GpuRenderError::OutOfMemory {
+                message: "oom first".to_owned()
+            })
+        );
+
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::Internal {
+                message: "internal first".to_owned(),
+            },
+        );
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::DeviceLost {
+                reason: GpuDeviceLossReason::Unknown,
+                message: "device second".to_owned(),
+            },
+        );
+        assert_eq!(
+            take_gpu_fault(&slot, 7),
+            Some(GpuRenderError::DeviceLost {
+                reason: GpuDeviceLossReason::Unknown,
+                message: "device second".to_owned()
+            })
+        );
+
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::DeviceLost {
+                reason: GpuDeviceLossReason::Destroyed,
+                message: "device first".to_owned(),
+            },
+        );
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::Internal {
+                message: "internal second".to_owned(),
+            },
+        );
+        assert_eq!(
+            take_gpu_fault(&slot, 7),
+            Some(GpuRenderError::DeviceLost {
+                reason: GpuDeviceLossReason::Destroyed,
+                message: "device first".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn generation_stamped_faults_reject_stale_destroyed_callbacks() {
+        let slot = Arc::new(Mutex::new(GpuFaultState {
+            active_device_generation: 7,
+            pending: None,
+        }));
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::Validation {
+                message: "active validation".to_owned(),
+            },
+        );
+        record_gpu_fault(
+            &slot,
+            6,
+            GpuRenderError::OutOfMemory {
+                message: "stale oom".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            take_gpu_fault(&slot, 7),
+            Some(GpuRenderError::Validation {
+                message: "active validation".to_owned()
+            })
+        );
+        assert_eq!(take_gpu_fault(&slot, 7), None);
+
+        retire_gpu_generation(&slot, 8);
+        record_gpu_fault(
+            &slot,
+            7,
+            GpuRenderError::DeviceLost {
+                reason: GpuDeviceLossReason::Destroyed,
+                message: "stale old device".to_owned(),
+            },
+        );
+        assert!(!has_gpu_fault(&slot, 8));
+
+        record_gpu_fault(
+            &slot,
+            8,
+            GpuRenderError::DeviceLost {
+                reason: GpuDeviceLossReason::Unknown,
+                message: "active device".to_owned(),
+            },
+        );
+        assert!(has_gpu_fault(&slot, 8));
     }
 
     fn ready_artifact(width: u32, height: u32, revision: u64) -> PaneContent {

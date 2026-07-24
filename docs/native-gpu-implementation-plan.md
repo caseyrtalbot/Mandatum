@@ -1,7 +1,7 @@
 # Native GPU Frontend Implementation Plan
 
-Status: capability branch accepted; Phases 1, 2, and 3 complete in the excluded
-adapter; production GPU admission pending (2026-07-23).
+Status: capability branch accepted; Phases 1–6 complete in the excluded
+adapter; production GPU admission pending (2026-07-24).
 
 This document is the durable implementation plan for a native window and
 GPU-backed renderer. It does not change the current product verdict: the
@@ -33,11 +33,11 @@ parallel product model.
 | Product state | `RuntimeEngine` owns all live terminal, task, and agent state; `AppState` folds durable and presentation state. | Reuse this state machine unchanged. |
 | Renderer contract | `WorkspaceScene` carries layout, pane surfaces, overlays, themes, and hit targets; `mandatum-scene` compiles the complete frame into one neutral `CellProgram` consumed by both adapters. | Extend the semantic scene contract only for an admitted product capability, never for a renderer convenience. |
 | Terminal frontend | `app_shell.rs` drives `FrontendHost` while retaining the crossterm lifecycle, input reader, 250 ms heartbeat schedule, 8 ms redraw cap, rendering, and terminal effect encoding. | Keep this shipped fallback unchanged while the excluded native adapter advances through parity work. |
-| GPU spike | The excluded winit/wgpu shell now drives the real `FrontendHost`, translates winit input to neutral `InputEvent` values, and paints real `WorkspaceScene` snapshots through its scene-only renderer. Its duplicate `TerminalSession`, parser, input encoder, and scene bridge are gone. | Continue parity work against the shared host and scene contracts; do not add a second product state machine or promote the excluded dependency tree. |
+| GPU spike | The excluded winit/wgpu shell drives the real `FrontendHost`, paints real `WorkspaceScene` snapshots through its scene-only renderer, and now has typed surface/device recovery, explicit failures, bounded scheduling, stress tooling, and structured evidence. Its duplicate `TerminalSession`, parser, input encoder, and scene bridge are gone. | Preserve the completed shared-host boundary; do not add a second product state machine or promote the excluded dependency tree without Phase 7 admission. |
 | Clipboard | `AppState` emits FIFO `FrontendEffect::SetClipboard(String)` values; `app_shell.rs` alone maps them to OSC 52. | Phase 1A is complete and proves the first renderer-neutral platform effect. |
 | Wake path | `AppEventSender` is the only send side for input, PTY, restore-preserved input/artifact completions, agent events, and artifact workers. The channel remains truth; an optional callback coalesces notifications while the queue is non-empty. | The excluded native shell binds that callback to `EventLoopProxy<UserEvent>` without moving a GUI type into app state. |
-| Performance evidence | The spike measured key-to-GPU-present p50 21.6 ms / p95 22.2 ms. The terminal's 2026-07-22 Phase 2 refresh measured key-to-app-output p50 11.39 ms / p95 12.56 ms / max 13.69 ms. | These endpoints are asymmetric and do not prove a native product win or sub-20 ms input-to-present performance. |
-| Admission | The Artifact Preview capability, typed scene surface, terminal fallback, excluded-GPU path, and adapter tests are complete. | Capability proof alone does not admit dependencies; production GPU dependencies remain rejected until the separate admission evidence and decision. |
+| Performance evidence | Three paired 1,000-sample trials used identical targeted input and ScreenCaptureKit endpoints. Native p95 was 61.14–62.54 ms; terminal p95 was 76.12–84.14 ms with four recovered misses. | Acquisition is complete, but sub-20 ms, zero-miss, and every-pair 25% improvement admission thresholds are not met. |
+| Admission | Phases 1–6, including Artifact Preview, parity, advanced text/IME, recovery, stress, and structured acquisition, are complete in the excluded adapter. | Capability and hardening proof do not admit dependencies; Phase 7 still requires an explicit decision plus the deferred soak, matrix, dependency, packaging, and rollout evidence. |
 
 The detailed evidence and standing procedures live in
 [frontend-platform.md](frontend-platform.md),
@@ -573,6 +573,24 @@ Proposed thresholds for the later admission decision, not current promises:
 Exit gate: every threshold actually accepted in Phase 0 passes. Historical
 p50-only or bytes-out measurements cannot substitute for symmetric evidence.
 
+Phase completion decision (2026-07-24): the excluded adapter's Phase 6
+hardening capability is complete. Deterministic tests and live fault probes
+cover surface outdated/lost recovery, device recreation, out-of-memory, stable
+startup classifications, bounded event-loop draining, and fail-closed
+occlusion. A 1,000-change resize/scale exercise completed every requested
+apply/present, and three paired 1,000-sample ScreenCaptureKit acquisitions
+completed on the same 85 Hz display.
+
+The thresholds above remain production-admission thresholds, not prerequisites
+for completing an excluded refactor. The accepted acquisition did not meet
+them: native p95 was 61.14–62.54 ms rather than below 20 ms, one paired
+improvement was below 25%, the third terminal trial recorded four recovered
+misses, and this Mac cannot prove a multi-display matrix. Repeated long soak
+attempts exposed and drove fixes for event-loop starvation and oversized
+synchronous runtime drains, but no clean admission-grade 30-minute result is
+claimed. That soak and the unproven platform matrix move to Phase 7 and must
+pass before any dependency or release admission.
+
 ## Phase 7 — Admit And Promote The Product Adapter
 
 Dependency: accepted trigger plus Phase 6 evidence.
@@ -643,10 +661,9 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Build Phase 6 as one hardening-and-measurement capability family. Add
-deterministic surface outdated/lost reconfiguration, device-loss recreation,
-explicit out-of-memory/no-adapter/no-display outcomes, and resize/scale-storm
-coverage. Then emit structured platform/GPU/display/workload/sample/miss/
-percentile evidence and run the accepted soak/resize/latency matrix. Add cache
-or damage-tracking complexity only when that profiling justifies it. Stop before
-production GPU admission, installer/release changes, or rollout.
+Prepare the Phase 7 admission decision without presuming promotion. Re-run and
+accept the clean 30-minute flood/resize/input soak, qualify the intended
+multi-display/support matrix, and decide whether the latency, miss, dependency,
+packaging, and rollout evidence justifies admitting a production native
+frontend. If any accepted threshold remains unmet, keep the spike excluded.
+Do not change installer/release surfaces before that explicit decision.

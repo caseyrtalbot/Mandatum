@@ -297,13 +297,19 @@ spikes/               experiments outside the Cargo workspace; they may depend
 ```
 
 The scene contract keeps frontends swappable: the same `WorkspaceScene`
-that drives the ratatui frontend drove a winit+wgpu spike that measured
-key-to-GPU-present p50 21.6 ms. The terminal frontend is v1; the GPU
-adapter stays excluded, but its native shell now drives the real
+drives the ratatui frontend and the excluded winit+wgpu adapter. The current
+symmetric ScreenCaptureKit acquisition measured native p95 61.14–62.54 ms and
+terminal p95 76.12–84.14 ms across three paired 1,000-sample trials; those
+results do not meet the proposed production-admission bar. The terminal
+frontend is v1; the GPU adapter stays excluded, but its native shell drives the real
 `FrontendHost`, translates winit input to neutral events, and paints real
 workstation scenes without a duplicate PTY/parser state machine. It also
 uploads and contain-fits the typed Artifact Preview surface while respecting
-scene-owned occlusion and aggregate resource limits. Evidence and verdict:
+scene-owned occlusion and aggregate resource limits. Its excluded Phase 6
+hardening now also covers typed surface/device recovery, explicit GPU failure
+outcomes, bounded event draining, resize/scale stress, and structured symmetric
+measurement. The accepted measurements do not meet the later production-
+admission thresholds, so the adapter remains excluded. Evidence and verdict:
 [spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md). The
 admission-gated path from the spike to a real workstation frontend is in the
 [native GPU implementation plan](docs/native-gpu-implementation-plan.md).

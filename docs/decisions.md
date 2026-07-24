@@ -2329,3 +2329,50 @@ preedit/commit/cancel, late commits, modal/focus routing, scale and glyph-span
 geometry. Three independent review tracks drove boundary corrections and ended
 clean. The displayed macOS matrix and exact gate/latency evidence are recorded
 in `docs/verification.md`.
+
+## Accepted: Phase 6 Completes The Excluded Hardening Refactor, Not Admission
+
+Status: accepted (2026-07-24)
+
+Decision: Phase 6 is complete when the excluded native adapter has deterministic
+surface/device recovery, explicit failure outcomes, bounded event-loop work,
+structured evidence, a complete resize/scale storm, and accepted symmetric
+acquisition. The proposed 30-minute soak, multi-display matrix, and latency
+thresholds are production-admission evidence owned by Phase 7. They are not
+prerequisites for completing an excluded refactor.
+
+Context: the Phase 6 implementation and repeated live runs exercised the
+adapter beyond a normal spike bar. They found real event-loop starvation,
+multi-second synchronous drain slices, watchdog ordering, and screen-lock
+occlusion defects, all of which were fixed. Three paired 1,000-sample
+acquisitions completed, but their accepted result already fails the later
+admission bar: native p95 is above 20 ms, one pair improves by less than 25%,
+the terminal path is not zero-miss across all trials, and this one-display Mac
+cannot prove multi-display behavior. Further repeated 30-minute runs cannot
+change that admission decision.
+
+Rationale: engineering verification should be proportional to the decision it
+can affect. Deterministic hardening tests and bounded live stress prove the
+refactor; admission-grade endurance and platform evidence justify adding GPU
+dependencies to the shipped product. Conflating those gates turns an excluded
+spike into an open-ended qualification program without reducing current
+product risk.
+
+Consequences:
+
+- Phase 6 code, tests, evidence, and documentation may land while winit/wgpu
+  remain excluded from the product workspace, installer, release, and ordinary
+  merge gate;
+- the completed 1,000-change and 3×1,000 paired acquisitions remain valid
+  Phase 6 evidence and do not need repetition;
+- no clean 30-minute soak or multi-display qualification is claimed;
+- Phase 7 must explicitly accept its long-soak, latency, platform, dependency,
+  packaging, and rollout evidence before any production promotion;
+- the terminal frontend remains the shipped default.
+
+Verification: `./ci/gpu-spike.sh`, `cargo test -p mandatum-app`, and the full
+`./ci/gate.sh` are green. Surface/device/OOM probes and the resize storm
+completed with structured evidence. Three independent final reviews returned
+no finding. Exact counts, methodology, measurements, and remaining boundaries
+are recorded in `docs/verification.md` and
+`spikes/frontend-wgpu/RESULTS.md`.

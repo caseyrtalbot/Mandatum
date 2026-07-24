@@ -8,11 +8,20 @@ mod stats;
 
 use std::{
     collections::VecDeque,
-    time::{Duration, Instant},
+    fs,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant, SystemTime},
 };
 
 use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
-use mandatum_gpu_renderer_spike::{GpuText, NativeTextSettings, SceneCompileError};
+use mandatum_gpu_renderer_spike::{
+    GpuFaultInjection, GpuFaultInjectionResult, GpuFrameSkip, GpuRenderError, GpuRenderOutcome,
+    GpuStartupErrorKind, GpuSurfaceRecovery, GpuText, NativeTextSettings,
+};
 use mandatum_scene::{
     SceneSize, WorkspaceScene,
     input::{
@@ -20,80 +29,333 @@ use mandatum_scene::{
         PointerEvent, PointerKind, TextRange,
     },
 };
-use stats::Samples;
+use serde::Serialize;
+use stats::{MemorySamples, MemorySummary, MetricSummary, Samples, StressState, StressSummary};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     platform::modifier_supplement::KeyEventExtModifierSupplement,
     window::{Window, WindowId},
 };
 
-const INJECT_TOTAL: u32 = 300;
-const INJECT_INTERVAL: Duration = Duration::from_micros(33_333);
+const DEFAULT_INJECT_TOTAL: u32 = 300;
+const DEFAULT_INJECT_INTERVAL: Duration = Duration::from_micros(33_333);
+const RESIZE_EXERCISE_STEPS: u64 = 1_000;
+const DEFAULT_RESIZE_INTERVAL: Duration = Duration::from_millis(16);
+const DEFAULT_SOAK_DURATION: Duration = Duration::from_secs(30 * 60);
+// macOS applies live window-size changes asynchronously and continuous PTY
+// backpressure can delay the event loop for several seconds. A fifteen-second
+// cadence still exercises 120 resize/scale/input cycles in the required
+// 30-minute soak without defining a schedule the system cannot service.
+const DEFAULT_SOAK_INTERVAL: Duration = Duration::from_secs(15);
+const DEFAULT_MEMORY_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_MEASUREMENT_SAMPLES: usize = 200_000;
 const HEARTBEAT: Duration = Duration::from_millis(250);
-const EVENT_DRAIN_BUDGET: usize = 256;
+const EVENT_DRAIN_BUDGET: usize = 16;
 const IDLE_FRAME_CUTOFF_MS: f64 = 250.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum StressConfig {
+    ResizeExercise { steps: u64 },
+    Soak { duration: Duration },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FaultConfig {
+    SurfaceOutdated,
+    SurfaceLost,
+    DeviceLost,
+    OutOfMemory,
+}
+
+impl FaultConfig {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SurfaceOutdated => "surface_outdated",
+            Self::SurfaceLost => "surface_lost",
+            Self::DeviceLost => "device_lost",
+            Self::OutOfMemory => "out_of_memory",
+        }
+    }
+
+    fn injection(self) -> GpuFaultInjection {
+        match self {
+            Self::SurfaceOutdated => GpuFaultInjection::SurfaceOutdated,
+            Self::SurfaceLost => GpuFaultInjection::SurfaceLost,
+            Self::DeviceLost => GpuFaultInjection::DeviceLost,
+            Self::OutOfMemory => GpuFaultInjection::OutOfMemory,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct Config {
     exit_after: Option<f64>,
     typing_bench: bool,
+    typing_samples: u32,
+    typing_interval: Duration,
     flood: bool,
     scale_after: Option<f64>,
     scale_factor: f32,
+    stress: Option<StressConfig>,
+    stress_interval: Option<Duration>,
+    fault: Option<FaultConfig>,
+    fault_after: Duration,
+    memory_interval: Duration,
     text_settings: NativeTextSettings,
+    harness_project_path: Option<String>,
 }
 
-fn parse_config() -> Config {
+fn parse_config() -> Result<Config, String> {
+    parse_config_from(std::env::args().skip(1))
+}
+
+fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
     let defaults = NativeTextSettings::default();
     let mut font_family = defaults.family().to_owned();
     let mut font_size = defaults.font_size();
+    let mut typing_interval_set = false;
+    let mut stress_interval_set = false;
+    let mut fault_after_set = false;
+    let mut scale_factor_set = false;
     let mut config = Config {
         exit_after: None,
         typing_bench: false,
+        typing_samples: DEFAULT_INJECT_TOTAL,
+        typing_interval: DEFAULT_INJECT_INTERVAL,
         flood: false,
         scale_after: None,
         scale_factor: 1.5,
+        stress: None,
+        stress_interval: None,
+        fault: None,
+        fault_after: Duration::from_secs(1),
+        memory_interval: DEFAULT_MEMORY_INTERVAL,
         text_settings: defaults,
+        harness_project_path: None,
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--exit-after" => {
-                config.exit_after = args.next().and_then(|value| value.parse().ok());
+                let value = required_value(&mut args, &arg)?;
+                config.exit_after = Some(
+                    parse_bounded_f64(&value, 0.01, 21_600.0)
+                        .ok_or_else(|| invalid_value(&arg, &value, "0.01..=21600 seconds"))?,
+                );
             }
             "--typing-bench" => config.typing_bench = true,
+            "--typing-samples" => {
+                let value = required_value(&mut args, &arg)?;
+                config.typing_samples = parse_bounded_u64(&value, 1, 200_000)
+                    .ok_or_else(|| invalid_value(&arg, &value, "1..=200000"))?
+                    as u32;
+                config.typing_bench = true;
+            }
+            "--typing-interval-ms" => {
+                let value = required_value(&mut args, &arg)?;
+                config.typing_interval = parse_duration_ms(&value, 1, 60_000)
+                    .ok_or_else(|| invalid_value(&arg, &value, "1..=60000 ms"))?;
+                typing_interval_set = true;
+            }
             "--flood" => config.flood = true,
+            "--resize-exercise" => {
+                set_stress(
+                    &mut config,
+                    StressConfig::ResizeExercise {
+                        steps: RESIZE_EXERCISE_STEPS,
+                    },
+                )?;
+            }
+            "--resize-count" => {
+                let value = required_value(&mut args, &arg)?;
+                let steps = parse_bounded_u64(&value, 1, 100_000)
+                    .ok_or_else(|| invalid_value(&arg, &value, "1..=100000"))?;
+                set_stress(&mut config, StressConfig::ResizeExercise { steps })?;
+            }
+            "--soak" => {
+                set_stress(
+                    &mut config,
+                    StressConfig::Soak {
+                        duration: DEFAULT_SOAK_DURATION,
+                    },
+                )?;
+                config.flood = true;
+            }
+            "--soak-seconds" => {
+                let value = required_value(&mut args, &arg)?;
+                let seconds = parse_bounded_u64(&value, 1, 21_600)
+                    .ok_or_else(|| invalid_value(&arg, &value, "1..=21600 seconds"))?;
+                set_stress(
+                    &mut config,
+                    StressConfig::Soak {
+                        duration: Duration::from_secs(seconds),
+                    },
+                )?;
+                config.flood = true;
+            }
+            "--stress-interval-ms" => {
+                let value = required_value(&mut args, &arg)?;
+                config.stress_interval = Some(
+                    parse_duration_ms(&value, 5, 60_000)
+                        .ok_or_else(|| invalid_value(&arg, &value, "5..=60000 ms"))?,
+                );
+                stress_interval_set = true;
+            }
+            "--memory-interval-ms" => {
+                let value = required_value(&mut args, &arg)?;
+                config.memory_interval = parse_duration_ms(&value, 250, 60_000)
+                    .ok_or_else(|| invalid_value(&arg, &value, "250..=60000 ms"))?;
+            }
+            "--inject-fault" => {
+                let value = required_value(&mut args, &arg)?;
+                config.fault = Some(match value.as_str() {
+                    "surface-outdated" => FaultConfig::SurfaceOutdated,
+                    "surface-lost" => FaultConfig::SurfaceLost,
+                    "device-lost" => FaultConfig::DeviceLost,
+                    "out-of-memory" => FaultConfig::OutOfMemory,
+                    _ => {
+                        return Err(invalid_value(
+                            &arg,
+                            &value,
+                            "surface-outdated|surface-lost|device-lost|out-of-memory",
+                        ));
+                    }
+                });
+            }
+            "--fault-after" => {
+                let value = required_value(&mut args, &arg)?;
+                let seconds = parse_bounded_f64(&value, 0.0, 3_600.0)
+                    .ok_or_else(|| invalid_value(&arg, &value, "0..=3600 seconds"))?;
+                config.fault_after = Duration::from_secs_f64(seconds);
+                fault_after_set = true;
+            }
             "--scale-after" => {
-                config.scale_after = args.next().and_then(|value| parse_scale_delay(&value));
+                let value = required_value(&mut args, &arg)?;
+                config.scale_after = Some(
+                    parse_scale_delay(&value)
+                        .ok_or_else(|| invalid_value(&arg, &value, "0..=3600 seconds"))?,
+                );
             }
             "--scale-factor" => {
-                config.scale_factor = args
-                    .next()
-                    .and_then(|value| parse_scale_factor(&value))
-                    .unwrap_or(config.scale_factor);
+                let value = required_value(&mut args, &arg)?;
+                config.scale_factor = parse_scale_factor(&value)
+                    .ok_or_else(|| invalid_value(&arg, &value, "0.25..=8"))?;
+                scale_factor_set = true;
             }
             "--font-family" => {
-                if let Some(family) = args.next().and_then(|value| parse_font_family(&value)) {
-                    font_family = family;
-                }
+                let value = required_value(&mut args, &arg)?;
+                font_family = parse_font_family(&value)
+                    .ok_or_else(|| invalid_value(&arg, &value, "1..=128 non-control characters"))?;
             }
             "--font-size" => {
-                if let Some(size) = args.next().and_then(|value| parse_font_size(&value)) {
-                    font_size = size;
-                }
+                let value = required_value(&mut args, &arg)?;
+                font_size =
+                    parse_font_size(&value).ok_or_else(|| invalid_value(&arg, &value, "6..=72"))?;
             }
-            other => eprintln!("ignoring unknown arg: {other}"),
+            other => return Err(format!("unknown argument: {other}")),
         }
     }
     config.text_settings =
-        NativeTextSettings::new(font_family, font_size).expect("validated native text arguments");
-    config
+        NativeTextSettings::new(font_family, font_size).map_err(|error| error.to_string())?;
+    if typing_interval_set && !config.typing_bench {
+        return Err("--typing-interval-ms requires --typing-bench or --typing-samples".to_owned());
+    }
+    if stress_interval_set && config.stress.is_none() {
+        return Err("--stress-interval-ms requires a resize exercise or soak".to_owned());
+    }
+    if fault_after_set && config.fault.is_none() {
+        return Err("--fault-after requires --inject-fault".to_owned());
+    }
+    if scale_factor_set && config.scale_after.is_none() && config.stress.is_none() {
+        return Err("--scale-factor requires --scale-after or a stress workload".to_owned());
+    }
+    if config.typing_bench && (config.flood || config.stress.is_some()) {
+        return Err(
+            "typing latency must run in isolation from flood and stress workloads".to_owned(),
+        );
+    }
+    Ok(config)
+}
+
+fn required_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<String, String> {
+    args.next()
+        .ok_or_else(|| format!("missing value for {option}"))
+}
+
+fn set_stress(config: &mut Config, stress: StressConfig) -> Result<(), String> {
+    if config.stress.is_some() {
+        return Err(
+            "choose only one of --resize-exercise/--resize-count/--soak/--soak-seconds".to_owned(),
+        );
+    }
+    config.stress = Some(stress);
+    Ok(())
+}
+
+fn parse_duration_ms(value: &str, min: u64, max: u64) -> Option<Duration> {
+    parse_bounded_u64(value, min, max).map(Duration::from_millis)
+}
+
+fn parse_bounded_u64(value: &str, min: u64, max: u64) -> Option<u64> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|parsed| (min..=max).contains(parsed))
+}
+
+fn parse_bounded_f64(value: &str, min: f64, max: f64) -> Option<f64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|parsed| parsed.is_finite() && (min..=max).contains(parsed))
+}
+
+fn invalid_value(option: &str, value: &str, expected: &str) -> String {
+    format!("invalid value for {option}: {value:?}; expected {expected}")
+}
+
+fn configured_run_timeout(config: &Config) -> Option<Duration> {
+    let explicit = config.exit_after.map(Duration::from_secs_f64);
+    let mut automatic = None;
+    let mut include = |candidate: Duration| {
+        automatic = Some(automatic.map_or(candidate, |current: Duration| current.max(candidate)));
+    };
+    match config.stress {
+        Some(StressConfig::ResizeExercise { steps }) => {
+            let interval = config
+                .stress_interval
+                .unwrap_or(DEFAULT_RESIZE_INTERVAL)
+                .as_secs_f64();
+            include(Duration::from_secs_f64(
+                (interval * steps as f64 * 20.0).clamp(60.0, 21_600.0),
+            ));
+        }
+        Some(StressConfig::Soak { duration }) => {
+            include(Duration::from_millis(400) + duration);
+        }
+        None => {}
+    }
+    if config.typing_bench {
+        include(
+            Duration::from_millis(400)
+                + config.typing_interval * config.typing_samples
+                + Duration::from_secs(2),
+        );
+    }
+    if config.fault.is_some() {
+        include(config.fault_after + Duration::from_secs(5));
+    }
+    match (explicit, automatic) {
+        (Some(explicit), Some(automatic)) => Some(explicit.min(automatic)),
+        (Some(explicit), None) => Some(explicit),
+        (None, automatic) => automatic,
+    }
 }
 
 fn parse_scale_delay(value: &str) -> Option<f64> {
@@ -123,9 +385,283 @@ fn parse_font_size(value: &str) -> Option<f32> {
         .filter(|size| size.is_finite() && (6.0..=72.0).contains(size))
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct OutcomeEvidence {
+    status: &'static str,
+    phase: &'static str,
+    kind: &'static str,
+    message: String,
+}
+
+impl OutcomeEvidence {
+    fn success(message: impl Into<String>) -> Self {
+        Self {
+            status: "ok",
+            phase: "complete",
+            kind: "clean_exit",
+            message: message.into(),
+        }
+    }
+
+    fn failure(phase: &'static str, kind: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: "error",
+            phase,
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct GpuEvidence {
+    name: String,
+    backend: String,
+    device_type: String,
+    driver: String,
+    driver_info: String,
+    vendor: u32,
+    device: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct LifecycleEvidence {
+    input_correlation_drops: u64,
+    timeout_skips: u64,
+    occluded_skips: u64,
+    window_occlusion_events: u64,
+    outdated_reconfigurations: u64,
+    lost_reconfigurations: u64,
+    device_recreations: u64,
+    device_recreation_failures: u64,
+    device_generation: u64,
+    surface_generation: u64,
+    renderer_surface_reconfigurations: u64,
+    injected_faults: u64,
+    quad_capacity_floats: usize,
+    raster_capacity_floats: usize,
+    text_row_capacity: usize,
+    raster_cache_entries: usize,
+    raster_cache_entries_high_water: usize,
+    raster_cache_bytes: usize,
+    raster_cache_bytes_high_water: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct WorkloadEvidence {
+    typing_bench: bool,
+    typing_target: u32,
+    typing_interval_ms: Option<u64>,
+    flood: bool,
+    stress: &'static str,
+    stress_target: Option<u64>,
+    soak_seconds: Option<u64>,
+    stress_interval_ms: Option<u64>,
+    memory_interval_ms: u64,
+    injected_fault: Option<&'static str>,
+    fault_after_ms: Option<u64>,
+    scale_after_ms: Option<u64>,
+    scale_factor: f32,
+    font_family: String,
+    font_size: f32,
+    harness_project_path: Option<String>,
+    window_visibility_policy: &'static str,
+    elapsed_ms: u64,
+}
+
+#[derive(Serialize)]
+struct RunEvidence {
+    schema_version: u8,
+    outcome: OutcomeEvidence,
+    platform: PlatformEvidence,
+    gpu: Option<GpuEvidence>,
+    display_refresh_hz: Option<f64>,
+    first_usable_frame_ms: Option<f64>,
+    first_usable_frame_within_1s: Option<bool>,
+    workload: WorkloadEvidence,
+    input_to_present_ms: MetricSummary,
+    frame_ms: MetricSummary,
+    stress: Option<StressSummary>,
+    fault_injection: Option<FaultEvidence>,
+    memory: MemorySummary,
+    lifecycle: LifecycleEvidence,
+    notes: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct FaultEvidence {
+    requested: &'static str,
+    injected: bool,
+    post_recovery_present: bool,
+}
+
+#[derive(Serialize)]
+struct PlatformEvidence {
+    os: &'static str,
+    arch: &'static str,
+}
+
+fn workload_evidence(config: &Config, elapsed: Duration) -> WorkloadEvidence {
+    let (stress, stress_target, soak_seconds, default_interval) = match config.stress {
+        None => ("none", None, None, None),
+        Some(StressConfig::ResizeExercise { steps }) => (
+            "resize_scale_exercise",
+            Some(steps),
+            None,
+            Some(DEFAULT_RESIZE_INTERVAL),
+        ),
+        Some(StressConfig::Soak { duration }) => (
+            "flood_resize_input_soak",
+            None,
+            Some(duration.as_secs()),
+            Some(DEFAULT_SOAK_INTERVAL),
+        ),
+    };
+    WorkloadEvidence {
+        typing_bench: config.typing_bench,
+        typing_target: if config.typing_bench {
+            config.typing_samples
+        } else {
+            0
+        },
+        typing_interval_ms: config
+            .typing_bench
+            .then_some(config.typing_interval.as_millis() as u64),
+        flood: config.flood,
+        stress,
+        stress_target,
+        soak_seconds,
+        stress_interval_ms: config
+            .stress_interval
+            .or(default_interval)
+            .map(|interval| interval.as_millis() as u64),
+        memory_interval_ms: config.memory_interval.as_millis() as u64,
+        injected_fault: config.fault.map(FaultConfig::label),
+        fault_after_ms: config.fault.map(|_| config.fault_after.as_millis() as u64),
+        scale_after_ms: config.scale_after.map(|seconds| (seconds * 1_000.0) as u64),
+        scale_factor: config.scale_factor,
+        font_family: config.text_settings.family().to_owned(),
+        font_size: config.text_settings.font_size(),
+        harness_project_path: config.harness_project_path.clone(),
+        window_visibility_policy: if matches!(config.stress, Some(StressConfig::Soak { .. })) {
+            "focus_each_action_reference"
+        } else {
+            "normal"
+        },
+        elapsed_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
+    }
+}
+
+fn startup_error_kind(kind: GpuStartupErrorKind) -> &'static str {
+    match kind {
+        GpuStartupErrorKind::NoDisplay => "no_display",
+        GpuStartupErrorKind::NoAdapter => "no_adapter",
+        GpuStartupErrorKind::DeviceRequest => "device_request",
+        GpuStartupErrorKind::InvalidConfiguration => "invalid_configuration",
+    }
+}
+
+fn render_error_kind(error: &GpuRenderError) -> &'static str {
+    match error {
+        GpuRenderError::Scene(_) => "scene_compile",
+        GpuRenderError::OutOfMemory { .. } => "out_of_memory",
+        GpuRenderError::DeviceLost { .. } => "device_lost",
+        GpuRenderError::Validation { .. } => "gpu_validation",
+        GpuRenderError::Internal { .. } => "gpu_internal",
+        GpuRenderError::SurfaceValidation => "surface_validation",
+        GpuRenderError::SurfaceRecreation { .. } => "surface_recreation",
+        GpuRenderError::TextAtlasFull => "text_atlas_full",
+        GpuRenderError::TextRender { .. } => "text_render",
+        GpuRenderError::FaultInjection { .. } => "fault_injection",
+    }
+}
+
+fn print_failure(
+    config: Option<&Config>,
+    phase: &'static str,
+    kind: &'static str,
+    message: impl Into<String>,
+) {
+    let fallback = NativeTextSettings::default();
+    let fallback_config = Config {
+        exit_after: None,
+        typing_bench: false,
+        typing_samples: DEFAULT_INJECT_TOTAL,
+        typing_interval: DEFAULT_INJECT_INTERVAL,
+        flood: false,
+        scale_after: None,
+        scale_factor: 1.5,
+        stress: None,
+        stress_interval: None,
+        fault: None,
+        fault_after: Duration::from_secs(1),
+        memory_interval: DEFAULT_MEMORY_INTERVAL,
+        text_settings: fallback,
+        harness_project_path: None,
+    };
+    let config = config.unwrap_or(&fallback_config);
+    let evidence = RunEvidence {
+        schema_version: 1,
+        outcome: OutcomeEvidence::failure(phase, kind, message),
+        platform: PlatformEvidence {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+        },
+        gpu: None,
+        display_refresh_hz: None,
+        first_usable_frame_ms: None,
+        first_usable_frame_within_1s: None,
+        workload: workload_evidence(config, Duration::ZERO),
+        input_to_present_ms: MetricSummary::default(),
+        frame_ms: MetricSummary::default(),
+        stress: None,
+        fault_injection: config.fault.map(|fault| FaultEvidence {
+            requested: fault.label(),
+            injected: false,
+            post_recovery_present: false,
+        }),
+        memory: MemorySummary::default(),
+        lifecycle: LifecycleEvidence::default(),
+        notes: "run failed before native measurement evidence was available",
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&evidence).expect("evidence is serializable")
+    );
+}
+
+fn process_rss_bytes() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        let output = Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then_some(())
+            .and_then(|()| parse_ps_rss_kib(&output.stdout))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn parse_ps_rss_kib(stdout: &[u8]) -> Option<u64> {
+    std::str::from_utf8(stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
 #[derive(Debug)]
 enum UserEvent {
     Wake,
+    WatchdogExpired(Arc<AtomicBool>),
 }
 
 enum PlatformAction {
@@ -184,20 +720,35 @@ struct App {
     host: FrontendHost,
     window: Option<std::sync::Arc<Window>>,
     gpu: Option<GpuText>,
+    gpu_evidence: Option<GpuEvidence>,
+    display_refresh_hz: Option<f64>,
     clipboard: Option<arboard::Clipboard>,
 
     input_to_present: Samples,
     frame_ms: Samples,
+    memory: MemorySamples,
+    next_memory_sample: Instant,
+    memory_trend_at: Option<Instant>,
     pending_inputs: VecDeque<Instant>,
     dirty_from_runtime: bool,
     last_present: Option<Instant>,
-    dropped_correlations: u32,
+    stress: Option<StressState>,
+    lifecycle: LifecycleEvidence,
+    fault_at: Option<Instant>,
+    fault_injected: bool,
+    awaiting_recovery_present: bool,
+    post_recovery_present: bool,
+    consecutive_surface_recoveries: u8,
+    consecutive_device_recoveries: u8,
+    first_usable_frame_ms: Option<f64>,
 
     start: Instant,
     deadline: Option<Instant>,
     next_heartbeat: Instant,
     summary_printed: bool,
     fatal_error: Option<String>,
+    failure_phase: &'static str,
+    failure_kind: &'static str,
 
     injected: u32,
     next_inject: Instant,
@@ -215,7 +766,12 @@ struct App {
 }
 
 impl App {
-    fn new(config: Config, proxy: EventLoopProxy<UserEvent>, app_config: AppConfig) -> Self {
+    fn new(
+        config: Config,
+        proxy: EventLoopProxy<UserEvent>,
+        app_config: AppConfig,
+        process_start: Instant,
+    ) -> Self {
         let wake_proxy = proxy.clone();
         let mut host = FrontendHost::new_with_wake_callback(app_config, move || {
             let _ = wake_proxy.send_event(UserEvent::Wake);
@@ -236,18 +792,33 @@ impl App {
             host,
             window: None,
             gpu: None,
+            gpu_evidence: None,
+            display_refresh_hz: None,
             clipboard,
-            input_to_present: Samples::new(),
-            frame_ms: Samples::new(),
+            input_to_present: Samples::with_limit(MAX_MEASUREMENT_SAMPLES),
+            frame_ms: Samples::with_limit(MAX_MEASUREMENT_SAMPLES),
+            memory: MemorySamples::default(),
+            next_memory_sample: now,
+            memory_trend_at: None,
             pending_inputs: VecDeque::new(),
             dirty_from_runtime: false,
             last_present: None,
-            dropped_correlations: 0,
-            start: now,
+            stress: None,
+            lifecycle: LifecycleEvidence::default(),
+            fault_at: None,
+            fault_injected: false,
+            awaiting_recovery_present: false,
+            post_recovery_present: false,
+            consecutive_surface_recoveries: 0,
+            consecutive_device_recoveries: 0,
+            first_usable_frame_ms: None,
+            start: process_start,
             deadline: None,
             next_heartbeat: now + HEARTBEAT,
             summary_printed: false,
             fatal_error: None,
+            failure_phase: "runtime",
+            failure_kind: "runtime_error",
             injected: 0,
             next_inject: now,
             inject_letter: b'a',
@@ -270,6 +841,50 @@ impl App {
         }
     }
 
+    fn fail(&mut self, phase: &'static str, kind: &'static str, message: impl Into<String>) {
+        self.failure_phase = phase;
+        self.failure_kind = kind;
+        self.fatal_error = Some(message.into());
+    }
+
+    fn capture_gpu_evidence(&mut self) {
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let metadata = gpu.adapter_metadata();
+        self.gpu_evidence = Some(GpuEvidence {
+            name: metadata.name.clone(),
+            backend: metadata.backend.to_owned(),
+            device_type: metadata.device_type.to_owned(),
+            driver: metadata.driver.clone(),
+            driver_info: metadata.driver_info.clone(),
+            vendor: metadata.vendor,
+            device: metadata.device,
+        });
+    }
+
+    fn capture_lifecycle_evidence(&mut self) {
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let snapshot = gpu.lifecycle_snapshot();
+        self.lifecycle.device_generation = snapshot.device_generation;
+        self.lifecycle.surface_generation = snapshot.surface_generation;
+        self.lifecycle.renderer_surface_reconfigurations = snapshot.surface_reconfigurations;
+        self.lifecycle.device_recreations = self
+            .lifecycle
+            .device_recreations
+            .max(snapshot.device_recreations);
+        self.lifecycle.injected_faults = snapshot.injected_faults;
+        self.lifecycle.quad_capacity_floats = snapshot.quad_capacity_floats;
+        self.lifecycle.raster_capacity_floats = snapshot.raster_capacity_floats;
+        self.lifecycle.text_row_capacity = snapshot.text_row_capacity;
+        self.lifecycle.raster_cache_entries = snapshot.raster_cache_entries;
+        self.lifecycle.raster_cache_entries_high_water = snapshot.raster_cache_entries_high_water;
+        self.lifecycle.raster_cache_bytes = snapshot.raster_cache_bytes;
+        self.lifecycle.raster_cache_bytes_high_water = snapshot.raster_cache_bytes_high_water;
+    }
+
     fn scene_size(&self) -> Option<SceneSize> {
         let gpu = self.gpu.as_ref()?;
         let (width, height) = gpu.surface_size();
@@ -289,7 +904,7 @@ impl App {
         if let Some(gpu) = &mut self.gpu
             && let Err(error) = gpu.set_scale(scale_factor)
         {
-            self.fatal_error = Some(error);
+            self.fail("runtime", "invalid_scale", error);
             return;
         }
         self.refresh_mouse_cell();
@@ -298,11 +913,17 @@ impl App {
     }
 
     fn send_input(&mut self, input: InputEvent, measured: bool, at: Instant) {
-        if measured {
+        // Only the isolated typing benchmark has a causal contract: it waits
+        // for terminal runtime output produced by the injected character.
+        // Flood/soak and interactive input use separate responsiveness
+        // evidence and must not be correlated with unrelated runtime drains.
+        if measured && self.config.typing_bench {
             if self.pending_inputs.len() < 64 {
                 self.pending_inputs.push_back(at);
             } else {
-                self.dropped_correlations += 1;
+                self.lifecycle.input_correlation_drops =
+                    self.lifecycle.input_correlation_drops.saturating_add(1);
+                self.input_to_present.miss();
             }
         }
         self.host.handle_input(input);
@@ -329,7 +950,7 @@ impl App {
     }
 
     fn drain_runtime(&mut self) -> bool {
-        let drained = self.host.drain_runtime();
+        let drained = self.host.drain_runtime_bounded(EVENT_DRAIN_BUDGET);
         if drained > 0 {
             self.dirty_from_runtime = true;
         }
@@ -337,7 +958,7 @@ impl App {
         drained == EVENT_DRAIN_BUDGET
     }
 
-    fn render_frame(&mut self) -> Result<(), SceneCompileError> {
+    fn render_frame(&mut self) -> Result<(), GpuRenderError> {
         self.scene_presentable = false;
         let Some(size) = self.scene_size() else {
             self.cancel_and_disable_ime();
@@ -354,24 +975,119 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(());
         };
-        if let Some(present) = gpu.render(&snapshot.scene, &snapshot.theme)? {
-            self.scene_presentable = true;
-            if let Some(last) = self.last_present {
-                let frame_ms = present.duration_since(last).as_secs_f64() * 1000.0;
-                if frame_ms < IDLE_FRAME_CUTOFF_MS {
-                    self.frame_ms.push(frame_ms);
+        let outcome = match gpu.render(&snapshot.scene, &snapshot.theme) {
+            Ok(outcome) => outcome,
+            Err(GpuRenderError::DeviceLost { .. }) => {
+                self.consecutive_device_recoveries =
+                    self.consecutive_device_recoveries.saturating_add(1);
+                if self.consecutive_device_recoveries > 3 {
+                    self.fail(
+                        "runtime",
+                        "device_recovery_exhausted",
+                        "GPU device recovery exceeded three consecutive attempts",
+                    );
+                    return Ok(());
+                }
+                match pollster::block_on(gpu.recreate_device()) {
+                    Ok(()) => {
+                        self.lifecycle.device_recreations =
+                            self.lifecycle.device_recreations.saturating_add(1);
+                        self.scene_presentable = false;
+                        self.host.suspend_scene_interaction();
+                        self.capture_gpu_evidence();
+                        self.resize_host();
+                        self.awaiting_recovery_present = true;
+                        self.request_redraw();
+                    }
+                    Err(error) => {
+                        self.lifecycle.device_recreation_failures =
+                            self.lifecycle.device_recreation_failures.saturating_add(1);
+                        self.fail(
+                            "runtime",
+                            startup_error_kind(error.kind()),
+                            format!("GPU device recreation failed: {error}"),
+                        );
+                    }
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        match outcome {
+            GpuRenderOutcome::Presented(present) => {
+                self.scene_presentable = true;
+                self.consecutive_surface_recoveries = 0;
+                self.consecutive_device_recoveries = 0;
+                self.first_usable_frame_ms.get_or_insert_with(|| {
+                    present.duration_since(self.start).as_secs_f64() * 1_000.0
+                });
+                if self.awaiting_recovery_present {
+                    self.awaiting_recovery_present = false;
+                    self.post_recovery_present = true;
+                }
+                if let Some(stress) = &mut self.stress {
+                    stress.presented();
+                }
+                if let Some(last) = self.last_present {
+                    let frame_ms = present.duration_since(last).as_secs_f64() * 1000.0;
+                    if frame_ms < IDLE_FRAME_CUTOFF_MS {
+                        self.frame_ms.push(frame_ms);
+                    }
+                }
+                self.last_present = Some(present);
+                if self.dirty_from_runtime {
+                    if let Some(input) = self.pending_inputs.pop_front() {
+                        self.input_to_present
+                            .push(present.duration_since(input).as_secs_f64() * 1000.0);
+                    }
+                    self.dirty_from_runtime = false;
                 }
             }
-            self.last_present = Some(present);
-            if self.dirty_from_runtime {
-                if let Some(input) = self.pending_inputs.pop_front() {
-                    self.input_to_present
-                        .push(present.duration_since(input).as_secs_f64() * 1000.0);
+            GpuRenderOutcome::Skipped(reason) => {
+                self.scene_presentable = false;
+                self.host.suspend_scene_interaction();
+                self.frame_ms.miss();
+                match reason {
+                    GpuFrameSkip::Timeout => {
+                        self.lifecycle.timeout_skips =
+                            self.lifecycle.timeout_skips.saturating_add(1);
+                    }
+                    GpuFrameSkip::Occluded => {
+                        self.lifecycle.occluded_skips =
+                            self.lifecycle.occluded_skips.saturating_add(1);
+                        if matches!(self.config.stress, Some(StressConfig::Soak { .. })) {
+                            self.fail(
+                                "runtime",
+                                "measurement_occluded",
+                                "GPU surface became occluded during the active soak",
+                            );
+                        }
+                    }
                 }
-                self.dirty_from_runtime = false;
             }
-        } else {
-            self.host.suspend_scene_interaction();
+            GpuRenderOutcome::SurfaceReconfigured(recovery) => {
+                self.scene_presentable = false;
+                self.host.suspend_scene_interaction();
+                match recovery {
+                    GpuSurfaceRecovery::Outdated => {
+                        self.lifecycle.outdated_reconfigurations =
+                            self.lifecycle.outdated_reconfigurations.saturating_add(1);
+                    }
+                    GpuSurfaceRecovery::Lost => {
+                        self.lifecycle.lost_reconfigurations =
+                            self.lifecycle.lost_reconfigurations.saturating_add(1);
+                    }
+                }
+                self.consecutive_surface_recoveries =
+                    self.consecutive_surface_recoveries.saturating_add(1);
+                if self.consecutive_surface_recoveries > 8 {
+                    self.fail(
+                        "runtime",
+                        "surface_recovery_exhausted",
+                        "GPU surface recovery exceeded eight consecutive attempts",
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -380,7 +1096,7 @@ impl App {
         if !self.config.typing_bench {
             return;
         }
-        while self.injected < INJECT_TOTAL && now >= self.next_inject {
+        while self.injected < self.config.typing_samples && now >= self.next_inject {
             if self.injected > 0 && self.injected.is_multiple_of(40) {
                 self.send_input(InputEvent::Key(InputKey::ctrl('u')), false, now);
             }
@@ -392,8 +1108,93 @@ impl App {
                 now,
             );
             self.injected += 1;
-            self.next_inject += INJECT_INTERVAL;
+            self.next_inject += self.config.typing_interval;
         }
+    }
+
+    fn maybe_stress(&mut self, now: Instant) {
+        let action = self.stress.as_mut().and_then(|stress| stress.issue(now));
+        let Some(action) = action else {
+            if self
+                .stress
+                .as_ref()
+                .is_some_and(|stress| stress.is_finished(now))
+                && matches!(
+                    self.config.stress,
+                    Some(StressConfig::ResizeExercise { .. })
+                )
+            {
+                let completion_deadline = now + Duration::from_secs(1);
+                self.deadline = Some(self.deadline.map_or(completion_deadline, |deadline| {
+                    deadline.min(completion_deadline)
+                }));
+            }
+            return;
+        };
+        if let Some(window) = &self.window {
+            if matches!(self.config.stress, Some(StressConfig::Soak { .. })) {
+                window.focus_window();
+            }
+            let _ = window.request_inner_size(PhysicalSize::new(action.width, action.height));
+        }
+        self.apply_scale_factor(action.scale);
+        if self.fatal_error.is_none()
+            && let Some(stress) = &mut self.stress
+        {
+            stress.mark_scale_applied(action.sequence);
+        }
+        if action.restart_flood {
+            self.send_input(InputEvent::Paste("seq 1 200000\n".to_owned()), false, now);
+        }
+        if action.inject_input {
+            self.send_input(InputEvent::Key(InputKey::ctrl('l')), false, now);
+            if let Some(stress) = &mut self.stress {
+                stress.mark_input_issued(action.sequence);
+            }
+        }
+    }
+
+    fn maybe_inject_fault(&mut self, now: Instant) {
+        let Some(fault) = self.config.fault else {
+            return;
+        };
+        if self.fault_injected || self.fault_at.is_none_or(|fault_at| now < fault_at) {
+            return;
+        }
+        let result = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| "GPU is unavailable".to_owned())
+            .and_then(|gpu| {
+                gpu.inject_fault(fault.injection())
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(GpuFaultInjectionResult::SurfaceReconfigured(recovery)) => {
+                self.fault_injected = true;
+                match recovery {
+                    GpuSurfaceRecovery::Outdated => {
+                        self.lifecycle.outdated_reconfigurations =
+                            self.lifecycle.outdated_reconfigurations.saturating_add(1);
+                    }
+                    GpuSurfaceRecovery::Lost => {
+                        self.lifecycle.lost_reconfigurations =
+                            self.lifecycle.lost_reconfigurations.saturating_add(1);
+                    }
+                }
+                self.awaiting_recovery_present = true;
+                self.request_redraw();
+            }
+            Ok(GpuFaultInjectionResult::FaultQueued) => {
+                self.fault_injected = true;
+                if fault != FaultConfig::OutOfMemory {
+                    self.awaiting_recovery_present = true;
+                }
+                self.request_redraw();
+            }
+            Err(error) => self.fail("runtime", "fault_injection", error),
+        }
+        self.fault_at = None;
     }
 
     fn print_summary(&mut self) {
@@ -401,39 +1202,127 @@ impl App {
             return;
         }
         self.summary_printed = true;
-        if let Some(error) = &self.fatal_error {
-            println!(
-                "{{\"error\":{:?},\"notes\":\"run failed; measurements are incomplete\"}}",
-                error
+        self.memory.push(process_rss_bytes());
+        self.capture_lifecycle_evidence();
+        if let Some(fault) = self.config.fault
+            && self.fatal_error.is_none()
+        {
+            if !self.fault_injected {
+                self.fail(
+                    "runtime",
+                    "fault_not_injected",
+                    format!("requested {} fault was not injected", fault.label()),
+                );
+            } else if fault != FaultConfig::OutOfMemory && !self.post_recovery_present {
+                self.fail(
+                    "runtime",
+                    "recovery_unverified",
+                    format!(
+                        "injected {} fault did not produce a post-recovery present",
+                        fault.label()
+                    ),
+                );
+            }
+        }
+        let now = Instant::now();
+        let stress = self.stress.as_mut().map(|stress| stress.finish(now));
+        let memory = self.memory.summary();
+        if self.fatal_error.is_none()
+            && matches!(self.config.stress, Some(StressConfig::Soak { .. }))
+            && (self.lifecycle.occluded_skips > 0 || self.lifecycle.window_occlusion_events > 0)
+        {
+            self.fail(
+                "runtime",
+                "measurement_occluded",
+                format!(
+                    "soak observed {} GPU occlusion skips and {} window occlusion events",
+                    self.lifecycle.occluded_skips, self.lifecycle.window_occlusion_events
+                ),
             );
-            return;
         }
-        let mut notes = format!(
-            "host=FrontendHost present=Fifo(vsync) typing_bench={} flood={} scale_probe_applied={} input_samples={} frame_samples={}",
-            self.config.typing_bench,
-            self.config.flood,
-            self.scale_probe_applied,
-            self.input_to_present.len(),
-            self.frame_ms.len(),
-        );
-        if self.dropped_correlations > 0 {
-            notes.push_str(&format!(
-                " dropped_correlations={}",
-                self.dropped_correlations
-            ));
+        if self.fatal_error.is_none()
+            && let Some(stress) = stress
+            && !stress.completed
+        {
+            self.fail(
+                "runtime",
+                "stress_incomplete",
+                format!(
+                    "stress run incomplete: issued={} applied={} presented={} misses={}",
+                    stress.issued, stress.changes_applied, stress.presented, stress.misses
+                ),
+            );
         }
-        notes.push_str(
-            " method: neutral input stamped at winit receipt, present timestamped after queue.submit+present; one pending input correlated per runtime-wake-driven present; frame_ms filters idle gaps >=250ms.",
+        if self.fatal_error.is_none()
+            && matches!(self.config.stress, Some(StressConfig::Soak { .. }))
+        {
+            match memory.monotonic_growth {
+                Some(false) if memory.misses == 0 => {}
+                Some(true) => self.fail(
+                    "runtime",
+                    "monotonic_memory_growth",
+                    format!(
+                        "post-warmup RSS grew monotonically by {} bytes",
+                        memory.trend_delta_rss_bytes
+                    ),
+                ),
+                _ => self.fail(
+                    "runtime",
+                    "inconclusive_memory_evidence",
+                    format!(
+                        "soak requires at least three post-warmup RSS samples and zero misses; samples={} misses={}",
+                        memory.trend_sample_count, memory.misses
+                    ),
+                ),
+            }
+        }
+        if self.fatal_error.is_none()
+            && self.gpu_evidence.is_some()
+            && self.first_usable_frame_ms.is_none()
+        {
+            self.fail(
+                "runtime",
+                "no_usable_frame",
+                "GPU initialized but no usable frame was presented",
+            );
+        }
+        let outcome = self.fatal_error.as_ref().map_or_else(
+            || OutcomeEvidence::success("native shell exited cleanly"),
+            |error| {
+                OutcomeEvidence::failure(self.failure_phase, self.failure_kind, error.to_owned())
+            },
         );
+        let mut input_to_present = self.input_to_present.summary();
+        input_to_present.misses = input_to_present
+            .misses
+            .saturating_add(self.pending_inputs.len() as u64);
+        let evidence = RunEvidence {
+            schema_version: 1,
+            outcome,
+            platform: PlatformEvidence {
+                os: std::env::consts::OS,
+                arch: std::env::consts::ARCH,
+            },
+            gpu: self.gpu_evidence.clone(),
+            display_refresh_hz: self.display_refresh_hz,
+            first_usable_frame_ms: self.first_usable_frame_ms,
+            first_usable_frame_within_1s: self.first_usable_frame_ms.map(|ms| ms <= 1_000.0),
+            workload: workload_evidence(&self.config, now.saturating_duration_since(self.start)),
+            input_to_present_ms: input_to_present,
+            frame_ms: self.frame_ms.summary(),
+            stress,
+            fault_injection: self.config.fault.map(|fault| FaultEvidence {
+                requested: fault.label(),
+                injected: self.fault_injected,
+                post_recovery_present: self.post_recovery_present,
+            }),
+            memory,
+            lifecycle: self.lifecycle,
+            notes: "FrontendHost is preserved across renderer recovery; input-to-present is emitted only by the isolated typing benchmark; soak input is action-counted without claiming causal latency; frame timing excludes idle gaps >=250ms",
+        };
         println!(
-            "{{\"input_to_present_ms\":{{\"p50\":{:.2},\"p95\":{:.2},\"max\":{:.2}}},\"frame_ms\":{{\"p50\":{:.2},\"p95\":{:.2}}},\"frames\":{},\"notes\":{:?}}}",
-            self.input_to_present.percentile(50.0),
-            self.input_to_present.percentile(95.0),
-            self.input_to_present.max(),
-            self.frame_ms.percentile(50.0),
-            self.frame_ms.percentile(95.0),
-            self.frame_ms.len(),
-            notes,
+            "{}",
+            serde_json::to_string(&evidence).expect("evidence is serializable")
         );
     }
 
@@ -606,6 +1495,78 @@ impl App {
             .handle_input(InputEvent::Composition(CompositionEvent::Cancel));
     }
 
+    /// Service timers at both the start and end of each winit event batch.
+    /// Continuous PTY wake/redraw traffic can prevent `about_to_wait` from
+    /// running, so it cannot be the sole owner of deadlines or stress cadence.
+    fn service_scheduled_work(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if self.window.is_none() {
+            return false;
+        }
+        let now = Instant::now();
+        if self
+            .scale_probe_at
+            .is_some_and(|scale_probe_at| now >= scale_probe_at)
+        {
+            self.scale_probe_at = None;
+            self.scale_probe_applied = true;
+            self.apply_scale_factor(self.config.scale_factor);
+        }
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.cancel_and_disable_ime();
+            self.host.shutdown();
+            self.print_summary();
+            event_loop.exit();
+            return true;
+        }
+        if now >= self.next_heartbeat {
+            self.host.heartbeat();
+            self.next_heartbeat = now + HEARTBEAT;
+            self.request_redraw();
+        }
+        if now >= self.next_memory_sample {
+            if self.memory_trend_at.is_some_and(|trend_at| now >= trend_at) {
+                self.memory.begin_trend();
+                self.memory_trend_at = None;
+            }
+            self.memory.push(process_rss_bytes());
+            self.next_memory_sample = now + self.config.memory_interval;
+        }
+        self.maybe_inject(now);
+        self.maybe_stress(now);
+        self.maybe_inject_fault(now);
+        if self.fatal_error.is_some() {
+            self.cancel_and_disable_ime();
+            self.host.shutdown();
+            self.print_summary();
+            event_loop.exit();
+            return true;
+        }
+        false
+    }
+
+    fn schedule_next_wake(&self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let mut next = self.deadline.map_or(self.next_heartbeat, |deadline| {
+            deadline.min(self.next_heartbeat)
+        });
+        next = next.min(self.next_memory_sample);
+        if let Some(scale_probe_at) = self.scale_probe_at {
+            next = next.min(scale_probe_at);
+        }
+        if let Some(fault_at) = self.fault_at {
+            next = next.min(fault_at);
+        }
+        if self.config.typing_bench && self.injected < self.config.typing_samples {
+            next = next.min(self.next_inject);
+        }
+        if let Some(stress) = &self.stress
+            && !stress.is_finished(now)
+        {
+            next = next.min(stress.next_at());
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+    }
+
     fn cancel_pointer_gesture(&mut self) {
         self.pressed_pointer_buttons.clear();
         self.host.cancel_pointer_gesture();
@@ -613,20 +1574,30 @@ impl App {
 }
 
 impl ApplicationHandler<UserEvent> for App {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: StartCause) {
+        self.service_scheduled_work(event_loop);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
-        let window = match event_loop
-            .create_window(Window::default_attributes().with_title("Mandatum GPU Host Spike"))
-        {
+        let attributes = Window::default_attributes().with_title("Mandatum GPU Host Spike");
+        let window = match event_loop.create_window(attributes) {
             Ok(window) => {
                 #[cfg(target_os = "macos")]
                 window.set_option_as_alt(OptionAsAlt::OnlyRight);
+                if matches!(self.config.stress, Some(StressConfig::Soak { .. })) {
+                    window.focus_window();
+                }
                 std::sync::Arc::new(window)
             }
             Err(error) => {
-                self.fatal_error = Some(format!("no window (headless?): {error}"));
+                self.fail(
+                    "startup",
+                    "no_display",
+                    format!("no window (headless?): {error}"),
+                );
                 self.print_summary();
                 event_loop.exit();
                 return;
@@ -638,42 +1609,94 @@ impl ApplicationHandler<UserEvent> for App {
         )) {
             Ok(gpu) => gpu,
             Err(error) => {
-                self.fatal_error = Some(error);
+                self.fail(
+                    "startup",
+                    startup_error_kind(error.kind()),
+                    error.to_string(),
+                );
                 self.print_summary();
                 event_loop.exit();
                 return;
             }
         };
+        self.display_refresh_hz = window
+            .current_monitor()
+            .and_then(|monitor| monitor.refresh_rate_millihertz())
+            .map(|millihertz| f64::from(millihertz) / 1_000.0);
         self.window = Some(window);
         self.gpu = Some(gpu);
+        self.capture_gpu_evidence();
         self.resize_host();
 
-        self.start = Instant::now();
-        self.next_heartbeat = self.start + HEARTBEAT;
-        self.next_inject = self.start + Duration::from_millis(400);
-        self.deadline = self
-            .config
-            .exit_after
-            .map(|seconds| self.start + Duration::from_secs_f64(seconds));
-        if self.deadline.is_none() && self.config.typing_bench {
-            self.deadline =
-                Some(self.next_inject + INJECT_INTERVAL * INJECT_TOTAL + Duration::from_secs(2));
+        let ready = Instant::now();
+        self.next_heartbeat = ready + HEARTBEAT;
+        self.next_memory_sample = ready;
+        self.next_inject = ready + Duration::from_millis(400);
+        self.fault_at = self.config.fault.map(|_| ready + self.config.fault_after);
+        self.stress = self.config.stress.map(|stress| match stress {
+            StressConfig::ResizeExercise { steps } => StressState::resize_exercise(
+                ready + Duration::from_millis(400),
+                steps,
+                self.config
+                    .stress_interval
+                    .unwrap_or(DEFAULT_RESIZE_INTERVAL),
+            ),
+            StressConfig::Soak { duration } => StressState::soak(
+                ready + Duration::from_millis(400),
+                duration,
+                self.config.stress_interval.unwrap_or(DEFAULT_SOAK_INTERVAL),
+            ),
+        });
+        if let Some(StressConfig::Soak { duration }) = self.config.stress {
+            // The flood takes minutes to fill bounded PTY scrollback/output
+            // capacity. Judge leak behavior over the steady-state second half
+            // rather than misclassifying that one-time high-water ramp.
+            let warmup_seconds = (duration.as_secs() / 2).clamp(1, 15 * 60);
+            self.memory.pause_trend();
+            self.memory_trend_at = Some(ready + Duration::from_secs(warmup_seconds));
         }
-        if self.config.flood {
+        self.deadline = configured_run_timeout(&self.config).map(|timeout| ready + timeout);
+        if self.config.flood && !matches!(self.config.stress, Some(StressConfig::Soak { .. })) {
             self.send_input(
                 InputEvent::Paste("seq 1 200000\n".to_owned()),
                 false,
                 Instant::now(),
             );
         }
+        self.memory.push(process_rss_bytes());
+        self.next_memory_sample = ready + self.config.memory_interval;
         self.request_redraw();
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: UserEvent) {
-        self.request_redraw();
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::WatchdogExpired(acknowledged) => {
+                // Acknowledge before any orderly shutdown work. The watchdog
+                // thread must never hard-exit merely because an already-due
+                // normal deadline preempted this event.
+                acknowledged.store(true, Ordering::Release);
+                self.fail(
+                    "runtime",
+                    "watchdog",
+                    "event loop did not exit within budget",
+                );
+                self.cancel_and_disable_ime();
+                self.host.shutdown();
+                self.print_summary();
+                event_loop.exit();
+            }
+            UserEvent::Wake => {
+                if !self.service_scheduled_work(event_loop) {
+                    self.request_redraw();
+                }
+            }
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if self.service_scheduled_work(event_loop) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.cancel_and_disable_ime();
@@ -687,14 +1710,22 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if let Err(error) = self.render_frame() {
-                    self.fatal_error = Some(format!("unsupported GPU spike scene: {error}"));
+                    let kind = render_error_kind(&error);
+                    self.fail("runtime", kind, error.to_string());
                     self.cancel_and_disable_ime();
                     self.host.shutdown();
                     self.print_summary();
                     event_loop.exit();
                     return;
                 }
-                if more_pending {
+                if self.fatal_error.is_some() {
+                    self.cancel_and_disable_ime();
+                    self.host.shutdown();
+                    self.print_summary();
+                    event_loop.exit();
+                    return;
+                }
+                if more_pending && self.scene_presentable {
                     self.request_redraw();
                 }
             }
@@ -704,6 +1735,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.host.suspend_scene_interaction();
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize_surface(size.width, size.height);
+                }
+                if let Some(stress) = &mut self.stress {
+                    stress.observe_resize(size.width, size.height);
                 }
                 self.refresh_mouse_cell();
                 self.resize_host();
@@ -798,44 +1832,30 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseWheel { delta, .. } => self.pointer_wheel(delta),
             WindowEvent::Focused(focused) => self.focus_changed(focused),
+            WindowEvent::Occluded(true) => {
+                self.lifecycle.window_occlusion_events =
+                    self.lifecycle.window_occlusion_events.saturating_add(1);
+                if matches!(self.config.stress, Some(StressConfig::Soak { .. })) {
+                    self.fail(
+                        "runtime",
+                        "measurement_occluded",
+                        "window became occluded during the active soak",
+                    );
+                    self.cancel_and_disable_ime();
+                    self.host.shutdown();
+                    self.print_summary();
+                    event_loop.exit();
+                }
+            }
+            WindowEvent::Occluded(false) => {}
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let now = Instant::now();
-        if self
-            .scale_probe_at
-            .is_some_and(|scale_probe_at| now >= scale_probe_at)
-        {
-            self.scale_probe_at = None;
-            self.scale_probe_applied = true;
-            self.apply_scale_factor(self.config.scale_factor);
+        if !self.service_scheduled_work(event_loop) {
+            self.schedule_next_wake(event_loop);
         }
-        if self.deadline.is_some_and(|deadline| now >= deadline) {
-            self.cancel_and_disable_ime();
-            self.host.shutdown();
-            self.print_summary();
-            event_loop.exit();
-            return;
-        }
-        if now >= self.next_heartbeat {
-            self.host.heartbeat();
-            self.next_heartbeat = now + HEARTBEAT;
-            self.request_redraw();
-        }
-        self.maybe_inject(now);
-
-        let mut next = self.deadline.map_or(self.next_heartbeat, |deadline| {
-            deadline.min(self.next_heartbeat)
-        });
-        if let Some(scale_probe_at) = self.scale_probe_at {
-            next = next.min(scale_probe_at);
-        }
-        if self.config.typing_bench && self.injected < INJECT_TOTAL {
-            next = next.min(self.next_inject);
-        }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1073,46 +2093,108 @@ fn shift_meta_character(character: char) -> char {
     }
 }
 
-fn main() {
-    let config = parse_config();
-    if let Some(seconds) = config.exit_after {
-        std::thread::Builder::new()
-            .name("watchdog".into())
-            .spawn(move || {
-                std::thread::sleep(Duration::from_secs_f64(seconds + 8.0));
-                println!(
-                    "{{\"error\":\"watchdog fired\",\"notes\":\"event loop did not exit within budget\"}}"
-                );
-                std::process::exit(1);
-            })
-            .ok();
-    }
+fn uses_isolated_harness(config: &Config) -> bool {
+    config.typing_bench || config.flood || config.stress.is_some() || config.fault.is_some()
+}
 
-    let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
-        Ok(event_loop) => event_loop,
+fn app_config_for_run(config: &mut Config) -> std::io::Result<AppConfig> {
+    if uses_isolated_harness(config) {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let project_path = std::env::temp_dir().join(format!(
+            "mandatum-native-harness-{}-{nonce}",
+            std::process::id()
+        ));
+        // `create_dir` fails on every pre-existing file, directory, or symlink;
+        // a harness never reuses stale or attacker-prepared workspace state.
+        fs::create_dir(&project_path)?;
+        let app_config = AppConfig {
+            workspace_name: "Mandatum GPU Harness".to_owned(),
+            workspace_file: project_path.join(".mandatum").join("workspace.json"),
+            project_path: project_path.clone(),
+            shell_program: "/bin/sh".to_owned(),
+            spawn_pty: true,
+            restore_on_startup: false,
+            ..AppConfig::default()
+        };
+        config.harness_project_path = Some(project_path.display().to_string());
+        Ok(app_config)
+    } else {
+        AppConfig::from_current_dir()
+    }
+}
+
+fn main() {
+    let process_start = Instant::now();
+    let mut config = match parse_config() {
+        Ok(config) => config,
         Err(error) => {
-            println!(
-                "{{\"error\":{:?},\"notes\":\"no event loop (headless environment)\"}}",
-                error.to_string()
-            );
+            print_failure(None, "startup", "invalid_arguments", error);
             std::process::exit(2);
         }
     };
-    let app_config = match AppConfig::from_current_dir() {
+    let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            print_failure(Some(&config), "startup", "no_display", error.to_string());
+            std::process::exit(2);
+        }
+    };
+    let app_config = match app_config_for_run(&mut config) {
         Ok(config) => config,
         Err(error) => {
-            println!(
-                "{{\"error\":{:?},\"notes\":\"could not construct the real workstation host\"}}",
-                error.to_string()
+            print_failure(
+                Some(&config),
+                "startup",
+                "host_initialization",
+                error.to_string(),
             );
             std::process::exit(2);
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let mut app = App::new(config, proxy, app_config);
+    if let Some(timeout) = configured_run_timeout(&config) {
+        let watchdog_config = config.clone();
+        let watchdog_proxy = proxy.clone();
+        let watchdog_acknowledged = Arc::new(AtomicBool::new(false));
+        let shutdown_acknowledged = watchdog_acknowledged.clone();
+        std::thread::Builder::new()
+            .name("watchdog".into())
+            .spawn(move || {
+                std::thread::sleep(timeout + Duration::from_secs(8));
+                if watchdog_proxy
+                    .send_event(UserEvent::WatchdogExpired(shutdown_acknowledged))
+                    .is_err()
+                {
+                    return;
+                }
+                // A responsive event loop performs orderly host shutdown.
+                // Hard exit is reserved for an event loop that cannot process
+                // the shutdown request at all.
+                std::thread::sleep(Duration::from_secs(5));
+                if watchdog_acknowledged.load(Ordering::Acquire) {
+                    return;
+                }
+                print_failure(
+                    Some(&watchdog_config),
+                    "runtime",
+                    "watchdog_hard_exit",
+                    "event loop ignored the orderly watchdog shutdown request",
+                );
+                std::process::exit(1);
+            })
+            .ok();
+    }
+    let mut app = App::new(config, proxy, app_config, process_start);
     if let Err(error) = event_loop.run_app(&mut app) {
-        app.fatal_error = Some(format!("event loop error: {error}"));
+        app.fail(
+            "runtime",
+            "event_loop",
+            format!("event loop error: {error}"),
+        );
     }
     // `process::exit` skips Drop, so finalize explicitly before deriving a
     // nonzero process status from any recoverable event-loop failure.
@@ -1128,8 +2210,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        PlatformAction, PressedPointerButtons, ime_event_is_accepted, key_for_platform_translation,
-        pane_geometry_is_suspended, parse_font_family, parse_font_size, parse_scale_delay,
+        DEFAULT_MEMORY_INTERVAL, DEFAULT_SOAK_DURATION, FaultConfig, LifecycleEvidence,
+        MemorySummary, MetricSummary, OutcomeEvidence, PlatformAction, PlatformEvidence,
+        PressedPointerButtons, RunEvidence, StressConfig, WorkloadEvidence, configured_run_timeout,
+        ime_event_is_accepted, key_for_platform_translation, pane_geometry_is_suspended,
+        parse_config_from, parse_font_family, parse_font_size, parse_ps_rss_kib, parse_scale_delay,
         parse_scale_factor, run_exit_code, scene_size_from_metrics, translate_ime, translate_key,
     };
     use mandatum_scene::input::{
@@ -1211,6 +2296,132 @@ mod tests {
         assert_eq!(parse_font_size("5"), None);
         assert_eq!(parse_font_size("73"), None);
         assert_eq!(parse_font_size("NaN"), None);
+        assert_eq!(parse_ps_rss_kib(b" 12345\n"), Some(12_641_280));
+        assert_eq!(parse_ps_rss_kib(b"not-a-number"), None);
+    }
+
+    #[test]
+    fn measurement_cli_is_bounded_and_rejects_ambiguous_stress_modes() {
+        let resize = parse_config_from(
+            [
+                "--resize-exercise",
+                "--stress-interval-ms",
+                "20",
+                "--memory-interval-ms",
+                "1000",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("bounded resize config");
+        assert_eq!(
+            resize.stress,
+            Some(StressConfig::ResizeExercise { steps: 1_000 })
+        );
+        assert_eq!(resize.stress_interval.unwrap().as_millis(), 20);
+        assert_eq!(resize.memory_interval.as_millis(), 1000);
+        assert_eq!(configured_run_timeout(&resize).unwrap().as_secs(), 400);
+
+        let typing = parse_config_from(
+            ["--typing-samples", "1000", "--typing-interval-ms", "20"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("isolated typing config");
+        assert_eq!(typing.typing_samples, 1000);
+        assert_eq!(typing.typing_interval.as_millis(), 20);
+
+        let soak = parse_config_from(["--soak"].into_iter().map(str::to_owned))
+            .expect("standard soak config");
+        assert_eq!(
+            soak.stress,
+            Some(StressConfig::Soak {
+                duration: DEFAULT_SOAK_DURATION
+            })
+        );
+        assert!(soak.flood);
+        assert_eq!(
+            configured_run_timeout(&soak).unwrap(),
+            DEFAULT_SOAK_DURATION + std::time::Duration::from_millis(400)
+        );
+
+        let fault = parse_config_from(
+            ["--inject-fault", "device-lost", "--fault-after", "0.5"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("bounded fault config");
+        assert_eq!(fault.fault, Some(FaultConfig::DeviceLost));
+        assert_eq!(fault.fault_after.as_millis(), 500);
+
+        for invalid in [
+            vec!["--resize-count", "0"],
+            vec!["--soak-seconds", "21601"],
+            vec!["--memory-interval-ms", "10"],
+            vec!["--resize-exercise", "--soak"],
+            vec!["--unknown"],
+            vec!["--inject-fault", "spontaneous-magic"],
+            vec!["--fault-after", "-1"],
+            vec!["--fault-after", "1"],
+            vec!["--typing-interval-ms", "10"],
+            vec!["--stress-interval-ms", "100"],
+            vec!["--scale-factor", "2"],
+            vec!["--typing-bench", "--flood"],
+            vec!["--typing-bench", "--resize-exercise"],
+        ] {
+            assert!(
+                parse_config_from(invalid.into_iter().map(str::to_owned)).is_err(),
+                "invalid config was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_evidence_schema_keeps_unavailable_first_frame_explicitly_null() {
+        let evidence = RunEvidence {
+            schema_version: 1,
+            outcome: OutcomeEvidence::failure("startup", "no_display", "headless"),
+            platform: PlatformEvidence {
+                os: "test-os",
+                arch: "test-arch",
+            },
+            gpu: None,
+            display_refresh_hz: None,
+            first_usable_frame_ms: None,
+            first_usable_frame_within_1s: None,
+            workload: WorkloadEvidence {
+                typing_bench: false,
+                typing_target: 0,
+                typing_interval_ms: None,
+                flood: false,
+                stress: "none",
+                stress_target: None,
+                soak_seconds: None,
+                stress_interval_ms: None,
+                memory_interval_ms: DEFAULT_MEMORY_INTERVAL.as_millis() as u64,
+                injected_fault: None,
+                fault_after_ms: None,
+                scale_after_ms: None,
+                scale_factor: 1.5,
+                font_family: "monospace".to_owned(),
+                font_size: 15.0,
+                harness_project_path: None,
+                window_visibility_policy: "normal",
+                elapsed_ms: 0,
+            },
+            input_to_present_ms: MetricSummary::default(),
+            frame_ms: MetricSummary::default(),
+            stress: None,
+            fault_injection: None,
+            memory: MemorySummary::default(),
+            lifecycle: LifecycleEvidence::default(),
+            notes: "test",
+        };
+        let json = serde_json::to_value(evidence).expect("schema serializes");
+        assert!(json["first_usable_frame_ms"].is_null());
+        assert!(json["first_usable_frame_within_1s"].is_null());
+        assert!(json["input_to_present_ms"]["p50"].is_null());
+        assert_eq!(json["outcome"]["kind"], "no_display");
     }
 
     #[test]

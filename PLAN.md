@@ -140,8 +140,14 @@ more useful without pretending the wider vision is finished:
   terminal snapshots, scenes, both adapters, and native input now share an
   extended-grapheme/wide-cell contract; the native shell carries neutral
   preedit/commit/cancel with left-Option composition and right-Option Meta.
-  Phase 6 hardening and measurement is next. Production GPU dependencies and
-  release admission remain blocked.
+  Phase 6 hardening and measurement is complete in the excluded adapter:
+  surface outdated/lost recovery, device recreation, explicit failure
+  classifications, bounded event draining, a 1,000-change resize/scale storm,
+  and three paired 1,000-sample acquisitions are verified. The admission-grade
+  30-minute soak and multi-display matrix remain Phase 7 evidence. The accepted
+  paired results also miss the proposed native p95 and per-pair improvement
+  thresholds, so production GPU dependencies and release admission remain
+  blocked.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.

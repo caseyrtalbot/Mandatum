@@ -130,6 +130,19 @@ impl FrontendHost {
         }
     }
 
+    /// Apply at most `budget` buffered events without blocking.
+    ///
+    /// Platform shells with tighter event-loop deadlines can choose a smaller
+    /// slice while preserving the app's existing hard maximum and FIFO event
+    /// truth. A zero budget is a no-op.
+    pub fn drain_runtime_bounded(&mut self, budget: usize) -> usize {
+        if self.shutdown_complete {
+            0
+        } else {
+            self.app.drain_events_bounded(budget)
+        }
+    }
+
     /// Perform child-exit polling; the active platform shell owns its cadence.
     pub fn heartbeat(&mut self) {
         if !self.shutdown_complete {
@@ -283,6 +296,22 @@ mod tests {
         assert!(!host.should_quit());
         assert!(host.wait_event(Duration::ZERO));
         assert!(host.should_quit());
+    }
+
+    #[test]
+    fn platform_shell_can_choose_a_smaller_runtime_drain_slice() {
+        let mut host = FrontendHost::new(AppConfig::default());
+        let sender = host.event_sender();
+        for _ in 0..32 {
+            sender
+                .send(AppEvent::Input(InputEvent::FocusGained))
+                .unwrap();
+        }
+
+        assert_eq!(host.drain_runtime_bounded(0), 0);
+        assert_eq!(host.drain_runtime_bounded(16), 16);
+        assert_eq!(host.drain_runtime_bounded(16), 16);
+        assert_eq!(host.drain_runtime_bounded(16), 0);
     }
 
     #[test]
