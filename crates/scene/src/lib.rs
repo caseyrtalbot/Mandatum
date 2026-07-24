@@ -25,7 +25,8 @@ mod workspace;
 pub use mandatum_core::{AgentStatus, ArtifactFit, PaneId, SplitAxis};
 
 pub use cell_program::{
-    CellOccupancy, CellProgram, CellSelection, ProgramCell, compile_cell_program,
+    CellOccupancy, CellProgram, CellSelection, ProgramCell, TextPaintScope, TextPaintScopeId,
+    TextPaintScopeKind, compile_cell_program,
 };
 pub use geometry::{SceneRect, SceneSize};
 pub use pane::{
@@ -34,7 +35,7 @@ pub use pane::{
 };
 pub use style::{SceneCellStyle, SceneColor};
 pub use surface::{RasterSurface, SceneCell, SurfacePosition, TerminalSurface};
-pub use theme::Theme;
+pub use theme::{TerminalPalette, Theme};
 pub use workspace::{
     AttentionSegment, ContextMenuEntry, ContextMenuOverlay, HeaderScene, HelpEntry, HelpOverlay,
     HitTarget, HitTargetKind, OverlayScene, PaletteEntry, PaletteOverlay, PreeditScene,

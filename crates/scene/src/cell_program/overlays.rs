@@ -1,5 +1,5 @@
 use super::{
-    CellSelection, Compiler, ProgramCell,
+    CellSelection, Compiler, ProgramCell, TextPaintScopeKind,
     primitives::{bounded_grapheme, display_width},
 };
 use crate::{
@@ -13,6 +13,17 @@ use unicode_segmentation::UnicodeSegmentation;
 
 impl Compiler {
     pub(super) fn paint_overlay(&mut self, overlay: &OverlayScene, theme: &Theme) {
+        let area = match overlay {
+            OverlayScene::Palette(overlay) => overlay.area,
+            OverlayScene::ContextMenu(overlay) => overlay.area,
+            OverlayScene::Timeline(overlay) => overlay.area,
+            OverlayScene::SessionMap(overlay) => overlay.area,
+            OverlayScene::Prompt(overlay) => overlay.area,
+            OverlayScene::Search(overlay) => overlay.area,
+            OverlayScene::Help(overlay) => overlay.area,
+            OverlayScene::Welcome(overlay) => overlay.area,
+        };
+        self.begin_text_scope(TextPaintScopeKind::Overlay, area);
         match overlay {
             OverlayScene::Palette(palette) => self.paint_palette(palette, theme),
             OverlayScene::ContextMenu(menu) => self.paint_context_menu(menu, theme),

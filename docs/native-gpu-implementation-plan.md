@@ -2,8 +2,8 @@
 
 Status: native-first direction accepted on 2026-07-24. Work 2 promoted the
 production shell and renderer into the workspace. Work 3 completed with a
-negative typography verdict, and the focused typography architecture is now
-accepted. Implement that contract before the Work 4 cache.
+negative typography verdict. The accepted typography foundation is now
+implemented and displayed; the bounded Work 4 shaping cache is next.
 
 ## Product Direction
 
@@ -63,11 +63,6 @@ Standing procedures and current dated runs live in
 These are work, not reasons to resist the direction:
 
 - Native is not yet the default launcher.
-- The accepted bundled JetBrains Mono profile, strict system-family override,
-  and bounded face/fallback report are not implemented yet.
-- `Theme::terminal_palette` and the accepted native materialization policy are
-  not implemented, and the one-buffer-per-grapheme adapter has not yet been
-  replaced by bounded row runs.
 - The renderer reshapes repeated graphemes without the planned bounded cache.
 
 ## Work 1 — Reorder Startup — Complete
@@ -165,8 +160,9 @@ contract is accepted.
 
 ## Work 4 — Implement Accepted Typography, Then Add A Bounded Shaping Cache
 
-The focused decision is complete. Implement this contract as one capability
-family before adding the cache.
+The focused decision and foundation capability family are complete. The
+contract below is implemented; the bounded cache is the remaining Work 4
+slice.
 
 ### Font provisioning and face truth
 
@@ -281,7 +277,7 @@ support is explicitly separate from this cache-preparation family.
 - Display the shared typography corpus at Casey's accepted font, size, theme,
   and scale before beginning the cache.
 
-Only after those checks are green:
+The foundation checks are green. The next slice may now:
 
 - memoize accepted shaped runs by text, resolved style, font-catalog/profile
   generation, metrics, and scale generation; observed fallback identities live
@@ -353,7 +349,7 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Implement the accepted font-provisioning, terminal-palette, and row-run adapter
-contract as one capability family. Stop before the Work 4 shaping cache,
-renderer modularization, row damage, default launcher, installer, release, or
-rollout work.
+Implement the bounded generation-aware shaping cache, record shaping cost
+before and after, and keep the existing fallback identities in cached values.
+Stop before renderer modularization, row damage, default launcher, installer,
+release, or rollout work.

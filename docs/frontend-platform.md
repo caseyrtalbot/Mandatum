@@ -72,15 +72,12 @@ Keep:
 - glyphon/cosmic-text behind the accepted terminal row-run adapter;
 - `mandatum-scene` as the frontend contract.
 
-Do not start a Metal or Swift renderer fork. The Ghostty comparison exited
-through the focused-decision branch: native cannot load Ghostty's embedded
-JetBrains Mono or currently be configured to match its palette, and the
-current per-grapheme adapter cannot shape across grapheme/cell boundaries.
-The accepted implementation path bundles a pinned JetBrains Mono default,
-fails closed for explicit unavailable system families, puts the native pixel
-surface's terminal colors in `Theme::terminal_palette`, and shapes clipped
-same-style row runs with cosmic-text's cell-width constraint. The terminal
-escape hatch continues delegating reset and named ANSI colors to its host.
+Do not start a Metal or Swift renderer fork. The accepted implementation now
+bundles pinned JetBrains Mono, fails closed for explicit unavailable or
+incomplete static system families, puts the native pixel surface's terminal
+colors in `Theme::terminal_palette`, and shapes clipped same-style row runs
+with cosmic-text's cell-width constraint. The terminal escape hatch continues
+delegating reset and named ANSI colors to its host.
 
 ## Verified Baseline
 
@@ -116,8 +113,8 @@ The ordered work is:
    — complete.
 3. Compare text quality directly with Ghostty — complete; the focused
    typography contract is accepted.
-4. Implement the accepted font, palette, and row-run contract, then add a
-   bounded generation-aware shaping cache and profile it.
+4. Accepted font, palette, and row-run foundation — complete. Add a bounded
+   generation-aware shaping cache and profile it.
 5. Make native Casey's default and build the feel roadmap through daily use.
 
 The authoritative detail is
@@ -135,8 +132,7 @@ accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
 
 ## Current Implementation Drift
 
-Native is not yet the default launcher. The accepted font provisioning,
-terminal palette, and row-run adapter are not implemented, and the renderer has
-no bounded shaping cache. Implement the accepted foundation before caching it.
-These are ordered product tasks, not reasons to return to the retired product
-posture.
+Native is not yet the default launcher, and the renderer has no bounded shaping
+cache. Cache and profile the accepted row-run unit before considering row
+damage. These are ordered product tasks, not reasons to return to the retired
+product posture.

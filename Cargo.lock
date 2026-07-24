@@ -1217,6 +1217,7 @@ dependencies = [
  "mandatum-native-renderer",
  "mandatum-scene",
  "pollster",
+ "serde_json",
  "winit",
 ]
 
@@ -1226,6 +1227,9 @@ version = "0.2.0"
 dependencies = [
  "glyphon",
  "mandatum-scene",
+ "serde",
+ "sys-locale",
+ "ttf-parser",
  "wgpu",
  "winit",
 ]

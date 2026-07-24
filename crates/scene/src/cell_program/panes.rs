@@ -1,3 +1,4 @@
+use super::TextPaintScopeKind;
 use super::{CellOccupancy, CellSelection, Compiler, ProgramCell};
 use crate::{
     AgentStatus, ArtifactState, PaneContent, PaneScene, SceneCellStyle, SceneColor, SceneRect,
@@ -14,6 +15,7 @@ impl Compiler {
         theme: &Theme,
         raster_layer: Option<u16>,
     ) {
+        let chrome_scope = self.begin_text_scope(TextPaintScopeKind::PaneChrome, pane.area);
         // Every pane is opaque in scene order, regardless of layout flags.
         self.paint_rect(pane.area, SceneCellStyle::default());
         self.paint_border(pane.area, foreground(theme.pane_border));
@@ -36,6 +38,7 @@ impl Compiler {
         self.paint_text(title_area, &pane_title(pane), title_style);
 
         let inner = bordered_inner_rect(pane.area);
+        self.begin_text_scope(TextPaintScopeKind::PaneContent, inner);
         match &pane.content {
             PaneContent::Terminal(surface) => self.paint_surface(inner, 0, surface),
             PaneContent::Task(task) => {
@@ -126,6 +129,7 @@ impl Compiler {
         }
 
         if pane.focused && pane.area.width < 4 && !pane.area.is_empty() {
+            self.set_text_scope(chrome_scope);
             self.paint_cell(
                 pane.area.x,
                 pane.area.y,

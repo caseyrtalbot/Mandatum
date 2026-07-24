@@ -2,7 +2,7 @@
 // backgrounds/selection/cursor/status, layered under GPU-rasterized glyphs
 // rendered by glyphon. All rendering is per-frame from WorkspaceScene.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -16,13 +16,17 @@ use glyphon::{
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
     ArtifactState, CellOccupancy, CellProgram, CellSelection, OverlayScene, PaneContent,
-    ProgramCell, RasterSurface, SceneColor, SceneRect, Theme, WorkspaceScene, compile_cell_program,
-    layout,
+    ProgramCell, RasterSurface, SceneColor, SceneRect, TerminalPalette, Theme, WorkspaceScene,
+    compile_cell_program, layout,
 };
 use winit::window::Window;
 
-const DEFAULT_FG: [u8; 3] = [220, 220, 224];
-const DEFAULT_BG: [u8; 3] = [18, 18, 22];
+use crate::row_run::{
+    LayoutGlyphFacts, LayoutRunFacts, ResolvedGlyphStyle, RowRun, RowRunAdmission,
+    RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, admit_layout,
+    anchored_fallback_runs, build_row_runs, split_at_span,
+};
+
 const BASE_FONT_PT: f32 = 15.0;
 const MAX_GPU_PANES: usize = 256;
 const MAX_GPU_FRAME_CELLS: usize = 262_144;
@@ -260,6 +264,7 @@ pub enum SceneCompileError {
         layer: u16,
         reason: &'static str,
     },
+    InvalidTextProgram(&'static str),
 }
 
 impl std::fmt::Display for SceneCompileError {
@@ -277,6 +282,9 @@ impl std::fmt::Display for SceneCompileError {
             Self::InvalidGeometry(reason) => write!(f, "invalid scene geometry: {reason}"),
             Self::InvalidRasterSurface { layer, reason } => {
                 write!(f, "invalid raster surface at layer {layer}: {reason}")
+            }
+            Self::InvalidTextProgram(reason) => {
+                write!(f, "invalid compiled text program: {reason}")
             }
         }
     }
@@ -592,19 +600,26 @@ fn validate_compiled_program(program: &CellProgram) -> Result<(), SceneCompileEr
     let instructions = program.cells().count();
     enforce_resource_limit("cell instructions", instructions, MAX_GPU_CELL_INSTRUCTIONS)?;
 
-    let text_buffers = program
-        .cells()
-        .filter(|(_, _, cell)| {
-            matches!(
-                &cell.occupancy,
-                CellOccupancy::Grapheme(grapheme)
-                    if (grapheme != " " || cell.style.underline || cell.style.strikethrough)
-                        && grapheme != "\r"
-                        && grapheme != "\n"
-            )
-        })
-        .count();
+    let text_buffers = build_row_runs(program, |cell| ResolvedGlyphStyle {
+        foreground: [0, 0, 0, 255],
+        bold: cell.style.bold,
+        italic: cell.style.italic,
+        underline: cell.style.underline,
+        strikethrough: cell.style.strikethrough,
+    })
+    .map_err(text_program_error)?
+    .runs
+    .len();
     enforce_resource_limit("text buffers", text_buffers, MAX_GPU_TEXT_BUFFERS)
+}
+
+fn text_program_error(error: RowRunBuildError) -> SceneCompileError {
+    let reason = match error {
+        RowRunBuildError::ByteLengthOverflow => "row-run byte length overflow",
+        RowRunBuildError::RunWidthOverflow => "row-run width overflow",
+        RowRunBuildError::InvalidSplitBoundary { .. } => "invalid row-run split boundary",
+    };
+    SceneCompileError::InvalidTextProgram(reason)
 }
 
 fn enforce_resource_limit(
@@ -620,6 +635,27 @@ fn enforce_resource_limit(
         });
     }
     Ok(())
+}
+
+fn enforce_text_buffer_work_limit(
+    accepted: usize,
+    pending: usize,
+    expansion: usize,
+) -> Result<(), SceneCompileError> {
+    let actual = accepted
+        .checked_add(pending)
+        .and_then(|count| count.checked_add(expansion))
+        .unwrap_or(usize::MAX);
+    enforce_resource_limit("text buffers", actual, MAX_GPU_TEXT_BUFFERS)
+}
+
+fn anchored_fallback_runs_within_budget(
+    run: &RowRun,
+    accepted: usize,
+    pending: usize,
+) -> Result<Vec<RowRun>, SceneCompileError> {
+    enforce_text_buffer_work_limit(accepted, pending, run.byte_cells.len())?;
+    anchored_fallback_runs(run).map_err(text_program_error)
 }
 
 fn add_rect_cells(total: &mut usize, area: SceneRect) -> Result<(), SceneCompileError> {
@@ -704,40 +740,28 @@ struct ResolvedCell {
     strikethrough: bool,
 }
 
+/// Theme colors consumed outside cell materialization for each native frame.
+///
+/// Keeping this projection pure gives the clear pass and glyphon's default
+/// text color one deterministic headless verification seam.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct GlyphStyle {
-    foreground: [u8; 4],
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    strikethrough: bool,
+struct NativeFrameColors {
+    default_foreground: [u8; 3],
+    clear_background: [u8; 3],
 }
 
-impl From<&ResolvedCell> for GlyphStyle {
-    fn from(cell: &ResolvedCell) -> Self {
-        Self {
-            foreground: cell.foreground,
-            bold: cell.bold,
-            italic: cell.italic,
-            underline: cell.underline,
-            strikethrough: cell.strikethrough,
-        }
+fn native_frame_colors(theme: &Theme) -> NativeFrameColors {
+    NativeFrameColors {
+        default_foreground: theme.terminal_palette.foreground,
+        clear_background: theme.terminal_palette.background,
     }
-}
-
-#[derive(Debug)]
-struct ProgramRow {
-    y: u16,
-    x: u16,
-    width: u8,
-    text: String,
-    runs: Vec<(std::ops::Range<usize>, GlyphStyle)>,
 }
 
 #[derive(Debug)]
 struct PreparedCellProgram {
     cells: Vec<(u16, u16, ResolvedCell)>,
-    rows: Vec<ProgramRow>,
+    rows: Vec<RowRun>,
+    issues: Vec<RowRunBuildIssue>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -828,14 +852,27 @@ fn raster_replacement_layers(
 }
 
 fn resolve_program_cell(cell: &ProgramCell, theme: &Theme) -> ResolvedCell {
-    let mut foreground = resolve(cell.style.foreground, DEFAULT_FG);
-    let mut background = resolve(cell.style.background, DEFAULT_BG);
+    let palette = &theme.terminal_palette;
+    let mut foreground = resolve(
+        cell.style.foreground,
+        palette.foreground,
+        palette,
+    );
+    let mut background = resolve(
+        cell.style.background,
+        palette.background,
+        palette,
+    );
     let terminal_selection_reverses = cell.selection == Some(CellSelection::Terminal)
         && theme.selection_highlight == SceneColor::Default;
     if cell.selection == Some(CellSelection::Terminal)
         && theme.selection_highlight != SceneColor::Default
     {
-        background = resolve(theme.selection_highlight, DEFAULT_BG);
+        background = resolve(
+            theme.selection_highlight,
+            palette.background,
+            palette,
+        );
     }
     // Item selection is already represented by the compiled style. A cursor
     // and fallback terminal selection add the same reverse-video modifier as
@@ -868,7 +905,21 @@ fn resolve_program_cell(cell: &ProgramCell, theme: &Theme) -> ResolvedCell {
     }
 }
 
-fn prepare_cell_program(program: &CellProgram, theme: &Theme) -> PreparedCellProgram {
+fn resolved_glyph_style(cell: &ProgramCell, theme: &Theme) -> ResolvedGlyphStyle {
+    let cell = resolve_program_cell(cell, theme);
+    ResolvedGlyphStyle {
+        foreground: cell.foreground,
+        bold: cell.bold,
+        italic: cell.italic,
+        underline: cell.underline,
+        strikethrough: cell.strikethrough,
+    }
+}
+
+fn prepare_cell_program(
+    program: &CellProgram,
+    theme: &Theme,
+) -> Result<PreparedCellProgram, SceneCompileError> {
     let mut topmost = BTreeMap::new();
     for (x, y, cell) in program.cells() {
         topmost.insert((y, x), resolve_program_cell(cell, theme));
@@ -878,37 +929,17 @@ fn prepare_cell_program(program: &CellProgram, theme: &Theme) -> PreparedCellPro
         .iter()
         .map(|(&(y, x), cell)| (x, y, cell.clone()))
         .collect::<Vec<_>>();
-    let rows = topmost
-        .iter()
-        .filter_map(|(&(y, x), cell)| {
-            if cell.grapheme.is_empty()
-                || (cell.grapheme == " " && !cell.underline && !cell.strikethrough)
-            {
-                return None;
-            }
-            let width = if topmost
-                .get(&(y, x.saturating_add(1)))
-                .is_some_and(|next| next.grapheme.is_empty())
-            {
-                2
-            } else {
-                1
-            };
-            let style = GlyphStyle::from(cell);
-            Some(ProgramRow {
-                y,
-                x,
-                width,
-                text: cell.grapheme.clone(),
-                runs: vec![(0..cell.grapheme.len(), style)],
-            })
-        })
-        .collect();
-
-    PreparedCellProgram { cells, rows }
+    let plan =
+        build_row_runs(program, |cell| resolved_glyph_style(cell, theme)).map_err(text_program_error)?;
+    enforce_resource_limit("text buffers", plan.runs.len(), MAX_GPU_TEXT_BUFFERS)?;
+    Ok(PreparedCellProgram {
+        cells,
+        rows: plan.runs,
+        issues: plan.issues,
+    })
 }
 
-fn glyph_attrs<'a>(style: GlyphStyle, family: &'a str) -> Attrs<'a> {
+fn glyph_attrs<'a>(style: ResolvedGlyphStyle, family: &'a str) -> Attrs<'a> {
     let mut attrs = Attrs::new().family(font_family(family)).color(GColor::rgba(
         style.foreground[0],
         style.foreground[1],
@@ -928,6 +959,92 @@ fn glyph_attrs<'a>(style: GlyphStyle, family: &'a str) -> Attrs<'a> {
         attrs = attrs.strikethrough();
     }
     attrs
+}
+
+#[derive(Debug)]
+struct FontObservation {
+    font_id: glyphon::fontdb::ID,
+    glyph_id: u16,
+    sample: String,
+}
+
+fn shape_row_buffer(
+    buffer: &mut Buffer,
+    row: &RowRun,
+    font_system: &mut FontSystem,
+    metrics: Metrics,
+    cell_width: f32,
+    cell_height: f32,
+    family: &str,
+) {
+    buffer.set_metrics(metrics);
+    buffer.set_wrap(Wrap::None);
+    buffer.set_monospace_width(Some(cell_width));
+    buffer.set_size(
+        Some((f32::from(row.width) * cell_width).max(1.0)),
+        Some(cell_height),
+    );
+    let spans = row.style_ranges.iter().map(|range| {
+        (
+            &row.text[range.bytes.clone()],
+            glyph_attrs(range.style, family),
+        )
+    });
+    buffer.set_rich_text(
+        spans,
+        &Attrs::new().family(font_family(family)),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+}
+
+fn layout_facts_and_observations(
+    buffer: &Buffer,
+    row: &RowRun,
+) -> (LayoutRunFacts, Vec<FontObservation>) {
+    let Some(layout) = buffer.layout_runs().next() else {
+        return (
+            LayoutRunFacts {
+                rtl: false,
+                line_width: 0.0,
+                glyphs: Vec::new(),
+            },
+            Vec::new(),
+        );
+    };
+    let facts = LayoutRunFacts {
+        rtl: layout.rtl,
+        line_width: layout.line_w,
+        glyphs: layout
+            .glyphs
+            .iter()
+            .map(|glyph| LayoutGlyphFacts {
+                bytes: glyph.start..glyph.end,
+                x: glyph.x,
+                advance: glyph.w,
+                rtl: glyph.level.is_rtl(),
+            })
+            .collect(),
+    };
+    let observations = layout
+        .glyphs
+        .iter()
+        .map(|glyph| FontObservation {
+            font_id: glyph.font_id,
+            glyph_id: glyph.glyph_id,
+            sample: row
+                .text
+                .get(glyph.start..glyph.end)
+                .map(bounded_sample)
+                .unwrap_or_else(|| "<invalid-cluster>".to_owned()),
+        })
+        .collect();
+    (facts, observations)
+}
+
+fn bounded_sample(value: &str) -> String {
+    value.chars().take(32).collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1126,6 +1243,9 @@ pub struct GpuText {
     text_renderer: TextRenderer,
     row_buffers: RowBufferPool,
 
+    font_profile: ResolvedFontProfile,
+    fallback_report: FallbackReport,
+    row_run_diagnostics: BTreeSet<String>,
     scale: f32,
     base_font_size: f32,
     font_family: String,
@@ -1139,16 +1259,32 @@ impl GpuText {
         window: Arc<Window>,
         text_settings: NativeTextSettings,
     ) -> Result<Self, GpuStartupError> {
-        Self::new_with_device_generation(window, text_settings, 1).await
+        NativeTextSettings::new(text_settings.family.clone(), text_settings.font_size)
+            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
+        let request = if text_settings.family.eq_ignore_ascii_case("monospace") {
+            FontRequest::BundledDefault {
+                size: text_settings.font_size,
+            }
+        } else {
+            FontRequest::installed(text_settings.family, text_settings.font_size)
+        };
+        let profile = ResolvedFontProfile::resolve(request)
+            .map_err(|error| startup_error(StartupFailureStage::Configuration, error.to_string()))?;
+        Self::new_with_profile(window, profile).await
+    }
+
+    pub async fn new_with_profile(
+        window: Arc<Window>,
+        profile: ResolvedFontProfile,
+    ) -> Result<Self, GpuStartupError> {
+        Self::new_with_device_generation(window, profile, 1).await
     }
 
     async fn new_with_device_generation(
         window: Arc<Window>,
-        text_settings: NativeTextSettings,
+        font_profile: ResolvedFontProfile,
         device_generation: u64,
     ) -> Result<Self, GpuStartupError> {
-        NativeTextSettings::new(text_settings.family.clone(), text_settings.font_size)
-            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         validate_scale(scale)
@@ -1429,7 +1565,7 @@ impl GpuText {
         });
 
         // --- Text stack ------------------------------------------------------
-        let mut font_system = FontSystem::new();
+        let mut font_system = font_profile.create_font_system();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
@@ -1437,10 +1573,10 @@ impl GpuText {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
-        let font_size = (text_settings.font_size * scale).round();
+        let font_size = (font_profile.size() * scale).round();
         let line_height = (font_size * 1.3).round();
         let metrics = Metrics::new(font_size, line_height);
-        let cell_w = measure_cell_width(&mut font_system, metrics, &text_settings.family);
+        let cell_w = measure_cell_width(&mut font_system, metrics, font_profile.family());
         let cell_h = line_height;
 
         Ok(Self {
@@ -1479,9 +1615,12 @@ impl GpuText {
             atlas,
             text_renderer,
             row_buffers: RowBufferPool::new(),
+            fallback_report: FallbackReport::new(font_profile.generation()),
+            row_run_diagnostics: BTreeSet::new(),
             scale,
-            base_font_size: text_settings.font_size,
-            font_family: text_settings.family,
+            base_font_size: font_profile.size(),
+            font_family: font_profile.family().to_owned(),
+            font_profile,
             font_size,
             cell_w,
             cell_h,
@@ -1582,11 +1721,9 @@ impl GpuText {
         let next_device_generation = self.device_generation.saturating_add(1);
         let next_surface_generation = self.surface_generation.saturating_add(1);
         let next_device_recreations = self.device_recreations.saturating_add(1);
-        let text_settings = NativeTextSettings::new(self.font_family.clone(), self.base_font_size)
-            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
         let mut replacement = Self::new_with_device_generation(
             self.window.clone(),
-            text_settings,
+            self.font_profile.clone_for_device_recreation(),
             next_device_generation,
         )
         .await?;
@@ -1600,6 +1737,8 @@ impl GpuText {
         replacement.injected_faults = self.injected_faults;
         replacement.raster_cache_entries_high_water = self.raster_cache_entries_high_water;
         replacement.raster_cache_bytes_high_water = self.raster_cache_bytes_high_water;
+        replacement.fallback_report = self.fallback_report.clone();
+        replacement.row_run_diagnostics = self.row_run_diagnostics.clone();
         retire_gpu_generation(&self.device_fault, next_device_generation);
         *self = replacement;
         Ok(())
@@ -1761,6 +1900,130 @@ impl GpuText {
         self.raster_cache_bytes_high_water = self.raster_cache_bytes_high_water.max(cached_bytes);
     }
 
+    fn record_row_run_diagnostic(&mut self, message: String) {
+        const MAX_ROW_RUN_DIAGNOSTICS: usize = 16;
+        if self.row_run_diagnostics.len() >= MAX_ROW_RUN_DIAGNOSTICS
+            || !self.row_run_diagnostics.insert(message.clone())
+        {
+            return;
+        }
+        eprintln!("mandatum-native-renderer: {message}");
+    }
+
+    fn emit_new_fallback_record(&self) {
+        let Some(record) = self.fallback_report.records().last() else {
+            return;
+        };
+        match record {
+            FallbackRecord::Face {
+                family,
+                postscript_name,
+                sample,
+                ..
+            } => eprintln!(
+                "mandatum-native-renderer: font fallback family={family:?} postscript={postscript_name:?} sample={sample:?}"
+            ),
+            FallbackRecord::MissingGlyph { sample } => eprintln!(
+                "mandatum-native-renderer: missing glyph sample={sample:?}"
+            ),
+        }
+    }
+
+    fn shape_row_runs(
+        &mut self,
+        initial: Vec<RowRun>,
+        metrics: Metrics,
+    ) -> Result<Vec<RowRun>, GpuRenderError> {
+        let mut pending = initial
+            .into_iter()
+            .map(|run| (run, false))
+            .collect::<VecDeque<_>>();
+        let mut accepted = Vec::new();
+
+        while let Some((run, forced_anchor)) = pending.pop_front() {
+            enforce_text_buffer_work_limit(accepted.len(), pending.len(), 1)?;
+
+            let buffer_index = accepted.len();
+            self.row_buffers.ensure_len(
+                buffer_index + 1,
+                &mut self.font_system,
+                metrics,
+            );
+            let (layout, observations) = {
+                let buffer = &mut self.row_buffers.rows[buffer_index];
+                shape_row_buffer(
+                    buffer,
+                    &run,
+                    &mut self.font_system,
+                    metrics,
+                    self.cell_w,
+                    self.cell_h,
+                    &self.font_family,
+                );
+                layout_facts_and_observations(buffer, &run)
+            };
+
+            if observations.is_empty()
+                && self.fallback_report.observe_missing_glyph(&run.text)
+            {
+                self.emit_new_fallback_record();
+            }
+            for observation in observations {
+                if observation.glyph_id == 0
+                    && self
+                        .fallback_report
+                        .observe_missing_glyph(&observation.sample)
+                {
+                    self.emit_new_fallback_record();
+                }
+                if self.fallback_report.observe_face(
+                    &self.font_profile,
+                    observation.font_id,
+                    &observation.sample,
+                ) {
+                    self.emit_new_fallback_record();
+                }
+            }
+
+            let admission = if forced_anchor {
+                RowRunAdmission::Accepted
+            } else {
+                // Font metrics are already scaled to physical pixels and
+                // TextArea uses scale 1.0, so layout facts are physical here.
+                admit_layout(&run, &layout, self.cell_w, 1.0)
+            };
+            match admission {
+                RowRunAdmission::Accepted => accepted.push(run),
+                RowRunAdmission::Fallback { reason, action } => {
+                    self.record_row_run_diagnostic(format!(
+                        "row-run fallback {reason:?} for {:?}",
+                        bounded_sample(&run.text)
+                    ));
+                    match action {
+                        RowRunFallbackAction::SplitAtSpan(boundary) => {
+                            let (left, right) =
+                                split_at_span(&run, boundary).map_err(text_program_error)?;
+                            pending.push_front((right, false));
+                            pending.push_front((left, false));
+                        }
+                        RowRunFallbackAction::AnchorAll => {
+                            let anchored = anchored_fallback_runs_within_budget(
+                                &run,
+                                accepted.len(),
+                                pending.len(),
+                            )?;
+                            for part in anchored.into_iter().rev() {
+                                pending.push_front((part, true));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(accepted)
+    }
+
     /// Render one frame from a `WorkspaceScene`. Consumes only scene types: the
     /// visible cells, styles, cursor/selection marks, and status come from the
     /// scene, never from a grid or parser. Returns the instant right after
@@ -1776,11 +2039,14 @@ impl GpuText {
             return Err(fault);
         }
         let prepared = prepare_scene(scene, theme)?;
-        let program = prepare_cell_program(prepared.cell_program(), theme);
+        let program = prepare_cell_program(prepared.cell_program(), theme)?;
+        let frame_colors = native_frame_colors(theme);
         self.sync_raster_cache(prepared.artifacts());
         let metrics = Metrics::new(self.font_size, self.cell_h);
-        self.row_buffers
-            .ensure_len(program.rows.len(), &mut self.font_system, metrics);
+        for issue in &program.issues {
+            self.record_row_run_diagnostic(format!("row-run build issue: {issue:?}"));
+        }
+        let rows = self.shape_row_runs(program.rows, metrics)?;
 
         // The cell compiler has already applied pane order, opacity, chrome,
         // content, overlay, selection, and cursor semantics. The GPU adapter
@@ -1796,25 +2062,6 @@ impl GpuText {
                 self.cell_h,
                 cell.background,
             );
-        }
-
-        for (buffer, row) in self.row_buffers.rows.iter_mut().zip(program.rows.iter()) {
-            let width = f32::from(row.width) * self.cell_w;
-            buffer.set_wrap(Wrap::None);
-            buffer.set_size(Some(width.max(1.0)), Some(self.cell_h));
-            let spans = row.runs.iter().map(|(range, style)| {
-                (
-                    &row.text[range.clone()],
-                    glyph_attrs(*style, &self.font_family),
-                )
-            });
-            buffer.set_rich_text(
-                spans,
-                &Attrs::new().family(font_family(&self.font_family)),
-                Shaping::Advanced,
-                None,
-            );
-            buffer.shape_until_scroll(&mut self.font_system, false);
         }
 
         if quads.len() > self.inst_capacity_floats {
@@ -1883,24 +2130,31 @@ impl GpuText {
             },
         );
 
-        let text_areas = program.rows.iter().enumerate().map(|(index, row)| {
+        let text_areas = rows.iter().enumerate().map(|(index, row)| {
             let left = f32::from(row.x) * self.cell_w;
             let top = f32::from(row.y) * self.cell_h;
+            let clip = row
+                .clipped_cell_bounds()
+                .unwrap_or_else(|| SceneRect::new(row.x, row.y, row.width, 1));
             TextArea {
                 buffer: &self.row_buffers.rows[index],
                 left,
                 top,
                 scale: 1.0,
                 bounds: glyph_text_bounds(
-                    row.x,
-                    row.y,
-                    row.width,
+                    clip.x,
+                    clip.y,
+                    clip.width,
                     self.cell_w,
                     self.cell_h,
                     self.config.width,
                     self.config.height,
                 ),
-                default_color: GColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]),
+                default_color: GColor::rgb(
+                    frame_colors.default_foreground[0],
+                    frame_colors.default_foreground[1],
+                    frame_colors.default_foreground[2],
+                ),
                 custom_glyphs: &[],
             }
         });
@@ -1960,9 +2214,9 @@ impl GpuText {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: DEFAULT_BG[0] as f64 / 255.0,
-                            g: DEFAULT_BG[1] as f64 / 255.0,
-                            b: DEFAULT_BG[2] as f64 / 255.0,
+                            r: frame_colors.clear_background[0] as f64 / 255.0,
+                            g: frame_colors.clear_background[1] as f64 / 255.0,
+                            b: frame_colors.clear_background[2] as f64 / 255.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -2030,16 +2284,20 @@ impl GpuText {
 /// Map a scene color onto RGB, using the given default for
 /// `SceneColor::Default`, the standard xterm palette for ANSI/indexed colors,
 /// and a passthrough for direct RGB.
-fn resolve(color: SceneColor, default: [u8; 3]) -> [u8; 3] {
+fn resolve(
+    color: SceneColor,
+    default: [u8; 3],
+    terminal_palette: &TerminalPalette,
+) -> [u8; 3] {
     match color {
         SceneColor::Default => default,
         SceneColor::Rgb(r, g, b) => [r, g, b],
-        SceneColor::Ansi(i) => palette(i),
-        SceneColor::Indexed(i) => palette(i),
+        SceneColor::Ansi(i @ 0..=15) => terminal_palette.ansi[i as usize],
+        SceneColor::Ansi(i) | SceneColor::Indexed(i) => indexed_palette(i),
     }
 }
 
-fn palette(i: u8) -> [u8; 3] {
+fn indexed_palette(i: u8) -> [u8; 3] {
     const BASE: [[u8; 3]; 16] = [
         [0, 0, 0],
         [205, 49, 49],
@@ -2118,7 +2376,7 @@ fn cell_clip_scissor(
 fn glyph_text_bounds(
     x: u16,
     y: u16,
-    width: u8,
+    width: u16,
     cell_width: f32,
     cell_height: f32,
     surface_width: u32,
@@ -2130,7 +2388,7 @@ fn glyph_text_bounds(
         left: pixel_boundary(left, surface_width) as i32,
         top: pixel_boundary(top, surface_height) as i32,
         right: pixel_boundary(
-            left + f32::from(width.clamp(1, 2)) * cell_width,
+            left + f32::from(width.max(1)) * cell_width,
             surface_width,
         ) as i32,
         bottom: pixel_boundary(top + cell_height, surface_height) as i32,
@@ -2840,11 +3098,102 @@ mod tests {
         assert!(resolved.underline);
         assert!(resolved.strikethrough);
 
-        let attrs = glyph_attrs(GlyphStyle::from(&resolved), "monospace");
+        let attrs = glyph_attrs(
+            ResolvedGlyphStyle {
+                foreground: resolved.foreground,
+                bold: resolved.bold,
+                italic: resolved.italic,
+                underline: resolved.underline,
+                strikethrough: resolved.strikethrough,
+            },
+            "monospace",
+        );
         assert_eq!(attrs.weight, Weight::BOLD);
         assert_eq!(attrs.style, FontStyle::Italic);
         assert_eq!(attrs.text_decoration.underline, UnderlineStyle::Single);
         assert!(attrs.text_decoration.strikethrough);
+    }
+
+    #[test]
+    fn native_materializes_all_terminal_palette_colors_and_keeps_indexed_rgb_meaning() {
+        let ansi = std::array::from_fn(|index| {
+            [
+                index as u8,
+                (index as u8).saturating_add(32),
+                (index as u8).saturating_add(64),
+            ]
+        });
+        let theme = Theme {
+            terminal_palette: TerminalPalette {
+                foreground: [1, 2, 3],
+                background: [4, 5, 6],
+                ansi,
+            },
+            ..Theme::default()
+        };
+        let mut cell = ProgramCell {
+            occupancy: CellOccupancy::Grapheme("X".to_owned()),
+            style: mandatum_scene::SceneCellStyle::default(),
+            selection: None,
+            cursor: false,
+            raster_layer: None,
+        };
+
+        let defaults = resolve_program_cell(&cell, &theme);
+        assert_eq!(defaults.foreground, [1, 2, 3, 255]);
+        assert_eq!(defaults.background, [4, 5, 6, 255]);
+        assert_eq!(
+            native_frame_colors(&theme),
+            NativeFrameColors {
+                default_foreground: [1, 2, 3],
+                clear_background: [4, 5, 6],
+            }
+        );
+
+        for index in 0..16 {
+            cell.style.foreground = SceneColor::Ansi(index);
+            assert_eq!(
+                resolve_program_cell(&cell, &theme).foreground,
+                [
+                    ansi[index as usize][0],
+                    ansi[index as usize][1],
+                    ansi[index as usize][2],
+                    255
+                ]
+            );
+        }
+        for (index, expected) in [
+            (16, [0, 0, 0]),
+            (231, [255, 255, 255]),
+            (232, [8, 8, 8]),
+            (255, [238, 238, 238]),
+        ] {
+            cell.style.foreground = SceneColor::Indexed(index);
+            assert_eq!(
+                resolve_program_cell(&cell, &theme).foreground,
+                [expected[0], expected[1], expected[2], 255]
+            );
+        }
+        cell.style.foreground = SceneColor::Rgb(7, 8, 9);
+        assert_eq!(
+            resolve_program_cell(&cell, &theme).foreground,
+            [7, 8, 9, 255]
+        );
+
+        let mut chrome_theme = theme.clone();
+        chrome_theme.header = SceneColor::Ansi(12);
+        let scene = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let prepared = prepare_scene(&scene, &chrome_theme).unwrap();
+        let header = prepared
+            .cell_program()
+            .cell_at(scene.header.area.x, scene.header.area.y)
+            .expect("compiled header cell");
+        assert_eq!(header.style.foreground, SceneColor::Ansi(12));
+        assert_eq!(
+            resolve_program_cell(header, &chrome_theme).foreground,
+            [ansi[12][0], ansi[12][1], ansi[12][2], 255],
+            "compiled semantic chrome must materialize through the active terminal palette"
+        );
     }
 
     #[test]
@@ -2946,7 +3295,7 @@ mod tests {
         let theme = Theme::default();
         let prepared = prepare_scene(&scene, &theme).unwrap();
 
-        let translated = prepare_cell_program(prepared.cell_program(), &theme);
+        let translated = prepare_cell_program(prepared.cell_program(), &theme).unwrap();
         let final_cells = translated
             .cells
             .iter()
@@ -2957,7 +3306,12 @@ mod tests {
         assert_eq!(final_cells[0].2.grapheme, " ");
         assert_eq!(
             final_cells[0].2.background,
-            [DEFAULT_BG[0], DEFAULT_BG[1], DEFAULT_BG[2], 255]
+            [
+                Theme::default().terminal_palette.background[0],
+                Theme::default().terminal_palette.background[1],
+                Theme::default().terminal_palette.background[2],
+                255
+            ]
         );
     }
 
@@ -2983,7 +3337,7 @@ mod tests {
         let scene = scene(vec![pane]);
         let theme = Theme::default();
         let prepared = prepare_scene(&scene, &theme).unwrap();
-        let translated = prepare_cell_program(prepared.cell_program(), &theme);
+        let translated = prepare_cell_program(prepared.cell_program(), &theme).unwrap();
         let inner = layout::pane_inner_rect(scene.panes[0].area);
         let runs = translated
             .rows
@@ -3008,6 +3362,147 @@ mod tests {
             runs.iter().all(|(_, _, text)| !text.is_empty()),
             "continuations reserve cells but never become shaped glyph runs"
         );
+    }
+
+    #[test]
+    fn bundled_row_run_shapes_a_real_multicell_ligature_and_passes_admission() {
+        let surface = TerminalSurface {
+            rows: vec![vec![
+                SceneCell::grapheme("-", mandatum_scene::SceneCellStyle::default()),
+                SceneCell::grapheme(">", mandatum_scene::SceneCellStyle::default()),
+            ]],
+            ..TerminalSurface::default()
+        };
+        let pane = pane(PaneSceneKind::Terminal, PaneContent::Terminal(surface));
+        let scene = scene(vec![pane]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(prepared.cell_program(), &theme).unwrap();
+        let row = translated
+            .rows
+            .iter()
+            .find(|row| row.text == "->")
+            .expect("adjacent same-style cells form one row run");
+
+        let profile = ResolvedFontProfile::resolve(FontRequest::default()).unwrap();
+        let mut font_system = profile.create_font_system();
+        let line_height = (profile.size() * 1.3).round();
+        let metrics = Metrics::new(profile.size(), line_height);
+        let cell_width = measure_cell_width(&mut font_system, metrics, profile.family());
+        let mut buffer = Buffer::new(&mut font_system, metrics);
+        shape_row_buffer(
+            &mut buffer,
+            row,
+            &mut font_system,
+            metrics,
+            cell_width,
+            line_height,
+            profile.family(),
+        );
+        let (facts, observations) = layout_facts_and_observations(&buffer, row);
+
+        assert_eq!(
+            admit_layout(row, &facts, cell_width, 1.0),
+            RowRunAdmission::Accepted
+        );
+        let contextual_glyphs = observations
+            .iter()
+            .map(|observation| observation.glyph_id)
+            .collect::<Vec<_>>();
+        let mut anchored_glyphs = Vec::new();
+        for anchored in anchored_fallback_runs(row).unwrap() {
+            let mut anchored_buffer = Buffer::new(&mut font_system, metrics);
+            shape_row_buffer(
+                &mut anchored_buffer,
+                &anchored,
+                &mut font_system,
+                metrics,
+                cell_width,
+                line_height,
+                profile.family(),
+            );
+            anchored_glyphs.extend(
+                layout_facts_and_observations(&anchored_buffer, &anchored)
+                    .1
+                    .into_iter()
+                    .map(|observation| observation.glyph_id),
+            );
+        }
+        assert_ne!(
+            contextual_glyphs, anchored_glyphs,
+            "JetBrains Mono should apply contextual ligature forms only when -> shapes as one run"
+        );
+        assert!(
+            observations
+                .iter()
+                .all(|observation| observation.font_id == profile.selected_faces().regular)
+        );
+    }
+
+    #[test]
+    fn bundled_profile_shapes_regular_bold_italic_and_bold_italic_from_selected_faces() {
+        let style = |bold, italic| mandatum_scene::SceneCellStyle {
+            bold,
+            italic,
+            ..mandatum_scene::SceneCellStyle::default()
+        };
+        let surface = TerminalSurface {
+            rows: vec![vec![
+                SceneCell::grapheme("R", style(false, false)),
+                SceneCell::grapheme("B", style(true, false)),
+                SceneCell::grapheme("I", style(false, true)),
+                SceneCell::grapheme("Z", style(true, true)),
+            ]],
+            ..TerminalSurface::default()
+        };
+        let scene = scene(vec![pane(
+            PaneSceneKind::Terminal,
+            PaneContent::Terminal(surface),
+        )]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(prepared.cell_program(), &theme).unwrap();
+        let profile = ResolvedFontProfile::resolve(FontRequest::default()).unwrap();
+        let selected = profile.selected_faces();
+        let expected = [
+            ("R", selected.regular),
+            ("B", selected.bold),
+            ("I", selected.italic),
+            ("Z", selected.bold_italic),
+        ];
+        let mut font_system = profile.create_font_system();
+        let line_height = (profile.size() * 1.3).round();
+        let metrics = Metrics::new(profile.size(), line_height);
+        let cell_width = measure_cell_width(&mut font_system, metrics, profile.family());
+
+        for (text, expected_id) in expected {
+            let row = translated
+                .rows
+                .iter()
+                .find(|row| row.text == text)
+                .expect("style boundary creates one run");
+            let mut buffer = Buffer::new(&mut font_system, metrics);
+            shape_row_buffer(
+                &mut buffer,
+                row,
+                &mut font_system,
+                metrics,
+                cell_width,
+                line_height,
+                profile.family(),
+            );
+            let (_, observations) = layout_facts_and_observations(&buffer, row);
+            assert!(
+                !observations.is_empty(),
+                "{text:?} should produce a shaped glyph"
+            );
+            assert!(
+                observations
+                    .iter()
+                    .all(|observation| observation.font_id == expected_id),
+                "{text:?} did not use the selected face"
+            );
+        }
     }
 
     #[test]
@@ -3124,11 +3619,18 @@ mod tests {
 
     #[test]
     fn pathological_dense_terminal_hits_the_explicit_text_buffer_budget() {
-        let rows =
-            vec![
-                vec![SceneCell::grapheme("X", mandatum_scene::SceneCellStyle::default()); 510];
-                66
-            ];
+        let alternating_row = (0..510)
+            .map(|index| {
+                SceneCell::grapheme(
+                    "X",
+                    mandatum_scene::SceneCellStyle {
+                        bold: index % 2 == 0,
+                        ..mandatum_scene::SceneCellStyle::default()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let rows = vec![alternating_row; 66];
         let mut dense = scene(vec![pane(
             PaneSceneKind::Terminal,
             PaneContent::Terminal(TerminalSurface {
@@ -3148,6 +3650,48 @@ mod tests {
                 maximum: MAX_GPU_TEXT_BUFFERS,
             } if actual > MAX_GPU_TEXT_BUFFERS
         ));
+    }
+
+    #[test]
+    fn anchor_all_expansion_cannot_enqueue_beyond_the_text_buffer_budget() {
+        let surface = TerminalSurface {
+            rows: vec![vec![
+                SceneCell::grapheme("A", mandatum_scene::SceneCellStyle::default()),
+                SceneCell::grapheme("B", mandatum_scene::SceneCellStyle::default()),
+            ]],
+            ..TerminalSurface::default()
+        };
+        let pane = pane(PaneSceneKind::Terminal, PaneContent::Terminal(surface));
+        let scene = scene(vec![pane]);
+        let prepared = prepare_scene(&scene, &Theme::default()).unwrap();
+        let translated =
+            prepare_cell_program(prepared.cell_program(), &Theme::default()).unwrap();
+        let row = translated
+            .rows
+            .iter()
+            .find(|row| row.text == "AB")
+            .expect("same-style graphemes share one row run");
+
+        let admitted =
+            anchored_fallback_runs_within_budget(row, MAX_GPU_TEXT_BUFFERS - 2, 0).unwrap();
+        assert_eq!(admitted.len(), 2);
+
+        assert_eq!(
+            anchored_fallback_runs_within_budget(row, MAX_GPU_TEXT_BUFFERS - 1, 0).unwrap_err(),
+            SceneCompileError::ResourceLimit {
+                resource: "text buffers",
+                actual: MAX_GPU_TEXT_BUFFERS + 1,
+                maximum: MAX_GPU_TEXT_BUFFERS,
+            }
+        );
+        assert_eq!(
+            enforce_text_buffer_work_limit(usize::MAX, 1, 1).unwrap_err(),
+            SceneCompileError::ResourceLimit {
+                resource: "text buffers",
+                actual: usize::MAX,
+                maximum: MAX_GPU_TEXT_BUFFERS,
+            }
+        );
     }
 
     #[test]

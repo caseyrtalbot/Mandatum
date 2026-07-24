@@ -1,4 +1,4 @@
-use super::{Compiler, primitives::display_width};
+use super::{Compiler, TextPaintScopeKind, primitives::display_width};
 use crate::{SceneCellStyle, TextInputKind, TextInputScene, Theme};
 
 impl Compiler {
@@ -9,6 +9,7 @@ impl Compiler {
         if input.area.is_empty() || preedit.text.is_empty() {
             return;
         }
+        self.begin_text_scope(TextPaintScopeKind::TextInput, input.area);
 
         let mut style = match input.kind {
             TextInputKind::Terminal { style } => style,

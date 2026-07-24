@@ -325,6 +325,7 @@ fn reload_config_applies_project_config_live() {
         &config_file,
         "[keymap]\nsplit-right = \"ctrl+alt+s\"\n\n\
          [theme]\nname = \"mandatum-light\"\n\n\
+         [theme.terminal]\nforeground = \"#010203\"\nbackground = \"#040506\"\nbright-blue = \"#070809\"\n\n\
          [shell]\nprogram = \"/configured/shell\"\n\n\
          [task]\ndefault_command = \"configured-task\"\n\n\
          [agent]\nconnector = \"claude\"\nmodel = \"configured-model\"\n",
@@ -335,6 +336,9 @@ fn reload_config_applies_project_config_live() {
 
     assert_eq!(state.status(), "config reloaded");
     assert_eq!(state.theme().name, "mandatum-light");
+    assert_eq!(state.theme().terminal_palette.foreground, [1, 2, 3]);
+    assert_eq!(state.theme().terminal_palette.background, [4, 5, 6]);
+    assert_eq!(state.theme().terminal_palette.ansi[12], [7, 8, 9]);
     assert_eq!(state.shell_program, "/configured/shell");
     assert_eq!(state.task_command, "configured-task");
     assert_eq!(state.agent_connector_label(), "claude");
@@ -357,6 +361,10 @@ fn reload_config_applies_project_config_live() {
     assert_eq!(state.status(), "config reloaded");
     assert_eq!(state.keymap, Keymap::default());
     assert_eq!(state.theme().name, "mandatum-dark");
+    assert_eq!(
+        state.theme().terminal_palette,
+        Theme::default().terminal_palette
+    );
     assert_eq!(state.shell_program, defaults.shell_program);
     assert_eq!(state.task_command, defaults.task_command);
     assert_eq!(
@@ -387,6 +395,10 @@ fn reload_config_applies_project_config_live() {
     assert!(state.status().contains("not valid TOML"));
     assert_eq!(state.keymap, Keymap::default());
     assert_eq!(state.theme().name, "mandatum-dark");
+    assert_eq!(
+        state.theme().terminal_palette,
+        Theme::default().terminal_palette
+    );
     assert_eq!(state.shell_program, defaults.shell_program);
     assert_eq!(state.task_command, defaults.task_command);
     assert_eq!(

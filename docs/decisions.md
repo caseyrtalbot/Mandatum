@@ -2673,3 +2673,50 @@ the locked dependency sources. They agreed that the existing boundaries and
 APIs can express the contract without a stack replacement. This slice changes
 architecture guidance only; no rendered-behavior or implementation claim is
 made.
+
+## Implement The Accepted Typography Foundation Before Caching
+
+Status: accepted and completed (2026-07-24)
+
+Decision: land font provisioning, terminal-palette ownership, and the clipped
+row-run adapter as one capability family before introducing the Work 4 shaping
+cache.
+
+The native default is the four pinned JetBrains Mono v2.304 static faces.
+`--font-family` accepts only an exact installed monospaced
+Regular/Bold/Italic/BoldItalic set and rejects generic, missing, ambiguous, or
+variable-only families before downstream application launch construction.
+`--font-info` is the stable headless resolution surface. Device recreation
+clones the resolved catalog generation and selected face identities. Shaped
+fallback faces and missing glyphs emit deduplicated diagnostics retained under
+the 64-record / 64-KiB ceiling.
+
+`Theme::terminal_palette` owns direct foreground/background and ANSI 0–15.
+Native materializes those colors, including semantic chrome, while the
+maintained terminal adapter deliberately preserves host `Reset` and named ANSI
+colors.
+
+The scene compiler assigns renderer-neutral text paint scopes and exact clips.
+Native builds same-row/same-style runs with checked UTF-8-to-cell maps, admits
+only complete monotonic left-to-right clusters within the physical-pixel
+tolerance, and otherwise splits or uses a bounded observable anchored fallback.
+Final cell quads continue to own backgrounds, cursor, selection, inverse,
+decorated spaces, and wide-cell geometry.
+
+The displayed corpus exposed one adjacent lifecycle defect: on a backing-scale
+change without a separate resize event, font metrics changed while the wgpu
+surface retained the old physical size. The production scale-transition seam
+now refreshes the surface from the live window size before scene reflow. This
+keeps the full corpus, header, and pane clips coherent through
+1.0→2.0→1.0.
+
+Consequences:
+
+- the one-buffer-per-grapheme path is retired except as the bounded ultimate
+  fallback;
+- legitimate script and emoji fallback remains allowed, named, and bounded;
+- RTL/bidi visual reordering remains fallback behavior, not a support claim;
+- the next slice may cache only admitted shaped runs, keyed and invalidated by
+  the accepted generation/metrics contract;
+- renderer modularization, row damage, default-launcher, installer, release,
+  and rollout changes remain outside this capability family.

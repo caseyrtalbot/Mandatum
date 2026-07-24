@@ -1237,6 +1237,9 @@ version = "0.2.0"
 dependencies = [
  "glyphon",
  "mandatum-scene",
+ "serde",
+ "sys-locale",
+ "ttf-parser",
  "wgpu",
  "winit",
 ]

@@ -9,6 +9,47 @@ use serde::{Deserialize, Serialize};
 
 use crate::style::SceneColor;
 
+/// Direct RGB colors used when the native pixel surface materializes terminal
+/// defaults and the 16 named ANSI colors.
+///
+/// Keeping these values separate from [`SceneColor`] prevents a terminal
+/// palette entry from recursively referring to `Default` or another ANSI
+/// slot. The fixed-size array also makes the complete ANSI range part of the
+/// type contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalPalette {
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub ansi: [[u8; 3]; 16],
+}
+
+impl Default for TerminalPalette {
+    fn default() -> Self {
+        Self {
+            foreground: [220, 220, 224],
+            background: [18, 18, 22],
+            ansi: [
+                [0, 0, 0],
+                [205, 49, 49],
+                [13, 188, 121],
+                [229, 229, 16],
+                [36, 114, 200],
+                [188, 63, 188],
+                [17, 168, 205],
+                [229, 229, 229],
+                [128, 128, 128],
+                [241, 76, 76],
+                [35, 209, 139],
+                [245, 245, 67],
+                [59, 142, 234],
+                [214, 112, 214],
+                [41, 184, 219],
+                [255, 255, 255],
+            ],
+        }
+    }
+}
+
 /// Named color for every themable role in the workspace chrome.
 ///
 /// `Theme::default()` is the built-in `mandatum-dark` theme.
@@ -16,6 +57,9 @@ use crate::style::SceneColor;
 #[serde(default)]
 pub struct Theme {
     pub name: String,
+    /// Native materialization of terminal defaults and ANSI colors. Cell
+    /// programs retain their abstract [`SceneColor`] values.
+    pub terminal_palette: TerminalPalette,
     /// Title text of the focused pane.
     #[serde(alias = "focus_border")]
     pub focus_title: SceneColor,
@@ -74,6 +118,7 @@ impl Theme {
 fn mandatum_dark() -> Theme {
     Theme {
         name: "mandatum-dark".to_owned(),
+        terminal_palette: TerminalPalette::default(),
         focus_title: SceneColor::Ansi(12), // bright blue
         pane_border: SceneColor::Ansi(8),  // dark gray
         pane_title: SceneColor::Default,
@@ -99,6 +144,7 @@ fn mandatum_dark() -> Theme {
 fn mandatum_light() -> Theme {
     Theme {
         name: "mandatum-light".to_owned(),
+        terminal_palette: TerminalPalette::default(),
         focus_title: SceneColor::Ansi(4), // blue
         pane_border: SceneColor::Ansi(7), // gray
         pane_title: SceneColor::Default,
@@ -122,6 +168,7 @@ fn mandatum_light() -> Theme {
 fn mandatum_high_contrast() -> Theme {
     Theme {
         name: "mandatum-high-contrast".to_owned(),
+        terminal_palette: TerminalPalette::default(),
         // Focus must be unmistakable without making the entire pane frame
         // loud: bright yellow title text against bright-white calm chrome.
         focus_title: SceneColor::Ansi(11), // bright yellow
@@ -162,6 +209,41 @@ mod tests {
             assert_eq!(&theme.name, name);
         }
         assert!(Theme::builtin("solarized").is_none());
+    }
+
+    #[test]
+    fn every_builtin_starts_with_the_native_compatibility_palette() {
+        let expected = TerminalPalette::default();
+        assert_eq!(expected.foreground, [220, 220, 224]);
+        assert_eq!(expected.background, [18, 18, 22]);
+        assert_eq!(
+            expected.ansi,
+            [
+                [0, 0, 0],
+                [205, 49, 49],
+                [13, 188, 121],
+                [229, 229, 16],
+                [36, 114, 200],
+                [188, 63, 188],
+                [17, 168, 205],
+                [229, 229, 229],
+                [128, 128, 128],
+                [241, 76, 76],
+                [35, 209, 139],
+                [245, 245, 67],
+                [59, 142, 234],
+                [214, 112, 214],
+                [41, 184, 219],
+                [255, 255, 255],
+            ]
+        );
+        for name in Theme::BUILTIN_NAMES {
+            assert_eq!(
+                Theme::builtin(name).unwrap().terminal_palette,
+                expected,
+                "{name} must not change native pixels when palette ownership lands"
+            );
+        }
     }
 
     #[test]

@@ -7,9 +7,9 @@ use mandatum_scene::{
     PaletteEntry, PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind, PreeditScene,
     PromptOverlay, RasterSurface, SceneCell, SceneCellStyle, SceneColor, SceneRect, SceneSize,
     SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow, StatusScene, SurfacePosition,
-    TaskContent, TerminalSurface, TextInputKind, TextInputScene, Theme, TimelineEntry,
-    TimelineOverlay, WelcomeEntry, WelcomeOverlay, WorkspaceScene, compile_cell_program,
-    input::TextRange,
+    TaskContent, TerminalSurface, TextInputKind, TextInputScene, TextPaintScopeKind, Theme,
+    TimelineEntry, TimelineOverlay, WelcomeEntry, WelcomeOverlay, WorkspaceScene,
+    compile_cell_program, input::TextRange,
 };
 
 #[test]
@@ -99,6 +99,7 @@ fn whole_frame_cell_program_preserves_terminal_cell_style_selection_and_copy_cur
 fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
     let theme = Theme {
         name: "cell-program-tracer".to_owned(),
+        terminal_palette: mandatum_scene::TerminalPalette::default(),
         focus_title: SceneColor::Rgb(10, 11, 12),
         pane_border: SceneColor::Rgb(20, 21, 22),
         pane_title: SceneColor::Rgb(30, 31, 32),
@@ -559,6 +560,63 @@ fn scene_with_overlay(overlay: OverlayScene, hit_targets: Vec<HitTarget>) -> Wor
         hit_targets,
         copy_mode: false,
         text_input: None,
+    }
+}
+
+#[test]
+fn cell_program_assigns_distinct_exact_text_paint_scopes() {
+    let overlay_area = SceneRect::new(20, 5, 10, 4);
+    let overlay = OverlayScene::ContextMenu(ContextMenuOverlay {
+        area: overlay_area,
+        items: Vec::new(),
+        selected: 0,
+    });
+    let mut scene = scene_with_overlay(overlay, Vec::new());
+    scene.panes[0].area = SceneRect::new(0, 1, 30, 18);
+    let mut second = scene.panes[0].clone();
+    second.id = PaneId::new("pane-2");
+    second.area = SceneRect::new(30, 1, 30, 18);
+    second.focused = false;
+    scene.panes.push(second);
+
+    let program = compile_cell_program(&scene, &Theme::default());
+    let header = program.paint_scope_at(1, 0).expect("header scope");
+    let first_chrome = program.paint_scope_at(1, 1).expect("first pane chrome");
+    let first_content = program.paint_scope_at(1, 2).expect("first pane content");
+    let second_chrome = program.paint_scope_at(31, 1).expect("second pane chrome");
+    let second_content = program.paint_scope_at(31, 2).expect("second pane content");
+    let status = program.paint_scope_at(1, 19).expect("status scope");
+    let overlay = program.paint_scope_at(20, 5).expect("overlay scope");
+
+    assert_eq!(header.kind, TextPaintScopeKind::Header);
+    assert_eq!(header.clip, scene.header.area);
+    assert_eq!(first_chrome.kind, TextPaintScopeKind::PaneChrome);
+    assert_eq!(first_chrome.clip, scene.panes[0].area);
+    assert_eq!(first_content.kind, TextPaintScopeKind::PaneContent);
+    assert_eq!(first_content.clip, SceneRect::new(1, 2, 28, 16));
+    assert_eq!(second_chrome.kind, TextPaintScopeKind::PaneChrome);
+    assert_eq!(second_chrome.clip, scene.panes[1].area);
+    assert_eq!(second_content.kind, TextPaintScopeKind::PaneContent);
+    assert_eq!(second_content.clip, SceneRect::new(31, 2, 28, 16));
+    assert_eq!(status.kind, TextPaintScopeKind::Status);
+    assert_eq!(status.clip, scene.status.area);
+    assert_eq!(overlay.kind, TextPaintScopeKind::Overlay);
+    assert_eq!(overlay.clip, overlay_area);
+
+    let ids = [
+        header.id,
+        first_chrome.id,
+        first_content.id,
+        second_chrome.id,
+        second_content.id,
+        status.id,
+        overlay.id,
+    ];
+    for (index, id) in ids.iter().enumerate() {
+        assert!(
+            ids[..index].iter().all(|existing| existing != id),
+            "semantic paint regions must not share identity"
+        );
     }
 }
 
@@ -1339,6 +1397,15 @@ fn advanced_text_terminal_graphemes_keep_wide_marks_and_occlude_atomically() {
         ),
         "overlay cannot leave an orphan continuation"
     );
+    assert!(
+        occluded.paint_scope_at(2, 2).is_none(),
+        "removing the covered wide lead also removes its stale paint scope"
+    );
+    let overlay_scope = occluded
+        .paint_scope_at(3, 2)
+        .expect("covering overlay owns the final cell");
+    assert_eq!(overlay_scope.kind, TextPaintScopeKind::Overlay);
+    assert_eq!(overlay_scope.clip, SceneRect::new(3, 2, 1, 1));
 }
 
 #[test]
@@ -1396,4 +1463,42 @@ fn advanced_text_ime_preedit_compiles_underlined_graphemes_and_cursor() {
         program.cell_at(7, 2).is_some_and(|cell| cell.cursor),
         "preedit cursor uses display columns, not scalar count"
     );
+    for x in 4..=7 {
+        let scope = program
+            .paint_scope_at(x, 2)
+            .expect("preedit cells have paint ownership");
+        assert_eq!(scope.kind, TextPaintScopeKind::TextInput);
+        assert_eq!(scope.clip, SceneRect::new(4, 2, 7, 1));
+    }
+}
+
+#[test]
+fn terminal_ime_cursor_replaces_pane_content_scope_with_text_input_scope() {
+    let overlay = OverlayScene::ContextMenu(ContextMenuOverlay {
+        area: SceneRect::new(1, 1, 1, 1),
+        items: Vec::new(),
+        selected: 0,
+    });
+    let mut scene = scene_with_overlay(overlay, Vec::new());
+    scene.overlay = None;
+    scene.text_input = Some(TextInputScene {
+        area: SceneRect::new(10, 5, 4, 1),
+        kind: TextInputKind::Terminal {
+            style: SceneCellStyle::default(),
+        },
+        preedit: Some(PreeditScene {
+            text: "a".to_owned(),
+            cursor: Some(TextRange { start: 1, end: 1 }),
+        }),
+    });
+
+    let program = compile_cell_program(&scene, &Theme::default());
+    for x in [10, 11] {
+        let scope = program
+            .paint_scope_at(x, 5)
+            .expect("terminal preedit and caret retain paint ownership");
+        assert_eq!(scope.kind, TextPaintScopeKind::TextInput);
+        assert_eq!(scope.clip, SceneRect::new(10, 5, 4, 1));
+    }
+    assert!(program.cell_at(11, 5).is_some_and(|cell| cell.cursor));
 }

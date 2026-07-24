@@ -25,12 +25,12 @@ The workstation already has the five constitutional boundaries, one
 channel, renderer-neutral input/effects, scene-owned layout and presentation,
 terminal parity through `CellProgram`, typed Artifact Preview pixels, shared
 grapheme/IME contracts, native input and lifecycle routes, GPU recovery, and
-measurement tooling. The native typography path is now decided: retain
-glyphon/cosmic-text behind a terminal row-run adapter, provision a pinned
-JetBrains Mono default with fail-closed explicit system-family overrides, and
-put native terminal colors under the active scene theme. Native startup now
-completes window and GPU renderer preflight before constructing `FrontendHost`,
-so failed preflight cannot start restore or PTY work.
+measurement tooling. The native typography foundation now retains
+glyphon/cosmic-text behind a terminal row-run adapter, provisions pinned
+JetBrains Mono with fail-closed explicit system-family overrides, and puts
+native terminal colors under the active scene theme. Native startup completes
+font, window, and GPU renderer preflight before constructing `FrontendHost`, so
+failed preflight cannot start restore or PTY work.
 
 The production native shell and renderer now live in the root workspace as
 `mandatum-native` and `mandatum-native-renderer`. The native dependency
@@ -58,30 +58,29 @@ behavior and existing installer/release artifacts are unchanged.
 
 ### 3. De-risk typography — complete; focused decision accepted
 
-The displayed comparison exited through the negative branch. Ghostty's actual
-zero-config face is an embedded JetBrains Mono that Mandatum cannot load from
-the system font database, the native palette cannot currently be configured to
-match Casey's Ghostty colors, and the current one-buffer-per-grapheme adapter
-cannot shape across grapheme/cell boundaries. A Menlo control showed that
-cursor, styles, selection, Unicode fallback, resize, and live 1.0→2.0→1.0
-backing-scale transitions remain functional, but did not erase those
-structural gaps.
+The displayed comparison exited through the negative branch. At that point,
+Ghostty's zero-config embedded JetBrains Mono was unavailable to Mandatum's
+system font database, the native palette could not match Casey's Ghostty
+colors, and the one-buffer-per-grapheme adapter could not shape across cells.
+A Menlo control showed that cursor, styles, selection, Unicode fallback,
+resize, and live 1.0→2.0→1.0 backing-scale transitions were functional, but
+did not erase those structural gaps. Work 4 has since closed them.
 
-### 4. Implement the accepted typography path, then add a bounded shaping cache
+### 4. Implement the accepted typography path — foundation complete; cache next
 
-Vendor the pinned JetBrains Mono faces and license, resolve the primary face
-before host startup, add bounded observable fallback reporting, add
-`Theme::terminal_palette`, and replace the one-buffer-per-grapheme path with the
-accepted glyphon/cosmic-text row-run adapter. Preserve exact run clipping,
-declared cell spans, cursor/selection quads, wide-cell occupancy, and the
-terminal frontend's host-palette escape-hatch behavior. RTL/bidi reordering
-remains on a bounded observable fallback until a renderer-neutral cell/caret
+The pinned JetBrains Mono faces/license, pre-host primary resolution, bounded
+observable fallback reporting, `Theme::terminal_palette`, paint scopes, and
+clipped glyphon/cosmic-text row runs are implemented. The terminal frontend
+keeps host-palette behavior. Cell ownership remains exact for clipping,
+cursor/selection quads, wide cells, and decorations; RTL/bidi reordering takes
+the bounded observable anchored fallback until a renderer-neutral cell/caret
 mapping exists.
 
-Only after that foundation and its displayed corpus are green, memoize the
-accepted shaped-run unit by text, style, font-catalog generation, and metrics;
-bound retained count/bytes, invalidate by font/palette/metrics/scale generation,
-and profile before considering row-level damage tracking.
+The displayed corpus and deterministic foundation checks are green. Next,
+memoize the accepted shaped-run unit by text, style, font-catalog generation,
+and metrics; bound retained count/bytes, invalidate by
+font/palette/metrics/scale generation, and profile before considering row-level
+damage tracking.
 
 ### 5. Make native the default and build feel
 

@@ -162,7 +162,7 @@ impl Compiler {
         }
     }
 
-    fn clipped_rect(&self, area: SceneRect) -> SceneRect {
+    pub(super) fn clipped_rect(&self, area: SceneRect) -> SceneRect {
         let right = area.right().min(self.program.size.width);
         let bottom = area.bottom().min(self.program.size.height);
         if area.x >= right || area.y >= bottom {
@@ -182,6 +182,7 @@ impl Compiler {
         }
         self.remove_cell_span(x, y);
         self.program.cells.insert((y, x), cell);
+        self.program.paint_scopes.insert((y, x), self.active_scope);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -229,6 +230,7 @@ impl Compiler {
                 raster_layer,
             },
         );
+        self.program.paint_scopes.insert((y, x), self.active_scope);
         if width == 2 {
             self.program.cells.insert(
                 (y, x + 1),
@@ -240,6 +242,9 @@ impl Compiler {
                     raster_layer,
                 },
             );
+            self.program
+                .paint_scopes
+                .insert((y, x + 1), self.active_scope);
         }
     }
 
@@ -251,6 +256,7 @@ impl Compiler {
             CellOccupancy::WideContinuation => {
                 if let Some(lead) = x.checked_sub(1) {
                     self.program.cells.remove(&(y, lead));
+                    self.program.paint_scopes.remove(&(y, lead));
                 }
             }
             CellOccupancy::Grapheme(_) => {
@@ -261,10 +267,12 @@ impl Compiler {
                     .is_some_and(|cell| matches!(cell.occupancy, CellOccupancy::WideContinuation))
                 {
                     self.program.cells.remove(&(y, x.saturating_add(1)));
+                    self.program.paint_scopes.remove(&(y, x.saturating_add(1)));
                 }
             }
         }
         self.program.cells.remove(&(y, x));
+        self.program.paint_scopes.remove(&(y, x));
     }
 
     pub(super) fn mark_cursor(&mut self, x: u16, y: u16, style: SceneCellStyle) {
@@ -294,9 +302,15 @@ impl Compiler {
             cursor.cursor = true;
             self.program.cells.insert((y, lead), cursor);
         }
+        self.program
+            .paint_scopes
+            .insert((y, lead), self.active_scope);
         if wide && let Some(cell) = self.program.cells.get_mut(&(y, lead + 1)) {
             cell.cursor = true;
             cell.style = style;
+            self.program
+                .paint_scopes
+                .insert((y, lead + 1), self.active_scope);
         }
     }
 }

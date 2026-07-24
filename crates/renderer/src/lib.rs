@@ -235,6 +235,71 @@ mod tests {
     }
 
     #[test]
+    fn terminal_adapter_keeps_host_reset_and_named_ansi_colors() {
+        let mut theme = Theme::default();
+        theme.terminal_palette.foreground = [1, 2, 3];
+        theme.terminal_palette.background = [4, 5, 6];
+        theme.terminal_palette.ansi = [[7, 8, 9]; 16];
+        theme.header = SceneColor::Ansi(12);
+
+        let mut cells = vec![SceneCell {
+            occupancy: CellOccupancy::Grapheme("D".to_owned()),
+            style: SceneCellStyle::default(),
+        }];
+        for index in 0..16 {
+            cells.push(SceneCell {
+                occupancy: CellOccupancy::Grapheme("A".to_owned()),
+                style: SceneCellStyle {
+                    foreground: SceneColor::Ansi(index),
+                    ..SceneCellStyle::default()
+                },
+            });
+        }
+        let workspace = scene(vec![pane(PaneContent::Terminal(TerminalSurface {
+            rows: vec![cells],
+            ..TerminalSurface::default()
+        }))]);
+        let terminal = draw_with_theme(&workspace, &theme);
+        let buffer = terminal.backend().buffer();
+
+        let default = buffer.cell((1, 2)).unwrap();
+        assert_eq!(default.fg, Color::Reset);
+        assert_eq!(default.bg, Color::Reset);
+        for (index, expected) in [
+            Color::Black,
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::Gray,
+            Color::DarkGray,
+            Color::LightRed,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::LightCyan,
+            Color::White,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                buffer.cell((2 + index as u16, 2)).unwrap().fg,
+                expected,
+                "ANSI {index} must remain delegated to the host terminal"
+            );
+        }
+        assert_eq!(
+            buffer.cell((0, 0)).unwrap().fg,
+            Color::LightBlue,
+            "semantic chrome must also retain named host ANSI output"
+        );
+    }
+
+    #[test]
     fn adapter_translates_the_compiled_cell_program() {
         let terminal_style = SceneCellStyle {
             foreground: SceneColor::Rgb(1, 2, 3),

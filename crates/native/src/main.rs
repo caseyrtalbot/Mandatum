@@ -16,8 +16,8 @@ use input::{
 };
 use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
 use mandatum_native_renderer::{
-    GpuRenderError, GpuRenderOutcome, GpuStartupError, GpuStartupErrorKind, GpuText,
-    NativeTextSettings,
+    DEFAULT_FONT_SIZE, FontRequest, GpuRenderError, GpuRenderOutcome, GpuStartupError,
+    GpuStartupErrorKind, GpuText, ResolvedFontProfile,
 };
 use mandatum_scene::{
     SceneSize, WorkspaceScene,
@@ -38,12 +38,18 @@ use winit::{
 const HEARTBEAT: Duration = Duration::from_millis(250);
 const EVENT_DRAIN_BUDGET: usize = 16;
 
-fn parse_text_settings(
+#[derive(Clone, Debug, PartialEq)]
+struct NativeLaunchOptions {
+    font_request: FontRequest,
+    font_info: bool,
+}
+
+fn parse_launch_options(
     args: impl IntoIterator<Item = String>,
-) -> Result<NativeTextSettings, String> {
-    let defaults = NativeTextSettings::default();
-    let mut family = defaults.family().to_owned();
-    let mut font_size = defaults.font_size();
+) -> Result<NativeLaunchOptions, String> {
+    let mut family = None;
+    let mut font_size = DEFAULT_FONT_SIZE;
+    let mut font_info = false;
     let mut args = args.into_iter();
     while let Some(option) = args.next() {
         match option.as_str() {
@@ -54,7 +60,7 @@ fn parse_text_settings(
                 if value.starts_with("--") {
                     return Err("--font-family requires a value".to_owned());
                 }
-                family = value;
+                family = Some(value);
             }
             "--font-size" => {
                 let value = args
@@ -64,10 +70,40 @@ fn parse_text_settings(
                     .parse::<f32>()
                     .map_err(|_| format!("invalid --font-size value: {value}"))?;
             }
+            "--font-info" => font_info = true,
             _ => return Err(format!("unknown native option: {option}")),
         }
     }
-    NativeTextSettings::new(family, font_size)
+    let font_request = match family {
+        Some(family) => FontRequest::installed(family, font_size),
+        None => FontRequest::BundledDefault { size: font_size },
+    };
+    Ok(NativeLaunchOptions {
+        font_request,
+        font_info,
+    })
+}
+
+#[derive(Debug)]
+enum FontPreflightOutcome<T> {
+    Info(String),
+    Launch(T),
+}
+
+fn launch_after_font_preflight<T>(
+    args: impl IntoIterator<Item = String>,
+    construct_launch: impl FnOnce(Box<ResolvedFontProfile>) -> Result<T, String>,
+) -> Result<FontPreflightOutcome<T>, String> {
+    let options = parse_launch_options(args)?;
+    let profile =
+        ResolvedFontProfile::resolve(options.font_request).map_err(|error| error.to_string())?;
+    if options.font_info {
+        let json = serde_json::to_string(profile.info())
+            .map_err(|error| format!("could not encode --font-info: {error}"))?;
+        return Ok(FontPreflightOutcome::Info(json));
+    }
+
+    construct_launch(Box::new(profile)).map(FontPreflightOutcome::Launch)
 }
 
 #[derive(Debug)]
@@ -142,9 +178,21 @@ fn start_after_preflight<W, G, H, E>(
     Ok((window, gpu, host))
 }
 
+fn apply_renderer_scale_transition<R>(
+    renderer: &mut R,
+    scale_factor: f32,
+    physical_size: (u32, u32),
+    set_scale: impl FnOnce(&mut R, f32) -> Result<(), String>,
+    resize_surface: impl FnOnce(&mut R, u32, u32),
+) -> Result<(), String> {
+    set_scale(renderer, scale_factor)?;
+    resize_surface(renderer, physical_size.0, physical_size.1);
+    Ok(())
+}
+
 struct App {
     app_config: Option<AppConfig>,
-    text_settings: NativeTextSettings,
+    font_profile: Box<ResolvedFontProfile>,
     wake_proxy: EventLoopProxy<UserEvent>,
     host: Option<FrontendHost>,
     window: Option<std::sync::Arc<Window>>,
@@ -168,11 +216,11 @@ impl App {
     fn new(
         proxy: EventLoopProxy<UserEvent>,
         app_config: AppConfig,
-        text_settings: NativeTextSettings,
+        font_profile: Box<ResolvedFontProfile>,
     ) -> Self {
         Self {
             app_config: Some(app_config),
-            text_settings,
+            font_profile,
             wake_proxy: proxy,
             host: None,
             window: None,
@@ -239,8 +287,19 @@ impl App {
         self.scene_presentable = false;
         self.cancel_pointer_gesture();
         self.host_mut().suspend_scene_interaction();
+        let physical_size = self
+            .window
+            .as_ref()
+            .expect("scale changes require a live window")
+            .inner_size();
         if let Some(gpu) = &mut self.gpu
-            && let Err(error) = gpu.set_scale(scale_factor)
+            && let Err(error) = apply_renderer_scale_transition(
+                gpu,
+                scale_factor,
+                (physical_size.width, physical_size.height),
+                GpuText::set_scale,
+                GpuText::resize_surface,
+            )
         {
             self.fail(format!("invalid display scale: {error}"));
             return;
@@ -554,7 +613,7 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let text_settings = self.text_settings.clone();
+        let font_profile = self.font_profile.as_ref().clone();
         let app_config = self
             .app_config
             .take()
@@ -571,7 +630,7 @@ impl ApplicationHandler<UserEvent> for App {
                 window.set_option_as_alt(OptionAsAlt::OnlyRight);
                 Ok(std::sync::Arc::new(window))
             },
-            |window| pollster::block_on(GpuText::new(window.clone(), text_settings)),
+            |window| pollster::block_on(GpuText::new_with_profile(window.clone(), font_profile)),
             || {
                 FrontendHost::new_with_wake_callback(app_config, move || {
                     let _ = wake_proxy.send_event(UserEvent::Wake);
@@ -760,31 +819,44 @@ fn startup_error_kind(kind: GpuStartupErrorKind) -> &'static str {
     }
 }
 
-fn main() {
-    let text_settings = match parse_text_settings(std::env::args().skip(1)) {
-        Ok(settings) => settings,
-        Err(error) => {
-            eprintln!("mandatum-native: {error}");
-            std::process::exit(2);
-        }
-    };
-    let app_config = match AppConfig::from_current_dir() {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("mandatum-native: host initialization failed: {error}");
-            std::process::exit(2);
-        }
-    };
-    let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
-        Ok(event_loop) => event_loop,
-        Err(error) => {
-            eprintln!("mandatum-native: no display: {error}");
-            std::process::exit(2);
-        }
-    };
+struct NativeLaunch {
+    event_loop: EventLoop<UserEvent>,
+    app: App,
+}
+
+fn construct_native_launch(font_profile: Box<ResolvedFontProfile>) -> Result<NativeLaunch, String> {
+    eprintln!(
+        "mandatum-native: font {}",
+        serde_json::to_string(font_profile.info()).expect("FontInfo is JSON serializable")
+    );
+    let app_config = AppConfig::from_current_dir()
+        .map_err(|error| format!("host initialization failed: {error}"))?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .map_err(|error| format!("no display: {error}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let mut app = App::new(proxy, app_config, text_settings);
+    let app = App::new(proxy, app_config, font_profile);
+    Ok(NativeLaunch { event_loop, app })
+}
+
+fn main() {
+    let launch =
+        match launch_after_font_preflight(std::env::args().skip(1), construct_native_launch) {
+            Ok(FontPreflightOutcome::Info(json)) => {
+                println!("{json}");
+                return;
+            }
+            Ok(FontPreflightOutcome::Launch(launch)) => launch,
+            Err(error) => {
+                eprintln!("mandatum-native: {error}");
+                std::process::exit(2);
+            }
+        };
+    let NativeLaunch {
+        event_loop,
+        mut app,
+    } = launch;
     if let Err(error) = event_loop.run_app(&mut app) {
         app.fail(format!("event loop error: {error}"));
     }

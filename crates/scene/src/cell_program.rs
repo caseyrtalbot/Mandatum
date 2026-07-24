@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{SceneCellStyle, SceneSize, Theme, WorkspaceScene};
+use crate::{SceneCellStyle, SceneRect, SceneSize, Theme, WorkspaceScene};
 
 mod overlays;
 mod panes;
@@ -33,6 +33,38 @@ pub enum CellOccupancy {
 pub enum CellSelection {
     Terminal,
     Item,
+}
+
+/// Stable identity for one text-paint region in a compiled frame.
+///
+/// Identity, rather than geometry alone, prevents adjacent panes or semantic
+/// surfaces with coincident clips from becoming one shaping run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TextPaintScopeId(u32);
+
+impl TextPaintScopeId {
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// The semantic class of a renderer-neutral text-paint region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextPaintScopeKind {
+    Header,
+    Status,
+    PaneChrome,
+    PaneContent,
+    Overlay,
+    TextInput,
+}
+
+/// Identity and exact cell-coordinate clip for shaped text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextPaintScope {
+    pub id: TextPaintScopeId,
+    pub kind: TextPaintScopeKind,
+    pub clip: SceneRect,
 }
 
 /// One renderer-neutral cell after scene cursor and selection semantics apply.
@@ -73,6 +105,8 @@ pub struct CellProgram {
     size: SceneSize,
     /// `(row, column)` keeps iteration deterministic in row-major order.
     cells: BTreeMap<(u16, u16), ProgramCell>,
+    /// Paint ownership follows the final topmost cell at each coordinate.
+    paint_scopes: BTreeMap<(u16, u16), TextPaintScope>,
 }
 
 impl CellProgram {
@@ -89,6 +123,25 @@ impl CellProgram {
     pub fn cells(&self) -> impl Iterator<Item = (u16, u16, &ProgramCell)> {
         self.cells.iter().map(|(&(y, x), cell)| (x, y, cell))
     }
+
+    /// Text paint ownership of the final topmost cell at whole-frame
+    /// coordinates.
+    pub fn paint_scope_at(&self, x: u16, y: u16) -> Option<TextPaintScope> {
+        self.cells
+            .contains_key(&(y, x))
+            .then(|| self.paint_scopes.get(&(y, x)).copied())
+            .flatten()
+    }
+
+    /// Final topmost cells and their text-paint ownership in row-major order.
+    pub fn scoped_cells(&self) -> impl Iterator<Item = (u16, u16, &ProgramCell, TextPaintScope)> {
+        self.cells.iter().filter_map(|(&(y, x), cell)| {
+            self.paint_scopes
+                .get(&(y, x))
+                .copied()
+                .map(|scope| (x, y, cell, scope))
+        })
+    }
 }
 
 /// Compile every workspace surface into one renderer-neutral cell program.
@@ -97,13 +150,22 @@ pub fn compile_cell_program(scene: &WorkspaceScene, theme: &Theme) -> CellProgra
         program: CellProgram {
             size: scene.size,
             cells: BTreeMap::new(),
+            paint_scopes: BTreeMap::new(),
         },
+        active_scope: TextPaintScope {
+            id: TextPaintScopeId(0),
+            kind: TextPaintScopeKind::Header,
+            clip: SceneRect::default(),
+        },
+        next_scope_id: 0,
     };
 
+    compiler.begin_text_scope(TextPaintScopeKind::Header, scene.header.area);
     compiler.paint_header(scene, theme);
     for (draw_index, pane) in scene.panes.iter().enumerate() {
         compiler.paint_pane(pane, theme, u16::try_from(draw_index).ok());
     }
+    compiler.begin_text_scope(TextPaintScopeKind::Status, scene.status.area);
     compiler.paint_status(scene, theme);
     if let Some(overlay) = &scene.overlay {
         compiler.paint_overlay(overlay, theme);
@@ -117,4 +179,23 @@ pub fn compile_cell_program(scene: &WorkspaceScene, theme: &Theme) -> CellProgra
 
 struct Compiler {
     program: CellProgram,
+    active_scope: TextPaintScope,
+    next_scope_id: u32,
+}
+
+impl Compiler {
+    fn begin_text_scope(&mut self, kind: TextPaintScopeKind, clip: SceneRect) -> TextPaintScope {
+        let scope = TextPaintScope {
+            id: TextPaintScopeId(self.next_scope_id),
+            kind,
+            clip: self.clipped_rect(clip),
+        };
+        self.next_scope_id = self.next_scope_id.saturating_add(1);
+        self.active_scope = scope;
+        scope
+    }
+
+    fn set_text_scope(&mut self, scope: TextPaintScope) {
+        self.active_scope = scope;
+    }
 }

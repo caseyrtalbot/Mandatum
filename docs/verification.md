@@ -300,6 +300,33 @@ developer unfamiliar with the current implementation can identify:
   sources. No implementation or rendered-behavior change is claimed by this
   decision-only slice. The first synchronized `./ci/gate.sh` run reported
   `GATE GREEN`.
+- **2026-07-24:** the accepted typography foundation shipped as one capability
+  family. Native now resolves the four bundled JetBrains Mono v2.304 static
+  faces before application launch, rejects generic/incomplete/variable-only
+  installed families, prints stable headless `--font-info` JSON, preserves
+  selected face IDs across device recreation, and emits bounded deduplicated
+  fallback/missing-glyph diagnostics. `Theme::terminal_palette` reloads partial
+  foreground/background/ANSI overrides; native materializes all 18 palette
+  classes and semantic chrome while the terminal adapter still emits host
+  `Reset` and named ANSI colors. The scene compiler assigns paint scopes and
+  clips; the native adapter shapes checked same-style row runs, admits a real
+  JetBrains Mono multicell ligature, and takes bounded observable split/anchor
+  fallback for unrepresentable or visually reordered runs. Focused tests passed
+  16 product-shell, 47 default-renderer, 47 fault-feature renderer, 31 terminal
+  renderer, 39 scene unit plus 16 scene integration, 285 app, 23 lab-shell, and
+  27 real-host checks; warnings-denied Clippy and the native boundary scan
+  passed. The real production shell displayed the shared corpus with bundled
+  JetBrains Mono 13: ASCII, ligature sequences, fallback scripts, CJK,
+  combining text, emoji, normal/bold/dim/italic/underline/inverse combinations,
+  ANSI colors, prompt cursor, header, pane chrome, and fallback diagnostics
+  remained visible. The first displayed scale-2 move exposed stale physical
+  surface dimensions when no separate resize event arrived; the production
+  scale seam now refreshes the surface from the live window, its regression is
+  green, and the complete corpus remained coherent through the repeated
+  1.0→2.0→1.0 run. The excluded lab lockfile was refreshed for the renderer's
+  direct `ttf-parser` edge, after which `./ci/native-frontend.sh` passed. With
+  source, active docs, and the continuation handoff synchronized,
+  `./ci/gate.sh` reported `GATE GREEN`.
 
 ## Completion Rule
 

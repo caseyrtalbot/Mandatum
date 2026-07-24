@@ -108,17 +108,21 @@ and has no terminal-engine dependency (banned by the L1 gate).
 ### `crates/native-renderer`
 
 `mandatum-native-renderer`: scene-only wgpu/glyphon presentation. It owns GPU
-surface/device recovery, text and raster resource bounds, and frame
-preparation. Its only internal workspace dependency is `mandatum-scene`;
-synthetic fault injection is feature-gated for the excluded lab.
+surface/device recovery, bundled/static font provisioning, bounded fallback
+diagnostics, terminal-palette materialization, clipped row-run shaping, text
+and raster resource bounds, and frame preparation. Vendored JetBrains Mono
+faces, OFL, and provenance live under `assets/fonts/`. Its only internal
+workspace dependency is `mandatum-scene`; synthetic fault injection is
+feature-gated for the excluded lab.
 
 ### `crates/native`
 
 `mandatum-native`: the production winit shell over `FrontendHost`. It owns GPU
 preflight ordering, native input/IME/pointer/clipboard translation, strict
-font-family/font-size options, bounded event draining, redraw scheduling,
-renderer recovery, and clean shutdown. Its internal dependencies are frozen to
-`mandatum-app`, `mandatum-scene`, and `mandatum-native-renderer`.
+font-family/font-size options plus headless `--font-info`, scale/surface
+coordination, bounded event draining, redraw scheduling, renderer recovery,
+and clean shutdown. Its internal dependencies are frozen to `mandatum-app`,
+`mandatum-scene`, and `mandatum-native-renderer`.
 
 ### `crates/app`
 

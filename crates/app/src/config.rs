@@ -308,6 +308,15 @@ fn apply_theme(config: &mut LoadedConfig, mut table: toml::Table, label: &str) {
         }
     }
 
+    if let Some(value) = table.remove("terminal") {
+        match value {
+            toml::Value::Table(terminal) => apply_terminal_palette(config, terminal, label),
+            _ => config
+                .warnings
+                .push(format!("{label}: [theme.terminal] must be a table")),
+        }
+    }
+
     for (key, value) in table {
         if theme_slot(&mut config.theme, &key).is_none() {
             config
@@ -330,6 +339,56 @@ fn apply_theme(config: &mut LoadedConfig, mut table: toml::Table, label: &str) {
                 .push(format!("{label}: {target}: {problem}")),
         }
     }
+}
+
+fn apply_terminal_palette(config: &mut LoadedConfig, table: toml::Table, label: &str) {
+    for (key, value) in table {
+        if terminal_palette_slot(&mut config.theme, &key).is_none() {
+            config
+                .warnings
+                .push(format!("{label}: unknown key 'theme.terminal.{key}'"));
+            continue;
+        }
+        let target = format!("theme.terminal.{key}");
+        let Some(text) = expect_string(config, &target, value, label) else {
+            continue;
+        };
+        match parse_direct_rgb(&text) {
+            Ok(rgb) => {
+                if let Some(slot) = terminal_palette_slot(&mut config.theme, &key) {
+                    *slot = rgb;
+                }
+            }
+            Err(problem) => config
+                .warnings
+                .push(format!("{label}: {target}: {problem}")),
+        }
+    }
+}
+
+fn terminal_palette_slot<'a>(theme: &'a mut Theme, key: &str) -> Option<&'a mut [u8; 3]> {
+    let palette = &mut theme.terminal_palette;
+    Some(match key {
+        "foreground" => &mut palette.foreground,
+        "background" => &mut palette.background,
+        "black" => &mut palette.ansi[0],
+        "red" => &mut palette.ansi[1],
+        "green" => &mut palette.ansi[2],
+        "yellow" => &mut palette.ansi[3],
+        "blue" => &mut palette.ansi[4],
+        "magenta" => &mut palette.ansi[5],
+        "cyan" => &mut palette.ansi[6],
+        "gray" | "grey" => &mut palette.ansi[7],
+        "dark-gray" | "dark-grey" => &mut palette.ansi[8],
+        "bright-red" => &mut palette.ansi[9],
+        "bright-green" => &mut palette.ansi[10],
+        "bright-yellow" => &mut palette.ansi[11],
+        "bright-blue" => &mut palette.ansi[12],
+        "bright-magenta" => &mut palette.ansi[13],
+        "bright-cyan" => &mut palette.ansi[14],
+        "white" => &mut palette.ansi[15],
+        _ => return None,
+    })
 }
 
 fn theme_slot<'a>(theme: &'a mut Theme, key: &str) -> Option<&'a mut SceneColor> {
@@ -512,6 +571,15 @@ fn parse_color(text: &str) -> Result<SceneColor, String> {
     Ok(SceneColor::Ansi(index))
 }
 
+fn parse_direct_rgb(text: &str) -> Result<[u8; 3], String> {
+    match parse_color(text)? {
+        SceneColor::Rgb(red, green, blue) => Ok([red, green, blue]),
+        SceneColor::Default | SceneColor::Ansi(_) | SceneColor::Indexed(_) => Err(format!(
+            "'{text}' is recursive; terminal palette values must be direct #rrggbb colors"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -600,6 +668,12 @@ focus_title = "#ff8800"
 overlay_background = "#202020"
 attention = "bright-yellow"
 
+[theme.terminal]
+foreground = "#010203"
+background = "#040506"
+red = "#070809"
+bright-blue = "#0a0b0c"
+
 [ui]
 reduced_motion = true
 debug_status = true
@@ -646,6 +720,10 @@ model = "claude-opus-4-6"
             SceneColor::Rgb(0x20, 0x20, 0x20)
         );
         assert_eq!(config.theme.attention, SceneColor::Ansi(11));
+        assert_eq!(config.theme.terminal_palette.foreground, [1, 2, 3]);
+        assert_eq!(config.theme.terminal_palette.background, [4, 5, 6]);
+        assert_eq!(config.theme.terminal_palette.ansi[1], [7, 8, 9]);
+        assert_eq!(config.theme.terminal_palette.ansi[12], [10, 11, 12]);
         assert!(config.reduced_motion);
         assert!(config.debug_status);
         assert_eq!(config.shell_program.as_deref(), Some("/bin/zsh"));
@@ -666,12 +744,20 @@ model = "claude-opus-4-6"
 
     #[test]
     fn legacy_serialized_theme_shape_migrates_to_the_new_roles() {
-        let mut legacy = serde_json::to_value(Theme::default()).unwrap();
+        let theme = Theme::default();
+        let serialized = serde_json::to_value(&theme).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Theme>(serialized.clone()).unwrap(),
+            theme
+        );
+
+        let mut legacy = serialized;
         let object = legacy.as_object_mut().unwrap();
         let focus = object.remove("focus_title").unwrap();
         object.insert("focus_border".to_owned(), focus);
         object.remove("overlay_foreground");
         object.remove("overlay_background");
+        object.remove("terminal_palette");
 
         let migrated: Theme = serde_json::from_value(legacy).unwrap();
         assert_eq!(migrated, Theme::default());
@@ -694,6 +780,142 @@ model = "claude-opus-4-6"
         // Settings the project file does not touch keep the user value.
         assert!(config.reduced_motion);
         assert!(config.warnings.is_empty());
+    }
+
+    #[test]
+    fn terminal_palette_overrides_are_partial_and_layer_user_then_project() {
+        let dir = TestConfigDir::new();
+        let user = dir.write(
+            "user.toml",
+            r##"
+[theme]
+name = "mandatum-light"
+
+[theme.terminal]
+foreground = "#010203"
+background = "#040506"
+red = "#070809"
+"##,
+        );
+        let project = dir.write(
+            "project.toml",
+            r##"
+[theme.terminal]
+background = "#101112"
+bright-cyan = "#131415"
+"##,
+        );
+
+        let config = load_config(Some(&user), &project);
+
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.theme.name, "mandatum-light");
+        assert_eq!(config.theme.terminal_palette.foreground, [1, 2, 3]);
+        assert_eq!(config.theme.terminal_palette.background, [16, 17, 18]);
+        assert_eq!(config.theme.terminal_palette.ansi[1], [7, 8, 9]);
+        assert_eq!(config.theme.terminal_palette.ansi[14], [19, 20, 21]);
+        assert_eq!(
+            config.theme.terminal_palette.ansi[2],
+            Theme::builtin("mandatum-light")
+                .unwrap()
+                .terminal_palette
+                .ansi[2]
+        );
+    }
+
+    #[test]
+    fn terminal_palette_names_cover_all_sixteen_ansi_slots() {
+        let mut theme = Theme::default();
+        for (index, name) in [
+            "black",
+            "red",
+            "green",
+            "yellow",
+            "blue",
+            "magenta",
+            "cyan",
+            "gray",
+            "dark-gray",
+            "bright-red",
+            "bright-green",
+            "bright-yellow",
+            "bright-blue",
+            "bright-magenta",
+            "bright-cyan",
+            "white",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            *terminal_palette_slot(&mut theme, name).unwrap() = [index as u8; 3];
+        }
+
+        for (index, rgb) in theme.terminal_palette.ansi.into_iter().enumerate() {
+            assert_eq!(rgb, [index as u8; 3]);
+        }
+    }
+
+    #[test]
+    fn terminal_palette_rejects_recursive_invalid_and_unknown_values() {
+        let dir = TestConfigDir::new();
+        let user = dir.write(
+            "user.toml",
+            r##"
+[theme.terminal]
+foreground = "default"
+background = "red"
+red = "#12345"
+chartreuse = "#010203"
+bright-blue = 12
+"##,
+        );
+
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+        let warnings = config.warnings.join("\n");
+
+        assert!(
+            warnings.contains("theme.terminal.foreground")
+                && warnings.contains("'default' is recursive"),
+            "warnings: {warnings}"
+        );
+        assert!(
+            warnings.contains("theme.terminal.background")
+                && warnings.contains("'red' is recursive"),
+            "warnings: {warnings}"
+        );
+        assert!(
+            warnings.contains("theme.terminal.red") && warnings.contains("#12345"),
+            "warnings: {warnings}"
+        );
+        assert!(
+            warnings.contains("unknown key 'theme.terminal.chartreuse'"),
+            "warnings: {warnings}"
+        );
+        assert!(
+            warnings.contains("theme.terminal.bright-blue must be a string"),
+            "warnings: {warnings}"
+        );
+        assert_eq!(
+            config.theme.terminal_palette,
+            Theme::default().terminal_palette
+        );
+    }
+
+    #[test]
+    fn terminal_palette_section_must_be_a_table() {
+        let dir = TestConfigDir::new();
+        let user = dir.write("user.toml", "[theme]\nterminal = \"#010203\"\n");
+
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+
+        assert_eq!(
+            config.warnings,
+            vec!["user config: [theme.terminal] must be a table"]
+        );
+        assert_eq!(
+            config.theme.terminal_palette,
+            Theme::default().terminal_palette
+        );
     }
 
     #[test]

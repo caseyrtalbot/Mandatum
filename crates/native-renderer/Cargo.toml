@@ -12,5 +12,8 @@ fault-injection = []
 [dependencies]
 glyphon.workspace = true
 mandatum-scene.workspace = true
+serde.workspace = true
+sys-locale.workspace = true
+ttf-parser.workspace = true
 wgpu.workspace = true
 winit.workspace = true
