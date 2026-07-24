@@ -181,9 +181,9 @@ Own rendering and platform input:
 - terminal frontend (`mandatum-renderer`: the ratatui adapter over
   `mandatum-scene`; computes no layout, no direct terminal-engine
   dependency; maintained for SSH, headless use, recovery, and escape-hatch use)
-- native/GPU product frontend (currently `spikes/frontend-wgpu` until workspace
-  promotion): a working winit shell over the real `FrontendHost`, with a
-  scene-only GPU renderer and native visual ownership
+- native/GPU product frontend (`mandatum-native` in `crates/native`): a winit
+  shell over the real `FrontendHost`, with scene-only GPU paint in
+  `mandatum-native-renderer`
 
 Frontend adapters should draw a scene and emit input/hit-test events. They do
 not own product behavior.
@@ -298,11 +298,11 @@ The native implementation already covers layout/composition, content/style,
 input/lifecycle, Artifact Preview, advanced text/IME, typed surface/device
 recovery, explicit failure outcomes, bounded event-loop work, resize/scale
 stress, and regression measurement behind the same `FrontendHost` and
-`WorkspaceScene` boundaries. Its source still lives under `spikes/` until the
-signed promotion change moves it into a production workspace package. Startup
-reorder, promotion, typography validation, shaping-cache work, and native
-default selection are the forward path; the former Phase 7/8 admission and
-rollout policy is retired.
+`WorkspaceScene` boundaries. Its product source now lives in the workspace;
+the separate `spikes/frontend-wgpu` lab retains measurement and fault tooling
+and is not a second product runtime. Typography validation, shaping-cache work,
+and native default selection are the forward path; the former Phase 7/8
+admission and rollout policy is retired.
 
 ### `workflows`
 

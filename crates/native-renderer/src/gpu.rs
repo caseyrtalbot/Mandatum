@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -153,6 +153,7 @@ pub enum GpuRenderOutcome {
     SurfaceReconfigured(GpuSurfaceRecovery),
 }
 
+#[cfg(feature = "fault-injection")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuFaultInjection {
     SurfaceOutdated,
@@ -161,6 +162,7 @@ pub enum GpuFaultInjection {
     OutOfMemory,
 }
 
+#[cfg(feature = "fault-injection")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuFaultInjectionResult {
     SurfaceReconfigured(GpuSurfaceRecovery),
@@ -207,6 +209,7 @@ pub enum GpuRenderError {
     TextRender {
         message: String,
     },
+    #[cfg(feature = "fault-injection")]
     FaultInjection {
         message: String,
     },
@@ -228,6 +231,7 @@ impl std::fmt::Display for GpuRenderError {
             }
             Self::TextAtlasFull => f.write_str("GPU text atlas is full"),
             Self::TextRender { message } => write!(f, "GPU text render failed: {message}"),
+            #[cfg(feature = "fault-injection")]
             Self::FaultInjection { message } => {
                 write!(f, "GPU fault injection failed: {message}")
             }
@@ -1006,6 +1010,7 @@ fn surface_acquire_directive(signal: SurfaceAcquireSignal) -> SurfaceAcquireDire
     }
 }
 
+#[cfg(feature = "fault-injection")]
 fn injected_surface_recovery(injection: GpuFaultInjection) -> Option<GpuSurfaceRecovery> {
     match injection {
         GpuFaultInjection::SurfaceOutdated => Some(GpuSurfaceRecovery::Outdated),
@@ -1039,6 +1044,7 @@ fn record_gpu_fault(slot: &GpuFaultSlot, generation: u64, fault: GpuRenderError)
     }
 }
 
+#[cfg(any(test, feature = "fault-injection"))]
 fn has_gpu_fault(slot: &GpuFaultSlot, generation: u64) -> bool {
     let state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     state.active_device_generation == generation && state.pending.is_some()
@@ -1164,7 +1170,7 @@ impl GpuText {
         let adapter_metadata = adapter_metadata(adapter.get_info());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("mandatum-spike-device"),
+                label: Some("mandatum-native-device"),
                 ..Default::default()
             })
             .await
@@ -1520,8 +1526,9 @@ impl GpuText {
         }
     }
 
-    /// Drive the excluded frontend's displayed fault matrix through the same
-    /// renderer paths used by real surface and device failures.
+    /// Drive the lab harness's fault matrix through the same renderer paths
+    /// used by real surface and device failures.
+    #[cfg(feature = "fault-injection")]
     pub fn inject_fault(
         &mut self,
         injection: GpuFaultInjection,
@@ -1546,7 +1553,7 @@ impl GpuText {
                 self.device.destroy();
                 let _ = self.device.poll(wgpu::PollType::Wait {
                     submission_index: None,
-                    timeout: Some(Duration::from_secs(1)),
+                    timeout: Some(std::time::Duration::from_secs(1)),
                 });
                 if !has_gpu_fault(&self.device_fault, self.device_generation) {
                     return Err(GpuRenderError::FaultInjection {
@@ -2313,22 +2320,25 @@ mod tests {
             surface_acquire_directive(SurfaceAcquireSignal::Validation),
             SurfaceAcquireDirective::FailValidation
         );
-        assert_eq!(
-            injected_surface_recovery(GpuFaultInjection::SurfaceOutdated),
-            Some(GpuSurfaceRecovery::Outdated)
-        );
-        assert_eq!(
-            injected_surface_recovery(GpuFaultInjection::SurfaceLost),
-            Some(GpuSurfaceRecovery::Lost)
-        );
-        assert_eq!(
-            injected_surface_recovery(GpuFaultInjection::DeviceLost),
-            None
-        );
-        assert_eq!(
-            injected_surface_recovery(GpuFaultInjection::OutOfMemory),
-            None
-        );
+        #[cfg(feature = "fault-injection")]
+        {
+            assert_eq!(
+                injected_surface_recovery(GpuFaultInjection::SurfaceOutdated),
+                Some(GpuSurfaceRecovery::Outdated)
+            );
+            assert_eq!(
+                injected_surface_recovery(GpuFaultInjection::SurfaceLost),
+                Some(GpuSurfaceRecovery::Lost)
+            );
+            assert_eq!(
+                injected_surface_recovery(GpuFaultInjection::DeviceLost),
+                None
+            );
+            assert_eq!(
+                injected_surface_recovery(GpuFaultInjection::OutOfMemory),
+                None
+            );
+        }
     }
 
     #[test]

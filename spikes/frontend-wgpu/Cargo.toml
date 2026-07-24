@@ -1,18 +1,15 @@
 [package]
-name = "mandatum-frontend-wgpu-spike"
+name = "mandatum-native-lab"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 publish = false
-# The spike is the default binary; tui_probe is the external ratatui probe.
-default-run = "mandatum-frontend-wgpu-spike"
-
-[workspace]
-members = ["gpu-renderer"]
-resolver = "3"
+# The lab harness is the default binary; tui_probe is the external terminal
+# latency probe. Product shell and renderer code live in the root workspace.
+default-run = "mandatum-native-lab"
 
 [[bin]]
-name = "mandatum-frontend-wgpu-spike"
+name = "mandatum-native-lab"
 path = "src/main.rs"
 
 # The native shell consumes the real shared host. mandatum-pty remains a
@@ -21,7 +18,7 @@ path = "src/main.rs"
 mandatum-app = { path = "../../crates/app" }
 mandatum-pty = { path = "../../crates/pty" }
 mandatum-scene = { path = "../../crates/scene" }
-mandatum-gpu-renderer-spike = { path = "gpu-renderer" }
+mandatum-native-renderer = { path = "../../crates/native-renderer", features = ["fault-injection"] }
 
 winit = "0.30"
 arboard = "3.6"

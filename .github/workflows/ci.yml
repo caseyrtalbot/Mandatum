@@ -10,7 +10,7 @@ env:
 
 jobs:
   gate:
-    name: gate (fmt + clippy + build + test + conformance + doc-trace)
+    name: gate (workspace + native + conformance + doc-trace)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

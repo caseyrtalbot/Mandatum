@@ -28,9 +28,9 @@ It owns the window, platform events, GPU lifecycle, font/scale state, glyph and
 texture caches, and presentation scheduling. It receives product state only
 through `FrontendHost` and paints only `WorkspaceScene`.
 
-The implementation currently remains at `spikes/frontend-wgpu` until the
-promotion work moves it into the root workspace. That location is current code
-state, not a product decision.
+The production shell is `crates/native` (`mandatum-native`) and the scene-only
+GPU renderer is `crates/native-renderer`. Measurement, stress, fault, and
+terminal probes remain separate under `spikes/frontend-wgpu`.
 
 ### Terminal frontend — maintained tool
 
@@ -107,7 +107,8 @@ The ordered work is:
 1. Reorder startup so GPU preflight succeeds before `FrontendHost` exists
    — complete.
 2. Move the native frontend into the workspace, narrow the GPU dependency
-   allowlist, and make the authoritative gate run the native checks in CI.
+   allowlist, and make the authoritative gate run the native checks in CI
+   — complete.
 3. Compare text quality directly with Ghostty.
 4. Add a bounded generation-aware shaping cache and profile it.
 5. Make native Casey's default and build the feel roadmap through daily use.
@@ -127,12 +128,7 @@ accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
 
 ## Current Implementation Drift
 
-Until promotion lands:
-
-- native still lives under `spikes/frontend-wgpu`;
-- `ci/gpu-spike.sh` retains its historical name and is not ordinary CI;
-- `ci/conformance.sh` still encodes the retired admission branch;
-- native is not yet the default launcher.
-
-These are explicit next-work items. Do not reinterpret them as reasons to return
-to the retired product posture.
+Native is not yet the default launcher. Typography has not yet been compared
+directly with Ghostty, and the renderer has no bounded shaping cache. These are
+the ordered next-work items, not reasons to return to the retired product
+posture.

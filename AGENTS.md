@@ -17,21 +17,19 @@ Linux-native, accessibility/theme parity, and rollout ceremony are not adoption
 gates. Keep the probes as regression measurements; do not use them to resist
 native polish.
 
-Until the promotion change lands, native source still lives under
-`spikes/frontend-wgpu`, `ci/gpu-spike.sh` retains its historical name, and
-`ci/conformance.sh` retains the old dependency policy. Those are named
-implementation gaps, not current product posture. The authoritative ordered
-work is `docs/native-gpu-implementation-plan.md`.
+The production native shell and scene-only renderer live in
+`crates/native` and `crates/native-renderer`. Measurement, stress, fault, and
+terminal probes remain in `spikes/frontend-wgpu` as lab tooling. The
+authoritative ordered work is `docs/native-gpu-implementation-plan.md`.
 
 ## The gate
 
 `./ci/gate.sh` is the single merge gate: fmt, clippy `-D warnings`, build,
-test, `ci/conformance.sh`, `ci/doc-trace.sh`. GitHub Actions runs exactly this
-script, so local and remote CI cannot drift. Native promotion must add the
-renamed native gate as a stage inside `ci/gate.sh`, not create a second CI
-authority. Red means the change does not land. Run it before claiming any
-change complete; commits go directly to main, gated by a green run (solo repo,
-see docs/decisions.md).
+test, `ci/native-frontend.sh`, `ci/conformance.sh`, and `ci/doc-trace.sh`.
+GitHub Actions runs exactly this script, so local and remote CI cannot drift.
+Red means the change does not land. Run it before claiming any change
+complete; commits go directly to main, gated by a green run (solo repo, see
+docs/decisions.md).
 
 ## The Constitution
 
@@ -81,10 +79,12 @@ loses its documentation or its gate.
   unified event channel, identity checks, replacement, reconciliation, and
   restore lifecycle facts. `AppState` folds accepted typed effects into core
   intent, the timeline, status, and presentation state.
-- Experiments live in `spikes/`, outside the Cargo workspace. The current
-  native frontend remains there only until the signed promotion work moves it
-  into a production workspace package. Until then, run `./ci/gpu-spike.sh`
-  after native or scene-contract changes.
+- `mandatum-native` owns the product winit shell and reaches state only through
+  `FrontendHost`; `mandatum-native-renderer` owns scene-only GPU paint.
+  GPU/window dependencies are allowed only in those packages. Experiments,
+  measurement, stress, and fault tools live in `spikes/`, outside the Cargo
+  workspace. Run `./ci/native-frontend.sh` after native or scene-contract
+  changes; `./ci/gate.sh` invokes it.
 
 ## Test conventions
 

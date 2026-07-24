@@ -4,6 +4,8 @@ members = [
   "crates/app",
   "crates/commands",
   "crates/core",
+  "crates/native",
+  "crates/native-renderer",
   "crates/pty",
   "crates/renderer",
   "crates/scene",
@@ -15,16 +17,15 @@ default-members = [
   "crates/app",
   "crates/commands",
   "crates/core",
+  "crates/native",
+  "crates/native-renderer",
   "crates/pty",
   "crates/renderer",
   "crates/scene",
   "crates/terminal-vt",
   "crates/workflows",
 ]
-# Frontend spikes live outside the workspace: they may depend on engine
-# crates, but their heavy frontend dependency trees never join the product
-# build or merge gate. The isolated GPU manifest has an opt-in maintenance
-# check for scene-contract changes. See docs/frontend-platform.md.
+# Frontend probes and stress/fault tooling remain outside the workspace.
 exclude = ["spikes/frontend-wgpu"]
 resolver = "3"
 
@@ -35,9 +36,11 @@ version = "0.2.0"
 
 [workspace.dependencies]
 crossterm = "0.28"
+glyphon = "0.12"
 mandatum-agent-runtime = { path = "crates/agent-runtime" }
 mandatum-core = { path = "crates/core" }
 mandatum-commands = { path = "crates/commands" }
+mandatum-native-renderer = { path = "crates/native-renderer" }
 mandatum-pty = { path = "crates/pty" }
 mandatum-renderer = { path = "crates/renderer" }
 mandatum-scene = { path = "crates/scene" }
@@ -49,9 +52,12 @@ rustix = { version = "0.38", features = ["fs"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 png = "0.18"
+pollster = "0.4"
 # preserve_order keeps config-file key order so "later binding wins"
 # means document order, not alphabetical order.
 toml = { version = "0.8", features = ["preserve_order"] }
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
 vte = "0.15"
+wgpu = "30"
+winit = "0.30"

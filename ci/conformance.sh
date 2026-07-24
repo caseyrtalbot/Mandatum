@@ -9,12 +9,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo metadata --format-version 1 --locked --all-features >/tmp/mandatum-metadata.json
+mandatum_metadata_path=$(mktemp "${TMPDIR:-/tmp}/mandatum-conformance.XXXXXX.json")
+trap 'rm -f "$mandatum_metadata_path"' EXIT
+cargo metadata --format-version 1 --locked --all-features >"$mandatum_metadata_path"
+export MANDATUM_CONFORMANCE_METADATA="$mandatum_metadata_path"
 
 python3 - <<'PY'
-import json, re, sys
+import json, os, re, sys
 
-meta = json.load(open("/tmp/mandatum-metadata.json"))
+with open(os.environ["MANDATUM_CONFORMANCE_METADATA"]) as metadata_file:
+    meta = json.load(metadata_file)
 packages = {p["id"]: p for p in meta["packages"]}
 by_name = {p["name"]: p for p in meta["packages"]}
 resolve = {n["id"]: n for n in meta["resolve"]["nodes"]}
@@ -71,34 +75,60 @@ for name in ENGINE_SIDE:
             f"[L1] {name} transitively depends on forbidden crates: {sorted(hit)}"
         )
 
-# ---- fail-closed production GPU admission --------------------------------
-# A GPU frontend remains an isolated spike until a production-admission
-# decision is backed by either a typed pixel-native scene surface plus adapter
-# tests, or a sub-20 ms key-to-present product target plus symmetric end-to-end
-# evidence. Selecting a product-trigger branch alone is not admission.
-# Windowing alone is not GPU admission, so winit is deliberately absent. This
-# known-stack list is a tripwire, not a claim to enumerate every GPU library.
-GPU_FRONTEND_DEPS = {
-    "wgpu", "glyphon", "vello", "skia-safe", "metal", "ash", "glow", "glium",
+# ---- production native frontend dependency boundary ----------------------
+# GPU/window dependencies belong only to the two production native frontend
+# packages. Every other workspace member is checked fail-closed against this
+# known-stack tripwire over its transitive normal dependency closure.
+NATIVE_FRONTEND_PACKAGES = {"mandatum-native", "mandatum-native-renderer"}
+GPU_WINDOW_DEPS = {
+    "winit", "wgpu", "glyphon", "cosmic-text", "raw-window-handle",
+    "vello", "skia-safe", "metal", "ash", "glow", "glium",
     "vulkano", "vulkano-shaders",
 }
-for pkg_id in meta["workspace_members"]:
-    pkg = packages[pkg_id]
-    closure = transitive_normal_deps(pkg_id)
-    hit = closure & GPU_FRONTEND_DEPS
-    if hit:
+
+workspace_names = {packages[pkg_id]["name"] for pkg_id in meta["workspace_members"]}
+missing_native_packages = NATIVE_FRONTEND_PACKAGES - workspace_names
+if missing_native_packages:
+    failures.append(
+        "[NATIVE-DEPENDENCY-BOUNDARY] production native package allowlist "
+        f"references missing workspace members: {sorted(missing_native_packages)}"
+    )
+
+closure_by_name = {
+    packages[pkg_id]["name"]: transitive_normal_deps(pkg_id)
+    for pkg_id in meta["workspace_members"]
+}
+
+def native_boundary_failures(closures):
+    found = []
+    for name, closure in sorted(closures.items()):
+        if name in NATIVE_FRONTEND_PACKAGES:
+            continue
+        hit = closure & GPU_WINDOW_DEPS
+        if hit:
+            found.append(
+                f"[NATIVE-DEPENDENCY-BOUNDARY] {name} transitively depends on "
+                f"native-only GPU/window crates: {sorted(hit)}. Only "
+                f"{sorted(NATIVE_FRONTEND_PACKAGES)} may reach this stack."
+            )
+    return found
+
+failures.extend(native_boundary_failures(closure_by_name))
+
+# Executable negative tests: model a forbidden wgpu edge in every non-native
+# production crate and prove the boundary checker rejects each one.
+for name in sorted(workspace_names - NATIVE_FRONTEND_PACKAGES):
+    modeled = {pkg: set(closure) for pkg, closure in closure_by_name.items()}
+    modeled[name].add("wgpu")
+    expected = f"[NATIVE-DEPENDENCY-BOUNDARY] {name} transitively depends"
+    if not any(expected in failure for failure in native_boundary_failures(modeled)):
         failures.append(
-            f"[GPU-ADMISSION-GATE] {pkg['name']} transitively depends on GPU "
-            f"frontend crates: {sorted(hit)}. Keep listed GPU dependencies spike-only "
-            "until a production-admission decision proves a typed pixel-native "
-            "scene surface with executable adapter tests, or a sub-20 ms "
-            "key-to-present product target with symmetric end-to-end evidence."
+            "[NATIVE-DEPENDENCY-BOUNDARY] negative self-test failed to reject "
+            f"a modeled {name} -> wgpu edge"
         )
 
-# An excluded manifest is intentionally absent from workspace metadata. Keep
-# the release/install surfaces on an explicit product-artifact allowlist so an
-# excluded GPU spike cannot bypass admission by being built and packaged
-# directly.
+# Keep the legacy terminal release/install surfaces on their existing explicit
+# artifact allowlists. Native promotion does not add a native binary to them.
 ALLOWED_RELEASE_TARGETS = {
     ("mandatum-app", "mandatum"),
     ("mandatum-agent-runtime", "mandatum-approval-bridge"),
@@ -113,8 +143,8 @@ for forbidden_ref in ("spikes/frontend-wgpu", "frontend-wgpu", "mandatum-fronten
     for path, source in ((release_path, release_text), (install_path, install_text)):
         if forbidden_ref in source:
             failures.append(
-                f"[GPU-ADMISSION-GATE] shipping surface {path} references excluded "
-                f"GPU spike token {forbidden_ref!r}"
+                f"[NATIVE-DEPENDENCY-BOUNDARY] legacy shipping surface {path} "
+                f"references lab-only token {forbidden_ref!r}"
             )
 
 release_targets = set()
@@ -125,7 +155,8 @@ for line in release_text.splitlines():
     binary = re.search(r"(?:^|\s)--bin\s+([A-Za-z0-9_-]+)", line)
     if "--manifest-path" in line or "--workspace" in line or not package or not binary:
         failures.append(
-            f"[GPU-ADMISSION-GATE] release build is not an allowlisted package/bin pair: "
+            "[NATIVE-DEPENDENCY-BOUNDARY] release build is not an allowlisted "
+            "package/bin pair: "
             f"{line.strip()}"
         )
         continue
@@ -133,7 +164,8 @@ for line in release_text.splitlines():
 
 if release_targets != ALLOWED_RELEASE_TARGETS:
     failures.append(
-        f"[GPU-ADMISSION-GATE] release targets changed: {sorted(release_targets)} "
+        "[NATIVE-DEPENDENCY-BOUNDARY] release targets changed: "
+        f"{sorted(release_targets)} "
         f"(allowed: {sorted(ALLOWED_RELEASE_TARGETS)})"
     )
 
@@ -145,18 +177,22 @@ release_members = printf_member_set(release_text, "expected")
 installer_members = printf_member_set(install_text, "expected_members")
 if release_members != ALLOWED_RELEASE_MEMBERS:
     failures.append(
-        f"[GPU-ADMISSION-GATE] release archive members changed: "
+        f"[NATIVE-DEPENDENCY-BOUNDARY] release archive members changed: "
         f"{sorted(release_members)} (allowed: {sorted(ALLOWED_RELEASE_MEMBERS)})"
     )
 if installer_members != ALLOWED_RELEASE_MEMBERS:
     failures.append(
-        f"[GPU-ADMISSION-GATE] installer archive members changed: "
+        f"[NATIVE-DEPENDENCY-BOUNDARY] installer archive members changed: "
         f"{sorted(installer_members)} (allowed: {sorted(ALLOWED_RELEASE_MEMBERS)})"
     )
 if 'test "$actual" = "$expected"' not in release_text:
-    failures.append("[GPU-ADMISSION-GATE] release archive allowlist assertion is missing")
+    failures.append(
+        "[NATIVE-DEPENDENCY-BOUNDARY] release archive allowlist assertion is missing"
+    )
 if '[ "$archive_members" = "$expected_members" ]' not in install_text:
-    failures.append("[GPU-ADMISSION-GATE] installer archive allowlist assertion is missing")
+    failures.append(
+        "[NATIVE-DEPENDENCY-BOUNDARY] installer archive allowlist assertion is missing"
+    )
 
 release_stage_sources = set(
     re.findall(r"install -m 0755 target/release/([A-Za-z0-9_-]+)", release_text)
@@ -170,19 +206,19 @@ installer_binary_loops = [
 ]
 if release_stage_sources != ALLOWED_RELEASE_BINARIES:
     failures.append(
-        f"[GPU-ADMISSION-GATE] release staging binaries changed: "
+        f"[NATIVE-DEPENDENCY-BOUNDARY] release staging binaries changed: "
         f"{sorted(release_stage_sources)} (allowed: {sorted(ALLOWED_RELEASE_BINARIES)})"
     )
 if installer_stage_sources != ALLOWED_RELEASE_BINARIES:
     failures.append(
-        f"[GPU-ADMISSION-GATE] installer staging binaries changed: "
+        f"[NATIVE-DEPENDENCY-BOUNDARY] installer staging binaries changed: "
         f"{sorted(installer_stage_sources)} (allowed: {sorted(ALLOWED_RELEASE_BINARIES)})"
     )
 if len(installer_binary_loops) != 2 or any(
     binaries != ALLOWED_RELEASE_BINARIES for binaries in installer_binary_loops
 ):
     failures.append(
-        f"[GPU-ADMISSION-GATE] installer binary loops changed: "
+        f"[NATIVE-DEPENDENCY-BOUNDARY] installer binary loops changed: "
         f"{[sorted(binaries) for binaries in installer_binary_loops]} "
         f"(allowed twice: {sorted(ALLOWED_RELEASE_BINARIES)})"
     )
@@ -207,13 +243,64 @@ for name, banned in DIRECT_DEP_BANS.items():
             "engine-to-scene conversion."
         )
 
+native_renderer = by_name.get("mandatum-native-renderer")
+if native_renderer is not None:
+    renderer_internal_deps = {
+        dependency["name"]
+        for dependency in native_renderer["dependencies"]
+        if dependency.get("kind") in (None, "normal")
+        and dependency["name"].startswith("mandatum-")
+    }
+    allowed_renderer_internal_deps = {"mandatum-scene"}
+    if renderer_internal_deps != allowed_renderer_internal_deps:
+        failures.append(
+            "[NATIVE-DEPENDENCY-BOUNDARY] mandatum-native-renderer internal "
+            f"dependency set changed: {sorted(renderer_internal_deps)} "
+            f"(allowed: {sorted(allowed_renderer_internal_deps)}). The native "
+            "renderer consumes the scene contract, not app/runtime internals."
+        )
+
+def native_shell_boundary_failures(internal_deps):
+    allowed = {
+        "mandatum-app",
+        "mandatum-native-renderer",
+        "mandatum-scene",
+    }
+    if internal_deps == allowed:
+        return []
+    return [
+        "[NATIVE-DEPENDENCY-BOUNDARY] mandatum-native internal dependency "
+        f"set changed: {sorted(internal_deps)} (allowed: {sorted(allowed)}). "
+        "The native shell reaches product state only through FrontendHost."
+    ]
+
+native_shell = by_name.get("mandatum-native")
+if native_shell is not None:
+    native_shell_internal_deps = {
+        dependency["name"]
+        for dependency in native_shell["dependencies"]
+        if dependency.get("kind") in (None, "normal")
+        and dependency["name"].startswith("mandatum-")
+    }
+    failures.extend(native_shell_boundary_failures(native_shell_internal_deps))
+    modeled_native_shell_deps = native_shell_internal_deps | {"mandatum-pty"}
+    if not native_shell_boundary_failures(modeled_native_shell_deps):
+        failures.append(
+            "[NATIVE-DEPENDENCY-BOUNDARY] negative self-test failed to reject "
+            "a modeled mandatum-native -> mandatum-pty edge"
+        )
+
 if failures:
     print("CONFORMANCE FAILURES:")
     for f in failures:
         print("  -", f)
     sys.exit(1)
 
-print("conformance: L1/L2 dependency laws and GPU admission policy hold")
+print(
+    "conformance: L1/L2 laws and native frontend dependency boundary hold; "
+    f"negative edge models rejected for "
+    f"{len(workspace_names - NATIVE_FRONTEND_PACKAGES)} non-native production crates"
+)
 PY
 
 # ---- [L1-GATE] module-level input seam inside the app crate --------------

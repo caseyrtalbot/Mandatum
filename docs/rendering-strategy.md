@@ -32,9 +32,9 @@ each frame (`scene_builder` converts terminal-engine grids into scene
 surfaces app-side), and `mandatum-renderer` is one adapter: it draws a
 scene with ratatui and computes no layout. A test-only plain-text frontend
 renders the same scenes to prove the contract is renderer-neutral
-(`crates/app/tests/frontend_parity.rs`), and the current native GPU renderer
-uses the same contract (its source remains at `spikes/frontend-wgpu` until
-workspace promotion; see docs/frontend-platform.md).
+(`crates/app/tests/frontend_parity.rs`), and `mandatum-native-renderer` uses
+the same contract from `crates/native-renderer` (see
+docs/frontend-platform.md).
 
 ## Scene Requirements
 

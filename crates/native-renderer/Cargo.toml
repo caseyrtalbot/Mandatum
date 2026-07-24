@@ -1,0 +1,16 @@
+[package]
+name = "mandatum-native-renderer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+fault-injection = []
+
+[dependencies]
+glyphon.workspace = true
+mandatum-scene.workspace = true
+wgpu.workspace = true
+winit.workspace = true

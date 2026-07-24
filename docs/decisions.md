@@ -2459,3 +2459,60 @@ failure tests prove the GPU and host factories stop in order; a success test pro
 window → GPU renderer → host construction. The native gate, real macOS
 startup/clean exit, and authoritative workspace gate are recorded in
 `docs/verification.md`.
+
+## Accepted: Production Native Frontend Is A Workspace Component
+
+Status: accepted (2026-07-24)
+
+Decision: the native product frontend is split into two root-workspace
+packages: `mandatum-native` owns the winit product shell and
+`mandatum-native-renderer` owns scene-only wgpu/glyphon presentation.
+Measurement, stress, synthetic fault injection, ScreenCaptureKit acquisition,
+and the terminal latency probe remain in the excluded
+`spikes/frontend-wgpu` lab.
+
+Context: Work 1 made GPU preflight safe, but the working native implementation
+and its maintenance gate still carried spike names and lived outside ordinary
+workspace CI. The combined lab shell also mixed product lifecycle/input code
+with measurement deadlines, evidence collection, stress schedules, and
+injected failures.
+
+Rationale: workspace membership makes native a maintained product component
+without adding lab controls to the daily-driver executable. A separate
+renderer crate keeps the strongest boundary executable: GPU paint consumes
+`WorkspaceScene`, not app, PTY, parser, or terminal-renderer internals. The
+excluded lab remains useful regression tooling, but it does not substitute for
+product-package tests or a real native startup check.
+
+Consequences:
+
+- the stable development command is
+  `cargo run -p mandatum-native --bin mandatum-native`;
+- the product command accepts only bounded `--font-family` and `--font-size`
+  options; lab-only flags are rejected;
+- native input preserves Shift+Tab, exact Command copy/paste fallback,
+  multi-grapheme composition, validated IME ranges, and Left Option native
+  composition while Right Option remains terminal Meta;
+- bounded runtime draining continues through event-loop wakes independently of
+  whether the current surface can present;
+- synthetic fault injection is a renderer feature enabled only by the lab;
+- `ci/conformance.sh` allows GPU/window dependencies only in the two native
+  packages, freezes both internal Mandatum dependency sets, and negative-tests
+  modeled forbidden edges;
+- `ci/native-frontend.sh` checks the product packages, the renderer with and
+  without fault injection, and the separate lab/real-host regressions;
+- `./ci/gate.sh` invokes the native gate and remains the single CI authority;
+- the terminal command, installer, updater, release workflow, and archive
+  allowlists are unchanged;
+- Work 3 typography comparison is next; Work 4 shaping-cache work and
+  default-launcher changes remain out of this slice.
+
+Verification: the focused native gate passed 13 product-shell tests, 25
+renderer tests with default features, 25 renderer tests with fault injection,
+23 lab-shell tests, and 27 real-host tests, plus warnings-denied Clippy, build,
+format, locked dependency, feature-closure, and renderer-boundary checks.
+Conformance rejected modeled GPU edges in all nine non-native production
+crates and a modeled native-shell PTY edge. The final synchronized
+`./ci/gate.sh`, terminal smoke, real macOS native startup/clean exit, diff
+hygiene, commit, and publication state are recorded in
+`docs/verification.md` and the continuation handoff.

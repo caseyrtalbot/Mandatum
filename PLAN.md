@@ -29,10 +29,11 @@ measurement tooling. Native startup now completes window and GPU renderer
 preflight before constructing `FrontendHost`, so failed preflight cannot start
 restore or PTY work.
 
-The native implementation still lives under `spikes/frontend-wgpu`; the root
-workspace, `ci/conformance.sh`, `ci/gpu-spike.sh`, and default launcher still
-reflect the retired posture. Those are explicit implementation gaps, not the
-product direction.
+The production native shell and renderer now live in the root workspace as
+`mandatum-native` and `mandatum-native-renderer`. The native dependency
+boundary is fail-closed, `ci/native-frontend.sh` retains product and lab
+regressions, and `./ci/gate.sh` invokes it. The default launcher remains a
+later daily-driver decision.
 
 ## Ordered Work
 
@@ -43,13 +44,14 @@ surface, adapter, device, queue, and renderer before `FrontendHost`. Forced
 no-display and no-adapter tests prove the host creation seam is never invoked;
 the real macOS startup/clean-exit path and restore coverage are green.
 
-### 2. Promote native into the workspace
+### 2. Promote native into the workspace — complete
 
-Move the native shell and renderer into a production workspace package. Keep
-lab and measurement tooling separate. Narrowly allow winit/wgpu/glyphon in the
-native package, retain negative dependency checks everywhere else, rename the
-native gate, and make `./ci/gate.sh` invoke it so CI retains one authority.
-Terminal behavior and existing installer/release artifacts stay unchanged.
+The production shell and scene-only renderer are workspace packages. Lab
+measurement, stress, fault, and terminal probes remain excluded; synthetic
+fault injection is not in the product feature closure. Conformance rejects
+GPU/window edges in every other production crate and freezes the native shell
+at the `FrontendHost` seam. `./ci/gate.sh` invokes the native gate. Terminal
+behavior and existing installer/release artifacts are unchanged.
 
 ### 3. De-risk typography
 

@@ -18,7 +18,7 @@ use std::{
 };
 
 use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
-use mandatum_gpu_renderer_spike::{
+use mandatum_native_renderer::{
     GpuFaultInjection, GpuFaultInjectionResult, GpuFrameSkip, GpuRenderError, GpuRenderOutcome,
     GpuStartupError, GpuStartupErrorKind, GpuSurfaceRecovery, GpuText, NativeTextSettings,
 };
@@ -712,6 +712,14 @@ impl PressedPointerButtons {
 
     fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    fn begin(&mut self, button: PointerButton, admitted: bool) -> bool {
+        if !admitted || self.active().is_some() {
+            return false;
+        }
+        self.set(button, true);
+        true
     }
 }
 
@@ -1420,11 +1428,11 @@ impl App {
     fn pointer_button(&mut self, state: ElementState, button: PointerButton) {
         match state {
             ElementState::Pressed => {
-                if self.pressed_pointer_buttons.active().is_some() {
+                let admitted = self.scene_presentable && self.scene_size().is_some();
+                if !self.pressed_pointer_buttons.begin(button, admitted) {
                     return;
                 }
-                self.pressed_pointer_buttons.set(button, true);
-                self.pointer_input(PointerKind::Down, Some(button));
+                self.send_pointer_input(PointerKind::Down, Some(button));
             }
             ElementState::Released => {
                 if self.pressed_pointer_buttons.all().contains(&button) {
@@ -1727,7 +1735,17 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             UserEvent::Wake => {
-                if !self.service_scheduled_work(event_loop) {
+                if self.service_scheduled_work(event_loop) {
+                    return;
+                }
+                let more_pending = self.drain_runtime();
+                if self.exit_if_requested(event_loop) {
+                    return;
+                }
+                if more_pending {
+                    let _ = self.wake_proxy.send_event(UserEvent::Wake);
+                }
+                if self.scene_presentable {
                     self.request_redraw();
                 }
             }
@@ -1768,6 +1786,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if more_pending && self.scene_presentable {
                     self.request_redraw();
+                }
+                if more_pending {
+                    let _ = self.wake_proxy.send_event(UserEvent::Wake);
                 }
             }
             WindowEvent::Resized(size) => {

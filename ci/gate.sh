@@ -18,6 +18,9 @@ cargo build --workspace --all-targets
 step "test"
 cargo test --workspace
 
+step "native frontend"
+./ci/native-frontend.sh
+
 step "conformance (Constitution L1/L2 dependency laws)"
 ./ci/conformance.sh
 

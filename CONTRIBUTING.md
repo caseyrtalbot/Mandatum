@@ -75,5 +75,6 @@ repository permissions.
 git clone https://github.com/caseyrtalbot/Mandatum.git
 cd Mandatum
 ./ci/gate.sh          # rustup installs the pinned toolchain automatically
-cargo run -p mandatum-app --bin mandatum
+cargo run -p mandatum-native --bin mandatum-native  # native product
+cargo run -p mandatum-app --bin mandatum            # terminal escape hatch
 ```

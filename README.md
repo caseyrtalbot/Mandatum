@@ -281,6 +281,9 @@ crates/terminal-vt    terminal parser adapter, grid, scrollback, capabilities
                       (parser stays behind TerminalAdapter)
 crates/scene          renderer-neutral scene contract: WorkspaceScene output
                       model, final cell compiler, layout math, neutral input
+crates/native         production winit shell over FrontendHost
+crates/native-renderer
+                      scene-only wgpu/glyphon renderer
 crates/agent-runtime  agent connector contract, approval events, FakeConnector,
                       Claude CLI connector + the approval-bridge hook binary
 crates/workflows      task recipes, agent intent, failure-handoff policy
@@ -289,11 +292,9 @@ crates/app            the workstation: deep RuntimeEngine over terminal/task/
                       agent registries, bounded artifact loader/cache, event
                       loop, scene builder, timeline, search, config,
                       transactional save/restore
-spikes/               experiments outside the Cargo workspace; the native
-                      frontend remains here only until its signed promotion
-                      into a production workspace package
-  frontend-wgpu/gpu-renderer/
-                      scene-only GPU paint crate with no app/runtime dependency
+spikes/               experiments outside the Cargo workspace
+  frontend-wgpu/      native measurement, stress, fault, and terminal probes;
+                      frozen historical RESULTS.md
 ```
 
 The scene contract keeps frontends swappable: the same `WorkspaceScene`
@@ -301,17 +302,19 @@ drives the terminal tool and native winit+wgpu product frontend. The native
 shell drives the real `FrontendHost`, translates platform input to neutral
 events, and paints real workstation scenes without a duplicate PTY/parser state
 machine. It also renders typed Artifact Preview pixels and includes surface/
-device recovery, bounded event draining, resize/scale stress, and regression
-measurement tooling. The source still lives under `spikes/` until the signed
-promotion work moves it into the workspace. Historical evidence is frozen in
-[spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md); the
-forward native-first plan is
+device recovery and bounded event draining. Measurement, resize/scale stress,
+fault injection, and terminal probes remain separate under `spikes/`.
+Historical evidence is frozen in
+[spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md); the forward
+native-first plan is
 [docs/native-gpu-implementation-plan.md](docs/native-gpu-implementation-plan.md).
 
 ## Development
 
 ```sh
 ./ci/gate.sh    # fmt, clippy -D warnings, build, test, conformance, doc-trace
+cargo run -p mandatum-native --bin mandatum-native  # native product
+cargo run -p mandatum-app --bin mandatum            # terminal escape hatch
 ```
 
 Local runs and CI execute the same script on the same pinned toolchain.
@@ -327,17 +330,16 @@ the Constitution are the review. Security reports: [SECURITY.md](SECURITY.md).
 ## Status
 
 The existing `v0.2.0` terminal release remains available as operational
-tooling, while current development moves the native wgpu frontend into the
-workspace and toward Casey's daily driver. There is no public-release audience.
+tooling, while the workspace-native wgpu frontend moves toward Casey's daily
+driver. There is no public-release audience.
 Everything in [the tour](#the-tour) works today behind the merge gate. The
 dated charter close and its red-team evidence are preserved in
 [docs/history/charter-closure-2026-07-10.md](docs/history/charter-closure-2026-07-10.md);
 current status and forward work live in [PLAN.md](PLAN.md).
 
-Immediate work: promote the native frontend into the workspace, compare
-typography with Ghostty, add a bounded shaping cache, and make native the
-default development surface. Rewrap-on-resize remains a terminal engine
-concern. [PLAN.md](PLAN.md) holds the forward horizon;
+Immediate work: compare typography with Ghostty, add a bounded shaping cache,
+and make native the default development surface. Rewrap-on-resize remains a
+terminal engine concern. [PLAN.md](PLAN.md) holds the forward horizon;
 [docs/decisions.md](docs/decisions.md) records every judgment call.
 
 ## License

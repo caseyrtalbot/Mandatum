@@ -1,8 +1,8 @@
 # Native GPU Frontend Plan
 
-Status: native-first direction accepted on 2026-07-24. The current source still
-lives under `spikes/frontend-wgpu` until Work 2 promotes it into the workspace.
-That path is implementation lag, not product posture.
+Status: native-first direction accepted on 2026-07-24. Work 2 promoted the
+production shell and renderer into the workspace; Work 3 typography comparison
+is next.
 
 ## Product Direction
 
@@ -60,9 +60,6 @@ Standing procedures and current dated runs live in
 
 These are work, not reasons to resist the direction:
 
-- The native source and its renderer still live under `spikes/`.
-- `ci/conformance.sh` still encodes the retired admission policy.
-- `ci/gpu-spike.sh` is still spike-named and not run by ordinary CI.
 - Native is not yet the default launcher.
 - Typography quality has not been compared directly with Ghostty.
 - The renderer reshapes repeated graphemes without the planned bounded cache.
@@ -88,29 +85,31 @@ Completed on 2026-07-24.
 Exit: GPU startup failure cannot strand live PTYs or partially created product
 state.
 
-## Work 2 — Promote Native Into The Workspace
+## Work 2 — Promote Native Into The Workspace — Complete
 
-End the spike designation and make the native frontend a product component.
+Completed on 2026-07-24.
 
-- Move the native shell and renderer into a production workspace package.
-- Keep the product shell and renderer separate from measurement, stress, and
-  fault-injection tooling.
-- Retain one native executable with a stable development command.
-- Leave terminal release and installer artifacts unchanged.
+The native frontend is a production workspace component.
 
-- Allow winit, wgpu, glyphon, and their frontend-only dependencies in the
-  production native package.
-- Keep negative dependency tests rejecting GPU/window crates in every
-  engine-side and non-native production crate.
-- Preserve the renderer's scene-only dependency direction.
-- Rename the conformance messages from admission policy to dependency-boundary
-  enforcement.
-- Rename the native maintenance script appropriately.
-- Make `./ci/gate.sh` invoke the renamed native gate so CI retains one
-  authoritative command.
-- Keep `./ci/gate.sh` authoritative for the workspace and Constitution.
-- Prove the dependency allowlist fails when a GPU edge enters the wrong crate.
-- Keep latency, idle, resize, recovery, and fault probes as regression tools.
+- `crates/native` owns the `mandatum-native` product executable and strict
+  font-family/font-size options.
+- `crates/native-renderer` owns scene-only GPU presentation.
+- `spikes/frontend-wgpu` retains measurement, stress, fault-injection, and
+  terminal probes as the excluded `mandatum-native-lab`.
+- Synthetic fault injection is feature-gated and absent from the production
+  executable's default dependency closure.
+- The stable development command is
+  `cargo run -p mandatum-native --bin mandatum-native`.
+- Terminal release and installer artifacts are unchanged.
+
+- `ci/conformance.sh` allows GPU/window crates only in the two native packages,
+  freezes the renderer at `mandatum-scene`, freezes the shell at
+  `FrontendHost`/scene/renderer dependencies, and negative-tests modeled GPU
+  edges in every non-native production crate.
+- `ci/native-frontend.sh` checks product format, Clippy, build, tests, renderer
+  boundaries/default features, the lab harness, and fault-feature compilation.
+- `./ci/gate.sh` invokes that native gate and remains the only CI authority.
+- Latency, idle, resize, recovery, and fault probes remain regression tools.
 
 Exit: the native frontend is a workspace component; the native gate and
 `./ci/gate.sh` are green; terminal behavior is unchanged.
@@ -207,6 +206,6 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Implement Work 2: promote the native shell and renderer into a production
-workspace package while preserving one authoritative `./ci/gate.sh` and the
-terminal escape hatch.
+Implement Work 3: compare the production glyphon/cosmic-text path directly
+with Ghostty using Casey's actual font, size, scale, theme, and display. Stop
+before the Work 4 shaping cache.

@@ -13,19 +13,19 @@ The authoritative workspace gate is:
 ./ci/gate.sh
 ```
 
-It runs formatting, warnings-denied Clippy, build, workspace tests,
-`ci/conformance.sh`, and `ci/doc-trace.sh`. GitHub Actions runs the same script.
-Red means the change does not land.
+It runs formatting, warnings-denied Clippy, build, workspace tests, the native
+frontend gate, `ci/conformance.sh`, and `ci/doc-trace.sh`. GitHub Actions runs
+the same script. Red means the change does not land.
 
-Until native promotion renames and integrates its gate, run:
+The focused native frontend gate is:
 
 ```sh
-./ci/gpu-spike.sh
+./ci/native-frontend.sh
 ```
 
-That script is the current native frontend check despite its historical name.
-After promotion, its replacement must run in CI. Use `git diff --check` and
-inspect `git status --short` before completion.
+It checks the production packages plus the separate lab regression harness and
+is invoked by `./ci/gate.sh`; it is not a second CI authority. Use
+`git diff --check` and inspect `git status --short` before completion.
 
 ## Documentation Verification
 
@@ -56,8 +56,10 @@ Verify:
   internals directly;
 - richer native presentation uses typed `mandatum-scene` extensions;
 - parser backends stay behind `TerminalAdapter`;
-- GPU/window dependencies are allowed only in the native frontend package after
-  promotion, with negative tests for every other production crate.
+- GPU/window dependencies are allowed only in `mandatum-native` and
+  `mandatum-native-renderer`, with negative tests for every other production
+  crate; the shell's internal dependency set is frozen at the shared host,
+  scene, and native renderer.
 
 Useful scans:
 
@@ -120,10 +122,10 @@ insufficient.
 Current command:
 
 ```sh
-./ci/gpu-spike.sh
+./ci/native-frontend.sh
 ```
 
-After workspace promotion, the renamed native gate must cover:
+The native gate covers:
 
 - native package format, warnings-denied Clippy, build, and tests;
 - the scene-only renderer dependency boundary;
@@ -133,10 +135,10 @@ After workspace promotion, the renamed native gate must cover:
 - resize/scale stress and resource high-water bounds;
 - glyph, clipping, IME, artifact, and overlay correctness.
 
-After promotion, `./ci/gate.sh` must invoke the renamed native gate and GitHub
-Actions must continue running that one authoritative command. Latency, idle
-CPU, resize storms, fault injection, and longer manual runs are regression
-tools. None is an adoption permission gate.
+`./ci/gate.sh` invokes the native gate and GitHub Actions continues running
+that one authoritative command. Latency, idle CPU, resize storms, fault
+injection, and longer manual runs are regression tools. None is an adoption
+permission gate.
 
 ## Input Latency Regression Check
 
@@ -237,6 +239,17 @@ developer unfamiliar with the current implementation can identify:
   ordering test, 23 shell tests, 27 real-host tests, 25 renderer tests,
   warnings-denied native Clippy/boundary scan, real Apple M4 Pro/Metal
   startup-clean-exit run, and post-documentation `./ci/gate.sh` all passed.
+- **2026-07-24:** Work 2 promoted `mandatum-native` and
+  `mandatum-native-renderer` into the workspace, retained the excluded lab
+  probes, added fail-closed native dependency checks, and integrated
+  `ci/native-frontend.sh` into the authoritative gate. The final synchronized
+  run passed 13 product-shell, 25 default-renderer, 25 fault-feature renderer,
+  23 lab-shell, and 27 real-host tests; terminal distribution/live-PTY smoke
+  passed 5 + 4 tests; conformance rejected nine modeled non-native GPU edges
+  plus a native-shell PTY edge; `./ci/gate.sh` reported `GATE GREEN`; and the
+  real Apple M4 Pro/Metal product binary started and exited cleanly through
+  Ctrl+Q. No visual matrix was required because Work 2 changed package and CI
+  ownership without changing rendered behavior.
 
 ## Completion Rule
 

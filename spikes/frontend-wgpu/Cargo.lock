@@ -1216,12 +1216,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "mandatum-frontend-wgpu-spike"
+name = "mandatum-native-lab"
 version = "0.1.0"
 dependencies = [
  "arboard",
  "mandatum-app",
- "mandatum-gpu-renderer-spike",
+ "mandatum-native-renderer",
  "mandatum-pty",
  "mandatum-scene",
  "png",
@@ -1232,8 +1232,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "mandatum-gpu-renderer-spike"
-version = "0.1.0"
+name = "mandatum-native-renderer"
+version = "0.2.0"
 dependencies = [
  "glyphon",
  "mandatum-scene",

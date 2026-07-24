@@ -1,0 +1,19 @@
+[package]
+name = "mandatum-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+default-run = "mandatum-native"
+
+[[bin]]
+name = "mandatum-native"
+path = "src/main.rs"
+
+[dependencies]
+arboard = "3.6"
+mandatum-app = { path = "../app" }
+mandatum-native-renderer.workspace = true
+mandatum-scene.workspace = true
+pollster.workspace = true
+winit.workspace = true

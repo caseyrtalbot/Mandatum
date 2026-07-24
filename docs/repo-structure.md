@@ -20,7 +20,7 @@ docs/          product and architecture specs
 docs/assets/   README frames: SVGs generated from real captured sessions
 crates/        implementation modules
 examples/      live-slice driven demo (the stranger-test scene)
-spikes/        experiments; native source remains here pending promotion
+spikes/        excluded measurement, stress, fault, and terminal probes
 .agents/       repo-local agent skills
 ```
 
@@ -47,7 +47,8 @@ docs/history/               dated evidence and superseded closure records
 ## Crates
 
 Workspace members: `core`, `commands`, `pty`, `terminal-vt`, `scene`,
-`agent-runtime`, `renderer`, `app`, `workflows`.
+`agent-runtime`, `renderer`, `app`, `workflows`, `native`, and
+`native-renderer`.
 
 ### `crates/core`
 
@@ -103,6 +104,21 @@ serde_json (L1 gate).
 The ratatui terminal frontend adapter. Translates the scene compiler's neutral
 `CellProgram` into ratatui buffer cells; computes no layout/presentation rules
 and has no terminal-engine dependency (banned by the L1 gate).
+
+### `crates/native-renderer`
+
+`mandatum-native-renderer`: scene-only wgpu/glyphon presentation. It owns GPU
+surface/device recovery, text and raster resource bounds, and frame
+preparation. Its only internal workspace dependency is `mandatum-scene`;
+synthetic fault injection is feature-gated for the excluded lab.
+
+### `crates/native`
+
+`mandatum-native`: the production winit shell over `FrontendHost`. It owns GPU
+preflight ordering, native input/IME/pointer/clipboard translation, strict
+font-family/font-size options, bounded event draining, redraw scheduling,
+renderer recovery, and clean shutdown. Its internal dependencies are frozen to
+`mandatum-app`, `mandatum-scene`, and `mandatum-native-renderer`.
 
 ### `crates/app`
 
@@ -163,14 +179,9 @@ history (see docs/workflows.md for what remains unbuilt here).
 ## Spikes And Examples
 
 ```text
-spikes/frontend-wgpu/   current native product source pending workspace
-                        promotion; winit shell over mandatum-app FrontendHost,
-                        neutral key/composition input translation, grapheme-
-                        anchored GPU presentation (including bounded Artifact
-                        Preview texture upload/contain-fit),
-                        and the tui_probe latency harness; its gpu-renderer/
-                        member is a scene-only paint crate; RESULTS.md is the
-                        frozen historical evidence record
+spikes/frontend-wgpu/   excluded mandatum-native-lab measurement, stress, and
+                        fault harness; tui_probe terminal latency tool;
+                        symmetric ScreenCaptureKit script; frozen RESULTS.md
 examples/live-slice/    driven demo workspace for the stranger test
 ```
 

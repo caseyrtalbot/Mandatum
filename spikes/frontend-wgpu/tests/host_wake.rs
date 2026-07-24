@@ -7,7 +7,7 @@ use std::{
 };
 
 use mandatum_app::{AppConfig, FrameSnapshot, FrontendEffect, FrontendHost};
-use mandatum_gpu_renderer_spike::{PreparedScene, prepare_scene};
+use mandatum_native_renderer::{PreparedScene, prepare_scene};
 use mandatum_scene::{
     ArtifactState, CellOccupancy, CellSelection, HitTargetKind, OverlayScene, PaneContent,
     SceneRect, SceneSize, WorkspaceScene,
