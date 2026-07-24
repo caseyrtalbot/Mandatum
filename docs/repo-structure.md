@@ -180,8 +180,9 @@ history (see docs/workflows.md for what remains unbuilt here).
 
 ```text
 spikes/frontend-wgpu/   excluded mandatum-native-lab measurement, stress, and
-                        fault harness; tui_probe terminal latency tool;
-                        symmetric ScreenCaptureKit script; frozen RESULTS.md
+                        fault harness; terminal latency, symmetric
+                        ScreenCaptureKit, and typography-corpus tools; frozen
+                        RESULTS.md
 examples/live-slice/    driven demo workspace for the stranger test
 ```
 

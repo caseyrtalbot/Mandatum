@@ -2516,3 +2516,63 @@ crates and a modeled native-shell PTY edge. The final synchronized
 `./ci/gate.sh`, terminal smoke, real macOS native startup/clean exit, diff
 hygiene, commit, and publication state are recorded in
 `docs/verification.md` and the continuation handoff.
+
+## Accepted: Typography Path Must Be Decided Before It Is Cached
+
+Status: accepted (2026-07-24)
+
+Decision: the current Work 3 evidence takes its focused-decision branch. Pause
+broader visual-identity investment and the Work 4 shaping cache until the
+native text path defines font provisioning, observable/fail-closed face
+resolution, terminal palette ownership, and a shaping unit that can preserve
+terminal cell semantics while shaping across appropriate grapheme/cell
+boundaries. This does not authorize a Metal or Swift renderer rewrite;
+glyphon/cosmic-text may remain if a focused row-run adapter proves the right
+path.
+
+Context: Casey's zero-config Ghostty 1.2.3 uses an embedded JetBrains Mono at
+13 points, default background `#282c34`, default foreground `#ffffff`, and a
+separate built-in ANSI palette on one LG ULTRAGEAR+ at 3440×1440, scale 1.0,
+85 Hz. Mandatum's production CLI accepts the same family name, but cosmic-text
+sees only system fonts and the CLI does not verify resolution, so the nominal
+actual-settings run silently used an unknown fallback. Native terminal
+foreground, background, and ANSI colors are renderer constants rather than
+configurable theme data. A displayed Menlo 13 control reduced but did not
+eliminate face-resolution uncertainty and showed unjoined Arabic. Independent
+code inspection established the cause: the current adapter creates and shapes
+one buffer per grapheme, preventing shaping across grapheme/cell boundaries
+and therefore preventing cross-cell ligatures regardless of cache performance.
+
+Rationale: a cache makes the chosen shaping unit faster; it cannot make an
+incorrect unit typographically complete. Likewise, judging a silent fallback
+against Ghostty's embedded face would produce a false stack verdict. Resolve
+font and palette truth plus run shaping first, then design the bounded cache
+around the accepted presentation contract.
+
+Consequences:
+
+- explicit font requests must become observable and must not silently pass as
+  matched evidence when the face is unavailable;
+- Casey's chosen face needs a deliberate product provisioning path;
+- terminal foreground, background, and ANSI colors need explicit ownership
+  before exact reference comparisons;
+- the next implementation decision must compare a glyphon/cosmic-text row-run
+  adapter with any focused alternative while preserving cell clipping,
+  cursor/selection placement, wide-cell occupancy, and terminal fallback;
+- Work 4 cache implementation, broader visual identity, renderer
+  modularization, row damage, and default-launcher work remain blocked.
+
+Verification: `spikes/frontend-wgpu/scripts/typography-corpus.sh` was displayed
+through Ghostty's real shell and Mandatum's production `FrontendHost`/PTY/scene
+path. The actual-settings attempt was explicitly rejected as unmatched. The
+labeled Menlo control exercised ASCII, symbols, fallback scripts, ligature
+sequences, CJK, combining text, emoji, normal/bold/dim/italic/underline/inverse
+styles, prompt cursor, native selection, and live resize to 1650×1280. The
+displayed unjoined-script symptom and the renderer's one-buffer-per-grapheme
+code path are separate evidence tiers. After the built-in Retina display became
+active, production Mandatum and Ghostty both moved through backing scale
+1.0→2.0→1.0 with the shared corpus visible. Mandatum recomputed 191×59,
+89×46, then 127×48 scene sizes without observed stale frames or
+scale-transition corruption. The focused native result is recorded in
+`docs/verification.md`; after the evidence and active docs were synchronized,
+`./ci/gate.sh` reported `GATE GREEN`.

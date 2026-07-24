@@ -53,18 +53,25 @@ GPU/window edges in every other production crate and freezes the native shell
 at the `FrontendHost` seam. `./ci/gate.sh` invokes the native gate. Terminal
 behavior and existing installer/release artifacts are unchanged.
 
-### 3. De-risk typography
+### 3. De-risk typography — complete, focused decision required
 
-Compare glyphon/cosmic-text side by side with Ghostty using Casey's font, size,
-scale, theme, and display. Decide whether the stack can deliver delightful text
-before investing deeply in the broader visual identity.
+The displayed comparison exited through the negative branch. Ghostty's actual
+zero-config face is an embedded JetBrains Mono that Mandatum cannot load from
+the system font database, the native palette cannot currently be configured to
+match Casey's Ghostty colors, and the current one-buffer-per-grapheme adapter
+cannot shape across grapheme/cell boundaries. A Menlo control showed that
+cursor, styles, selection, Unicode fallback, resize, and live 1.0→2.0→1.0
+backing-scale transitions remain functional, but did not erase those
+structural gaps.
 
-### 4. Add a bounded shaping cache
+### 4. Resolve the typography path, then add a bounded shaping cache
 
-Memoize shaped buffers by grapheme, style, and metrics while preserving
-per-grapheme clipping and cell-span invariants. Bound retained count/bytes,
-invalidate by font/metrics/scale generation, and profile before considering
-row-level damage tracking.
+First decide font provisioning and verified face resolution, palette ownership,
+and row-run shaping while preserving cell-span clipping and terminal semantics.
+Then memoize the accepted shaping unit by text, style, and metrics; bound
+retained count/bytes, invalidate by font/metrics/scale generation, and profile
+before considering row-level damage tracking. Do not cache the current
+one-grapheme buffer shape merely because it already exists.
 
 ### 5. Make native the default and build feel
 

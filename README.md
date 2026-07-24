@@ -293,8 +293,8 @@ crates/app            the workstation: deep RuntimeEngine over terminal/task/
                       loop, scene builder, timeline, search, config,
                       transactional save/restore
 spikes/               experiments outside the Cargo workspace
-  frontend-wgpu/      native measurement, stress, fault, and terminal probes;
-                      frozen historical RESULTS.md
+  frontend-wgpu/      native measurement, stress, fault, terminal, and
+                      typography-comparison tools; frozen historical RESULTS.md
 ```
 
 The scene contract keeps frontends swappable: the same `WorkspaceScene`
@@ -337,9 +337,11 @@ dated charter close and its red-team evidence are preserved in
 [docs/history/charter-closure-2026-07-10.md](docs/history/charter-closure-2026-07-10.md);
 current status and forward work live in [PLAN.md](PLAN.md).
 
-Immediate work: compare typography with Ghostty, add a bounded shaping cache,
-and make native the default development surface. Rewrap-on-resize remains a
-terminal engine concern. [PLAN.md](PLAN.md) holds the forward horizon;
+Immediate work: resolve the font, palette, and row-run shaping path found by
+the Ghostty comparison, then add a bounded shaping cache and make native the
+default development surface. Rewrap-on-resize remains a terminal engine
+concern.
+[PLAN.md](PLAN.md) holds the forward horizon;
 [docs/decisions.md](docs/decisions.md) records every judgment call.
 
 ## License

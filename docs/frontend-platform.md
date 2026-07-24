@@ -72,10 +72,12 @@ Keep:
 - glyphon/cosmic-text for the current text path;
 - `mandatum-scene` as the frontend contract.
 
-Do not start a Metal or Swift renderer fork. First compare the current text
-stack directly with Ghostty using Casey's actual font, size, scale, theme, and
-display. If the comparison cannot delight, record a focused stack decision
-before investing in broader polish.
+Do not start a Metal or Swift renderer fork. The Ghostty comparison exited
+through the focused-decision branch: native cannot load Ghostty's embedded
+JetBrains Mono or currently be configured to match its palette, and the
+current per-grapheme adapter cannot shape across grapheme/cell boundaries.
+Resolve font provisioning, palette ownership, and row-run shaping before
+broader polish.
 
 ## Verified Baseline
 
@@ -109,8 +111,10 @@ The ordered work is:
 2. Move the native frontend into the workspace, narrow the GPU dependency
    allowlist, and make the authoritative gate run the native checks in CI
    — complete.
-3. Compare text quality directly with Ghostty.
-4. Add a bounded generation-aware shaping cache and profile it.
+3. Compare text quality directly with Ghostty — complete; focused typography
+   decision required.
+4. Resolve the typography path, then add a bounded generation-aware shaping
+   cache and profile it.
 5. Make native Casey's default and build the feel roadmap through daily use.
 
 The authoritative detail is
@@ -128,7 +132,8 @@ accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
 
 ## Current Implementation Drift
 
-Native is not yet the default launcher. Typography has not yet been compared
-directly with Ghostty, and the renderer has no bounded shaping cache. These are
-the ordered next-work items, not reasons to return to the retired product
-posture.
+Native is not yet the default launcher. Typography comparison found unresolved
+font provisioning, palette ownership, and shaping-unit defects; the renderer
+also has no bounded shaping cache. Resolve the typography path before caching
+it. These are ordered product tasks, not reasons to return to the retired
+product posture.

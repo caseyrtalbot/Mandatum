@@ -1,8 +1,8 @@
 # Native GPU Frontend Plan
 
 Status: native-first direction accepted on 2026-07-24. Work 2 promoted the
-production shell and renderer into the workspace; Work 3 typography comparison
-is next.
+production shell and renderer into the workspace. Work 3 completed with a
+focused-typography-decision verdict; that decision precedes the Work 4 cache.
 
 ## Product Direction
 
@@ -40,8 +40,10 @@ feel, living outside the terminal.
 7. Platform output leaves as typed `FrontendEffect` values.
 8. Window, GPU, glyph-cache, and other live resources are never serialized.
 9. Constitution laws L1–L5 and their executable gates remain authoritative.
-10. wgpu, winit, glyphon, and cosmic-text remain the selected stack unless the
-    typography comparison proves they cannot meet the quality bar.
+10. wgpu and winit remain selected. The focused typography decision must now
+    decide whether glyphon/cosmic-text stay and gain a row-run adapter or
+    whether the text stack changes; no Metal or Swift renderer fork follows
+    from that decision.
 
 ## Verified Starting Point
 
@@ -61,7 +63,11 @@ Standing procedures and current dated runs live in
 These are work, not reasons to resist the direction:
 
 - Native is not yet the default launcher.
-- Typography quality has not been compared directly with Ghostty.
+- The production path cannot load Ghostty's embedded JetBrains Mono or verify
+  that a requested face resolved instead of silently falling back.
+- Native terminal colors are renderer constants rather than the active theme,
+  and the one-buffer-per-grapheme adapter cannot shape across grapheme/cell
+  boundaries.
 - The renderer reshapes repeated graphemes without the planned bounded cache.
 
 ## Work 1 — Reorder Startup — Complete
@@ -114,29 +120,64 @@ The native frontend is a production workspace component.
 Exit: the native frontend is a workspace component; the native gate and
 `./ci/gate.sh` are green; terminal behavior is unchanged.
 
-## Work 3 — De-Risk Typography
+## Work 3 — De-Risk Typography — Complete
 
-Run a displayed side-by-side before investing deeply in visual identity.
+Completed on 2026-07-24 through the negative decision branch.
 
-Use Casey's real font, size, scale, theme, and display. Compare the same corpus
-in Mandatum and Ghostty:
+- Casey's zero-config Ghostty 1.2.3 resolves JetBrains Mono at 13 points from
+  an embedded face and uses default background `#282c34`, foreground
+  `#ffffff`, and its built-in ANSI palette on the LG ULTRAGEAR+ at 3440×1440,
+  scale 1.0, 85 Hz.
+- The nominal native launch with `--font-family "JetBrains Mono"` was rejected
+  as comparison evidence: cosmic-text's system database cannot see Ghostty's
+  embedded face, and the CLI validates only the string, so native silently
+  displayed an unknown fallback. Native also has no configuration surface for
+  Ghostty's actual base or ANSI colors.
+- The same
+  `spikes/frontend-wgpu/scripts/typography-corpus.sh` corpus was displayed in
+  the production native shell and Ghostty with mutually available Menlo at
+  13 points as a labeled control. Because native does not expose its resolved
+  face, this reduced but did not eliminate face-resolution uncertainty. It
+  exercised ASCII, symbols, fallback scripts, ligature sequences, CJK,
+  combining text, emoji, ANSI styles, prompt cursor, native selection, and
+  resize.
+- Native styles, prompt cursor, selection, fallback glyphs, and a resize from
+  the default window to 1650×1280 remained visible and stable. The display
+  showed unjoined Arabic. Independent code inspection established the cause:
+  native creates and shapes one buffer per grapheme, so shaping cannot cross
+  grapheme/cell boundaries and cross-cell ligatures cannot form.
+- With the LG and built-in Retina display active, the same Menlo control moved
+  from backing scale 1.0 to 2.0 and back to 1.0 in both production Mandatum and
+  Ghostty. Enabling Retina changed the LG from the earlier single-display
+  85 Hz mode to 60 Hz. Mandatum recomputed from 191×59 on the wide LG window
+  to 89×46 on the narrower Retina window and to 127×48 on return. Corpus order,
+  styles, fallback/emoji, prompt cursor, chrome, and scene presentation
+  remained coherent; no stale frame or scale-transition corruption was
+  observed.
 
-- stems, weight, contrast, and baseline stability;
-- spacing, line height, and perceived density;
-- ASCII, symbols, fallback glyphs, ligatures, CJK, combining text, and emoji;
-- cursor, selection, underlines, dim text, and style combinations;
-- live scale changes and fluid resize.
+Verdict: the current production typography path cannot yet delight at Casey's
+actual settings. A focused decision on font provisioning/resolution, palette
+ownership, and row-run shaping is required before broader visual-identity
+investment or a shaping cache.
 
-- If glyphon/cosmic-text can delight, record and lock the typography direction.
-- If it cannot, pause visual-identity investment for a focused stack decision.
-- Do not infer text quality from performance measurements.
+Exit: displayed matrix and negative verdict recorded; the focused typography
+decision is next.
 
-Exit: record a displayed comparison and explicit typography verdict.
+## Work 4 — Resolve Typography, Then Add A Bounded Shaping Cache
 
-## Work 4 — Add A Bounded Shaping Cache
+Do not implement the cache until the focused typography decision defines the
+shaping unit and font/theme ownership.
 
-- Memoize shaped buffers by grapheme, style, and metrics.
-- Preserve per-grapheme clipping, declared cell spans, and wide-cell invariants.
+- Decide whether glyphon/cosmic-text stays behind a row-run adapter or the text
+  stack changes.
+- Make requested-face resolution observable and fail closed for an explicit
+  unavailable face; define how Casey's selected font enters the product.
+- Put terminal foreground, background, and ANSI colors under explicit theme
+  ownership so reference comparisons can be exact.
+
+- Memoize accepted shaped runs by text, style, and metrics.
+- Preserve cell clipping, declared cell spans, cursor/selection placement, and
+  wide-cell invariants.
 - Bound the cache by count and retained bytes.
 - Invalidate by generation when font, metrics, scale, or renderer configuration
   changes.
@@ -206,6 +247,6 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Implement Work 3: compare the production glyphon/cosmic-text path directly
-with Ghostty using Casey's actual font, size, scale, theme, and display. Stop
-before the Work 4 shaping cache.
+Make the focused typography-path decision: font provisioning and verified face
+resolution, terminal palette ownership, and row-run shaping versus a different
+text stack. Stop before implementing the Work 4 cache.

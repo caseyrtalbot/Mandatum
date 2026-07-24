@@ -173,6 +173,15 @@ beside Ghostty and capture:
 - cursor and baseline alignment;
 - live scale and resize behavior.
 
+Use `spikes/frontend-wgpu/scripts/typography-corpus.sh` through each terminal's
+real PTY path. Before treating the windows as matched, prove the requested face
+resolved in both applications and record the actual foreground, background,
+ANSI palette, physical display, refresh rate, and backing scale. A structurally
+valid family name or a visible fallback is not matched-font evidence. If the
+active hardware cannot produce a live backing-scale transition, the displayed
+matrix remains incomplete until suitable hardware is available; do not
+substitute a lab probe.
+
 Record the displayed evidence and a direct verdict: the glyphon/cosmic-text
 stack can delight, or a focused stack decision is required before broader
 visual-identity investment.
@@ -250,6 +259,37 @@ developer unfamiliar with the current implementation can identify:
   real Apple M4 Pro/Metal product binary started and exited cleanly through
   Ctrl+Q. No visual matrix was required because Work 2 changed package and CI
   ownership without changing rendered behavior.
+- **2026-07-24:** Work 3 displayed one deterministic typography corpus in
+  Ghostty 1.2.3 and the production native shell on the LG ULTRAGEAR+
+  (3440×1440, scale 1.0, 85 Hz). The requested actual Ghostty settings
+  (embedded JetBrains Mono 13; background `#282c34`; foreground `#ffffff`;
+  ANSI `#1d1f21 #cc6666 #b5bd68 #f0c674 #81a2be #b294bb #8abeb7
+  #c5c8c6 #666666 #d54e53 #b9ca4a #e7c547 #7aa6da #c397d8 #70c0b1
+  #eaeaea`) could not be reproduced in native: its system font database cannot
+  see the embedded face, explicit families do not fail on fallback, and its
+  renderer constants are background `#121216`, foreground `#dcdce0`, and ANSI
+  `#000000 #cd3131 #0dbc79 #e5e510 #2472c8 #bc3fbc #11a8cd #e5e5e5
+  #808080 #f14c4c #23d18b #f5f543 #3b8eea #d670d6 #29b8db #ffffff`.
+  A labeled Menlo 13 control reduced but did not eliminate face-resolution
+  uncertainty and displayed ASCII, symbols, fallback scripts, ligature
+  sequences, CJK, combining text, emoji, styles, prompt cursor, native
+  selection, and a live resize to 1650×1280. The display showed unjoined
+  Arabic; independent code inspection established that one buffer is created
+  and shaped per grapheme, so shaping cannot cross grapheme/cell boundaries.
+  `./ci/native-frontend.sh` then passed 13 product-shell, 25 default-renderer,
+  25 fault-feature renderer, 23 lab-shell, and 27 real-host tests.
+- **2026-07-24:** the Work 3 scale matrix then used the same Menlo control with
+  the LG at backing scale 1.0 / 60 Hz and the built-in Retina display at
+  backing scale 2.0; enabling Retina changed the LG from the earlier
+  single-display 85 Hz mode to 60 Hz. Both production Mandatum and Ghostty moved
+  1.0→2.0→1.0 with the shared corpus visible. Mandatum recomputed from 191×59
+  on the wide LG window to 89×46 on the narrower Retina window and to 127×48
+  on return; corpus order, styles, fallback/emoji, prompt cursor, chrome, and
+  scene presentation remained coherent, with no observed stale frame or
+  scale-transition corruption. Verdict: Work 3 is complete through its
+  focused-typography-decision branch; broader polish and the Work 4 cache wait
+  on that decision. After the evidence and active docs were synchronized,
+  `./ci/gate.sh` reported `GATE GREEN`.
 
 ## Completion Rule
 

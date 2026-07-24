@@ -300,9 +300,11 @@ recovery, explicit failure outcomes, bounded event-loop work, resize/scale
 stress, and regression measurement behind the same `FrontendHost` and
 `WorkspaceScene` boundaries. Its product source now lives in the workspace;
 the separate `spikes/frontend-wgpu` lab retains measurement and fault tooling
-and is not a second product runtime. Typography validation, shaping-cache work,
-and native default selection are the forward path; the former Phase 7/8
-admission and rollout policy is retired.
+and is not a second product runtime. Typography validation found that explicit
+font requests are not resolution-checked, terminal colors are renderer-owned,
+and the adapter shapes one grapheme per buffer. Resolve that font/palette/run
+boundary before the shaping cache, then proceed toward native default
+selection; the former Phase 7/8 admission and rollout policy is retired.
 
 ### `workflows`
 
