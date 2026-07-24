@@ -334,10 +334,10 @@ dated charter close and its red-team evidence are preserved in
 [docs/history/charter-closure-2026-07-10.md](docs/history/charter-closure-2026-07-10.md);
 current status and forward work live in [PLAN.md](PLAN.md).
 
-Immediate work: reorder native startup, promote the native frontend into the
-workspace, compare typography with Ghostty, add a bounded shaping cache, and
-make native the default development surface. Rewrap-on-resize remains a terminal
-engine concern. [PLAN.md](PLAN.md) holds the forward horizon;
+Immediate work: promote the native frontend into the workspace, compare
+typography with Ghostty, add a bounded shaping cache, and make native the
+default development surface. Rewrap-on-resize remains a terminal engine
+concern. [PLAN.md](PLAN.md) holds the forward horizon;
 [docs/decisions.md](docs/decisions.md) records every judgment call.
 
 ## License

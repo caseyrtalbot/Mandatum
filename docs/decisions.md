@@ -2425,3 +2425,37 @@ This decision supersedes only the opt-in/default/admission posture in
 Gated** (2026-07-21) and **Phase 6 Completes The Excluded Hardening Refactor,
 Not Admission** (2026-07-24). Their architecture choices and recorded evidence
 remain historical fact.
+
+## Accepted: Native GPU Preflight Precedes Product State
+
+Status: accepted (2026-07-24)
+
+Decision: the native application holds validated `AppConfig` and
+`host: Option<FrontendHost>` while winit creates the window and `GpuText`
+creates the surface, adapter, device, queue, and renderer. The sole host
+construction seam runs only after that complete preflight succeeds.
+
+Context: `App::new` previously constructed `FrontendHost` before winit entered
+`resumed()`. Because `FrontendHost` owns `AppState`, restore, and all live
+runtimes, a missing display or incompatible GPU could leave PTYs running even
+though native presentation never became possible.
+
+Rationale: configuration is inert and safe to retain during preflight; product
+state and live runtimes are not. One ordered seam makes every window, surface,
+adapter, device, or renderer failure return before host side effects without
+creating a second state machine.
+
+Consequences:
+
+- native boot owns `host: None` until complete GPU renderer construction;
+- failed preflight has no host to shut down and cleanup remains idempotent;
+- successful restore and PTY startup begin only after native rendering can
+  start;
+- renderer recovery still preserves the already-running shared host;
+- workspace promotion remains separate Work 2.
+
+Verification: deterministic forced no-display, no-adapter, surface, and device
+failure tests prove the GPU and host factories stop in order; a success test proves
+window → GPU renderer → host construction. The native gate, real macOS
+startup/clean exit, and authoritative workspace gate are recorded in
+`docs/verification.md`.

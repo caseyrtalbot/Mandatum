@@ -231,6 +231,12 @@ developer unfamiliar with the current implementation can identify:
   regression baselines, not adoption thresholds.
 - **2026-07-24:** the native-first direction retired Phase 7/8 admission policy;
   no code promotion or startup reorder is claimed by that documentation change.
+- **2026-07-24:** native startup now constructs `FrontendHost` only after
+  window and complete GPU renderer preflight. Forced no-display, no-adapter,
+  surface, and device failures never invoked the host seam; the successful
+  ordering test, 23 shell tests, 27 real-host tests, 25 renderer tests,
+  warnings-denied native Clippy/boundary scan, real Apple M4 Pro/Metal
+  startup-clean-exit run, and post-documentation `./ci/gate.sh` all passed.
 
 ## Completion Rule
 

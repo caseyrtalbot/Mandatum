@@ -88,6 +88,8 @@ The current native implementation:
   overlay scene data;
 - shares layout, paint order, styles, grapheme spans, cursor, selection, and
   composition semantics with the terminal adapter;
+- completes window and GPU renderer preflight before constructing
+  `FrontendHost`, restore state, or live PTYs;
 - handles clipboard, pointer capture, scrollback, focus, resize, scale, restore,
   and shutdown without a second product state machine;
 - has typed surface/device recovery, explicit GPU failures, bounded draining,
@@ -102,7 +104,8 @@ procedures and dated one-line evidence live in
 
 The ordered work is:
 
-1. Reorder startup so GPU preflight succeeds before `FrontendHost` exists.
+1. Reorder startup so GPU preflight succeeds before `FrontendHost` exists
+   — complete.
 2. Move the native frontend into the workspace, narrow the GPU dependency
    allowlist, and make the authoritative gate run the native checks in CI.
 3. Compare text quality directly with Ghostty.
@@ -129,7 +132,6 @@ Until promotion lands:
 - native still lives under `spikes/frontend-wgpu`;
 - `ci/gpu-spike.sh` retains its historical name and is not ordinary CI;
 - `ci/conformance.sh` still encodes the retired admission branch;
-- native startup still constructs `FrontendHost` before GPU success;
 - native is not yet the default launcher.
 
 These are explicit next-work items. Do not reinterpret them as reasons to return

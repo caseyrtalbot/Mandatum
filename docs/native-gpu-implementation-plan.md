@@ -60,7 +60,6 @@ Standing procedures and current dated runs live in
 
 These are work, not reasons to resist the direction:
 
-- `FrontendHost` is currently constructed before native GPU preflight.
 - The native source and its renderer still live under `spikes/`.
 - `ci/conformance.sh` still encodes the retired admission policy.
 - `ci/gpu-spike.sh` is still spike-named and not run by ordinary CI.
@@ -68,22 +67,23 @@ These are work, not reasons to resist the direction:
 - Typography quality has not been compared directly with Ghostty.
 - The renderer reshapes repeated graphemes without the planned bounded cache.
 
-## Work 1 — Reorder Startup
+## Work 1 — Reorder Startup — Complete
 
-Do this first because it is a known correctness defect.
+Completed on 2026-07-24.
 
-- Store `host: Option<FrontendHost>` during native application boot.
-- Inside `resumed()`, create the window, surface, adapter, device, queue, and
-  renderer before constructing `FrontendHost`.
-- Hold validated configuration, not live application state, during preflight.
-- Create `FrontendHost` only after native rendering can start.
-- Keep shutdown idempotent when failure occurs at any boot stage.
+- `App` stores `host: Option<FrontendHost>` and validated `AppConfig` during
+  boot.
+- `resumed()` creates the window and complete GPU renderer before invoking the
+  sole `FrontendHost` construction seam.
+- Window or GPU preflight failure drops configuration without constructing
+  `AppState`, running restore, or starting a PTY.
+- Shutdown remains idempotent when failure occurs before or after host creation.
 
-- Force no-adapter startup and prove it fails before `AppState` exists.
-- Force no-display startup and prove it fails before `AppState` exists.
-- Prove no PTY or restored runtime starts on either failure.
-- Recheck normal startup, restore, native quit, and terminal behavior.
-- Run the native gate and `./ci/gate.sh`.
+- Deterministic no-display, no-adapter, surface, and device failure tests prove
+  GPU and host construction stop at the expected boundary.
+- A successful-order test proves window, GPU renderer, then host construction.
+- The real macOS native shell completed GPU startup and exited cleanly; the
+  native gate rechecked restore and quit.
 
 Exit: GPU startup failure cannot strand live PTYs or partially created product
 state.
@@ -207,5 +207,6 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Implement Work 1: reorder native startup so window, surface, adapter, and device
-succeed before `FrontendHost` creates `AppState` or live runtimes.
+Implement Work 2: promote the native shell and renderer into a production
+workspace package while preserving one authoritative `./ci/gate.sh` and the
+terminal escape hatch.

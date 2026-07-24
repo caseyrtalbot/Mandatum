@@ -20,7 +20,7 @@ use std::{
 use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
 use mandatum_gpu_renderer_spike::{
     GpuFaultInjection, GpuFaultInjectionResult, GpuFrameSkip, GpuRenderError, GpuRenderOutcome,
-    GpuStartupErrorKind, GpuSurfaceRecovery, GpuText, NativeTextSettings,
+    GpuStartupError, GpuStartupErrorKind, GpuSurfaceRecovery, GpuText, NativeTextSettings,
 };
 use mandatum_scene::{
     SceneSize, WorkspaceScene,
@@ -715,9 +715,26 @@ impl PressedPointerButtons {
     }
 }
 
+/// Construct product state only after every native rendering prerequisite.
+///
+/// `create_host` is the sole `FrontendHost`/`AppState`/runtime creation seam,
+/// so any window or GPU error returns without restore or PTY side effects.
+fn start_after_preflight<W, G, H, E>(
+    create_window: impl FnOnce() -> Result<W, E>,
+    create_gpu: impl FnOnce(&W) -> Result<G, E>,
+    create_host: impl FnOnce() -> H,
+) -> Result<(W, G, H), E> {
+    let window = create_window()?;
+    let gpu = create_gpu(&window)?;
+    let host = create_host();
+    Ok((window, gpu, host))
+}
+
 struct App {
     config: Config,
-    host: FrontendHost,
+    app_config: Option<AppConfig>,
+    wake_proxy: EventLoopProxy<UserEvent>,
+    host: Option<FrontendHost>,
     window: Option<std::sync::Arc<Window>>,
     gpu: Option<GpuText>,
     gpu_evidence: Option<GpuEvidence>,
@@ -772,29 +789,20 @@ impl App {
         app_config: AppConfig,
         process_start: Instant,
     ) -> Self {
-        let wake_proxy = proxy.clone();
-        let mut host = FrontendHost::new_with_wake_callback(app_config, move || {
-            let _ = wake_proxy.send_event(UserEvent::Wake);
-        });
         let now = Instant::now();
         let scale_probe_at = config
             .scale_after
             .map(|seconds| now + Duration::from_secs_f64(seconds));
-        let clipboard = match arboard::Clipboard::new() {
-            Ok(clipboard) => Some(clipboard),
-            Err(error) => {
-                host.report_platform_error(format!("clipboard unavailable: {error}"));
-                None
-            }
-        };
         Self {
             config,
-            host,
+            app_config: Some(app_config),
+            wake_proxy: proxy,
+            host: None,
             window: None,
             gpu: None,
             gpu_evidence: None,
             display_refresh_hz: None,
-            clipboard,
+            clipboard: None,
             input_to_present: Samples::with_limit(MAX_MEASUREMENT_SAMPLES),
             frame_ms: Samples::with_limit(MAX_MEASUREMENT_SAMPLES),
             memory: MemorySamples::default(),
@@ -838,6 +846,24 @@ impl App {
     fn request_redraw(&self) {
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+
+    fn host(&self) -> &FrontendHost {
+        self.host
+            .as_ref()
+            .expect("FrontendHost exists after GPU preflight")
+    }
+
+    fn host_mut(&mut self) -> &mut FrontendHost {
+        self.host
+            .as_mut()
+            .expect("FrontendHost exists after GPU preflight")
+    }
+
+    fn shutdown_host(&mut self) {
+        if let Some(host) = &mut self.host {
+            host.shutdown();
         }
     }
 
@@ -893,14 +919,14 @@ impl App {
 
     fn resize_host(&mut self) {
         if let Some(size) = self.scene_size() {
-            self.host.handle_input(InputEvent::Resize(size));
+            self.host_mut().handle_input(InputEvent::Resize(size));
         }
     }
 
     fn apply_scale_factor(&mut self, scale_factor: f32) {
         self.scene_presentable = false;
         self.cancel_pointer_gesture();
-        self.host.suspend_scene_interaction();
+        self.host_mut().suspend_scene_interaction();
         if let Some(gpu) = &mut self.gpu
             && let Err(error) = gpu.set_scale(scale_factor)
         {
@@ -926,22 +952,23 @@ impl App {
                 self.input_to_present.miss();
             }
         }
-        self.host.handle_input(input);
+        self.host_mut().handle_input(input);
         self.apply_effects();
         self.request_redraw();
     }
 
     fn apply_effects(&mut self) {
-        for effect in self.host.take_effects() {
+        let effects = self.host_mut().take_effects();
+        for effect in effects {
             match effect {
                 FrontendEffect::SetClipboard(text) => {
                     if let Some(clipboard) = &mut self.clipboard {
                         if let Err(error) = clipboard.set_text(text) {
-                            self.host
+                            self.host_mut()
                                 .report_platform_error(format!("clipboard write failed: {error}"));
                         }
                     } else {
-                        self.host
+                        self.host_mut()
                             .report_platform_error("clipboard write failed: clipboard unavailable");
                     }
                 }
@@ -950,7 +977,7 @@ impl App {
     }
 
     fn drain_runtime(&mut self) -> bool {
-        let drained = self.host.drain_runtime_bounded(EVENT_DRAIN_BUDGET);
+        let drained = self.host_mut().drain_runtime_bounded(EVENT_DRAIN_BUDGET);
         if drained > 0 {
             self.dirty_from_runtime = true;
         }
@@ -962,13 +989,13 @@ impl App {
         self.scene_presentable = false;
         let Some(size) = self.scene_size() else {
             self.cancel_and_disable_ime();
-            self.host.suspend_scene_interaction();
+            self.host_mut().suspend_scene_interaction();
             return Ok(());
         };
-        let snapshot = self.host.frame(size);
+        let snapshot = self.host_mut().frame(size);
         if scene_is_suspended_by_tiled_minimum(&snapshot.scene) {
             self.cancel_and_disable_ime();
-            self.host.suspend_scene_interaction();
+            self.host_mut().suspend_scene_interaction();
             return Ok(());
         }
         self.sync_ime(&snapshot.scene);
@@ -993,7 +1020,7 @@ impl App {
                         self.lifecycle.device_recreations =
                             self.lifecycle.device_recreations.saturating_add(1);
                         self.scene_presentable = false;
-                        self.host.suspend_scene_interaction();
+                        self.host_mut().suspend_scene_interaction();
                         self.capture_gpu_evidence();
                         self.resize_host();
                         self.awaiting_recovery_present = true;
@@ -1045,7 +1072,7 @@ impl App {
             }
             GpuRenderOutcome::Skipped(reason) => {
                 self.scene_presentable = false;
-                self.host.suspend_scene_interaction();
+                self.host_mut().suspend_scene_interaction();
                 self.frame_ms.miss();
                 match reason {
                     GpuFrameSkip::Timeout => {
@@ -1067,7 +1094,7 @@ impl App {
             }
             GpuRenderOutcome::SurfaceReconfigured(recovery) => {
                 self.scene_presentable = false;
-                self.host.suspend_scene_interaction();
+                self.host_mut().suspend_scene_interaction();
                 match recovery {
                     GpuSurfaceRecovery::Outdated => {
                         self.lifecycle.outdated_reconfigurations =
@@ -1327,11 +1354,11 @@ impl App {
     }
 
     fn exit_if_requested(&mut self, event_loop: &ActiveEventLoop) -> bool {
-        if !self.host.should_quit() {
+        if !self.host().should_quit() {
             return false;
         }
         self.cancel_and_disable_ime();
-        self.host.shutdown();
+        self.shutdown_host();
         self.print_summary();
         event_loop.exit();
         true
@@ -1367,7 +1394,7 @@ impl App {
     }
 
     fn send_pointer_input(&mut self, kind: PointerKind, button: Option<PointerButton>) {
-        let redraw = kind != PointerKind::Move || self.host.pointer_move_needs_redraw();
+        let redraw = kind != PointerKind::Move || self.host().pointer_move_needs_redraw();
         let (column, row) = self.mouse_cell;
         let input = InputEvent::Pointer(PointerEvent {
             kind,
@@ -1376,7 +1403,7 @@ impl App {
             row,
             mods: neutral_modifiers(self.modifiers),
         });
-        self.host.handle_input(input);
+        self.host_mut().handle_input(input);
         self.apply_effects();
         if redraw {
             self.request_redraw();
@@ -1491,8 +1518,9 @@ impl App {
             }
             self.ime_allowed = false;
         }
-        self.host
-            .handle_input(InputEvent::Composition(CompositionEvent::Cancel));
+        if let Some(host) = &mut self.host {
+            host.handle_input(InputEvent::Composition(CompositionEvent::Cancel));
+        }
     }
 
     /// Service timers at both the start and end of each winit event batch.
@@ -1513,13 +1541,13 @@ impl App {
         }
         if self.deadline.is_some_and(|deadline| now >= deadline) {
             self.cancel_and_disable_ime();
-            self.host.shutdown();
+            self.shutdown_host();
             self.print_summary();
             event_loop.exit();
             return true;
         }
         if now >= self.next_heartbeat {
-            self.host.heartbeat();
+            self.host_mut().heartbeat();
             self.next_heartbeat = now + HEARTBEAT;
             self.request_redraw();
         }
@@ -1536,7 +1564,7 @@ impl App {
         self.maybe_inject_fault(now);
         if self.fatal_error.is_some() {
             self.cancel_and_disable_ime();
-            self.host.shutdown();
+            self.shutdown_host();
             self.print_summary();
             event_loop.exit();
             return true;
@@ -1569,7 +1597,9 @@ impl App {
 
     fn cancel_pointer_gesture(&mut self) {
         self.pressed_pointer_buttons.clear();
-        self.host.cancel_pointer_gesture();
+        if let Some(host) = &mut self.host {
+            host.cancel_pointer_gesture();
+        }
     }
 }
 
@@ -1582,32 +1612,35 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let attributes = Window::default_attributes().with_title("Mandatum GPU Host Spike");
-        let window = match event_loop.create_window(attributes) {
-            Ok(window) => {
+        let text_settings = self.config.text_settings.clone();
+        let focus_for_soak = matches!(self.config.stress, Some(StressConfig::Soak { .. }));
+        let app_config = self
+            .app_config
+            .take()
+            .expect("native startup configuration is consumed exactly once");
+        let wake_proxy = self.wake_proxy.clone();
+        let startup = start_after_preflight(
+            || {
+                let attributes = Window::default_attributes().with_title("Mandatum GPU Host Spike");
+                let window = event_loop.create_window(attributes).map_err(|error| {
+                    GpuStartupError::no_display(format!("no window (headless?): {error}"))
+                })?;
                 #[cfg(target_os = "macos")]
                 window.set_option_as_alt(OptionAsAlt::OnlyRight);
-                if matches!(self.config.stress, Some(StressConfig::Soak { .. })) {
+                if focus_for_soak {
                     window.focus_window();
                 }
-                std::sync::Arc::new(window)
-            }
-            Err(error) => {
-                self.fail(
-                    "startup",
-                    "no_display",
-                    format!("no window (headless?): {error}"),
-                );
-                self.print_summary();
-                event_loop.exit();
-                return;
-            }
-        };
-        let gpu = match pollster::block_on(GpuText::new(
-            window.clone(),
-            self.config.text_settings.clone(),
-        )) {
-            Ok(gpu) => gpu,
+                Ok(std::sync::Arc::new(window))
+            },
+            |window| pollster::block_on(GpuText::new(window.clone(), text_settings)),
+            || {
+                FrontendHost::new_with_wake_callback(app_config, move || {
+                    let _ = wake_proxy.send_event(UserEvent::Wake);
+                })
+            },
+        );
+        let (window, gpu, mut host) = match startup {
+            Ok(started) => started,
             Err(error) => {
                 self.fail(
                     "startup",
@@ -1619,12 +1652,20 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        self.clipboard = match arboard::Clipboard::new() {
+            Ok(clipboard) => Some(clipboard),
+            Err(error) => {
+                host.report_platform_error(format!("clipboard unavailable: {error}"));
+                None
+            }
+        };
         self.display_refresh_hz = window
             .current_monitor()
             .and_then(|monitor| monitor.refresh_rate_millihertz())
             .map(|millihertz| f64::from(millihertz) / 1_000.0);
         self.window = Some(window);
         self.gpu = Some(gpu);
+        self.host = Some(host);
         self.capture_gpu_evidence();
         self.resize_host();
 
@@ -1681,7 +1722,7 @@ impl ApplicationHandler<UserEvent> for App {
                     "event loop did not exit within budget",
                 );
                 self.cancel_and_disable_ime();
-                self.host.shutdown();
+                self.shutdown_host();
                 self.print_summary();
                 event_loop.exit();
             }
@@ -1700,7 +1741,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => {
                 self.cancel_and_disable_ime();
-                self.host.shutdown();
+                self.shutdown_host();
                 self.print_summary();
                 event_loop.exit();
             }
@@ -1713,14 +1754,14 @@ impl ApplicationHandler<UserEvent> for App {
                     let kind = render_error_kind(&error);
                     self.fail("runtime", kind, error.to_string());
                     self.cancel_and_disable_ime();
-                    self.host.shutdown();
+                    self.shutdown_host();
                     self.print_summary();
                     event_loop.exit();
                     return;
                 }
                 if self.fatal_error.is_some() {
                     self.cancel_and_disable_ime();
-                    self.host.shutdown();
+                    self.shutdown_host();
                     self.print_summary();
                     event_loop.exit();
                     return;
@@ -1732,7 +1773,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(size) => {
                 self.scene_presentable = false;
                 self.cancel_pointer_gesture();
-                self.host.suspend_scene_interaction();
+                self.host_mut().suspend_scene_interaction();
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize_surface(size.width, size.height);
                 }
@@ -1789,30 +1830,30 @@ impl ApplicationHandler<UserEvent> for App {
                         self.send_input(input, measured, now);
                     }
                     PlatformAction::PasteShortcut(shortcut) => {
-                        if self.host.handles_workspace_key(shortcut) {
+                        if self.host().handles_workspace_key(shortcut) {
                             self.send_input(InputEvent::Key(shortcut), false, now);
                         } else if let Some(clipboard) = &mut self.clipboard {
                             match clipboard.get_text() {
                                 Ok(text) => {
                                     self.send_input(InputEvent::Paste(text), false, now);
                                 }
-                                Err(error) => self.host.report_platform_error(format!(
+                                Err(error) => self.host_mut().report_platform_error(format!(
                                     "clipboard read failed: {error}"
                                 )),
                             }
                             self.request_redraw();
                         } else {
-                            self.host.report_platform_error(
+                            self.host_mut().report_platform_error(
                                 "clipboard read failed: clipboard unavailable",
                             );
                             self.request_redraw();
                         }
                     }
                     PlatformAction::CopyShortcut(shortcut) => {
-                        if self.host.handles_workspace_key(shortcut) {
+                        if self.host().handles_workspace_key(shortcut) {
                             self.send_input(InputEvent::Key(shortcut), false, now);
                         } else {
-                            self.host.copy_selection();
+                            self.host_mut().copy_selection();
                             self.apply_effects();
                             self.request_redraw();
                         }
@@ -1842,7 +1883,7 @@ impl ApplicationHandler<UserEvent> for App {
                         "window became occluded during the active soak",
                     );
                     self.cancel_and_disable_ime();
-                    self.host.shutdown();
+                    self.shutdown_host();
                     self.print_summary();
                     event_loop.exit();
                 }
@@ -1860,7 +1901,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.cancel_and_disable_ime();
-        self.host.shutdown();
+        self.shutdown_host();
         self.print_summary();
     }
 }
@@ -2199,7 +2240,7 @@ fn main() {
     // `process::exit` skips Drop, so finalize explicitly before deriving a
     // nonzero process status from any recoverable event-loop failure.
     app.cancel_and_disable_ime();
-    app.host.shutdown();
+    app.shutdown_host();
     app.print_summary();
     let exit_code = run_exit_code(app.fatal_error.as_deref());
     if exit_code != 0 {
@@ -2215,7 +2256,8 @@ mod tests {
         PressedPointerButtons, RunEvidence, StressConfig, WorkloadEvidence, configured_run_timeout,
         ime_event_is_accepted, key_for_platform_translation, pane_geometry_is_suspended,
         parse_config_from, parse_font_family, parse_font_size, parse_ps_rss_kib, parse_scale_delay,
-        parse_scale_factor, run_exit_code, scene_size_from_metrics, translate_ime, translate_key,
+        parse_scale_factor, run_exit_code, scene_size_from_metrics, start_after_preflight,
+        translate_ime, translate_key,
     };
     use mandatum_scene::input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, TextRange,
@@ -2224,6 +2266,83 @@ mod tests {
         event::Ime,
         keyboard::{Key, ModifiersState, NamedKey},
     };
+
+    #[test]
+    fn startup_preflight_no_display_never_constructs_gpu_or_host() {
+        let mut gpu_constructed = false;
+        let mut host_constructed = false;
+
+        let result = start_after_preflight(
+            || Err::<(), _>("no display"),
+            |_| {
+                gpu_constructed = true;
+                Ok(())
+            },
+            || {
+                host_constructed = true;
+            },
+        );
+
+        assert_eq!(result, Err("no display"));
+        assert!(!gpu_constructed);
+        assert!(!host_constructed);
+    }
+
+    #[test]
+    fn startup_preflight_no_adapter_never_constructs_host() {
+        let mut host_constructed = false;
+
+        let result = start_after_preflight(
+            || Ok("window"),
+            |_| Err::<(), _>("no adapter"),
+            || {
+                host_constructed = true;
+            },
+        );
+
+        assert_eq!(result, Err("no adapter"));
+        assert!(!host_constructed);
+    }
+
+    #[test]
+    fn startup_preflight_surface_and_device_failures_never_construct_host() {
+        for failure in ["surface", "device"] {
+            let mut host_constructed = false;
+            let result = start_after_preflight(
+                || Ok("window"),
+                |_| Err::<(), _>(failure),
+                || {
+                    host_constructed = true;
+                },
+            );
+
+            assert_eq!(result, Err(failure));
+            assert!(!host_constructed);
+        }
+    }
+
+    #[test]
+    fn successful_startup_constructs_host_after_window_and_gpu() {
+        let order = std::cell::RefCell::new(Vec::new());
+
+        let result = start_after_preflight(
+            || {
+                order.borrow_mut().push("window");
+                Ok::<_, &str>("window")
+            },
+            |_| {
+                order.borrow_mut().push("gpu");
+                Ok("gpu")
+            },
+            || {
+                order.borrow_mut().push("host");
+                "host"
+            },
+        );
+
+        assert_eq!(result, Ok(("window", "gpu", "host")));
+        assert_eq!(order.into_inner(), ["window", "gpu", "host"]);
+    }
 
     #[test]
     fn winit_key_is_neutral_before_it_reaches_the_host() {

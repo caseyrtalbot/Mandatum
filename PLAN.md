@@ -25,7 +25,9 @@ The workstation already has the five constitutional boundaries, one
 channel, renderer-neutral input/effects, scene-owned layout and presentation,
 terminal parity through `CellProgram`, typed Artifact Preview pixels, shared
 grapheme/IME contracts, native input and lifecycle routes, GPU recovery, and
-measurement tooling.
+measurement tooling. Native startup now completes window and GPU renderer
+preflight before constructing `FrontendHost`, so failed preflight cannot start
+restore or PTY work.
 
 The native implementation still lives under `spikes/frontend-wgpu`; the root
 workspace, `ci/conformance.sh`, `ci/gpu-spike.sh`, and default launcher still
@@ -34,12 +36,12 @@ product direction.
 
 ## Ordered Work
 
-### 1. Reorder native startup
+### 1. Reorder native startup — complete
 
-Create the window, surface, adapter, device, queue, and renderer before
-constructing `FrontendHost`. Keep `host: None` during preflight. Forced
-no-adapter and no-display failures must occur before `AppState`, restore, or any
-PTY exists.
+The native shell keeps `host: None` during preflight and creates the window,
+surface, adapter, device, queue, and renderer before `FrontendHost`. Forced
+no-display and no-adapter tests prove the host creation seam is never invoked;
+the real macOS startup/clean-exit path and restore coverage are green.
 
 ### 2. Promote native into the workspace
 
