@@ -1292,7 +1292,7 @@ mod tests {
             area: layout::welcome_rect(with_welcome.size, entries.len() as u16 + 4),
             introduction: "A workspace for terminals, tasks, and agents.".to_owned(),
             entries,
-            dismissal: "Any key or click dismisses this note".to_owned(),
+            dismissal: "Esc dismisses · other input continues".to_owned(),
         }));
         let terminal = draw(&with_welcome);
         let rows = buffer_rows(&terminal);
@@ -1301,7 +1301,7 @@ mod tests {
         assert!(all.contains("Mandatum"));
         assert!(all.contains("A workspace for terminals, tasks, and agents."));
         assert!(all.contains("ctrl+p  Command palette"));
-        assert!(all.contains("Any key or click dismisses this note"));
+        assert!(all.contains("Esc dismisses · other input continues"));
 
         let buffer = terminal.backend().buffer();
         let find_cell = |needle: &str, marker: char| {
@@ -1320,7 +1320,7 @@ mod tests {
         let description = find_cell("Command palette", 'C');
         assert!(!description.modifier.contains(Modifier::BOLD));
         assert!(!description.modifier.contains(Modifier::DIM));
-        let dismissal = find_cell("Any key or click", 'A');
+        let dismissal = find_cell("Esc dismisses", 'E');
         assert!(dismissal.modifier.contains(Modifier::DIM));
     }
 

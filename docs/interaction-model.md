@@ -83,10 +83,12 @@ When launched with no saved workspace — and only then — the state-only statu
 `new workspace` composes with the permanent live-keymap hint into `new
 workspace — ctrl+p commands · right-click menu · f1 help`; each route appears
 once. A calm eight-line note names the four doors: the palette chord, the
-right-click menu, the help key, and the quit chord. It is not modal: any key,
-paste, or click dismisses it and the action itself still lands. Once a
-workspace has been saved the launch path restores instead, so the note never
-returns. No splash theater.
+right-click menu, the help key, and the quit chord. Bare Escape is a one-shot
+safe dismissal: it removes the note without reaching the focused child. Any
+other key, paste, or click dismisses the note and the action itself still
+lands. Escape returns to normal child or modal routing immediately afterward.
+Once a workspace has been saved the launch path restores instead, so the note
+never returns. No splash theater.
 
 ## Pane Interaction
 

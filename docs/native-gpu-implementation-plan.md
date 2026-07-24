@@ -388,8 +388,10 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Daily-drive the native launcher. When the first concrete functional failure
-appears, reproduce it, fix the smallest owning product seam, and add a
-regression before moving to another failure. Do not pull visual materials, the
-installer, updater, release workflow, archives, rollout, or public GitHub
-presentation out of the concluding build phase.
+Continue daily-driving the native launcher. The first post-transition failure
+— first-run Escape mutating the focused vi-mode shell behind the welcome note —
+is resolved at the shared input seam with regression coverage. When the next
+concrete functional failure appears, reproduce it, fix the smallest owning
+product seam, and add a regression before moving on. Do not pull visual
+materials, the installer, updater, release workflow, archives, rollout, or
+public GitHub presentation out of the concluding build phase.

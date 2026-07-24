@@ -444,8 +444,15 @@ impl AppState {
             self.cancel_composition_and_reject_commit();
         }
         // The first-run note dismisses on any action — a key, a paste, or a
-        // pointer press — and the action itself proceeds normally (the note
-        // is never modal). Resize and pointer motion are not actions.
+        // pointer press. A plain Escape is the note's safe dismissal action:
+        // consume it so a shell using Escape for modal editing cannot change
+        // state behind the note. Every other action proceeds normally. Resize
+        // and pointer motion are not actions.
+        let consume_first_run_escape = self.first_run_note
+            && matches!(
+                &event,
+                InputEvent::Key(key) if *key == Key::plain(KeyCode::Escape)
+            );
         if self.first_run_note
             && matches!(
                 event,
@@ -461,6 +468,10 @@ impl AppState {
             )
         {
             self.first_run_note = false;
+            if consume_first_run_escape {
+                self.mark_redraw();
+                return;
+            }
         }
         match event {
             InputEvent::Key(key) => self.handle_key(key),
@@ -933,6 +944,7 @@ impl AppState {
     }
 
     fn open_palette(&mut self) {
+        self.first_run_note = false;
         // Palette is a top-level input owner. Copy mode can still be active
         // when the pointer opens the palette through the status strip, so
         // close it here to keep key and paste routing on the same surface.
@@ -3047,6 +3059,7 @@ impl AppState {
     /// commands relevant to its kind and runtime state. Every row carries
     /// the key chord that runs the same command from the keyboard.
     fn open_context_menu(&mut self, pane_id: PaneId, pointer: PointerEvent) {
+        self.first_run_note = false;
         self.focus_pane_for_pointer(&pane_id);
         self.palette = None;
         let items = self.context_menu_items(&pane_id);
@@ -3291,6 +3304,7 @@ impl AppState {
     /// Open the execution timeline: read the durable tail once, newest
     /// first. The other modal surfaces close.
     fn open_timeline(&mut self) {
+        self.first_run_note = false;
         self.palette = None;
         self.context_menu = None;
         self.search_view = None;
@@ -3312,6 +3326,7 @@ impl AppState {
     /// flood. The other modal surfaces close; copy mode exits because search
     /// owns the keyboard while open.
     fn open_search(&mut self) {
+        self.first_run_note = false;
         self.palette = None;
         self.context_menu = None;
         self.timeline_view = None;
@@ -3566,6 +3581,7 @@ impl AppState {
 
     /// Open the session map with the active session's focused pane selected.
     fn open_session_map(&mut self) {
+        self.first_run_note = false;
         self.palette = None;
         self.context_menu = None;
         self.timeline_view = None;
@@ -3598,6 +3614,7 @@ impl AppState {
     /// and the LIVE keymap (`crate::help`), so rebinds are always reflected.
     /// The other modal surfaces close.
     fn open_help(&mut self) {
+        self.first_run_note = false;
         self.palette = None;
         self.context_menu = None;
         self.timeline_view = None;
@@ -3713,7 +3730,7 @@ impl AppState {
             area: welcome_rect(size, entries.len() as u16 + 4),
             introduction: "A workspace for terminals, tasks, and agents.".to_owned(),
             entries,
-            dismissal: "Any key or click dismisses this note".to_owned(),
+            dismissal: "Esc dismisses · other input continues".to_owned(),
         })
     }
 
@@ -3736,6 +3753,7 @@ impl AppState {
             self.status = format!("agent pane {pane_id} was not found");
             return;
         };
+        self.first_run_note = false;
         self.palette = None;
         self.context_menu = None;
         self.timeline_view = None;
@@ -3752,6 +3770,7 @@ impl AppState {
     /// Open a project-relative path prompt. The path remains durable intent;
     /// filesystem validation and PNG decoding begin only after Enter.
     fn open_artifact_prompt(&mut self) {
+        self.first_run_note = false;
         self.palette = None;
         self.context_menu = None;
         self.timeline_view = None;

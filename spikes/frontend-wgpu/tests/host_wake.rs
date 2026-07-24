@@ -1170,7 +1170,7 @@ fn real_host_welcome_reaches_the_gpu_render_plan() {
             ("ctrl+q", "Quit Mandatum"),
         ]
     );
-    assert_eq!(welcome.dismissal, "Any key or click dismisses this note");
+    assert_eq!(welcome.dismissal, "Esc dismisses · other input continues");
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
         .expect("GPU renderer did not prepare the real welcome scene");

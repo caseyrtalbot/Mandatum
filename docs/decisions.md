@@ -2859,3 +2859,46 @@ native package while preserving `/private/tmp` as the caller directory, and
 terminal release builds, 16 native shell tests, five terminal distribution
 tests, and conformance passed. The final repository gate and displayed launch
 checks are recorded in `docs/verification.md`.
+
+## First-Run Escape Is A One-Shot Consumed Workspace Action
+
+Status: accepted and completed (2026-07-24)
+
+Decision: while the first-run note is visible, an exact bare Escape dismisses
+the note, requests a redraw, and is consumed before terminal routing. Every
+other dismissal action continues through its existing route, and Escape
+returns to normal child or modal routing immediately after the note closes.
+The shared `AppState` owns the exception so native and terminal frontends
+retain identical product behavior.
+
+Context: the first native daily-drive after Work 5 dismissed the note with
+Escape. The same byte reached Casey's vi-mode zsh, switched it out of insert
+mode behind the overlay, and caused the following `pwd` characters to edit and
+execute a prior history command. A second fresh-workspace run proved the path:
+after Escape, a leading `i` was consumed as zsh's insert-mode command while the
+following `printf` executed.
+
+Rationale: the visible orientation note makes dismissal an explicit,
+short-lived workspace interaction. Consuming its conventional Escape action
+prevents hidden child-state mutation without turning the note modal or
+weakening the terminal-soul rule for ordinary input.
+
+Consequences:
+
+- first-run Escape cannot alter shell editing mode or another child state
+  behind the note;
+- ordinary typing, paste, composition, pointer actions, and configured
+  workspace chords still dismiss and continue;
+- opening any modal clears the note, so the visible modal owns its Escape
+  route and the welcome note cannot reappear behind it;
+- a second Escape follows the normal child or active-modal route;
+- renderer implementation, launcher, persistence, packaging, release, and the
+  visual-material roadmap remain unchanged; the displayed dismissal guidance
+  now states the functional exception.
+
+Verification: a focused RED test first observed Escape reach the no-PTY child
+route. The implemented regression proves the first Escape is consumed, the
+next Escape resumes child routing, Ctrl+P still opens the palette and its
+following Escape closes it, and an ordinary first key still follows the child
+route. The final displayed native check and repository gate are recorded in
+`docs/verification.md`.

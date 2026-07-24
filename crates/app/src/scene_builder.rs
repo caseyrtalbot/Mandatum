@@ -985,6 +985,76 @@ mod tests {
         }
     }
 
+    // [L5-GATE] The visible welcome note owns one explicit bare-Escape
+    // dismissal; terminal routing resumes immediately afterward.
+    #[test]
+    fn first_run_escape_is_consumed_while_other_actions_still_fall_through() {
+        let escape_dir = FreshDir::new("escape-consumed");
+        let mut escape_state = AppState::new(escape_dir.config());
+        assert!(matches!(
+            build_workspace_scene(&escape_state, SceneSize::new(100, 30)).overlay,
+            Some(OverlayScene::Welcome(_))
+        ));
+
+        escape_state.handle_event(InputEvent::Key(key(KeyCode::Escape)));
+
+        assert_eq!(
+            escape_state.status(),
+            "new workspace",
+            "first-run Escape must not reach the focused child"
+        );
+        assert!(
+            !matches!(
+                build_workspace_scene(&escape_state, SceneSize::new(100, 30)).overlay,
+                Some(OverlayScene::Welcome(_))
+            ),
+            "the frame after Escape must omit the welcome note"
+        );
+        escape_state.handle_event(InputEvent::Key(key(KeyCode::Escape)));
+        assert_eq!(
+            escape_state.status(),
+            "pane pane-1 has no live PTY",
+            "Escape must return to the normal child route after dismissal"
+        );
+
+        let palette_dir = FreshDir::new("palette-fallthrough");
+        let mut palette_state = AppState::new(palette_dir.config());
+        palette_state.handle_event(InputEvent::Key(ctrl('p')));
+        assert!(
+            palette_state.palette_open(),
+            "the first action must still reach workspace controls"
+        );
+        palette_state.handle_event(InputEvent::Key(key(KeyCode::Escape)));
+        assert!(
+            !palette_state.palette_open(),
+            "Escape after another first action must retain its modal behavior"
+        );
+
+        let help_dir = FreshDir::new("direct-help");
+        let mut help_state = AppState::new(help_dir.config());
+        help_state.dispatch(CommandId::ShowHelp);
+        assert!(matches!(
+            build_workspace_scene(&help_state, SceneSize::new(100, 30)).overlay,
+            Some(OverlayScene::Help(_))
+        ));
+        help_state.handle_event(InputEvent::Key(key(KeyCode::Escape)));
+        assert!(
+            build_workspace_scene(&help_state, SceneSize::new(100, 30))
+                .overlay
+                .is_none(),
+            "a directly opened modal must dismiss the latent welcome note and own Escape"
+        );
+
+        let ordinary_dir = FreshDir::new("ordinary-fallthrough");
+        let mut ordinary_state = AppState::new(ordinary_dir.config());
+        ordinary_state.handle_event(InputEvent::Key(key(KeyCode::Char('x'))));
+        assert_eq!(
+            ordinary_state.status(),
+            "pane pane-1 has no live PTY",
+            "ordinary first actions must still fall through to the child route"
+        );
+    }
+
     #[test]
     fn first_run_note_shows_on_a_fresh_dir_dismisses_on_action_and_never_returns() {
         let dir = FreshDir::new("gating");
@@ -1020,8 +1090,8 @@ mod tests {
         assert!(welcome.entries.iter().any(|entry| entry.keys == "ctrl+p"));
         assert!(welcome.dismissal.contains("dismisses"));
 
-        // Any action dismisses it, and the action itself still lands.
-        state.handle_key(ctrl('p'));
+        // A non-Escape action dismisses it, and the action itself still lands.
+        state.handle_event(InputEvent::Key(ctrl('p')));
         assert!(state.palette_open(), "the dismissing action still runs");
         let scene = build_workspace_scene(&state, SceneSize::new(100, 30));
         assert!(

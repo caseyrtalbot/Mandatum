@@ -360,6 +360,26 @@ developer unfamiliar with the current implementation can identify:
   the host terminal through Ctrl+Q. The first post-documentation
   `./ci/gate.sh` run reported `GATE GREEN`; the synchronized rerun after this
   evidence entry also reported `GATE GREEN` and is the completion authority.
+- **2026-07-24:** the first native daily-drive after Work 5 reproduced a
+  first-run input defect on Casey's vi-mode zsh: Escape dismissed the welcome
+  note but also reached the child, so the following `pwd` characters edited
+  and executed a prior history command. A second fresh workspace proved the
+  route when Escape consumed a leading `i` as zsh's insert-mode command before
+  the remaining `printf` executed. `AppState` now treats exact bare Escape as
+  a one-shot consumed welcome dismissal while every other first action still
+  continues normally. The RED regression first observed the existing no-PTY
+  child route; the GREEN version proves first Escape consumed, second Escape
+  restored to child routing, Ctrl+P then Escape still opens and closes the
+  palette, directly opened Help owns its Escape without reviving Welcome, and
+  an ordinary first key still follows the child route. The app library passed
+  286 tests and the real-host welcome path reached the GPU plan.
+  The fixed native build displayed `Esc dismisses · other input continues`;
+  Escape then left `printf MANDATUM_ESCAPE_CONSUMED_OK` intact, and
+  Ctrl+Q exited cleanly. Pre-completion gate runs exposed the real-host test's
+  stale old-copy assertion, guidance that fit native but truncated in the
+  80-column terminal renderer, and excluded-lab rustfmt drift. Each
+  synchronization defect was corrected before completion. The synchronized
+  code, test, and documentation `./ci/gate.sh` run then reported `GATE GREEN`.
 
 ## Completion Rule
 

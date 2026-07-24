@@ -135,7 +135,8 @@ pub struct HelpEntry {
 /// The one-time first-run note: a short orientation card shown only when no
 /// saved workspace exists. Its semantic rows let every frontend distinguish
 /// keys, descriptions, and dismissal guidance without parsing whitespace.
-/// Dismissed by any action; not modal (input under it behaves normally).
+/// Bare Escape is a one-shot consumed dismissal; every other dismissal action
+/// continues to its normal route.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WelcomeOverlay {
     pub area: SceneRect,
