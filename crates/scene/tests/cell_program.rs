@@ -1,11 +1,14 @@
+use std::sync::Arc;
+
 use mandatum_scene::{
-    AgentApprovalPrompt, AgentContent, AgentStatus, AttentionSegment, CellOccupancy, CellSelection,
-    ContextMenuEntry, ContextMenuOverlay, EmptyContent, HeaderScene, HelpEntry, HelpOverlay,
-    HitTarget, HitTargetKind, OverlayScene, PaletteEntry, PaletteOverlay, PaneContent, PaneId,
-    PaneScene, PaneSceneKind, PromptOverlay, SceneCell, SceneCellStyle, SceneColor, SceneRect,
-    SceneSize, SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow, StatusScene,
-    SurfacePosition, TaskContent, TerminalSurface, Theme, TimelineEntry, TimelineOverlay,
-    WelcomeEntry, WelcomeOverlay, WorkspaceScene, compile_cell_program,
+    AgentApprovalPrompt, AgentContent, AgentStatus, ArtifactContent, ArtifactFit, ArtifactState,
+    AttentionSegment, CellOccupancy, CellSelection, ContextMenuEntry, ContextMenuOverlay,
+    EmptyContent, HeaderScene, HelpEntry, HelpOverlay, HitTarget, HitTargetKind, OverlayScene,
+    PaletteEntry, PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind, PromptOverlay,
+    RasterSurface, SceneCell, SceneCellStyle, SceneColor, SceneRect, SceneSize, SearchEntry,
+    SearchOverlay, SessionMapOverlay, SessionMapRow, StatusScene, SurfacePosition, TaskContent,
+    TerminalSurface, Theme, TimelineEntry, TimelineOverlay, WelcomeEntry, WelcomeOverlay,
+    WorkspaceScene, compile_cell_program,
 };
 
 #[test]
@@ -957,6 +960,99 @@ fn many_full_frame_replacements_compact_to_final_topmost_cells() {
             .flat_map(|y| (0..scene.size.width).map(move |x| (x, y)))
             .collect::<Vec<_>>(),
         "final cells iterate deterministically in row-major order"
+    );
+}
+
+#[test]
+fn ready_artifact_marks_only_its_final_visible_body_cells() {
+    let artifact_id = PaneId::new("artifact-pane");
+    let later_id = PaneId::new("later-pane");
+    let scene = WorkspaceScene {
+        size: SceneSize::new(20, 11),
+        header: HeaderScene {
+            area: SceneRect::new(0, 0, 20, 1),
+            workspace_name: "Mandatum".to_owned(),
+            session_name: "main".to_owned(),
+            pane_count: 2,
+            focused_pane: artifact_id.clone(),
+            zoomed: false,
+            connector_label: "none".to_owned(),
+            text: "artifacts".to_owned(),
+            attention: Vec::new(),
+        },
+        panes: vec![
+            PaneScene {
+                id: artifact_id.clone(),
+                title: "Home".to_owned(),
+                kind: PaneSceneKind::Artifact,
+                area: SceneRect::new(0, 1, 20, 9),
+                focused: true,
+                floating: false,
+                stacked: false,
+                zoomed: false,
+                content: PaneContent::Artifact(ArtifactContent {
+                    source_label: "shots/home.png".to_owned(),
+                    alt_text: "Home page".to_owned(),
+                    fit: ArtifactFit::Contain,
+                    state: ArtifactState::Ready(RasterSurface {
+                        width: 2,
+                        height: 1,
+                        revision: 7,
+                        rgba8: Arc::from([255, 0, 0, 255, 0, 255, 0, 255]),
+                    }),
+                }),
+            },
+            PaneScene {
+                id: later_id.clone(),
+                title: "later".to_owned(),
+                kind: PaneSceneKind::StatusLog,
+                area: SceneRect::new(10, 5, 8, 4),
+                focused: false,
+                floating: true,
+                stacked: false,
+                zoomed: false,
+                content: PaneContent::Empty(EmptyContent {
+                    cwd_label: "/tmp".to_owned(),
+                    restart_generation: 0,
+                }),
+            },
+        ],
+        overlay: Some(OverlayScene::Welcome(WelcomeOverlay {
+            area: SceneRect::new(1, 6, 6, 3),
+            introduction: "topmost".to_owned(),
+            entries: Vec::new(),
+            dismissal: String::new(),
+        })),
+        status: StatusScene {
+            area: SceneRect::new(0, 10, 20, 1),
+            text: "ready".to_owned(),
+        },
+        focused_pane: artifact_id,
+        hit_targets: Vec::new(),
+        copy_mode: false,
+    };
+
+    let program = compile_cell_program(&scene, &Theme::default());
+
+    assert_eq!(
+        program.cell_at(2, 5).and_then(|cell| cell.raster_layer),
+        Some(0),
+        "ready body cells carry the artifact pane draw index"
+    );
+    assert_eq!(
+        program.cell_at(1, 2).and_then(|cell| cell.raster_layer),
+        None,
+        "stable labeled detail rows stay cell-only"
+    );
+    assert_eq!(
+        program.cell_at(11, 6).and_then(|cell| cell.raster_layer),
+        None,
+        "a later pane replaces an earlier artifact marker"
+    );
+    assert_eq!(
+        program.cell_at(2, 6).and_then(|cell| cell.raster_layer),
+        None,
+        "the topmost overlay replaces an artifact marker"
     );
 }
 

@@ -259,7 +259,14 @@ Empty, chrome, every overlay, tiled/stacked/zoomed/mixed-content/dense/floating
 compositions, built-in and custom theme roles, all current style modifiers,
 terminal/item selection, and cursor without frontend presentation branches.
 The explicit `WideContinuation` occupancy is the Phase 5 seam; current scene
-surfaces still carry scalar cells and do not claim grapheme-width correctness.
+text surfaces still carry scalar cells and do not claim grapheme-width
+correctness. Artifact panes add a separate typed path: durable core state holds
+only project-relative `ArtifactPaneIntent`, app live state owns safe file
+opening/PNG decode/cache, and `mandatum-scene` carries immutable bounded RGBA8
+sRGB pixels plus loading/ready/failed state. `ProgramCell::raster_layer` marks
+only final-topmost artifact body cells, so the GPU adapter can clip pixels
+without learning pane or overlay composition; cell-only adapters ignore it and
+retain the deterministic text fallback.
 Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
 state remain frontend-local. Phase 3 input/lifecycle parity is complete in the
@@ -278,9 +285,10 @@ model, persistence model, or recovery policy. The full contingent sequence and
 its stop/go gate are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 Phase 3 is complete across layout/composition, content/style, and
-input/lifecycle capability families. Artifact Preview is the exact next
-dedicated product-capability phase, before hardening, measurement, production
-GPU admission, or rollout.
+input/lifecycle capability families. Phase 4 Artifact Preview is complete
+without admitting GPU dependencies into the product workspace. Phase 5
+advanced grapheme and IME correctness is next, before hardening, measurement,
+production GPU admission, or rollout.
 
 ### `workflows`
 

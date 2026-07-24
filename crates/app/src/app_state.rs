@@ -12,8 +12,9 @@ use mandatum_commands::{
     dispatch_command, resolve_palette_key_with_bindings,
 };
 use mandatum_core::{
-    ActionOutcome, AgentApprovalRecord, AgentPaneIntent, AgentStatus, CoreAction, LayoutNode,
-    PaneId, PaneKind, PersistenceRequest, SessionId, SplitAxis, TaskPaneIntent, Workspace,
+    ActionOutcome, AgentApprovalRecord, AgentPaneIntent, AgentStatus, ArtifactFit,
+    ArtifactPaneIntent, CoreAction, LayoutNode, PaneId, PaneKind, PersistenceRequest, SessionId,
+    SplitAxis, TaskPaneIntent, Workspace,
 };
 use mandatum_pty::PtySize;
 use mandatum_scene::{
@@ -33,6 +34,7 @@ use mandatum_workflows::TaskFailureHandoff;
 use crate::{
     agent_runtime::{AgentRuntimeEvent, connector_for_kind},
     app_shell::AppConfig,
+    artifact_preview::ArtifactPreviewStore,
     config::{AgentConnectorKind, effective_runtime_settings, load_config, project_config_file},
     copy_mode::CopyModeState,
     events::AppEvent,
@@ -78,6 +80,7 @@ const DRAIN_EVENT_BUDGET: usize = 256;
 
 pub struct AppState {
     workspace: Workspace,
+    artifacts: ArtifactPreviewStore,
     command_context: CommandContext,
     persistence: PersistenceCoordinator,
     shell_program: String,
@@ -109,7 +112,7 @@ pub struct AppState {
     /// action (a saved workspace suppresses it on every later launch).
     first_run_note: bool,
     /// The open Set-agent-objective prompt, if any (modal).
-    objective_prompt: Option<ObjectivePrompt>,
+    objective_prompt: Option<TextPrompt>,
     keymap: Keymap,
     theme: Theme,
     reduced_motion: bool,
@@ -162,6 +165,7 @@ impl AppState {
 
         let mut state = Self {
             workspace,
+            artifacts: ArtifactPreviewStore::default(),
             command_context,
             persistence: PersistenceCoordinator::new(config.workspace_file),
             shell_program: config.shell_program,
@@ -220,6 +224,14 @@ impl AppState {
 
     pub fn workspace(&self) -> &Workspace {
         &self.workspace
+    }
+
+    pub(crate) fn artifact_content(
+        &self,
+        pane_id: &PaneId,
+        intent: &ArtifactPaneIntent,
+    ) -> mandatum_scene::ArtifactContent {
+        self.artifacts.content(&self.workspace, pane_id, intent)
     }
 
     pub fn palette_open(&self) -> bool {
@@ -355,6 +367,7 @@ impl AppState {
                 PaneKind::Terminal { .. } => PaneSceneKind::Terminal,
                 PaneKind::Task { .. } => PaneSceneKind::Task,
                 PaneKind::Agent { .. } => PaneSceneKind::Agent,
+                PaneKind::Artifact { .. } => PaneSceneKind::Artifact,
                 PaneKind::StatusLog { .. } => PaneSceneKind::StatusLog,
             })
             .unwrap_or(PaneSceneKind::Terminal);
@@ -412,7 +425,7 @@ impl AppState {
             // Text-input overlays receive pasted text into their input.
             InputEvent::Paste(text) if self.objective_prompt.is_some() => {
                 if let Some(prompt) = self.objective_prompt.as_mut() {
-                    prompt.input.push_str(&text);
+                    prompt.input_mut().push_str(&text);
                 }
                 self.mark_redraw();
             }
@@ -468,6 +481,8 @@ impl AppState {
     /// Build one frame of scene and retain its hit targets, so pointer
     /// events resolve against exactly what was last drawn.
     pub fn build_scene(&mut self, size: SceneSize) -> WorkspaceScene {
+        let sender = self.runtime.event_sender();
+        self.artifacts.refresh_active(&self.workspace, &sender);
         let scene = crate::scene_builder::build_workspace_scene(self, size);
         self.hit_targets = scene.hit_targets.clone();
         scene
@@ -525,7 +540,7 @@ impl AppState {
         // The visibility overlays are modal too: at most one is open, and it
         // owns the keyboard until Esc/Enter closes it.
         if self.objective_prompt.is_some() {
-            self.handle_objective_prompt_key(key);
+            self.handle_prompt_key(key);
             self.mark_redraw();
             return;
         }
@@ -781,6 +796,26 @@ impl AppState {
             ),
         });
 
+        if command_id == CommandId::RestartPane
+            && matches!(
+                self.workspace
+                    .active_session()
+                    .pane(self.workspace.active_session().focused_pane_id())
+                    .map(|pane| pane.kind()),
+                Some(PaneKind::Artifact { .. })
+            )
+        {
+            let pane_id = self.workspace.active_session().focused_pane_id().clone();
+            self.artifacts.force_reload_active(
+                &self.workspace,
+                &pane_id,
+                &self.runtime.event_sender(),
+            );
+            self.status = format!("reloading artifact preview: {pane_id}");
+            self.mark_redraw();
+            return;
+        }
+
         match command_target(command_id) {
             CommandTarget::Runtime(runtime_command) => {
                 self.dispatch_runtime_command(runtime_command);
@@ -836,6 +871,7 @@ impl AppState {
                         PaneKind::Terminal { .. } => "terminal",
                         PaneKind::Task { .. } => "task",
                         PaneKind::Agent { .. } => "agent",
+                        PaneKind::Artifact { .. } => "artifact",
                         PaneKind::StatusLog { .. } => "status",
                     };
                     (pane_id.to_string(), kind.to_owned())
@@ -896,6 +932,7 @@ impl AppState {
         match runtime_command {
             RuntimeCommand::EnterCopyMode => self.enter_copy_mode(),
             RuntimeCommand::ReloadConfig => self.reload_config(),
+            RuntimeCommand::OpenArtifactPreview => self.open_artifact_prompt(),
             RuntimeCommand::ShowTimeline => self.open_timeline(),
             RuntimeCommand::ShowSessionMap => self.open_session_map(),
             RuntimeCommand::SearchSession => self.open_search(),
@@ -1034,10 +1071,16 @@ impl AppState {
                 self.apply_pty_runtime_event(event);
             }
             AppEvent::Agent(event) => self.apply_agent_runtime_event(event),
+            AppEvent::Artifact(event) => {
+                if self.artifacts.apply_load_event(event) {
+                    self.mark_redraw();
+                }
+            }
         }
     }
 
     pub fn shutdown(&mut self) {
+        self.artifacts.shutdown();
         self.runtime.shutdown_all();
         self.status = "terminal sessions stopped".to_owned();
     }
@@ -1146,6 +1189,7 @@ impl AppState {
             .commit_restore(&mut workspace, &outgoing_session_id, runtimes);
         debug_assert_eq!(self.runtime.last_lifecycle_report(), &report);
         self.workspace = workspace;
+        self.artifacts.clear();
         self.command_context = command_context_for_workspace(&self.workspace);
         self.copy_mode = None;
         self.timeline_view = None;
@@ -2137,8 +2181,13 @@ impl AppState {
         // The visibility overlays are modal the same way: rows activate,
         // click-away dismisses, and the press is consumed.
         if self.objective_prompt.is_some() {
+            let was_artifact = matches!(self.objective_prompt, Some(TextPrompt::Artifact { .. }));
             self.objective_prompt = None;
-            self.status = "objective unchanged".to_owned();
+            self.status = if was_artifact {
+                "artifact preview cancelled".to_owned()
+            } else {
+                "objective unchanged".to_owned()
+            };
             return;
         }
         if self.help_view.is_some() {
@@ -2837,6 +2886,7 @@ impl AppState {
                 }
                 commands.push(CommandId::SetAgentObjective);
             }
+            PaneKind::Artifact { .. } => {}
             PaneKind::StatusLog { .. } => {}
         }
         commands.push(CommandId::NewTerminal);
@@ -3110,6 +3160,7 @@ impl AppState {
                         ));
                     }
                 }
+                PaneKind::Artifact { .. } => {}
                 PaneKind::StatusLog { .. } => {}
             }
         }
@@ -3471,11 +3522,26 @@ impl AppState {
         self.search_view = None;
         self.session_map = None;
         self.help_view = None;
-        self.objective_prompt = Some(ObjectivePrompt {
+        self.objective_prompt = Some(TextPrompt::Objective {
             pane_id: pane_id.clone(),
             input: objective,
         });
         self.status = format!("editing objective for {pane_id}");
+    }
+
+    /// Open a project-relative path prompt. The path remains durable intent;
+    /// filesystem validation and PNG decoding begin only after Enter.
+    fn open_artifact_prompt(&mut self) {
+        self.palette = None;
+        self.context_menu = None;
+        self.timeline_view = None;
+        self.search_view = None;
+        self.session_map = None;
+        self.help_view = None;
+        self.objective_prompt = Some(TextPrompt::Artifact {
+            input: String::new(),
+        });
+        self.status = "artifact preview: enter a project-relative PNG path".to_owned();
     }
 
     fn handle_timeline_key(&mut self, key: Key) {
@@ -3644,7 +3710,7 @@ impl AppState {
         }
     }
 
-    fn handle_objective_prompt_key(&mut self, key: Key) {
+    fn handle_prompt_key(&mut self, key: Key) {
         if matches!(self.keymap.chord_action(key), Some(ChordAction::Quit)) {
             self.should_quit = true;
             self.status = "quitting".to_owned();
@@ -3652,39 +3718,53 @@ impl AppState {
         }
         match key.code {
             KeyCode::Escape => {
+                let was_artifact =
+                    matches!(self.objective_prompt, Some(TextPrompt::Artifact { .. }));
                 self.objective_prompt = None;
-                self.status = "objective unchanged".to_owned();
+                self.status = if was_artifact {
+                    "artifact preview cancelled".to_owned()
+                } else {
+                    "objective unchanged".to_owned()
+                };
             }
-            KeyCode::Enter => self.commit_objective_prompt(),
+            KeyCode::Enter => self.commit_prompt(),
             KeyCode::Backspace => {
                 if let Some(prompt) = self.objective_prompt.as_mut() {
-                    prompt.input.pop();
+                    prompt.input_mut().pop();
                 }
             }
             KeyCode::Char(character)
                 if !key.mods.control && !key.mods.alt && !key.mods.super_key =>
             {
                 if let Some(prompt) = self.objective_prompt.as_mut() {
-                    prompt.input.push(character);
+                    prompt.input_mut().push(character);
                 }
             }
             _ => {}
         }
     }
 
-    /// Commit the edited objective into the pane's durable intent; the next
-    /// StartAgent/relaunch reads it from there.
-    fn commit_objective_prompt(&mut self) {
+    fn commit_prompt(&mut self) {
         let Some(prompt) = self.objective_prompt.take() else {
             return;
         };
-        let objective = prompt.input.trim().to_owned();
+        match prompt {
+            TextPrompt::Objective { pane_id, input } => {
+                self.commit_objective_prompt(pane_id, input);
+            }
+            TextPrompt::Artifact { input } => self.commit_artifact_prompt(input),
+        }
+    }
+
+    /// Commit the edited objective into the pane's durable intent; the next
+    /// StartAgent/relaunch reads it from there.
+    fn commit_objective_prompt(&mut self, pane_id: PaneId, input: String) {
+        let objective = input.trim().to_owned();
         if objective.is_empty() {
-            self.objective_prompt = Some(prompt);
+            self.objective_prompt = Some(TextPrompt::Objective { pane_id, input });
             self.status = "objective cannot be empty (Esc cancels)".to_owned();
             return;
         }
-        let pane_id = prompt.pane_id;
         if self
             .workspace
             .active_session_mut()
@@ -3702,6 +3782,51 @@ impl AppState {
             objective: objective.clone(),
         });
         self.status = format!("objective set for {pane_id}: {objective}");
+    }
+
+    fn commit_artifact_prompt(&mut self, input: String) {
+        let source_text = input.trim();
+        if source_text.is_empty() {
+            self.objective_prompt = Some(TextPrompt::Artifact { input });
+            self.status = "artifact path cannot be empty (Esc cancels)".to_owned();
+            return;
+        }
+        let source = PathBuf::from(source_text);
+        let filename = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("artifact")
+            .to_owned();
+        let intent = ArtifactPaneIntent {
+            source,
+            title: filename.clone(),
+            alt_text: filename.clone(),
+            fit: ArtifactFit::Contain,
+        };
+        match self
+            .workspace
+            .apply_action(CoreAction::CreateArtifactPane { intent })
+        {
+            Ok(ActionOutcome::Mutated { focused_pane }) => {
+                self.timeline.record(TimelineEventKind::PaneCreated {
+                    pane: focused_pane.to_string(),
+                    kind: "artifact".to_owned(),
+                });
+                self.artifacts.force_reload_active(
+                    &self.workspace,
+                    &focused_pane,
+                    &self.runtime.event_sender(),
+                );
+                self.status = format!("artifact preview opened: {filename}");
+            }
+            Ok(ActionOutcome::PersistenceRequested(_)) => {
+                self.status = "artifact preview unexpectedly requested persistence".to_owned();
+            }
+            Err(error) => {
+                self.status = format!("artifact preview could not be opened: {error}");
+            }
+        }
     }
 
     /// The session-map rows for the current workspace, with live one-word
@@ -3754,15 +3879,26 @@ impl AppState {
         ))
     }
 
-    /// The objective-prompt overlay for the current frame, `None` while
-    /// closed.
+    /// The active one-line prompt overlay for the current frame.
     pub(crate) fn prompt_overlay_scene(&self, size: SceneSize) -> Option<PromptOverlay> {
         let prompt = self.objective_prompt.as_ref()?;
+        let (title, input, footer) = match prompt {
+            TextPrompt::Objective { pane_id, input } => (
+                format!(" Set agent objective — {pane_id} "),
+                input.clone(),
+                "enter save · esc cancel".to_owned(),
+            ),
+            TextPrompt::Artifact { input } => (
+                " Open artifact preview — project-relative PNG ".to_owned(),
+                input.clone(),
+                "enter open · esc cancel".to_owned(),
+            ),
+        };
         Some(PromptOverlay {
             area: prompt_rect(size),
-            title: format!(" Set agent objective — {} ", prompt.pane_id),
-            input: prompt.input.clone(),
-            footer: "enter save · esc cancel".to_owned(),
+            title,
+            input,
+            footer,
         })
     }
 
@@ -3910,11 +4046,18 @@ struct PaneClick {
     at: Instant,
 }
 
-/// The open Set-agent-objective prompt: which pane's durable intent it
-/// edits, and the live input text. Runtime presentation only.
-struct ObjectivePrompt {
-    pane_id: PaneId,
-    input: String,
+/// The active one-line text prompt. Runtime presentation only.
+enum TextPrompt {
+    Objective { pane_id: PaneId, input: String },
+    Artifact { input: String },
+}
+
+impl TextPrompt {
+    fn input_mut(&mut self) -> &mut String {
+        match self {
+            Self::Objective { input, .. } | Self::Artifact { input } => input,
+        }
+    }
 }
 
 /// The header label for a configured connector kind.

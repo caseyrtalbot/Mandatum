@@ -1,8 +1,8 @@
 # Frontend spike: winit + wgpu GPU terminal frontend
 
-Status: **Phase 3 complete in the excluded adapter across layout/composition,
-content/style, and input/lifecycle capability families. Artifact Preview is
-next; production GPU admission remains blocked.**
+Status: **Phases 3 and 4 are complete in the excluded adapter. Layout,
+content/style, input/lifecycle, and bounded Artifact Preview all cross the real
+host; production GPU admission remains blocked.**
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, terminal, task, agent, and Empty panes, status
@@ -12,6 +12,13 @@ One scene compiler consumes arbitrary ordered pane layouts, including tiled,
 stacked, zoomed, mixed-content, three-plus-pane, moved/custom-float,
 multiple-float, and overlay combinations. Typed clipboard effects return to the
 native shell.
+
+Phase 4 adds the real Artifact Preview path: the app resolves project-relative
+static PNG intent into bounded loading/ready/failed RGBA8 scene data, the
+terminal adapter keeps a deterministic labeled fallback, and the isolated GPU
+renderer uploads the same ready bytes as an sRGB texture, contain-fits them,
+and clips them with final-topmost raster markers. The texture cache is
+revision-aware and evicts every stale layer before allocating replacements.
 
 This remains an isolated frontend outside the Cargo workspace (the root
 `Cargo.toml` excludes `spikes/frontend-wgpu`), so its heavy GPU dependency tree
@@ -638,8 +645,9 @@ panic, exit 0).
 
 ## What a production adapter would still need
 
-- **Artifact Preview.** The selected pixel-native product capability remains
-  unbuilt; completing Phase 3 does not admit the adapter.
+- **Production admission for Artifact Preview.** The selected pixel-native
+  capability now works in the excluded adapter, but its winit/wgpu dependency
+  tree, device/surface recovery, packaging, and rollout are still unadmitted.
 - **Damage tracking + shaping cache.** Rebuild only changed rows; cache shaped
   glyph runs across frames. This is the path from 40 to a comfortable 60+ fps and
   is where the GPU approach's real throughput advantage would show.
@@ -784,15 +792,48 @@ complete ordered pane vector; its content/style family compiles every pane,
 chrome, and overlay surface into one renderer-neutral cell program shared by
 the ratatui and GPU adapters; and its input/lifecycle family covers native
 key/modifier translation, clipboard, pointer, scrollback, focus, resize/scale,
-restore, and shutdown through the real host. A production wgpu adapter still
-needs Artifact Preview, correct advanced grapheme and IME behavior,
-surface/device recovery, and damage tracking.
+restore, and shutdown through the real host. Phase 4 adds the bounded typed
+Artifact Preview surface, safe app loader, terminal fallback, and GPU
+contain-fit/cache path. A production wgpu adapter still needs correct advanced
+grapheme and IME behavior, surface/device recovery, damage tracking, dependency
+admission, and release integration.
 Those costs become decisive only when the product needs true GPU visuals,
 per-frame animation, pixel-precise layout, embedded non-text surfaces, or adopts
-a sub-20 ms end-to-end target. The later Artifact Preview decision selects the
-capability branch; Phase 2 still does not prove that surface or admit production
-GPU dependencies. The Phase 2 terminal refresh is p50 11.39 ms to bytes-out and
-remains incomparable to key-to-present.
+a sub-20 ms end-to-end target. The later Artifact Preview decision selected the
+capability branch and Phase 4 now proves that surface in the excluded adapter;
+it still does not admit production GPU dependencies. The Phase 2 terminal
+refresh is p50 11.39 ms to bytes-out and remains incomparable to
+key-to-present.
+
+## Phase 4 Artifact Preview Verification (2026-07-23)
+
+- The real host opens a project-relative PNG through the fuzzy palette/prompt,
+  wakes on bounded decode completion, reaches typed RGBA8 scene data, and
+  prepares the same GPU plan the displayed renderer consumes. Restart Pane
+  forces a new revision after rewrite.
+- Safe app-side loading rejects traversal, every symlink component, descriptor
+  swap races, non-regular/missing/malformed/animated/oversized sources,
+  dimensions above 4096×4096, aggregate decoded RGBA above 64 MiB, more than
+  four concurrent workers, and more than 64 artifact panes/open descriptors.
+- The GPU preflight independently checks surface length/dimensions and the
+  64 MiB aggregate. Contain-fit, fractional scissor boundaries, later-pane/
+  overlay occlusion, all-stale cache eviction, and revision replacement have
+  focused tests.
+- `./ci/gpu-spike.sh` passed 46 substantive tests: five native shell,
+  twenty-six real-host, and fifteen isolated renderer tests, plus formatting,
+  warnings-denied all-target Clippy, and the renderer-boundary scan.
+- The displayed release matrix painted 600×300 landscape and reloaded 300×600
+  portrait PNGs contain-fit, covered them with generated Help without bleed,
+  preserved fit across 88×30 to 380×72 full-screen resize, rendered a calm
+  missing-file failure, and exited cleanly through Ctrl+Q.
+- Three independent reviewers plus a final cold read drove containment,
+  aggregate-resource, animation, reload, cache-high-water, header-parsing,
+  descriptor-cap, and restore-reservation fixes. The final confidence-70+
+  review was clean.
+
+This completes the selected pixel-native capability, not production
+admission. Advanced grapheme/IME work is Phase 5; device/surface recovery,
+multi-display proof, production dependencies, packaging, and rollout remain.
 
 
 ## Correction note (2026-07-10)

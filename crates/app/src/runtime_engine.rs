@@ -970,7 +970,7 @@ impl RuntimeEngine {
             pending.push(event);
         }
         for event in pending {
-            if matches!(event, AppEvent::Input(_)) {
+            if matches!(event, AppEvent::Input(_) | AppEvent::Artifact(_)) {
                 let _ = self.event_tx.send(event);
             }
         }
@@ -1488,7 +1488,7 @@ mod tests {
     use mandatum_agent_runtime::{
         AgentConnector, AgentLaunchSpec, AgentSessionEvent, FakeConnector, FakeStep,
     };
-    use mandatum_core::{AgentPaneIntent, CoreAction, PaneKind, TaskPaneIntent};
+    use mandatum_core::{AgentPaneIntent, CoreAction, PaneKind, SessionId, TaskPaneIntent};
     use mandatum_scene::input::InputEvent;
 
     use super::*;
@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_event_discard_preserves_buffered_input_only() {
+    fn runtime_event_discard_preserves_buffered_input_and_artifact_completion() {
         let engine = &mut RuntimeEngine::new();
         let sender = engine.event_sender();
         sender
@@ -1515,11 +1515,21 @@ mod tests {
             }))
             .unwrap();
         sender
+            .send(AppEvent::Artifact(
+                crate::artifact_preview::ArtifactLoadEvent::failed_for_test(
+                    SessionId::new("session-stale"),
+                    PaneId::new("pane-artifact"),
+                    11,
+                ),
+            ))
+            .unwrap();
+        sender
             .send(AppEvent::Input(InputEvent::FocusGained))
             .unwrap();
 
         engine.discard_pending_runtime_events();
 
+        assert!(matches!(engine.try_recv_event(), Ok(AppEvent::Artifact(_))));
         assert!(matches!(
             engine.try_recv_event(),
             Ok(AppEvent::Input(InputEvent::FocusGained))

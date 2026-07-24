@@ -12,8 +12,8 @@ pub use action::{ActionOutcome, CoreAction, PersistenceRequest};
 pub use ids::{PaneId, ProjectId, SessionId, WorkspaceId};
 pub use layout::{FloatingPane, FloatingRect, Layout, LayoutNode, SplitAxis, SplitDirection};
 pub use pane::{
-    AgentApprovalRecord, AgentPaneIntent, AgentStatus, PaneKind, PaneSpec, StatusLogSource,
-    TaskPaneIntent,
+    AgentApprovalRecord, AgentPaneIntent, AgentStatus, ArtifactFit, ArtifactPaneIntent, PaneKind,
+    PaneSpec, StatusLogSource, TaskPaneIntent,
 };
 pub use persistence::{
     PersistedWorkspace, PersistenceError, SESSION_SCHEMA_VERSION, deserialize_workspace,
@@ -117,6 +117,49 @@ mod tests {
         assert!(serialized.contains(r#""type": "stack""#));
         assert!(serialized.contains(r#""floating""#));
         assert!(serialized.contains(r#""command": "cargo build""#));
+    }
+
+    #[test]
+    fn artifact_pane_persists_only_project_relative_preview_intent() {
+        let mut workspace = workspace();
+        let intent = ArtifactPaneIntent {
+            source: PathBuf::from("target/screenshots/home.png"),
+            title: "Home screenshot".to_owned(),
+            alt_text: "Home page after the navigation refactor".to_owned(),
+            fit: ArtifactFit::Contain,
+        };
+
+        workspace
+            .apply_action(CoreAction::CreateArtifactPane {
+                intent: intent.clone(),
+            })
+            .unwrap();
+
+        let pane = workspace
+            .active_session()
+            .pane(workspace.active_session().focused_pane_id())
+            .expect("created artifact pane");
+        assert_eq!(pane.title(), intent.title);
+        assert_eq!(
+            pane.kind(),
+            &PaneKind::Artifact {
+                intent: intent.clone()
+            }
+        );
+
+        let serialized = workspace.to_json().unwrap();
+        assert!(serialized.contains(r#""type": "artifact""#));
+        assert!(serialized.contains(r#""source": "target/screenshots/home.png""#));
+        assert!(serialized.contains(r#""fit": "contain""#));
+        for forbidden in ["rgba8", "decoder", "file_handle", "texture", "revision"] {
+            assert!(
+                !serialized.contains(forbidden),
+                "durable artifact intent leaked live field {forbidden}"
+            );
+        }
+
+        let restored = Workspace::from_json(&serialized).unwrap();
+        assert_eq!(restored, workspace);
     }
 
     #[test]

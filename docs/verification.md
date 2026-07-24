@@ -1026,8 +1026,73 @@ Standing terminal regression procedure:
 
 Known boundary: the runtime scale transition is proven, but this one-display
 environment cannot prove cross-monitor movement. Advanced grapheme/wide-cell
-production, IME/dead-key composition, surface/device recovery, Artifact
-Preview, production GPU admission, packaging, and rollout remain later phases.
+production, IME/dead-key composition, surface/device recovery, production GPU
+admission, packaging, and rollout remain later phases.
+
+## Phase 4 Artifact Preview Capability (2026-07-23)
+
+Environment: macOS on Apple M4 Pro. The displayed release adapter ran from the
+disposable project `/private/tmp/mandatum-artifact-display.Gvgj4Q` through a
+temporary local app wrapper used only so the accessibility driver could target
+the otherwise unbundled spike binary. The adapter remained excluded from the
+product workspace/build/release surface.
+
+Automated and review evidence:
+
+- Durable core tests prove JSON round-trip of project-relative source, title,
+  alt text, and contain fit without pixel, decoder, handle, texture, or revision
+  leakage.
+- Eight focused app artifact tests prove exact RGBA8 load, explicit and
+  metadata-detected reload with increasing revision, APNG/malformed/missing/
+  oversized/extension/traversal failures, final-file and ancestor symlink
+  rejection, descriptor-swap containment, 4096×4096/64 MiB bounds, four-worker
+  scheduling, aggregate decoded-byte admission, the 64-pane/open-descriptor
+  cap, stale completion release, and the real palette/prompt/scene path.
+- Runtime restore preserves buffered artifact completions alongside input so
+  cleared-workspace tokens release their reservations; stale results cannot
+  populate the restored workspace.
+- Ratatui tests prove deterministic loading/ready/failed fallback. Scene tests
+  prove final-topmost raster markers and later-pane/overlay occlusion. The
+  isolated GPU tests prove exact surface propagation without byte copies,
+  malformed/aggregate rejection before allocation, contain-fit for landscape/
+  portrait/square targets, fractional scissor boundaries, all-stale cache
+  eviction before replacement, and old-revision removal.
+- The real-host tracer drives the fuzzy "Open artifact preview" command and
+  prompt, reaches a ready surface, prepares the GPU plan, rewrites the file,
+  dispatches Restart Pane, and reaches the new dimensions/revision.
+- Three independent architecture, logic/security, and product-quality
+  reviewers plus the final cold read found and drove fixes for validation/use
+  races and FIFO blocking, unbounded decoded buffers/thread fan-out/file
+  descriptors, APNG acceptance, misleading Restart Pane behavior, GPU reload
+  high-water overshoot, synchronous per-frame header parsing, and restore-
+  stranded reservations. The final confidence-70-or-higher rerun reported no
+  remaining defect.
+- `./ci/gpu-spike.sh` passed formatting, warnings-denied all-target Clippy,
+  the renderer dependency-boundary scan, and 46 substantive tests: five native
+  shell, twenty-six real-host, and fifteen isolated renderer tests.
+- The final post-documentation `./ci/gate.sh` reported `GATE GREEN`, including
+  270 app tests, 36 scene tests, 11 cell-program tests, 29 renderer tests, the
+  core and command suites, workspace integration, documentation traceability,
+  and conformance checks.
+
+Displayed release matrix:
+
+- The keyboard-only fuzzy palette opened `preview.png`; the pane reported
+  `600x300 RGBA8 sRGB` and painted the image contain-fit without distortion.
+- Generated Help covered the artifact with an opaque card; pixels remained
+  visible only outside the overlay and did not bleed through it.
+- Replacing the source with a `300x600` PNG and dispatching Restart Pane
+  produced the new dimensions and portrait contain-fit. Full-screen resize
+  recomputed the grid from 88×30 to 380×72 and preserved the image fit.
+- Opening `missing.png` produced an in-pane red
+  `preview: failed · artifact file is missing: missing.png` state without a
+  panic or process exit.
+- Ctrl+Q closed the native app and the exact process PID was absent afterward.
+
+Remaining boundary: this completes the selected pixel-native capability but
+does not admit the winit/wgpu dependency tree to production. Phase 5 advanced
+grapheme/wide-cell/IME correctness, multi-display proof, surface/device-loss
+hardening, production admission, installer/release work, and rollout remain.
 
 ## Completion Rule
 

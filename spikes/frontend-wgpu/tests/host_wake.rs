@@ -9,8 +9,8 @@ use std::{
 use mandatum_app::{AppConfig, FrameSnapshot, FrontendEffect, FrontendHost};
 use mandatum_gpu_renderer_spike::{PreparedScene, prepare_scene};
 use mandatum_scene::{
-    CellOccupancy, CellSelection, HitTargetKind, OverlayScene, PaneContent, SceneRect, SceneSize,
-    WorkspaceScene,
+    ArtifactState, CellOccupancy, CellSelection, HitTargetKind, OverlayScene, PaneContent,
+    SceneRect, SceneSize, WorkspaceScene,
     input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
     layout,
 };
@@ -176,6 +176,18 @@ impl Drop for DisposableProject {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+fn write_test_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) {
+    let file = std::fs::File::create(path).expect("artifact fixture should be writable");
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .expect("artifact fixture header")
+        .write_image_data(rgba)
+        .expect("artifact fixture pixels");
 }
 
 #[test]
@@ -838,6 +850,97 @@ fn real_host_objective_prompt_reaches_the_gpu_render_plan() {
     assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
     assert_cell_program_contains(&prepared, prompt.area, &prompt.input);
     assert_cell_program_has_cursor(&prepared, prompt.area);
+}
+
+#[test]
+fn real_host_artifact_load_and_reload_reach_the_gpu_render_plan() {
+    let project = DisposableProject::new("artifact");
+    let artifact_path = project.path.join("preview.png");
+    write_test_png(&artifact_path, 2, 1, &[255, 0, 0, 255, 0, 0, 255, 255]);
+    let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    let mut host = FrontendHost::new_with_wake_callback(
+        AppConfig {
+            project_path: project.path.clone(),
+            workspace_file: project.path.join(".mandatum/workspace.json"),
+            spawn_pty: false,
+            ..AppConfig::default()
+        },
+        move || {
+            let _ = wake_tx.try_send(());
+        },
+    );
+    let size = SceneSize::new(80, 24);
+    host.handle_input(InputEvent::Resize(size));
+    host.handle_input(InputEvent::Key(Key::ctrl('p')));
+    host.handle_input(InputEvent::Key(Key::new(
+        KeyCode::Char('o'),
+        Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        },
+    )));
+    for character in "pen artifact preview".chars() {
+        host.handle_input(InputEvent::Key(Key::plain(KeyCode::Char(character))));
+    }
+    host.handle_input(InputEvent::Key(Key::plain(KeyCode::Enter)));
+    host.handle_input(InputEvent::Paste("preview.png".to_owned()));
+    host.handle_input(InputEvent::Key(Key::plain(KeyCode::Enter)));
+
+    let loaded = wait_for_frame(&mut host, &wake_rx, size, |snapshot| {
+        snapshot.scene.panes.iter().any(|pane| {
+            matches!(
+                &pane.content,
+                PaneContent::Artifact(content)
+                    if matches!(content.state, ArtifactState::Ready(_))
+            )
+        })
+    });
+    let first = loaded
+        .scene
+        .panes
+        .iter()
+        .find_map(|pane| match &pane.content {
+            PaneContent::Artifact(content) => match &content.state {
+                ArtifactState::Ready(surface) => Some(surface),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("loaded artifact should be ready");
+    assert_eq!((first.width, first.height), (2, 1));
+    assert_eq!(first.rgba8.as_ref(), &[255, 0, 0, 255, 0, 0, 255, 255]);
+    let first_revision = first.revision;
+    let prepared = prepare_scene(&loaded.scene, &loaded.theme)
+        .expect("real loaded artifact should reach GPU preparation");
+    assert_eq!(prepared.artifacts().len(), 1);
+
+    write_test_png(&artifact_path, 1, 2, &[0, 255, 0, 255, 255, 255, 0, 255]);
+    dispatch_palette_command(&mut host, 'r');
+    let reloaded = wait_for_frame(&mut host, &wake_rx, size, |snapshot| {
+        snapshot.scene.panes.iter().any(|pane| {
+            matches!(
+                &pane.content,
+                PaneContent::Artifact(content)
+                    if matches!(
+                        &content.state,
+                        ArtifactState::Ready(surface)
+                            if surface.width == 1
+                                && surface.height == 2
+                                && surface.revision > first_revision
+                    )
+            )
+        })
+    });
+    let prepared = prepare_scene(&reloaded.scene, &reloaded.theme)
+        .expect("real reloaded artifact should reach GPU preparation");
+    assert_eq!(prepared.artifacts().len(), 1);
+    assert_eq!(
+        (
+            prepared.artifacts()[0].width(),
+            prepared.artifacts()[0].height()
+        ),
+        (1, 2)
+    );
 }
 
 #[test]

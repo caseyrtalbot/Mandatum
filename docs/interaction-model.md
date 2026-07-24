@@ -336,6 +336,17 @@ control aliases are accepted, and configured workspace chords still win before
 terminal fallback or native clipboard conventions. Enhanced negotiated
 protocols such as CSI-u are not implied by this baseline.
 
+**Artifact Preview.** Search the fuzzy palette for "Open artifact preview",
+enter a project-relative PNG path, and Mandatum opens a focused floating
+artifact pane. The pane always states source, useful alt text (filename by
+default), and loading/ready/failed state. The terminal frontend keeps that
+deterministic labeled fallback; the excluded native adapter paints the same
+ready scene surface contain-fit without stretching. "Restart pane" on an
+artifact is an explicit reload and does not mutate terminal restart intent.
+Missing, malformed, animated, oversized, escaping, symlinked, or over-budget
+sources remain visible in the pane and never panic. URLs, SVG, HTML, PDF,
+video, and animation are outside this slice.
+
 **Font scaling — honest limits.** The terminal frontend renders in the
 host terminal and therefore inherits its font, size, and zoom; scale text
 with your terminal's own controls (this is also why there is no `[ui]

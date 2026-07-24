@@ -11,6 +11,7 @@ use mandatum_core::{ActionOutcome, CoreAction, Workspace, WorkspaceError};
 pub enum CommandId {
     NewSession,
     NewTerminal,
+    OpenArtifactPreview,
     SplitRight,
     SplitDown,
     FocusNext,
@@ -93,6 +94,14 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         name: "new-terminal",
         category: CommandCategory::Pane,
         palette_key: Some('n'),
+    },
+    Command {
+        id: CommandId::OpenArtifactPreview,
+        label: "Open artifact preview",
+        name: "open-artifact-preview",
+        category: CommandCategory::Pane,
+        // Searchable in the palette without consuming the final bare letter.
+        palette_key: None,
     },
     Command {
         id: CommandId::SplitRight,
@@ -419,6 +428,7 @@ pub enum CommandTarget {
 pub enum RuntimeCommand {
     EnterCopyMode,
     CopySelection,
+    OpenArtifactPreview,
     ReloadConfig,
     ShowTimeline,
     ShowSessionMap,
@@ -493,6 +503,9 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
     match command_id {
         CommandId::EnterCopyMode => CommandTarget::Runtime(RuntimeCommand::EnterCopyMode),
         CommandId::CopySelection => CommandTarget::Runtime(RuntimeCommand::CopySelection),
+        CommandId::OpenArtifactPreview => {
+            CommandTarget::Runtime(RuntimeCommand::OpenArtifactPreview)
+        }
         CommandId::ReloadConfig => CommandTarget::Runtime(RuntimeCommand::ReloadConfig),
         CommandId::ShowTimeline => CommandTarget::Runtime(RuntimeCommand::ShowTimeline),
         CommandId::ShowSessionMap => CommandTarget::Runtime(RuntimeCommand::ShowSessionMap),
@@ -666,6 +679,7 @@ pub fn core_action_for_command(
         CommandId::RestoreWorkspace => CoreAction::RestoreWorkspace,
         CommandId::EnterCopyMode
         | CommandId::CopySelection
+        | CommandId::OpenArtifactPreview
         | CommandId::ReloadConfig
         | CommandId::ShowTimeline
         | CommandId::ShowSessionMap

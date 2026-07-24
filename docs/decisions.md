@@ -2218,3 +2218,56 @@ Verification: focused tests, the aggregate multi-agent review, the 39-test GPU
 matrix, the displayed macOS release matrix, the standing terminal latency and
 idle-CPU procedure, and the post-documentation merge gate are recorded in
 `docs/verification.md`.
+
+## Accepted: Artifact Preview Keeps Intent Durable And Pixels Live
+
+Status: accepted (2026-07-23)
+
+Decision: Phase 4 introduces `ArtifactPaneIntent` as project-relative durable
+core state containing source, title, useful alt text, and `Contain` fit only.
+The app owns cheap source observation, secure descriptor-relative no-follow
+opening on supported macOS/Linux hosts, PNG header validation, bounded decode,
+reload, worker scheduling, and the live pixel cache. The scene carries typed
+loading/ready/failed artifact content and one immutable RGBA8 sRGB
+`RasterSurface`; it carries no decoder, file handle, or GPU resource.
+
+The first slice accepts static PNG only. It rejects non-relative paths, every
+symlink component, non-regular files, non-PNG extensions, animation, malformed
+data, files above 16 MiB, dimensions above 4096×4096, more than 64 MiB decoded
+RGBA across active/queued/cached previews, more than four concurrent decoders,
+and more than 64 artifact panes. Unsupported platforms return a visible
+failure instead of falling back to a racy open.
+
+Rationale: the first native-only product value must cross the existing
+core/app/scene/adapter seams without making pixels durable or giving a
+renderer filesystem authority. Opening every path component relative to an
+already-opened project root closes validation/use races. Counting queued and
+active reservations prevents many individually valid files from bypassing the
+aggregate ceiling. Preserving artifact completions across restore releases
+stale reservations without persisting live state.
+
+Consequences:
+
+- "Open artifact preview" is fuzzy-palette discoverable and accepts a
+  project-relative PNG path;
+- "Restart pane" on an artifact forces reload without incrementing terminal
+  restart generation;
+- the terminal adapter always renders source/alt/state as a deterministic
+  fallback;
+- final-topmost `ProgramCell::raster_layer` markers let the excluded GPU
+  adapter contain-fit and clip pixels behind later panes/overlays;
+- the GPU cache evicts all stale live layers before allocating replacements,
+  preserving the admitted 64 MiB high-water bound across redistribution;
+- the native GPU spike remains outside the product workspace, release, and
+  merge gate; this decision does not admit production GPU dependencies;
+- advanced grapheme/IME correctness remains Phase 5.
+
+Verification: focused tests cover durable-intent round trips, exact RGBA load
+and revision reload, APNG/malformed/missing/oversize/traversal/symlink
+failures, descriptor swap races, aggregate/fan-out/pane caps, stale restore
+completion, terminal fallback, scene occlusion, contain-fit, cache replacement,
+and the real host-to-GPU plan. Three independent reviewers plus a final cold
+read drove the boundary fixes and ended clean. The displayed release matrix
+proved landscape and portrait contain-fit, explicit reload, Help occlusion,
+full-screen resize, visible missing-file failure, and clean Ctrl+Q exit. Exact
+commands and counts are in `docs/verification.md`.

@@ -124,13 +124,16 @@ fn cell_style(style: SceneCellStyle) -> Style {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use mandatum_scene::{
-        AgentApprovalPrompt, AgentContent, AgentStatus, AttentionSegment, ContextMenuEntry,
-        ContextMenuOverlay, EmptyContent, HeaderScene, HelpOverlay, OverlayScene, PaletteEntry,
-        PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind, PromptOverlay, SceneCell,
-        SceneCellStyle, SceneRect, SceneSize, SearchEntry, SearchOverlay, SessionMapOverlay,
-        SessionMapRow, StatusScene, SurfacePosition, TaskContent, TerminalSurface, TimelineEntry,
-        TimelineOverlay, WelcomeEntry, WelcomeOverlay, layout,
+        AgentApprovalPrompt, AgentContent, AgentStatus, ArtifactContent, ArtifactFit,
+        ArtifactState, AttentionSegment, ContextMenuEntry, ContextMenuOverlay, EmptyContent,
+        HeaderScene, HelpOverlay, OverlayScene, PaletteEntry, PaletteOverlay, PaneContent, PaneId,
+        PaneScene, PaneSceneKind, PromptOverlay, RasterSurface, SceneCell, SceneCellStyle,
+        SceneRect, SceneSize, SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow,
+        StatusScene, SurfacePosition, TaskContent, TerminalSurface, TimelineEntry, TimelineOverlay,
+        WelcomeEntry, WelcomeOverlay, layout,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -286,6 +289,7 @@ mod tests {
             },
             selection: None,
             cursor: false,
+            raster_layer: None,
         };
 
         paint_program_cell(&mut target, &continuation, &Theme::default());
@@ -622,6 +626,54 @@ mod tests {
         assert!(all.contains("cwd: /tmp/mandatum"));
         assert!(all.contains("restart generation: 1"));
         assert!(all.contains("no live PTY grid is attached"));
+    }
+
+    #[test]
+    fn artifact_pane_renders_deterministic_cell_fallback_for_every_load_state() {
+        let states = [
+            (
+                ArtifactState::Loading,
+                "preview: loading",
+                "loading artifact fallback",
+            ),
+            (
+                ArtifactState::Ready(RasterSurface {
+                    width: 2,
+                    height: 1,
+                    revision: 4,
+                    rgba8: Arc::from([255, 0, 0, 255, 0, 255, 0, 255]),
+                }),
+                "preview: ready · 2x1 RGBA8 sRGB",
+                "ready artifact fallback",
+            ),
+            (
+                ArtifactState::Failed {
+                    message: "malformed PNG".to_owned(),
+                },
+                "preview: failed · malformed PNG",
+                "failed artifact fallback",
+            ),
+        ];
+
+        for (state, expected_state, label) in states {
+            let mut artifact = pane(PaneContent::Artifact(ArtifactContent {
+                source_label: "target/screenshots/home.png".to_owned(),
+                alt_text: "Home page after navigation".to_owned(),
+                fit: ArtifactFit::Contain,
+                state,
+            }));
+            artifact.kind = PaneSceneKind::Artifact;
+            artifact.title = "Home screenshot".to_owned();
+
+            let rows = buffer_rows(&draw(&scene(vec![artifact])));
+            let all = rows.join("\n");
+            assert!(
+                all.contains("source: target/screenshots/home.png"),
+                "{label}"
+            );
+            assert!(all.contains("alt: Home page after navigation"), "{label}");
+            assert!(all.contains(expected_state), "{label}");
+        }
     }
 
     #[test]

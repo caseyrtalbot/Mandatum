@@ -175,6 +175,10 @@ impl Workspace {
                 self.active_session_mut().add_agent_pane(title, intent, cwd);
                 Ok(self.mutated_outcome())
             }
+            CoreAction::CreateArtifactPane { intent } => {
+                self.active_session_mut().add_artifact_pane(intent);
+                Ok(self.mutated_outcome())
+            }
             CoreAction::SplitRight => {
                 self.active_session_mut()
                     .split_focused(SplitDirection::Right)?;

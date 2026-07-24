@@ -186,12 +186,13 @@ pixel-native capability (Artifact Preview), or on a separately accepted
 sub-20 ms symmetric end-to-end latency goal; Phase 2 host integration alone is
 not admission evidence.
 
-The capability branch is now selected: an Artifact Preview Pane will display a
-task- or agent-produced PNG as a typed pixel-native scene surface, while the
-terminal frontend renders a deterministic labeled fallback card. The latency
-branch is not selected. This product-trigger decision is not production
-admission: the scene type and executable terminal/GPU adapter tests do not
-exist yet, so the adapter remains unshipped and excluded from the product
+The selected capability branch is now implemented: an Artifact Preview Pane
+displays a task- or agent-produced project-relative PNG as a typed pixel-native
+scene surface, while the terminal frontend renders a deterministic labeled
+fallback card. The app owns no-follow file opening, bounds, decode, reload, and
+live cache; durable core state holds intent only. The latency branch is not
+selected. Completing this product trigger is still not production admission:
+the GPU adapter remains unshipped and excluded from the product
 workspace/build/release.
 
 ## Implementation Plan
@@ -207,6 +208,8 @@ layout/composition, content/style, and input/lifecycle are complete capability
 families. The
 excluded renderer consumes one neutral whole-frame cell program for all current
 pane content, chrome, overlays, theme roles, modifiers, selection, cursor, and
-scene-owned composition. Artifact Preview is the exact next capability family.
-Selecting the capability branch does not weaken the production conformance
-gate, and Artifact Preview remains unbuilt.
+scene-owned composition. Phase 4 adds the bounded artifact surface and
+final-cell raster markers to that same contract; the excluded adapter uploads,
+contain-fits, and clips it without gaining product-state ownership. Phase 5
+advanced grapheme/IME correctness is next. Completing Artifact Preview does not
+weaken the production conformance gate or admit the GPU dependency tree.

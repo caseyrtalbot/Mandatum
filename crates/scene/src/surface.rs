@@ -1,6 +1,8 @@
 //! Terminal content surfaces: pre-windowed rows of styled cells plus the
 //! viewport state a frontend needs to overlay cursor and selection marks.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::style::SceneCellStyle;
@@ -19,6 +21,19 @@ impl Default for SceneCell {
             style: SceneCellStyle::default(),
         }
     }
+}
+
+/// One decoded, renderer-neutral RGBA8 sRGB artifact surface.
+///
+/// The app owns decoding and bounds enforcement. Shared immutable bytes keep
+/// frame snapshots cheap to clone without introducing a decoder or renderer
+/// resource into the scene contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RasterSurface {
+    pub width: u32,
+    pub height: u32,
+    pub revision: u64,
+    pub rgba8: Arc<[u8]>,
 }
 
 /// A point in the combined scrollback-plus-screen buffer, in absolute

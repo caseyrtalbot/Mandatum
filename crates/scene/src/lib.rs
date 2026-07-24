@@ -22,18 +22,18 @@ mod workspace;
 
 /// Durable pane identity, agent status, and split-axis orientation, shared
 /// with `mandatum-core` so frontends need only this crate.
-pub use mandatum_core::{AgentStatus, PaneId, SplitAxis};
+pub use mandatum_core::{AgentStatus, ArtifactFit, PaneId, SplitAxis};
 
 pub use cell_program::{
     CellOccupancy, CellProgram, CellSelection, ProgramCell, compile_cell_program,
 };
 pub use geometry::{SceneRect, SceneSize};
 pub use pane::{
-    AgentApprovalPrompt, AgentContent, EmptyContent, PaneContent, PaneScene, PaneSceneKind,
-    TaskContent,
+    AgentApprovalPrompt, AgentContent, ArtifactContent, ArtifactState, EmptyContent, PaneContent,
+    PaneScene, PaneSceneKind, TaskContent,
 };
 pub use style::{SceneCellStyle, SceneColor};
-pub use surface::{SceneCell, SurfacePosition, TerminalSurface};
+pub use surface::{RasterSurface, SceneCell, SurfacePosition, TerminalSurface};
 pub use theme::Theme;
 pub use workspace::{
     AttentionSegment, ContextMenuEntry, ContextMenuOverlay, HeaderScene, HelpEntry, HelpOverlay,

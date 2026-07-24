@@ -1,13 +1,18 @@
 use super::{CellOccupancy, CellSelection, Compiler, ProgramCell};
 use crate::{
-    AgentStatus, PaneContent, PaneScene, SceneCellStyle, SceneColor, SceneRect, TerminalSurface,
-    Theme,
+    AgentStatus, ArtifactState, PaneContent, PaneScene, SceneCellStyle, SceneColor, SceneRect,
+    TerminalSurface, Theme,
 };
 
 use super::primitives::{bordered_inner_rect, foreground};
 
 impl Compiler {
-    pub(super) fn paint_pane(&mut self, pane: &PaneScene, theme: &Theme) {
+    pub(super) fn paint_pane(
+        &mut self,
+        pane: &PaneScene,
+        theme: &Theme,
+        raster_layer: Option<u16>,
+    ) {
         // Every pane is opaque in scene order, regardless of layout flags.
         self.paint_rect(pane.area, SceneCellStyle::default());
         self.paint_border(pane.area, foreground(theme.pane_border));
@@ -91,6 +96,24 @@ impl Compiler {
                     .collect::<Vec<_>>();
                 self.paint_wrapped_lines(inner, &lines);
             }
+            PaneContent::Artifact(artifact) => {
+                let lines = pane.detail_lines();
+                for (row, text) in lines.iter().enumerate() {
+                    let line_style = if matches!(artifact.state, ArtifactState::Failed { .. })
+                        && text.starts_with("preview: failed")
+                    {
+                        foreground(theme.attention)
+                    } else {
+                        SceneCellStyle::default()
+                    };
+                    self.paint_text_row(inner, row, &fit_line(text, inner.width), line_style);
+                }
+                if matches!(artifact.state, ArtifactState::Ready(_))
+                    && let Some(raster_layer) = raster_layer
+                {
+                    self.paint_raster_body(inner, lines.len(), raster_layer);
+                }
+            }
             PaneContent::Empty(_) => {
                 let lines = pane
                     .detail_lines()
@@ -147,8 +170,22 @@ impl Compiler {
                             .selection_contains(absolute_row, column as u16)
                             .then_some(CellSelection::Terminal),
                         cursor: surface.cursor_at(absolute_row, column as u16),
+                        raster_layer: None,
                     },
                 );
+            }
+        }
+    }
+
+    fn paint_raster_body(&mut self, area: SceneRect, row_offset: usize, raster_layer: u16) {
+        let start = area
+            .y
+            .saturating_add(u16::try_from(row_offset).unwrap_or(u16::MAX));
+        for y in start..area.bottom() {
+            for x in area.x..area.right() {
+                let mut cell = ProgramCell::glyph(' ', SceneCellStyle::default());
+                cell.raster_layer = Some(raster_layer);
+                self.paint_cell(x, y, cell);
             }
         }
     }

@@ -35,9 +35,9 @@ parallel product model.
 | Terminal frontend | `app_shell.rs` drives `FrontendHost` while retaining the crossterm lifecycle, input reader, 250 ms heartbeat schedule, 8 ms redraw cap, rendering, and terminal effect encoding. | Keep this shipped fallback unchanged while the excluded native adapter advances through parity work. |
 | GPU spike | The excluded winit/wgpu shell now drives the real `FrontendHost`, translates winit input to neutral `InputEvent` values, and paints real `WorkspaceScene` snapshots through its scene-only renderer. Its duplicate `TerminalSession`, parser, input encoder, and scene bridge are gone. | Continue parity work against the shared host and scene contracts; do not add a second product state machine or promote the excluded dependency tree. |
 | Clipboard | `AppState` emits FIFO `FrontendEffect::SetClipboard(String)` values; `app_shell.rs` alone maps them to OSC 52. | Phase 1A is complete and proves the first renderer-neutral platform effect. |
-| Wake path | `AppEventSender` is the only send side for input, PTY, restore-preserved input, and agent events. The channel remains truth; an optional callback coalesces notifications while the queue is non-empty. | The excluded native shell binds that callback to `EventLoopProxy<UserEvent>` without moving a GUI type into app state. |
+| Wake path | `AppEventSender` is the only send side for input, PTY, restore-preserved input/artifact completions, agent events, and artifact workers. The channel remains truth; an optional callback coalesces notifications while the queue is non-empty. | The excluded native shell binds that callback to `EventLoopProxy<UserEvent>` without moving a GUI type into app state. |
 | Performance evidence | The spike measured key-to-GPU-present p50 21.6 ms / p95 22.2 ms. The terminal's 2026-07-22 Phase 2 refresh measured key-to-app-output p50 11.39 ms / p95 12.56 ms / max 13.69 ms. | These endpoints are asymmetric and do not prove a native product win or sub-20 ms input-to-present performance. |
-| Admission | The Artifact Preview capability branch is selected, but its typed scene surface and adapter tests do not exist yet. | Production GPU dependencies remain rejected until the later admission evidence and decision. |
+| Admission | The Artifact Preview capability, typed scene surface, terminal fallback, excluded-GPU path, and adapter tests are complete. | Capability proof alone does not admit dependencies; production GPU dependencies remain rejected until the separate admission evidence and decision. |
 
 The detailed evidence and standing procedures live in
 [frontend-platform.md](frontend-platform.md),
@@ -120,7 +120,7 @@ reviewable workspace pane without leaving Mandatum. This is the first concrete
 step toward a useful workspace containing task, agent, and artifact panes with
 no terminal pane required.
 
-Planned typed contract and ownership:
+Implemented typed contract and ownership:
 
 - `mandatum-core` persists only `ArtifactPaneIntent`: a project-relative source
   path, title/alt text, and contain-fit mode.
@@ -486,7 +486,9 @@ latency, idle-CPU, and shutdown evidence is recorded in
 
 Dependency: Phase 3 capability families.
 
-Build the product trigger accepted in Phase 0 as one vertical capability
+Result: **complete (2026-07-23).**
+
+The product trigger accepted in Phase 0 now exists as one vertical capability
 family:
 
 - persist only project-relative `ArtifactPaneIntent`;
@@ -501,6 +503,19 @@ family:
 Exit gate: a task- or agent-produced PNG opens as a reviewable workspace pane
 through the real host, both adapters consume the same typed scene state, and no
 GPU dependency enters a production crate.
+
+Exit gate met. The fuzzy palette opens project-relative PNGs; Restart Pane
+forces reload. The app observes unchanged sources cheaply, then uses
+component-relative `O_NOFOLLOW` opens on macOS/Linux, rejects animation and
+non-PNG input, and bounds encoded bytes, dimensions, aggregate decoded memory,
+worker fan-out, and open descriptors before decode. Durable restore carries
+intent only and preserves completion events long enough to release stale
+reservations. The scene exposes loading/ready/failed content plus immutable
+RGBA8 sRGB bytes and revision. Ratatui renders the labeled fallback; the
+excluded GPU adapter validates aggregate texture bytes, evicts all stale
+revisions before replacement, contain-fits, and clips against later panes and
+overlays. Automated, aggregate-review, and displayed evidence is in
+`verification.md`.
 
 ## Phase 5 — Make Advanced Text And IME Correct
 
@@ -618,12 +633,9 @@ the date, environment, command, endpoint, and result.
 
 ## Next Implementation Slice
 
-Build Phase 4 as the Artifact Preview vertical capability family. Start with
-project-relative durable `ArtifactPaneIntent`, app-owned bounded PNG
-validation/decoding and live loading/ready/failed state, then carry one typed
-RGBA8 sRGB surface through `mandatum-scene`. The terminal adapter must paint a
-deterministic labeled fallback card; the excluded GPU adapter must upload and
-contain-fit the same scene-owned surface. Prove containment and symlink
-rejection, encoded/decoded byte and dimension ceilings, malformed input,
-revision/reload behavior, and visible failure states. Stop before advanced
-grapheme/IME work, production GPU admission, or release changes.
+Build Phase 5 as the advanced text and IME capability family. Complete
+grapheme clusters, combining marks, wide-cell placement, fallback, cursor, and
+selection alignment over the existing neutral continuation seam; then add a
+renderer-neutral IME preedit/commit/cancel contract and prove it through the
+real host. Stop before production GPU admission, device-loss hardening,
+installer/release changes, or rollout.

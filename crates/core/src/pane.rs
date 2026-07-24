@@ -71,7 +71,26 @@ pub enum PaneKind {
     Terminal { command: Option<String> },
     Task { intent: TaskPaneIntent },
     Agent { intent: AgentPaneIntent },
+    Artifact { intent: ArtifactPaneIntent },
     StatusLog { source: StatusLogSource },
+}
+
+/// Durable intent for one project-local artifact preview.
+///
+/// The source remains project-relative intent. Decoded pixels, file handles,
+/// and decoder state belong to the app's live artifact loader.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPaneIntent {
+    pub source: PathBuf,
+    pub title: String,
+    pub alt_text: String,
+    pub fit: ArtifactFit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactFit {
+    Contain,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

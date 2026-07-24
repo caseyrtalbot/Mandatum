@@ -94,6 +94,13 @@ ranking, a right-click context menu, and a config file where every command
 is rebindable. Help (`F1`) is generated from the live command table and
 keymap, with drift-failing tests.
 
+**Review visual artifacts in place.** Search the palette for "Open artifact
+preview" and enter a project-relative PNG. The pane persists only path/title/
+alt/contain intent, reloads through "Restart pane", and shows a deterministic
+loading/ready/failed fallback in the shipped terminal frontend. The excluded
+native GPU adapter additionally renders the bounded RGBA8 surface contain-fit;
+this does not admit GPU dependencies into the product build.
+
 **Terminal soul.** The workspace never steals input from a child terminal
 except through explicit workspace control. Apps that request mouse
 reporting get real SGR mouse bytes; `alt+click` is the explicit workspace
@@ -202,6 +209,7 @@ from an empty `ctrl+p` prompt.
 | `ctrl+p n` / `v` / `s` | new terminal, split right, split down |
 | `ctrl+p b` / `r` | run task, rerun (on a task pane) |
 | `ctrl+p` then type `investigate` | hand a failed task to an agent |
+| `ctrl+p` then type `open artifact` | preview a project-relative PNG |
 | `ctrl+p g`, then `y` / `n` | start agent; approve / reject its request |
 | `ctrl+p /` and `ctrl+p m` | timeline, session map |
 | `ctrl+shift+f` | search session output |
@@ -277,8 +285,9 @@ crates/agent-runtime  agent connector contract, approval events, FakeConnector,
 crates/workflows      task recipes, agent intent, failure-handoff policy
 crates/renderer       ratatui adapter over the shared neutral CellProgram
 crates/app            the workstation: deep RuntimeEngine over terminal/task/
-                      agent registries, event loop, scene builder, timeline,
-                      search, config, transactional save/restore
+                      agent registries, bounded artifact loader/cache, event
+                      loop, scene builder, timeline, search, config,
+                      transactional save/restore
 spikes/               experiments outside the Cargo workspace; they may depend
                       on product or engine crates, but their heavy dependency
                       trees never join the product build, release, or merge
@@ -292,8 +301,9 @@ that drives the ratatui frontend drove a winit+wgpu spike that measured
 key-to-GPU-present p50 21.6 ms. The terminal frontend is v1; the GPU
 adapter stays excluded, but its native shell now drives the real
 `FrontendHost`, translates winit input to neutral events, and paints real
-workstation scenes without a duplicate PTY/parser state machine. Evidence and
-verdict:
+workstation scenes without a duplicate PTY/parser state machine. It also
+uploads and contain-fits the typed Artifact Preview surface while respecting
+scene-owned occlusion and aggregate resource limits. Evidence and verdict:
 [spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md). The
 admission-gated path from the spike to a real workstation frontend is in the
 [native GPU implementation plan](docs/native-gpu-implementation-plan.md).

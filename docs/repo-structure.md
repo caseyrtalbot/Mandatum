@@ -80,7 +80,8 @@ exposure, snapshots. `[L4-GATE]` conformance tests live in
 ### `crates/scene`
 
 `mandatum-scene`: the renderer-neutral frontend contract. `WorkspaceScene`
-output model (geometry, pane content, terminal surfaces, overlays,
+output model (geometry, pane content, terminal and bounded artifact surfaces,
+overlays,
 header/status, hit targets), its final-topmost whole-frame cell compiler
 (`cell_program.rs` plus private `cell_program/` modules), all pane-rect layout
 math (`layout.rs`), semantic themes (`theme.rs`), and the neutral input event
@@ -120,7 +121,11 @@ The shared workstation runtime and shipped terminal shell:
 - `runtime_engine.rs`: deep live-runtime Module over terminal, task, and agent
   registries; owns the event channel, identity, reconciliation, replacement,
   approval control, shutdown, and transactional restore lifecycle facts
-- `events.rs`: the unified app event channel (input / PTY / agent) plus the
+- `artifact_preview.rs`: project-relative observation, descriptor-relative
+  no-follow opening on macOS/Linux, bounded PNG header/decode, aggregate
+  reservation/worker queue, reload, and live RGBA8 cache
+- `events.rs`: the unified app event channel (input / PTY / agent / artifact)
+  plus the
   app-owned sender that coalesces optional frontend wakes without replacing
   channel truth
 - `frontend.rs`: crossterm-to-neutral input translation (the only module
@@ -158,10 +163,11 @@ history (see docs/workflows.md for what remains unbuilt here).
 
 ```text
 spikes/frontend-wgpu/   excluded winit shell over mandatum-app FrontendHost,
-                        neutral input translation, GPU presentation, and the
-                        tui_probe latency harness; its gpu-renderer/ member is
-                        a scene-only paint crate; RESULTS.md is the evidence
-                        record
+                        neutral input translation, GPU presentation (including
+                        bounded Artifact Preview texture upload/contain-fit),
+                        and the tui_probe latency harness; its gpu-renderer/
+                        member is a scene-only paint crate; RESULTS.md is the
+                        evidence record
 examples/live-slice/    driven demo workspace for the stranger test
 ```
 

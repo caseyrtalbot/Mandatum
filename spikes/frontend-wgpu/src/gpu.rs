@@ -2,7 +2,7 @@
 // backgrounds/selection/cursor/status, layered under GPU-rasterized glyphs
 // rendered by glyphon. All rendering is per-frame from WorkspaceScene.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,8 +15,9 @@ use glyphon::{
 // mandatum-terminal-vt: the real app host converts its grids before the
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
-    CellOccupancy, CellProgram, CellSelection, OverlayScene, ProgramCell, SceneColor, SceneRect,
-    Theme, WorkspaceScene, compile_cell_program, layout,
+    ArtifactState, CellOccupancy, CellProgram, CellSelection, OverlayScene, PaneContent,
+    ProgramCell, RasterSurface, SceneColor, SceneRect, Theme, WorkspaceScene, compile_cell_program,
+    layout,
 };
 use winit::window::Window;
 
@@ -27,6 +28,8 @@ const MAX_GPU_PANES: usize = 256;
 const MAX_GPU_FRAME_CELLS: usize = 262_144;
 const MAX_GPU_CELL_INSTRUCTIONS: usize = 4_000_000;
 const MAX_GPU_ROW_BUFFERS: usize = 4_096;
+const MAX_GPU_RASTER_DIMENSION: usize = 4_096;
+const MAX_GPU_RASTER_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SceneCompileError {
@@ -37,6 +40,10 @@ pub enum SceneCompileError {
         maximum: usize,
     },
     InvalidGeometry(&'static str),
+    InvalidRasterSurface {
+        layer: u16,
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for SceneCompileError {
@@ -52,18 +59,67 @@ impl std::fmt::Display for SceneCompileError {
                 "scene {resource} exceed the renderer limit: {actual} > {maximum}"
             ),
             Self::InvalidGeometry(reason) => write!(f, "invalid scene geometry: {reason}"),
+            Self::InvalidRasterSurface { layer, reason } => {
+                write!(f, "invalid raster surface at layer {layer}: {reason}")
+            }
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedArtifact {
+    layer: u16,
+    body: SceneRect,
+    visible_clips: Vec<SceneRect>,
+    width: u32,
+    height: u32,
+    revision: u64,
+    rgba8: Arc<[u8]>,
+}
+
+impl PreparedArtifact {
+    pub fn layer(&self) -> u16 {
+        self.layer
+    }
+
+    pub fn body(&self) -> SceneRect {
+        self.body
+    }
+
+    pub fn visible_clips(&self) -> &[SceneRect] {
+        &self.visible_clips
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn rgba8(&self) -> &[u8] {
+        &self.rgba8
     }
 }
 
 #[derive(Debug)]
 pub struct PreparedScene {
     cell_program: CellProgram,
+    artifacts: Vec<PreparedArtifact>,
 }
 
 impl PreparedScene {
     pub fn cell_program(&self) -> &CellProgram {
         &self.cell_program
+    }
+
+    pub fn artifacts(&self) -> &[PreparedArtifact] {
+        &self.artifacts
     }
 }
 
@@ -76,7 +132,11 @@ pub fn prepare_scene(
     validate_scene_structure(scene)?;
     let cell_program = compile_cell_program(scene, theme);
     validate_compiled_program(&cell_program)?;
-    Ok(PreparedScene { cell_program })
+    let artifacts = prepare_artifacts(scene, &cell_program);
+    Ok(PreparedScene {
+        cell_program,
+        artifacts,
+    })
 }
 
 fn validate_scene_structure(scene: &WorkspaceScene) -> Result<(), SceneCompileError> {
@@ -149,6 +209,7 @@ fn validate_precompile_resources(scene: &WorkspaceScene) -> Result<(), SceneComp
         usize::from(scene.size.height),
         MAX_GPU_ROW_BUFFERS,
     )?;
+    validate_raster_resources(scene)?;
 
     // The cell compiler retains only final topmost cells, but it still visits
     // each semantic paint surface. Bound that precompile work, including
@@ -178,6 +239,139 @@ fn validate_precompile_resources(scene: &WorkspaceScene) -> Result<(), SceneComp
         estimated_instructions,
         MAX_GPU_CELL_INSTRUCTIONS,
     )
+}
+
+fn validate_raster_resources(scene: &WorkspaceScene) -> Result<(), SceneCompileError> {
+    let mut aggregate_bytes = 0usize;
+    for (draw_index, pane) in scene.panes.iter().enumerate() {
+        let PaneContent::Artifact(artifact) = &pane.content else {
+            continue;
+        };
+        let ArtifactState::Ready(surface) = &artifact.state else {
+            continue;
+        };
+        let layer = u16::try_from(draw_index).map_err(|_| SceneCompileError::ResourceLimit {
+            resource: "panes",
+            actual: scene.panes.len(),
+            maximum: MAX_GPU_PANES,
+        })?;
+        let surface_bytes = validate_raster_surface(layer, surface)?;
+        aggregate_bytes =
+            aggregate_bytes
+                .checked_add(surface_bytes)
+                .ok_or(SceneCompileError::ResourceLimit {
+                    resource: "artifact RGBA bytes",
+                    actual: usize::MAX,
+                    maximum: MAX_GPU_RASTER_BYTES,
+                })?;
+        enforce_resource_limit("artifact RGBA bytes", aggregate_bytes, MAX_GPU_RASTER_BYTES)?;
+    }
+    Ok(())
+}
+
+fn validate_raster_surface(
+    layer: u16,
+    surface: &RasterSurface,
+) -> Result<usize, SceneCompileError> {
+    if surface.width == 0 || surface.height == 0 {
+        return Err(SceneCompileError::InvalidRasterSurface {
+            layer,
+            reason: "dimensions must be nonzero",
+        });
+    }
+    enforce_resource_limit(
+        "artifact width",
+        surface.width as usize,
+        MAX_GPU_RASTER_DIMENSION,
+    )?;
+    enforce_resource_limit(
+        "artifact height",
+        surface.height as usize,
+        MAX_GPU_RASTER_DIMENSION,
+    )?;
+    let expected = usize::try_from(surface.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(surface.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(SceneCompileError::InvalidRasterSurface {
+            layer,
+            reason: "decoded byte length overflows",
+        })?;
+    if surface.rgba8.len() != expected {
+        return Err(SceneCompileError::InvalidRasterSurface {
+            layer,
+            reason: "decoded byte length does not match dimensions",
+        });
+    }
+    Ok(expected)
+}
+
+fn prepare_artifacts(scene: &WorkspaceScene, program: &CellProgram) -> Vec<PreparedArtifact> {
+    scene
+        .panes
+        .iter()
+        .enumerate()
+        .filter_map(|(draw_index, pane)| {
+            let layer = u16::try_from(draw_index).ok()?;
+            let PaneContent::Artifact(artifact) = &pane.content else {
+                return None;
+            };
+            let ArtifactState::Ready(surface) = &artifact.state else {
+                return None;
+            };
+            let visible_clips = raster_clip_runs(program, layer);
+            if visible_clips.is_empty() {
+                return None;
+            }
+            let inner = layout::pane_inner_rect(pane.area);
+            let detail_rows = u16::try_from(pane.detail_lines().len()).unwrap_or(u16::MAX);
+            let body_y = inner.y.saturating_add(detail_rows).min(inner.bottom());
+            let body = SceneRect::new(
+                inner.x,
+                body_y,
+                inner.width,
+                inner.bottom().saturating_sub(body_y),
+            );
+            Some(PreparedArtifact {
+                layer,
+                body,
+                visible_clips,
+                width: surface.width,
+                height: surface.height,
+                revision: surface.revision,
+                rgba8: surface.rgba8.clone(),
+            })
+        })
+        .collect()
+}
+
+fn raster_clip_runs(program: &CellProgram, layer: u16) -> Vec<SceneRect> {
+    let mut clips = Vec::new();
+    let mut current: Option<SceneRect> = None;
+    for (x, y, cell) in program.cells() {
+        if cell.raster_layer != Some(layer) {
+            continue;
+        }
+        match current {
+            Some(mut run) if run.y == y && run.right() == x => {
+                run.width = run.width.saturating_add(1);
+                current = Some(run);
+            }
+            Some(run) => {
+                clips.push(run);
+                current = Some(SceneRect::new(x, y, 1, 1));
+            }
+            None => current = Some(SceneRect::new(x, y, 1, 1)),
+        }
+    }
+    if let Some(run) = current {
+        clips.push(run);
+    }
+    clips
 }
 
 fn validate_compiled_program(program: &CellProgram) -> Result<(), SceneCompileError> {
@@ -328,6 +522,93 @@ struct PreparedCellProgram {
     rows: Vec<ProgramRow>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PixelRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+fn contain_fit(source_width: u32, source_height: u32, target: PixelRect) -> Option<PixelRect> {
+    if source_width == 0
+        || source_height == 0
+        || !target.x.is_finite()
+        || !target.y.is_finite()
+        || !target.width.is_finite()
+        || !target.height.is_finite()
+        || target.width <= 0.0
+        || target.height <= 0.0
+    {
+        return None;
+    }
+    let scale = (f64::from(target.width) / f64::from(source_width))
+        .min(f64::from(target.height) / f64::from(source_height));
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let width = (f64::from(source_width) * scale).min(f64::from(target.width)) as f32;
+    let height = (f64::from(source_height) * scale).min(f64::from(target.height)) as f32;
+    Some(PixelRect {
+        x: target.x + (target.width - width) / 2.0,
+        y: target.y + (target.height - height) / 2.0,
+        width,
+        height,
+    })
+}
+
+#[derive(Debug)]
+struct CachedRaster {
+    revision: u64,
+    width: u32,
+    height: u32,
+    rgba8: Arc<[u8]>,
+    _texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RasterIdentity {
+    revision: u64,
+    width: u32,
+    height: u32,
+    rgba_ptr: usize,
+}
+
+impl RasterIdentity {
+    fn prepared(artifact: &PreparedArtifact) -> Self {
+        Self {
+            revision: artifact.revision,
+            width: artifact.width,
+            height: artifact.height,
+            rgba_ptr: Arc::as_ptr(&artifact.rgba8) as *const u8 as usize,
+        }
+    }
+
+    fn cached(raster: &CachedRaster) -> Self {
+        Self {
+            revision: raster.revision,
+            width: raster.width,
+            height: raster.height,
+            rgba_ptr: Arc::as_ptr(&raster.rgba8) as *const u8 as usize,
+        }
+    }
+}
+
+fn raster_replacement_layers(
+    cached: impl IntoIterator<Item = (u16, RasterIdentity)>,
+    artifacts: &[PreparedArtifact],
+) -> BTreeSet<u16> {
+    let cached = cached.into_iter().collect::<BTreeMap<_, _>>();
+    artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let identity = RasterIdentity::prepared(artifact);
+            (cached.get(&artifact.layer) != Some(&identity)).then_some(artifact.layer)
+        })
+        .collect()
+}
+
 fn resolve_program_cell(cell: &ProgramCell, theme: &Theme) -> ResolvedCell {
     let mut foreground = resolve(cell.style.foreground, DEFAULT_FG);
     let mut background = resolve(cell.style.background, DEFAULT_BG);
@@ -460,6 +741,14 @@ pub struct GpuText {
     inst_capacity_floats: usize,
     res_buf: wgpu::Buffer,
     res_bind_group: wgpu::BindGroup,
+
+    // Ready artifact surface pipeline and revision-aware texture cache.
+    raster_pipeline: wgpu::RenderPipeline,
+    raster_bind_layout: wgpu::BindGroupLayout,
+    raster_sampler: wgpu::Sampler,
+    raster_inst_buf: wgpu::Buffer,
+    raster_inst_capacity_floats: usize,
+    raster_cache: BTreeMap<u16, CachedRaster>,
 
     // Text stack.
     font_system: FontSystem,
@@ -603,6 +892,90 @@ impl GpuText {
             cache: None,
         });
 
+        let raster_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("artifact-raster-shader"),
+            source: wgpu::ShaderSource::Wgsl(RASTER_WGSL.into()),
+        });
+        let raster_bind_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("artifact-raster-bind-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let raster_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("artifact-raster-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let raster_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("artifact-raster-pipeline-layout"),
+                bind_group_layouts: &[Some(&bind_layout), Some(&raster_bind_layout)],
+                immediate_size: 0,
+            });
+        const RASTER_INST_ATTRS: [wgpu::VertexAttribute; 1] =
+            wgpu::vertex_attr_array![1 => Float32x4];
+        let raster_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("artifact-raster-pipeline"),
+            layout: Some(&raster_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &raster_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 8,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &UNIT_ATTRS,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 16,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &RASTER_INST_ATTRS,
+                    }),
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &raster_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let unit: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         let unit_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("unit-quad"),
@@ -616,6 +989,13 @@ impl GpuText {
         let inst_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("quad-instances"),
             size: (inst_capacity_floats * 4) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let raster_inst_capacity_floats = 4 * MAX_GPU_PANES;
+        let raster_inst_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("artifact-raster-instances"),
+            size: (raster_inst_capacity_floats * 4) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -646,6 +1026,12 @@ impl GpuText {
             inst_capacity_floats,
             res_buf,
             res_bind_group,
+            raster_pipeline,
+            raster_bind_layout,
+            raster_sampler,
+            raster_inst_buf,
+            raster_inst_capacity_floats,
+            raster_cache: BTreeMap::new(),
             font_system,
             swash_cache,
             cache,
@@ -691,6 +1077,93 @@ impl GpuText {
         self.cell_h = line_height;
     }
 
+    fn sync_raster_cache(&mut self, artifacts: &[PreparedArtifact]) {
+        let live_layers = artifacts
+            .iter()
+            .map(PreparedArtifact::layer)
+            .collect::<BTreeSet<_>>();
+        self.raster_cache
+            .retain(|layer, _| live_layers.contains(layer));
+        let replacement_layers = raster_replacement_layers(
+            self.raster_cache
+                .iter()
+                .map(|(&layer, cached)| (layer, RasterIdentity::cached(cached))),
+            artifacts,
+        );
+        // Evict every stale live texture before allocating any replacement.
+        // This keeps reload high-water usage under the same admitted aggregate
+        // ceiling even when bytes are redistributed between artifact layers.
+        for layer in &replacement_layers {
+            self.raster_cache.remove(layer);
+        }
+
+        for artifact in artifacts {
+            if self.raster_cache.contains_key(&artifact.layer) {
+                continue;
+            }
+
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("artifact-rgba8-srgb"),
+                size: wgpu::Extent3d {
+                    width: artifact.width,
+                    height: artifact.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &artifact.rgba8,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(artifact.width * 4),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: artifact.width,
+                    height: artifact.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("artifact-raster-bind-group"),
+                layout: &self.raster_bind_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.raster_sampler),
+                    },
+                ],
+            });
+            self.raster_cache.insert(
+                artifact.layer,
+                CachedRaster {
+                    revision: artifact.revision,
+                    width: artifact.width,
+                    height: artifact.height,
+                    rgba8: artifact.rgba8.clone(),
+                    _texture: texture,
+                    bind_group,
+                },
+            );
+        }
+    }
+
     /// Render one frame from a `WorkspaceScene`. Consumes only scene types: the
     /// visible cells, styles, cursor/selection marks, and status come from the
     /// scene, never from a grid or parser. Returns the instant right after
@@ -705,6 +1178,7 @@ impl GpuText {
     ) -> Result<Option<Instant>, SceneCompileError> {
         let prepared = prepare_scene(scene, theme)?;
         let program = prepare_cell_program(prepared.cell_program(), theme);
+        self.sync_raster_cache(prepared.artifacts());
         let metrics = Metrics::new(self.font_size, self.cell_h);
         self.row_buffers
             .ensure_len(program.rows.len(), &mut self.font_system, metrics);
@@ -754,6 +1228,43 @@ impl GpuText {
         self.queue
             .write_buffer(&self.inst_buf, 0, bytes_of_slice(&quads));
         let instance_count = (quads.len() / 8) as u32;
+
+        let raster_rects = prepared
+            .artifacts()
+            .iter()
+            .enumerate()
+            .filter_map(|artifact| {
+                let (index, artifact) = artifact;
+                contain_fit(
+                    artifact.width,
+                    artifact.height,
+                    PixelRect {
+                        x: f32::from(artifact.body.x) * self.cell_w,
+                        y: f32::from(artifact.body.y) * self.cell_h,
+                        width: f32::from(artifact.body.width) * self.cell_w,
+                        height: f32::from(artifact.body.height) * self.cell_h,
+                    },
+                )
+                .map(|rect| (index, rect))
+            })
+            .collect::<Vec<_>>();
+        let mut raster_instances = Vec::with_capacity(raster_rects.len().saturating_mul(4));
+        for (_, rect) in &raster_rects {
+            raster_instances.extend_from_slice(&[rect.x, rect.y, rect.width, rect.height]);
+        }
+        if raster_instances.len() > self.raster_inst_capacity_floats {
+            self.raster_inst_capacity_floats = raster_instances.len().next_power_of_two();
+            self.raster_inst_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("artifact-raster-instances"),
+                size: (self.raster_inst_capacity_floats * 4) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !raster_instances.is_empty() {
+            self.queue
+                .write_buffer(&self.raster_inst_buf, 0, bytes_of_slice(&raster_instances));
+        }
 
         let resolution = [
             self.config.width as f32,
@@ -845,6 +1356,33 @@ impl GpuText {
                 pass.set_vertex_buffer(1, self.inst_buf.slice(..));
                 pass.draw(0..4, 0..instance_count);
             }
+            if !raster_rects.is_empty() {
+                pass.set_pipeline(&self.raster_pipeline);
+                pass.set_bind_group(0, &self.res_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.unit_buf.slice(..));
+                pass.set_vertex_buffer(1, self.raster_inst_buf.slice(..));
+                for (instance, (artifact_index, _)) in raster_rects.iter().enumerate() {
+                    let artifact = &prepared.artifacts()[*artifact_index];
+                    let Some(cached) = self.raster_cache.get(&artifact.layer) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, &cached.bind_group, &[]);
+                    for clip in &artifact.visible_clips {
+                        let Some((x, y, width, height)) = cell_clip_scissor(
+                            *clip,
+                            self.cell_w,
+                            self.cell_h,
+                            self.config.width,
+                            self.config.height,
+                        ) else {
+                            continue;
+                        };
+                        pass.set_scissor_rect(x, y, width, height);
+                        pass.draw(0..4, instance as u32..instance as u32 + 1);
+                    }
+                }
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            }
             let _ = self
                 .text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass);
@@ -917,6 +1455,34 @@ fn push_quad(buf: &mut Vec<f32>, x: f32, y: f32, w: f32, h: f32, rgba: [u8; 4]) 
     ]);
 }
 
+fn cell_clip_scissor(
+    clip: SceneRect,
+    cell_width: f32,
+    cell_height: f32,
+    surface_width: u32,
+    surface_height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    if clip.is_empty()
+        || !cell_width.is_finite()
+        || !cell_height.is_finite()
+        || cell_width <= 0.0
+        || cell_height <= 0.0
+    {
+        return None;
+    }
+    // Choose the integer boundary by pixel center. Reusing the exact same
+    // conversion for adjacent clips prevents fractional cell metrics from
+    // creating a one-pixel overlap where a lower artifact could bleed through
+    // a later opaque pane.
+    let pixel_boundary =
+        |position: f32, maximum: u32| (position - 0.5).ceil().clamp(0.0, maximum as f32) as u32;
+    let left = pixel_boundary(f32::from(clip.x) * cell_width, surface_width);
+    let top = pixel_boundary(f32::from(clip.y) * cell_height, surface_height);
+    let right = pixel_boundary(f32::from(clip.right()) * cell_width, surface_width);
+    let bottom = pixel_boundary(f32::from(clip.bottom()) * cell_height, surface_height);
+    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+}
+
 /// Measure a monospace advance width by shaping a run of identical glyphs and
 /// dividing the laid-out line width by the glyph count.
 fn measure_cell_width(font_system: &mut FontSystem, metrics: Metrics) -> f32 {
@@ -967,12 +1533,41 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+const RASTER_WGSL: &str = r#"
+struct Res { size: vec4<f32> };
+@group(0) @binding(0) var<uniform> res: Res;
+@group(1) @binding(0) var raster: texture_2d<f32>;
+@group(1) @binding(1) var raster_sampler: sampler;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs(@location(0) unit: vec2<f32>,
+      @location(1) rect: vec4<f32>) -> VOut {
+    let px = rect.xy + unit * rect.zw;
+    let ndc = vec2<f32>(px.x / res.size.x * 2.0 - 1.0, 1.0 - px.y / res.size.y * 2.0);
+    var out: VOut;
+    out.pos = vec4<f32>(ndc, 0.0, 1.0);
+    out.uv = unit;
+    return out;
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4<f32> {
+    return textureSample(raster, raster_sampler, in.uv);
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mandatum_scene::{
-        EmptyContent, HeaderScene, OverlayScene, PaletteOverlay, PaneContent, PaneId, PaneScene,
-        PaneSceneKind, SceneCell, SceneRect, SceneSize, StatusScene, TerminalSurface,
+        ArtifactContent, ArtifactFit, ArtifactState, EmptyContent, HeaderScene, OverlayScene,
+        PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind, RasterSurface, SceneCell,
+        SceneRect, SceneSize, StatusScene, TerminalSurface,
     };
 
     #[test]
@@ -989,6 +1584,294 @@ mod tests {
 
         pool.ensure_len(2, &mut font_system, metrics);
         assert_eq!(pool.len(), 5);
+    }
+
+    fn ready_artifact(width: u32, height: u32, revision: u64) -> PaneContent {
+        let bytes = usize::try_from(width)
+            .unwrap()
+            .checked_mul(usize::try_from(height).unwrap())
+            .and_then(|pixels| pixels.checked_mul(4))
+            .unwrap();
+        PaneContent::Artifact(ArtifactContent {
+            source_label: "artifacts/preview.png".to_owned(),
+            alt_text: "Preview".to_owned(),
+            fit: ArtifactFit::Contain,
+            state: ArtifactState::Ready(RasterSurface {
+                width,
+                height,
+                revision,
+                rgba8: vec![0x7f; bytes].into(),
+            }),
+        })
+    }
+
+    fn assert_rect_close(actual: PixelRect, expected: PixelRect) {
+        for (actual, expected) in [
+            (actual.x, expected.x),
+            (actual.y, expected.y),
+            (actual.width, expected.width),
+            (actual.height, expected.height),
+        ] {
+            assert!((actual - expected).abs() < 0.001, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn contain_fit_centers_landscape_portrait_and_square_surfaces() {
+        let target = PixelRect {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        assert_rect_close(
+            contain_fit(200, 100, target).unwrap(),
+            PixelRect {
+                x: 10.0,
+                y: 45.0,
+                width: 100.0,
+                height: 50.0,
+            },
+        );
+        assert_rect_close(
+            contain_fit(100, 200, target).unwrap(),
+            PixelRect {
+                x: 35.0,
+                y: 20.0,
+                width: 50.0,
+                height: 100.0,
+            },
+        );
+        assert_rect_close(contain_fit(1, 1, target).unwrap(), target);
+        assert!(contain_fit(0, 1, target).is_none());
+
+        let left = cell_clip_scissor(SceneRect::new(0, 0, 10, 1), 8.23, 19.5, 200, 100)
+            .expect("left clip should be visible");
+        let right = cell_clip_scissor(SceneRect::new(10, 0, 1, 1), 8.23, 19.5, 200, 100)
+            .expect("right clip should be visible");
+        assert_eq!(left.0 + left.2, right.0, "adjacent clips cannot overlap");
+    }
+
+    #[test]
+    fn ready_raster_reaches_the_headless_plan_without_copying_pixels() {
+        let content = ready_artifact(4, 2, 7);
+        let source_ptr = match &content {
+            PaneContent::Artifact(ArtifactContent {
+                state: ArtifactState::Ready(surface),
+                ..
+            }) => surface.rgba8.as_ptr(),
+            _ => unreachable!(),
+        };
+        let workspace = scene(vec![pane(PaneSceneKind::Artifact, content)]);
+
+        let prepared = prepare_scene(&workspace, &Theme::default()).unwrap();
+        let [artifact] = prepared.artifacts() else {
+            panic!("ready artifact did not reach the headless GPU plan");
+        };
+        assert_eq!(artifact.layer(), 0);
+        assert_eq!(artifact.body(), SceneRect::new(1, 5, 78, 17));
+        assert_eq!((artifact.width(), artifact.height()), (4, 2));
+        assert_eq!(artifact.revision(), 7);
+        assert_eq!(artifact.rgba8().as_ptr(), source_ptr);
+        assert_eq!(artifact.visible_clips().len(), 17);
+        assert!(
+            artifact
+                .visible_clips()
+                .iter()
+                .all(|clip| clip.width == 78 && clip.height == 1)
+        );
+    }
+
+    #[test]
+    fn aggregate_raster_bytes_cannot_be_bypassed_by_multiple_valid_surfaces() {
+        let mut first = pane(PaneSceneKind::Artifact, ready_artifact(4096, 2048, 1));
+        first.id = PaneId::new("artifact-1");
+        let mut second = pane(PaneSceneKind::Artifact, ready_artifact(4096, 2048, 1));
+        second.id = PaneId::new("artifact-2");
+        second.focused = false;
+        let exact_limit = scene(vec![first.clone(), second.clone()]);
+        prepare_scene(&exact_limit, &Theme::default())
+            .expect("the exact aggregate RGBA byte ceiling should be admitted");
+
+        let mut one_more = pane(PaneSceneKind::Artifact, ready_artifact(1, 1, 1));
+        one_more.id = PaneId::new("artifact-3");
+        one_more.focused = false;
+        let over_limit = scene(vec![first, second, one_more]);
+        assert_eq!(
+            prepare_scene(&over_limit, &Theme::default()).unwrap_err(),
+            SceneCompileError::ResourceLimit {
+                resource: "artifact RGBA bytes",
+                actual: MAX_GPU_RASTER_BYTES + 4,
+                maximum: MAX_GPU_RASTER_BYTES,
+            }
+        );
+    }
+
+    #[test]
+    fn cache_reload_plan_evicts_all_stale_layers_before_replacement() {
+        let old_first = Arc::<[u8]>::from([1, 2, 3, 4]);
+        let old_second = Arc::<[u8]>::from([5, 6, 7, 8]);
+        let artifacts = vec![
+            PreparedArtifact {
+                layer: 0,
+                body: SceneRect::new(0, 0, 1, 1),
+                visible_clips: vec![SceneRect::new(0, 0, 1, 1)],
+                width: 1,
+                height: 1,
+                revision: 2,
+                rgba8: Arc::from([9, 10, 11, 12]),
+            },
+            PreparedArtifact {
+                layer: 1,
+                body: SceneRect::new(1, 0, 1, 1),
+                visible_clips: vec![SceneRect::new(1, 0, 1, 1)],
+                width: 1,
+                height: 1,
+                revision: 2,
+                rgba8: Arc::from([13, 14, 15, 16]),
+            },
+        ];
+        let cached = [
+            (
+                0,
+                RasterIdentity {
+                    revision: 1,
+                    width: 1,
+                    height: 1,
+                    rgba_ptr: Arc::as_ptr(&old_first) as *const u8 as usize,
+                },
+            ),
+            (
+                1,
+                RasterIdentity {
+                    revision: 1,
+                    width: 1,
+                    height: 1,
+                    rgba_ptr: Arc::as_ptr(&old_second) as *const u8 as usize,
+                },
+            ),
+        ];
+
+        assert_eq!(
+            raster_replacement_layers(cached, &artifacts),
+            BTreeSet::from([0, 1]),
+            "every stale live texture must be dropped before the first replacement allocates"
+        );
+    }
+
+    #[test]
+    fn malformed_scene_rasters_fail_before_gpu_allocation() {
+        let malformed = PaneContent::Artifact(ArtifactContent {
+            source_label: "artifacts/bad.png".to_owned(),
+            alt_text: "Bad".to_owned(),
+            fit: ArtifactFit::Contain,
+            state: ArtifactState::Ready(RasterSurface {
+                width: 2,
+                height: 2,
+                revision: 1,
+                rgba8: vec![0; 15].into(),
+            }),
+        });
+        let zero = PaneContent::Artifact(ArtifactContent {
+            source_label: "artifacts/zero.png".to_owned(),
+            alt_text: "Zero".to_owned(),
+            fit: ArtifactFit::Contain,
+            state: ArtifactState::Ready(RasterSurface {
+                width: 0,
+                height: 1,
+                revision: 1,
+                rgba8: Arc::from([]),
+            }),
+        });
+        let too_wide = PaneContent::Artifact(ArtifactContent {
+            source_label: "artifacts/wide.png".to_owned(),
+            alt_text: "Wide".to_owned(),
+            fit: ArtifactFit::Contain,
+            state: ArtifactState::Ready(RasterSurface {
+                width: (MAX_GPU_RASTER_DIMENSION + 1) as u32,
+                height: 1,
+                revision: 1,
+                rgba8: Arc::from([]),
+            }),
+        });
+
+        assert_eq!(
+            prepare_scene(
+                &scene(vec![pane(PaneSceneKind::Artifact, malformed)]),
+                &Theme::default()
+            )
+            .unwrap_err(),
+            SceneCompileError::InvalidRasterSurface {
+                layer: 0,
+                reason: "decoded byte length does not match dimensions",
+            }
+        );
+        assert_eq!(
+            prepare_scene(
+                &scene(vec![pane(PaneSceneKind::Artifact, zero)]),
+                &Theme::default()
+            )
+            .unwrap_err(),
+            SceneCompileError::InvalidRasterSurface {
+                layer: 0,
+                reason: "dimensions must be nonzero",
+            }
+        );
+        assert_eq!(
+            prepare_scene(
+                &scene(vec![pane(PaneSceneKind::Artifact, too_wide)]),
+                &Theme::default()
+            )
+            .unwrap_err(),
+            SceneCompileError::ResourceLimit {
+                resource: "artifact width",
+                actual: MAX_GPU_RASTER_DIMENSION + 1,
+                maximum: MAX_GPU_RASTER_DIMENSION,
+            }
+        );
+    }
+
+    #[test]
+    fn final_cell_markers_clip_artifacts_behind_later_panes() {
+        let artifact = pane(PaneSceneKind::Artifact, ready_artifact(4, 2, 1));
+        let mut covering = pane(
+            PaneSceneKind::StatusLog,
+            PaneContent::Empty(EmptyContent {
+                cwd_label: "/tmp".to_owned(),
+                restart_generation: 0,
+            }),
+        );
+        covering.id = PaneId::new("covering-pane");
+        covering.area = SceneRect::new(10, 6, 10, 6);
+        covering.focused = false;
+        covering.floating = true;
+        let workspace = scene(vec![artifact, covering]);
+
+        let prepared = prepare_scene(&workspace, &Theme::default()).unwrap();
+        let [artifact] = prepared.artifacts() else {
+            panic!("partially visible artifact did not reach the GPU plan");
+        };
+        assert_eq!(
+            prepared
+                .cell_program()
+                .cell_at(2, 8)
+                .and_then(|cell| cell.raster_layer),
+            Some(0)
+        );
+        assert_eq!(
+            prepared
+                .cell_program()
+                .cell_at(12, 8)
+                .and_then(|cell| cell.raster_layer),
+            None
+        );
+        assert!(
+            artifact
+                .visible_clips()
+                .iter()
+                .all(|clip| !clip.contains(12, 8)),
+            "covering pane coordinates leaked into artifact clip runs"
+        );
     }
 
     #[test]
@@ -1012,6 +1895,7 @@ mod tests {
             },
             selection: Some(CellSelection::Terminal),
             cursor: false,
+            raster_layer: None,
         };
 
         let resolved = resolve_program_cell(&cell, &theme);
@@ -1042,6 +1926,7 @@ mod tests {
             },
             selection: Some(CellSelection::Terminal),
             cursor: true,
+            raster_layer: None,
         };
 
         let resolved = resolve_program_cell(&cell, &Theme::default());
@@ -1064,6 +1949,7 @@ mod tests {
             },
             selection: Some(CellSelection::Item),
             cursor: false,
+            raster_layer: None,
         };
         let hidden = ProgramCell {
             occupancy: CellOccupancy::Glyph('H'),
@@ -1073,12 +1959,14 @@ mod tests {
             },
             selection: None,
             cursor: false,
+            raster_layer: None,
         };
         let continuation = ProgramCell {
             occupancy: CellOccupancy::WideContinuation,
             style: mandatum_scene::SceneCellStyle::default(),
             selection: None,
             cursor: false,
+            raster_layer: None,
         };
 
         let resolved_item = resolve_program_cell(&item, &Theme::default());

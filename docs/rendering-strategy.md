@@ -22,7 +22,8 @@ frontend adapter (mandatum-renderer is the terminal adapter)
 ```
 
 The scene contract is implemented: `mandatum-scene` owns the neutral scene
-types (`WorkspaceScene`, `PaneScene`, `TerminalSurface`, overlays, hit
+types (`WorkspaceScene`, `PaneScene`, `TerminalSurface`, `RasterSurface`,
+artifact loading/ready/failed content, overlays, hit
 targets), all pane-rect layout math (`scene::layout`), and the neutral input
 event types (`scene::input`, now fully wired: the app consumes them
 exclusively, and the terminal frontend translates crossterm events into
@@ -46,6 +47,7 @@ The scene model must describe:
 - terminal grid surfaces
 - task output/status surfaces
 - agent status surfaces
+- bounded artifact surfaces with deterministic text fallback
 - command palette
 - session map
 - execution timeline
@@ -123,6 +125,15 @@ Every frontend adapter must:
 - expose errors as runtime-visible status
 - support automated smoke tests where possible
 
+Artifact adapters consume one scene contract. The shipped ratatui adapter
+renders source, alt text, dimensions/state, and calm failure detail as cells.
+The excluded GPU adapter additionally consumes final-topmost
+`ProgramCell::raster_layer` markers, validates each RGBA8 surface and the
+64 MiB aggregate, drops every stale texture before replacement, contain-fits
+without distortion, and scissors pixels around later panes and overlays. File
+opening, PNG parsing, reload detection, and decoded-memory admission remain app
+responsibilities, never renderer responsibilities.
+
 ## Quality Gates
 
 Rendering work is not complete until it has been checked under:
@@ -136,6 +147,7 @@ Rendering work is not complete until it has been checked under:
 - scrollback
 - selection
 - restored workspace
+- artifact load, reload, failure, overlay occlusion, and aspect-ratio resize
 
 ## Resize And Rewrap
 

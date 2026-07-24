@@ -40,6 +40,9 @@ pub struct ProgramCell {
     pub style: SceneCellStyle,
     pub selection: Option<CellSelection>,
     pub cursor: bool,
+    /// Ready artifact pixels assigned to this final-topmost cell, identified by
+    /// the artifact pane's draw index. Cell-only adapters ignore this marker.
+    pub raster_layer: Option<u16>,
 }
 
 impl ProgramCell {
@@ -49,6 +52,7 @@ impl ProgramCell {
             style,
             selection: None,
             cursor: false,
+            raster_layer: None,
         }
     }
 }
@@ -91,8 +95,8 @@ pub fn compile_cell_program(scene: &WorkspaceScene, theme: &Theme) -> CellProgra
     };
 
     compiler.paint_header(scene, theme);
-    for pane in &scene.panes {
-        compiler.paint_pane(pane, theme);
+    for (draw_index, pane) in scene.panes.iter().enumerate() {
+        compiler.paint_pane(pane, theme, u16::try_from(draw_index).ok());
     }
     compiler.paint_status(scene, theme);
     if let Some(overlay) = &scene.overlay {

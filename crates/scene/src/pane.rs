@@ -1,10 +1,10 @@
 //! Pane scenes: identity, chrome flags, and renderable content.
 
-use mandatum_core::{AgentStatus, PaneId};
+use mandatum_core::{AgentStatus, ArtifactFit, PaneId};
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::SceneRect;
-use crate::surface::TerminalSurface;
+use crate::surface::{RasterSurface, TerminalSurface};
 
 /// One pane ready to draw: durable identity plus resolved geometry, chrome
 /// flags, and content.
@@ -137,6 +137,20 @@ impl PaneScene {
                     }
                 }
             }
+            PaneContent::Artifact(artifact) => {
+                lines.push(format!("source: {}", artifact.source_label));
+                lines.push(format!("alt: {}", artifact.alt_text));
+                match &artifact.state {
+                    ArtifactState::Loading => lines.push("preview: loading".to_owned()),
+                    ArtifactState::Ready(surface) => lines.push(format!(
+                        "preview: ready · {}x{} RGBA8 sRGB",
+                        surface.width, surface.height
+                    )),
+                    ArtifactState::Failed { message } => {
+                        lines.push(format!("preview: failed · {message}"));
+                    }
+                }
+            }
             PaneContent::Empty(empty) => {
                 lines.push(format!("cwd: {}", empty.cwd_label));
                 lines.push(format!("restart generation: {}", empty.restart_generation));
@@ -153,6 +167,7 @@ pub enum PaneSceneKind {
     Terminal,
     Task,
     Agent,
+    Artifact,
     StatusLog,
 }
 
@@ -162,6 +177,7 @@ impl PaneSceneKind {
             Self::Terminal => "terminal",
             Self::Task => "task",
             Self::Agent => "agent",
+            Self::Artifact => "artifact",
             Self::StatusLog => "status",
         }
     }
@@ -173,7 +189,24 @@ pub enum PaneContent {
     Terminal(TerminalSurface),
     Task(TaskContent),
     Agent(AgentContent),
+    Artifact(ArtifactContent),
     Empty(EmptyContent),
+}
+
+/// Artifact pane labels plus its app-owned live load state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactContent {
+    pub source_label: String,
+    pub alt_text: String,
+    pub fit: ArtifactFit,
+    pub state: ArtifactState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArtifactState {
+    Loading,
+    Ready(RasterSurface),
+    Failed { message: String },
 }
 
 /// Task pane content: durable intent labels plus the live runtime view.

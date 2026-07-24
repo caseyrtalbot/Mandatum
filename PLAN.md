@@ -131,10 +131,13 @@ more useful without pretending the wider vision is finished:
   scrollback, focus/resize/scale transitions, startup restore, and idempotent
   shutdown through `FrontendHost`. Tiny or unpresentable frames suspend pointer
   interaction until a valid frame is presented, while malformed large
-  geometry remains visible as a fatal adapter error. Artifact Preview is now
-  the exact next dedicated product-capability phase before hardening,
-  measurement, admission, or release work. Production GPU dependencies and
-  release admission remain blocked.
+  geometry remains visible as a fatal adapter error. Phase 4 Artifact Preview
+  is complete: project-relative PNG intent persists without pixels, the app
+  opens each changed source through no-follow descriptor traversal, bounds and
+  decodes it into typed RGBA8 scene data, ratatui paints the deterministic
+  fallback, and the excluded GPU adapter contain-fits the texture with checked
+  aggregate admission and occlusion. Phase 5 advanced grapheme/IME correctness
+  is next. Production GPU dependencies and release admission remain blocked.
 - **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
   narrow widths stays wrapped. If adopted, it belongs in the
   `mandatum-terminal-vt` grid, not the scene or renderer layers.

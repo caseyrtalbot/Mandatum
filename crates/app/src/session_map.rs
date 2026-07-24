@@ -102,6 +102,7 @@ pub(crate) const SESSION_MAP_GLYPH_LEGEND: &[(&str, &str)] = &[
     ("❯", "terminal"),
     ("▶", "task"),
     ("◆", "agent"),
+    ("▣", "artifact"),
     ("≡", "status"),
     (SESSION_MAP_FOCUS_GLYPH, "focused"),
 ];
@@ -114,7 +115,8 @@ fn pane_glyph(kind: &PaneKind) -> &'static str {
         PaneKind::Terminal { .. } => SESSION_MAP_GLYPH_LEGEND[1].0,
         PaneKind::Task { .. } => SESSION_MAP_GLYPH_LEGEND[2].0,
         PaneKind::Agent { .. } => SESSION_MAP_GLYPH_LEGEND[3].0,
-        PaneKind::StatusLog { .. } => SESSION_MAP_GLYPH_LEGEND[4].0,
+        PaneKind::Artifact { .. } => SESSION_MAP_GLYPH_LEGEND[4].0,
+        PaneKind::StatusLog { .. } => SESSION_MAP_GLYPH_LEGEND[5].0,
     }
 }
 
@@ -125,6 +127,7 @@ fn durable_pane_state(kind: &PaneKind) -> String {
             "idle".to_owned()
         }
         PaneKind::Agent { intent } => agent_state_word(&intent.status).to_owned(),
+        PaneKind::Artifact { .. } => "preview".to_owned(),
     }
 }
 

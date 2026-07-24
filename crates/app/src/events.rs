@@ -17,6 +17,7 @@ use mandatum_scene::input::InputEvent;
 
 use crate::{
     agent_runtime::AgentRuntimeEvent,
+    artifact_preview::ArtifactLoadEvent,
     process_events::{PtyFlowCredit, PtyRuntimeEvent},
 };
 
@@ -33,6 +34,7 @@ pub(crate) enum AppEvent {
     Input(InputEvent),
     Pty(PtyRuntimeEvent, Option<PtyFlowCredit>),
     Agent(AgentRuntimeEvent),
+    Artifact(ArtifactLoadEvent),
 }
 
 pub(crate) type WakeCallback = Arc<dyn Fn() + Send + Sync + 'static>;

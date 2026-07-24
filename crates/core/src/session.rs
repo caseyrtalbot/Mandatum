@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentPaneIntent, Layout, PaneId, PaneKind, PaneSpec, ProjectId, SessionId, SplitDirection,
-    TaskPaneIntent, layout::LayoutMutationError,
+    AgentPaneIntent, ArtifactPaneIntent, Layout, PaneId, PaneKind, PaneSpec, ProjectId, SessionId,
+    SplitDirection, TaskPaneIntent, layout::LayoutMutationError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +109,11 @@ impl Session {
         cwd: Option<PathBuf>,
     ) -> PaneId {
         self.add_floating_pane(title, PaneKind::Agent { intent }, cwd)
+    }
+
+    pub fn add_artifact_pane(&mut self, intent: ArtifactPaneIntent) -> PaneId {
+        let title = intent.title.clone();
+        self.add_floating_pane(title, PaneKind::Artifact { intent }, None)
     }
 
     /// Mutable access to a pane's durable agent intent, when the pane exists
