@@ -116,6 +116,28 @@ Native product priorities:
 The ordered path for delivering these priorities is in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 
+## Native Visual Presentation
+
+Production native polish follows the ordered
+[visual polish plan](visual-polish-plan.md). The native presentation layer
+builds on the semantic scene rather than treating the terminal cell program as
+its design ceiling:
+
+- `WorkspaceScene` and typed scene extensions own product meaning;
+- `CellProgram` remains the exact terminal-parity projection and maintained
+  fallback;
+- a pure native presentation plan may translate typed scene surfaces into
+  ordered materials, clips, and scoped text without reconstructing state;
+- the GPU adapter materializes those primitives but never parses
+  `detail_lines()` or invents workflow hierarchy;
+- terminal content, child mouse reporting, hit targets, and cell ownership stay
+  authoritative while native chrome gains materials, density, and motion.
+
+The flagship direction is a compact graphite workbench: quiet continuous tiled
+surfaces, raised floating/modal surfaces, one navigation accent, and distinct
+semantic colors reserved for waiting, failure, success, and completion.
+Decorative effects are not substitutes for hierarchy.
+
 ## Frontend Adapter Expectations
 
 Every frontend adapter must:
@@ -149,6 +171,11 @@ Rendering work is not complete until it has been checked under:
 - selection
 - restored workspace
 - artifact load, reload, failure, overlay occlusion, and aspect-ratio resize
+
+Visual-polish work additionally requires the portable contrast, geometry,
+motion, fixed-reference macOS baseline, resize, idle, and frame-preparation
+procedures in [verification.md](verification.md). Pixel baselines supplement
+semantic tests; they never replace them or update implicitly.
 
 ## Resize And Rewrap
 

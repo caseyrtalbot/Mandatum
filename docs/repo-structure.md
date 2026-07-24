@@ -38,6 +38,7 @@ docs/interaction-model.md   commands, panes, session map, timeline, input
 docs/workflows.md           end-to-end developer workflows (built vs not yet)
 docs/native-gpu-implementation-plan.md
                             ordered native-first implementation plan
+docs/visual-polish-plan.md ordered in-app visual system and acceptance plan
 docs/verification.md        standing procedures + dated evidence ledger
 docs/repo-structure.md      current file layout
 docs/decisions.md           decision log (append-only)

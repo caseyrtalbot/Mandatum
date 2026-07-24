@@ -188,6 +188,292 @@ Record the displayed evidence and a direct verdict: the glyphon/cosmic-text
 stack can delight, or a focused stack decision is required before broader
 visual-identity investment.
 
+## Visual Polish Verification
+
+Visual polish is production work for the native daily driver. A visual
+capability family is not complete from screenshot inspection alone. It needs
+three complementary kinds of evidence:
+
+1. portable semantic, geometry, and color-contract tests;
+2. fixed-reference macOS pixel baselines from the real native window; and
+3. a representative displayed matrix with resize, motion, and performance
+   evidence.
+
+These are completion checks for changes to native presentation, not a return to
+the retired native-admission ceremony. Do not claim any check below until its
+command, capture, or observation actually ran.
+
+The requirements activate with the capability that implements them:
+
+- Phase 1 records the current visual baselines and known failures. Its hard
+  requirements are catalog determinism, capture/diff tool correctness,
+  explicit baseline acceptance, no regression from existing semantic gates,
+  and the ordinary full repository gate.
+- Phase 2 makes the app-owned contrast thresholds and native presentation-plan
+  contracts hard.
+- Phases 3-5 make their changed geometry, material, overlay, and workflow
+  baselines hard while unchanged scenarios remain no-regression checks.
+- Phase 6 makes motion, redraw/present-count, frame-pacing, and static-idle
+  requirements hard after adding the required evidence fields.
+- Phase 7 makes complete light/high-contrast and native accessibility checks
+  hard.
+
+Do not block Phase 1 because the baseline accurately records a defect that a
+later named phase exists to fix.
+
+### Portable Semantic, Geometry, And Contrast Gates
+
+Run the focused scene, app, and native-renderer tests before displayed work, then
+run `./ci/native-frontend.sh` and the authoritative `./ci/gate.sh` after the
+complete capability family and synchronized documentation are ready.
+
+Portable tests must prove:
+
+- every product state is represented by typed `WorkspaceScene` data and has an
+  honest `CellProgram` terminal projection; native-only radius, shadow, scrim,
+  elevation, and motion state instead reaches the typed native presentation
+  plan without either frontend deriving product meaning;
+- pane, chrome, overlay, artifact, text-input, selection, cursor, and attention
+  cells remain inside their exact scene-owned clip rectangles;
+- later panes and opaque overlays completely occlude earlier text and raster
+  content, including fractional physical-pixel bounds;
+- painted interactive rows and their hit targets use the same layout math;
+- narrow, normal, wide, minimum-usable, restored, stacked, floating, and zoomed
+  geometry remains deterministic;
+- wrapping and truncation are grapheme-safe, wide continuations remain atomic,
+  and no text escapes a border or paint scope;
+- focus, waiting, failure, success, disabled, selected, and idle states retain a
+  non-color cue as well as a semantic color role; and
+- every built-in theme resolves the actual native foreground/background pairs
+  used by app-owned chrome, rather than merely asserting that role enum values
+  differ.
+
+For resolved native colors, require:
+
+- at least 4.5:1 contrast for normal app-owned text and icons;
+- at least 7:1 for normal text in `mandatum-high-contrast`;
+- at least 3:1 for essential focus indicators, interactive control boundaries,
+  selection boundaries, and other state-bearing non-text cues against adjacent
+  colors. Decorative tiled separators may remain subtler because they carry no
+  state or interaction meaning by themselves.
+
+Do not reject arbitrary child-terminal ANSI combinations: the contrast gate
+owns Mandatum chrome, built-in theme defaults, and app-supplied state surfaces.
+User-defined theme overrides may warn instead of failing so explicit personal
+choice remains possible.
+
+Extend the existing deterministic seams rather than replacing them:
+
+- `crates/app/src/scene_builder.rs` for product-state-to-scene meaning;
+- `crates/scene/src/layout.rs` for cell geometry;
+- `crates/scene/tests/cell_program.rs` for final ownership, clipping, styles,
+  hit-target alignment, and text topology;
+- `crates/scene/src/theme.rs` and `crates/app/src/config.rs` for built-in and
+  configured theme contracts;
+- `crates/native-renderer/src/gpu.rs` for native color materialization and
+  physical-pixel bounds;
+- `crates/native-renderer/src/row_run.rs` for shaping and cell ownership; and
+- `spikes/frontend-wgpu/tests/host_wake.rs` for real `FrontendHost` scenes
+  reaching the native render plan.
+
+### Representative Scenario Matrix
+
+Maintain one deterministic visual-scenario catalog driven through
+`FrontendHost` and neutral input. Handcrafted renderer-only state may exercise
+an isolated boundary, but it cannot substitute for the real-host case.
+
+The catalog should contain:
+
+- the shared typography corpus with ANSI/true color, all styles, ligatures,
+  fallback scripts, CJK, combining text, emoji, cursor, and selection;
+- a calm single terminal;
+- a dense mixed workspace with three tiled panes and a float;
+- failed-task and approval-waiting attention states;
+- Palette with selected, disabled, filtered, and overflow states;
+- one full list/search modal, Welcome, and the context menu;
+- ready landscape/portrait artifacts, loading/failure states, and overlay
+  occlusion;
+- a narrow/minimum-usable frame; and
+- a restored workspace.
+
+Avoid the full cross-product. Use this pairwise matrix:
+
+- every scenario at the accepted primary theme, bundled JetBrains Mono 13,
+  backing scale 2.0, and one fixed normal window;
+- the color-role sampler, dense workspace, and Palette in every built-in theme;
+- typography, dense workspace, and artifacts at backing scales 1.0 and 2.0;
+- dense workspace and Palette at narrow, normal, and wide sizes; and
+- attention at the start, midpoint, and end of motion plus its reduced-motion
+  state.
+
+### Fixed-Reference Mac Visual Baselines
+
+Pixel baselines are reference-Mac evidence, not portable Linux CI truth. Capture
+the real native client surface through ScreenCaptureKit with the reference
+Apple Silicon Mac, bundled JetBrains Mono profile, exact theme, physical
+surface size, scene size, backing scale, display, refresh rate, commit, and
+build recorded beside each image. Do not include desktop pixels, window shadow,
+or an uncontrolled fallback font in the comparison.
+
+Keep baseline, current, and heatmap/diff images for every canonical case. Judge
+different pixel classes separately:
+
+- exact sRGB material and palette values are asserted through the pure native
+  resolver/presentation plan; color-managed ScreenCaptureKit pixels are not
+  required to be byte-identical to source tokens;
+- geometry edges and clip boundaries must match exactly, with at most one
+  physical pixel of documented scale-rounding tolerance;
+- bundled JetBrains Mono text on the fixed reference Mac must reach SSIM 0.995
+  or better and change no more than 1% of unmasked pixels; and
+- OS-dependent emoji or fallback-script glyph pixels may be masked from image
+  equality, but their semantic bounds, fallback identity, and clipping remain
+  hard tests.
+
+The comparison algorithm is fixed:
+
+- decode PNGs to unpremultiplied 8-bit sRGB;
+- for SSIM, convert sRGB to linear light, compute luminance as
+  `0.2126 R + 0.7152 G + 0.0722 B`, and use an 11 x 11 Gaussian window with
+  sigma 1.5, edge-clamped samples, `K1 = 0.01`, `K2 = 0.03`, and `L = 1`;
+- discard an SSIM window when any sample in its 11 x 11 kernel is masked;
+  never fill, renormalize, or borrow masked neighbors;
+- reject a baseline whose masks cover more than 5% of client-surface pixels or
+  leave fewer than 90% of otherwise valid SSIM window centers;
+- count an unmasked pixel as changed when any 8-bit sRGB channel differs by
+  more than 2; and
+- apply the 0.995 SSIM and 1% changed-pixel requirements together.
+
+A baseline must never update automatically. Accepting an intentional visual
+change requires:
+
+1. a human side-by-side review of baseline, candidate, and diff;
+2. an explicit baseline-acceptance command or flag;
+3. a short rationale naming the intended visual change;
+4. unchanged unrelated scenario baselines; and
+5. a dated evidence-ledger entry after the accepted images and code are in
+   their final state.
+
+A fuzzy threshold cannot approve a font, palette, spacing, material, or
+hierarchy change by itself. Portable semantic or contrast failure blocks
+baseline acceptance.
+
+### Motion And Reduced Motion
+
+Motion must clarify a state transition. Keep time and animation intent typed in
+the scene; the native renderer must not infer product state from wall-clock
+time. Use an injectable clock for deterministic tests.
+
+For every transition, prove:
+
+- exact start, midpoint, and final scene/pixel states;
+- monotonic progress and convergence on the stable final state;
+- only the documented properties change;
+- interrupted or reversed transitions settle on current product truth;
+- reduced motion moves directly to the stable state and schedules no animation
+  frames; and
+- the approval-attention treatment remains visible without relying on motion.
+
+The current approval pulse must retain its existing reduced-motion scene test.
+Any new transition joins that test's "no unguarded motion" contract and the
+displayed matrix. Prefer short 120-180 ms state transitions; looping decorative
+motion is not visual polish.
+
+### Resize, Frame, Startup, And Idle Budgets
+
+Use the existing excluded native lab for structured evidence. Freeze a
+three-run median on the fixed reference Mac before judging a visual capability
+family; record raw JSON, not only the summary.
+
+Resize and scale:
+
+- run:
+
+  ```sh
+  cargo run --release \
+    --manifest-path spikes/frontend-wgpu/Cargo.toml \
+    --bin mandatum-native-lab -- \
+    --resize-count 1000 \
+    --stress-interval-ms 16 \
+    --exit-after 25 \
+    --font-size 13
+  ```
+
+- run 1,000 resize/scale actions at a 16 ms requested cadence;
+- require the stress report to complete with zero action, cadence, or present
+  misses and no unexpected surface/device recovery;
+- capture minimum, narrow, normal, wide, and 1.0->2.0->1.0 checkpoints;
+- require every applied geometry to present the matching scene before it can
+  become interactive; and
+- require renderer buffers, raster retention, and shaping-cache high-water
+  values to remain within their existing hard bounds.
+
+Before plateau becomes a Phase 6 hard claim, extend the lab JSON with
+timestamped `resource_samples` at least once per second and at the final 80%,
+90%, and 100% stress checkpoints. Quad/raster/text buffer capacities must not
+increase during the final 20% of the workload. Cache entries and accounted
+bytes may move under eviction but must stay within their independent hard
+ceilings; they are not mislabeled as a monotonic plateau.
+
+Frame preparation uses three runs of:
+
+```sh
+cargo run --release \
+  --manifest-path spikes/frontend-wgpu/Cargo.toml \
+  --bin mandatum-native-lab -- \
+  --typing-samples 400 \
+  --typing-interval-ms 16 \
+  --exit-after 12 \
+  --font-size 13
+```
+
+at the established 1600x1200, scale-2, 102x35 reference fixture. Both limits
+are mandatory: p95 must be at or below 8 ms and at or below
+`baseline_p95 * 1.25 + 0.5 ms`. A documented decision may accept a known cost;
+silently changing the baseline may not. Report shaping separately so a richer
+material cannot hide a text regression.
+
+Phase 6 adds the lab argument
+`--visual-transition-exercise-seconds 5` plus JSON `redraw_count`,
+`present_count`, and refresh-relative interval fields. Its canonical command
+uses the same release binary, font, window, scale, and scenario profile. During
+that five-second exercise, use the detected refresh period:
+p95 present interval must stay within 1.2 times one display period, with fewer
+than 1% of frames exceeding two periods.
+
+For idle behavior, Phase 6 adds lab arguments `--warmup-seconds 5` and
+`--idle-measure-seconds 30` plus JSON
+`idle_window.{duration_ms,process_cpu_ms,redraw_count,present_count}`. Build the
+release lab once, then take the median of three runs of:
+
+```sh
+spikes/frontend-wgpu/target/release/mandatum-native-lab \
+  --visual-scenario calm-terminal \
+  --warmup-seconds 5 \
+  --idle-measure-seconds 30 \
+  --font-size 13
+```
+
+Only the internally delimited post-warm-up interval is measured; startup and
+shutdown CPU are excluded. `--idle-measure-seconds` must itself select the
+lab's isolated no-restore harness, and the `calm-terminal` scenario must use
+the catalog's fixed shell/output state rather than the caller's current
+directory or workspace.
+
+- process CPU must stay at or below 1.5% of one core;
+- process CPU must stay at or below 1.5% of one core;
+- a change may not add more than 0.25 percentage points without a documented
+  decision;
+- record redraw and GPU-present counts as well as CPU; and
+- a static workspace must not repaint solely because child-exit polling reached
+  its heartbeat. A scene change or active typed motion is the reason to draw.
+
+Compute one-core CPU percentage exactly as
+`100 * process_cpu_ms / duration_ms` from the JSON idle window.
+
+Keep the existing one-second hard ceiling for first usable native frame. Freeze
+and compare the three-run median; a visual change may not regress it by more
+than 20% without an explicit decision.
+
 ## Artifact Preview Checks
 
 Prove:
@@ -380,6 +666,17 @@ developer unfamiliar with the current implementation can identify:
   80-column terminal renderer, and excluded-lab rustfmt drift. Each
   synchronization defect was corrected before completion. The synchronized
   code, test, and documentation `./ci/gate.sh` run then reported `GATE GREEN`.
+- **2026-07-24:** the visual-polish planning audit launched the production
+  native application from `/private/tmp`, inspected the real first-run Welcome,
+  opened the Palette and Help surfaces, created a three-pane tiled layout, and
+  exited through Ctrl+Q with status 0. Screen captures showed the functional
+  surface still following the flattened terminal-cell presentation: touching
+  box borders, one text hierarchy, weak material separation, and inverse-video
+  selection. A separate source audit found task, agent, and artifact details
+  flattened into labeled strings before native rendering. These observations
+  informed `docs/visual-polish-plan.md`; they are baseline planning evidence,
+  not a claim that the planned visual system or its future baseline harness
+  exists.
 
 ## Completion Rule
 

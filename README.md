@@ -307,7 +307,9 @@ fault injection, and terminal probes remain separate under `spikes/`.
 Historical evidence is frozen in
 [spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md); the forward
 native-first plan is
-[docs/native-gpu-implementation-plan.md](docs/native-gpu-implementation-plan.md).
+[docs/native-gpu-implementation-plan.md](docs/native-gpu-implementation-plan.md),
+with the active in-app presentation phase specified in
+[docs/visual-polish-plan.md](docs/visual-polish-plan.md).
 
 ## Development
 
@@ -330,16 +332,17 @@ the Constitution are the review. Security reports: [SECURITY.md](SECURITY.md).
 ## Status
 
 The existing `v0.2.0` terminal release remains available as operational
-tooling, while the workspace-native wgpu frontend moves toward Casey's daily
+tooling, while the workspace-native wgpu frontend is Casey's local daily
 driver. There is no public-release audience.
 Everything in [the tour](#the-tour) works today behind the merge gate. The
 dated charter close and its red-team evidence are preserved in
 [docs/history/charter-closure-2026-07-10.md](docs/history/charter-closure-2026-07-10.md);
 current status and forward work live in [PLAN.md](PLAN.md).
 
-Immediate work: add and profile the bounded generation-aware shaping cache over
-the implemented bundled-font, theme-owned terminal palette, and clipped
-row-run path, then make native the default development surface.
+Immediate work: establish the canonical visual scenarios and token contract,
+then implement the production-grade native visual system in ordered capability
+families. Installer, release, rollout, marketing, and public-repository
+presentation remain separate deferred work.
 Rewrap-on-resize remains a terminal engine concern.
 [PLAN.md](PLAN.md) holds the forward horizon;
 [docs/decisions.md](docs/decisions.md) records every judgment call.

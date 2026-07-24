@@ -3,7 +3,9 @@
 Status: native-first direction accepted on 2026-07-24. Work 2 promoted the
 production shell and renderer into the workspace. Work 3 completed with a
 negative typography verdict. The accepted typography foundation is now
-implemented, displayed, and backed by the bounded Work 4 shaping cache.
+implemented, displayed, and backed by the bounded Work 4 shaping cache. Work 5
+made native Casey's local default. Production-grade native in-app visual polish
+is the next product phase.
 
 ## Product Direction
 
@@ -14,10 +16,11 @@ feel, living outside the terminal.
 - Daily-driver quality for Casey on known macOS hardware is the adoption bar.
 - The terminal frontend is a maintained tool for SSH, headless use, recovery,
   and an explicit escape hatch.
-- Installer, release, rollout, public-GitHub presentation, and visual-material
-  work are shelved until the concluding build phase.
-- Native polish and richer workflow surfaces remain product work, but do not
-  enter interim functional slices.
+- Native in-app visual polish and richer workflow surfaces are the next ordered
+  product work, specified in
+  [`docs/visual-polish-plan.md`](visual-polish-plan.md).
+- Installer, release, rollout, archives, public-GitHub presentation, and public
+  visual materials remain shelved for a later distribution phase.
 
 ## Product Roles
 
@@ -61,10 +64,12 @@ Standing procedures and current dated runs live in
 
 ## Known Implementation Gaps
 
-The planned local-launcher gap is closed. Concrete functional failures found
-through daily native use become the next hardening work; they are not reasons
-to restore the retired admission ceremony or pull forward the shelved public
-and visual phase.
+The planned local-launcher gap is closed. The remaining visible gap is that the
+native product still needs a coherent production-grade visual system and richer
+typed workflow presentation. Concrete functional failures found through daily
+native use remain hardening work at their smallest owning seam; they are not
+reasons to restore the retired admission ceremony or pull forward the shelved
+distribution and public-presentation phase.
 
 ## Work 1 — Reorder Startup — Complete
 
@@ -329,23 +334,29 @@ Interim Work 5 is functional only. Do not change the installer, updater,
 release workflow, archives, rollout, public GitHub presentation, or visual
 materials.
 
-## Concluding Build Phase — Shelved
+That constraint governed Work 5 and remains part of its completed history. The
+subsequent product decision advances native in-app polish as its own phase while
+keeping distribution and public materials deferred.
 
-After the functional build is complete, incorporate the deferred public and
-visual surfaces as one coherent phase:
+## Native Visual Polish Phase — Next
 
-1. Installer and updater.
-2. Release and rollout.
-3. Public GitHub presentation and visual materials.
-4. Typography polish.
-5. Pane materials and visual hierarchy.
-6. Spacing and information density.
-7. Focus treatment.
-8. Fluid resize.
-9. Purposeful transitions with reduced-motion behavior.
-10. Artifact surfaces and native workflow affordances.
+The complete ordered phase is
+[`docs/visual-polish-plan.md`](visual-polish-plan.md). It treats visual quality
+as a cornerstone capability of Casey's daily-driver product:
 
-Concluding-phase exit checks:
+- visual acceptance and representative scenarios before pixel changes;
+- semantic tokens and typography hierarchy;
+- pane materials, hierarchy, density, and focus;
+- coherent overlays and orientation surfaces;
+- richer typed task, agent, approval, and artifact presentation;
+- fluid geometry and purposeful motion with reduced-motion behavior; and
+- accessibility and displayed acceptance on Casey's actual native surface.
+
+The architecture remains unchanged: `WorkspaceScene` owns product meaning and
+layout, richer native presentation enters through typed `mandatum-scene`
+extensions, and `CellProgram` remains the terminal-parity path.
+
+Visual-phase exit checks:
 
 - startup and shutdown never strand runtimes;
 - keyboard, pointer, clipboard, and IME behavior are trustworthy;
@@ -353,6 +364,12 @@ Concluding-phase exit checks:
 - resize, recovery, and continuous output remain responsive;
 - failures are visible and recoverable;
 - probes reveal regressions without becoming permission gates.
+
+## Distribution And Public Presentation — Shelved
+
+Installer, updater, release, rollout, archives, public-GitHub presentation, and
+public visual materials remain deferred. They are a later distribution phase,
+not part of native in-app visual polish.
 
 ## Verification Policy
 
@@ -384,14 +401,16 @@ Do not reintroduce these as adoption gates:
 - no native reacharound into app or runtime state;
 - no generalized damage framework before profiling;
 - no transparent mid-session frontend migration;
-- no public distribution work before the concluding build phase.
+- no public distribution or public-presentation work during the native
+  visual-polish phase.
 
 ## Immediate Next Action
 
-Continue daily-driving the native launcher. The first post-transition failure
-— first-run Escape mutating the focused vi-mode shell behind the welcome note —
-is resolved at the shared input seam with regression coverage. When the next
-concrete functional failure appears, reproduce it, fix the smallest owning
-product seam, and add a regression before moving on. Do not pull visual
-materials, the installer, updater, release workflow, archives, rollout, or
-public GitHub presentation out of the concluding build phase.
+Execute Phase 1 of
+[`docs/visual-polish-plan.md`](visual-polish-plan.md): establish and verify the
+visual acceptance contract and representative scenario matrix before changing
+pixels. Continue daily-driving the native launcher; if another concrete
+functional failure appears, reproduce it, fix the smallest owning product seam,
+and add a regression. Do not pull the installer, updater, release workflow,
+archives, rollout, public-GitHub presentation, or public visual materials into
+the native visual-polish phase.

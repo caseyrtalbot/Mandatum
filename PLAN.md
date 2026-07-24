@@ -11,13 +11,15 @@ feel. The native wgpu frontend is the product. The terminal frontend is a
 maintained tool for SSH, headless use, recovery, and an explicit escape hatch.
 
 Daily-driver quality for Casey on known macOS hardware is the adoption bar.
-Installer, release, rollout, public-GitHub presentation, and visual-material
-work are explicitly shelved until the concluding build phase. Latency, idle,
-resize, recovery, and fault probes remain regression checks, not permission
-gates.
+Production-grade native in-app visual polish is now the next product phase.
+Installer, release, rollout, public-GitHub presentation, and public visual
+materials remain shelved for a later distribution phase. Latency, idle, resize,
+recovery, and fault probes remain regression checks, not permission gates.
 
 The complete ordered plan is
 [docs/native-gpu-implementation-plan.md](docs/native-gpu-implementation-plan.md).
+The visual phase is specified in
+[docs/visual-polish-plan.md](docs/visual-polish-plan.md).
 
 ## Current Baseline
 
@@ -103,13 +105,26 @@ command, so the local daily-driver choice does not mutate the installer,
 updater, release workflow, archives, rollout, public GitHub presentation, or
 visual materials. Daily use now sets the functional hardening queue.
 
-### Concluding build phase — shelved
+### 6. Production-grade native visual polish — next
 
-Only after the functional build is complete, incorporate installer, release,
-rollout, and public-GitHub work together with the visual-material roadmap:
-typography polish, pane materials and hierarchy, spacing and density, focus
-treatment, fluid resize, purposeful transitions, and richer
-artifact/workflow surfaces.
+Native in-app visual polish is a cornerstone product capability, not a public
+release accessory. The ordered phase covers typography hierarchy, pane
+materials, spacing and density, focus treatment, overlays, richer
+artifact/workflow surfaces, fluid resize, purposeful transitions, and
+accessibility. It preserves `CellProgram` terminal parity and introduces richer
+native presentation only through typed scene contracts.
+
+The first slice is Phase 1 of
+[docs/visual-polish-plan.md](docs/visual-polish-plan.md): establish the visual
+acceptance and representative-scenario contract before changing pixels.
+Concrete functional failures found through daily use remain valid hardening
+work at their smallest owning seam.
+
+### Distribution and public presentation — shelved
+
+Installer, updater, release, rollout, archives, public-GitHub presentation, and
+public visual materials remain deferred. They are not part of the native
+in-app visual-polish phase and should not be pulled forward by adjacent work.
 
 ## Product Work After The Native Transition
 

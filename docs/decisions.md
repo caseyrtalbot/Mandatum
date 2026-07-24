@@ -2902,3 +2902,61 @@ next Escape resumes child routing, Ctrl+P still opens the palette and its
 following Escape closes it, and an ordinary first key still follows the child
 route. The final displayed native check and repository gate are recorded in
 `docs/verification.md`.
+
+## Native In-App Visual Polish Is The Next Product Phase
+
+Status: accepted; implementation not started (2026-07-24)
+
+Decision: begin production-grade visual polish as the next native product
+phase. In-app typography, materials, hierarchy, density, focus, overlays,
+workflow surfaces, motion, accessibility, and visual verification are now
+active product work. Installer, updater, release, rollout, public-GitHub
+presentation, and marketing material remain shelved and are not prerequisites
+for improving Casey's daily-driver experience.
+
+The phase follows `docs/visual-polish-plan.md`. Its visual direction is a
+"quiet instrument": a dense graphite workbench in which terminal content is
+the visual center, chrome is restrained and structural, and color communicates
+navigation or changed state rather than decoration.
+
+Context: the native frontend has crossed the Casey-local daily-driver bar and
+the first functional hardening defect is fixed. A displayed audit of the
+current Welcome, Palette, Help, and multi-pane states found one typographic
+voice, touching box-glyph borders, weak material separation, and inverse-video
+selection. The accompanying source audit found task, agent, and artifact detail
+flattened into labeled strings before native rendering. Treating production
+polish as a late marketing concern would leave a cornerstone of the daily-use
+product deferred for the wrong reason.
+
+Rationale: in-app polish and public presentation solve different problems.
+The former improves comprehension, confidence, state recognition, and repeated
+daily use; the latter packages and markets a finished product. Mandatum's
+architecture already permits richer native presentation through typed
+`mandatum-scene` extensions while preserving `CellProgram` as the maintained
+terminal fallback.
+
+Consequences:
+
+- `docs/visual-polish-plan.md` is the ordered authority for the phase;
+- the first capability family freezes canonical visual scenarios, records
+  candidate tokens and current acceptance evidence, and defines the
+  scene-owned dual-geometry contract before changing rendered pixels;
+- native presentation consumes typed scene meaning and must not parse
+  `detail_lines()` or reconstruct product semantics in `gpu.rs`;
+- `CellProgram`, the terminal frontend, L1-L5, and one shared state machine
+  remain unchanged architectural constraints;
+- dark is the flagship theme, but light and high-contrast must become coherent
+  complete themes before the phase exits;
+- motion explains state changes, direct manipulation remains immediate, and
+  reduced motion reaches the stable end state without animation redraws;
+- fixed-reference macOS visual baselines supplement rather than replace
+  portable semantic, geometry, contrast, clipping, and hit-target gates;
+- decorative gradients, glow, vibrancy, custom titlebar work, marketing
+  screenshots, and a theme marketplace remain optional later work.
+
+Verification impact: documentation alone does not establish a polished result.
+Each capability family must run its focused semantic and native-renderer tests,
+the representative displayed scenario matrix when pixels change, and the full
+`./ci/gate.sh` after final documentation synchronization. Baseline images may
+change only through explicit human acceptance; CI must never auto-regenerate
+them.

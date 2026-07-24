@@ -118,6 +118,9 @@ The ordered work is:
 5. Make native Casey's local interactive default with an explicit terminal
    escape hatch — complete. Daily use now supplies concrete functional
    hardening work.
+6. Build the production-grade native in-app visual system — next. The ordered
+   capability families live in
+   [`docs/visual-polish-plan.md`](visual-polish-plan.md).
 
 The authoritative detail is
 [`docs/native-gpu-implementation-plan.md`](native-gpu-implementation-plan.md).
@@ -135,6 +138,8 @@ accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
 ## Current Implementation Drift
 
 The ordered launcher and shaping-cache gaps are closed. Row damage remains
-unjustified by the measured preparation profile. Concrete failures found
-through daily native use are the active functional queue; public-distribution
-and visual-material work remains shelved until the concluding build phase.
+unjustified by the measured preparation profile. Native in-app visual polish
+is the next product phase, while concrete failures found through daily use
+remain hardening work at their smallest owning seam. Installer, release,
+rollout, public-GitHub presentation, and public visual materials remain
+shelved for a separate distribution phase.
