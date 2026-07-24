@@ -11,9 +11,10 @@ feel. The native wgpu frontend is the product. The terminal frontend is a
 maintained tool for SSH, headless use, recovery, and an explicit escape hatch.
 
 Daily-driver quality for Casey on known macOS hardware is the adoption bar.
-There is no public-release audience and no Phase 7/8 admission ceremony.
-Latency, idle, resize, recovery, and fault probes remain regression checks, not
-permission gates.
+Installer, release, rollout, public-GitHub presentation, and visual-material
+work are explicitly shelved until the concluding build phase. Latency, idle,
+resize, recovery, and fault probes remain regression checks, not permission
+gates.
 
 The complete ordered plan is
 [docs/native-gpu-implementation-plan.md](docs/native-gpu-implementation-plan.md).
@@ -90,12 +91,20 @@ Median whole-frame preparation changed from 3.436/4.393 ms p50/p95 to
 3.388/4.107 ms. The remaining profile does not justify row-level damage
 tracking in this slice.
 
-### 5. Make native the default and build feel
+### 5. Make native the local default
 
 Casey daily-drives native with an explicit terminal escape hatch. Daily use
-sets the hardening queue. Build the feel roadmap in this order: typography,
-pane materials and hierarchy, spacing and density, focus treatment, fluid
-resize, purposeful transitions, and richer artifact/workflow surfaces.
+sets the functional hardening queue. This slice does not touch the installer,
+updater, release workflow, archives, rollout, public GitHub presentation, or
+visual materials.
+
+### Concluding build phase — shelved
+
+Only after the functional build is complete, incorporate installer, release,
+rollout, and public-GitHub work together with the visual-material roadmap:
+typography polish, pane materials and hierarchy, spacing and density, focus
+treatment, fluid resize, purposeful transitions, and richer
+artifact/workflow surfaces.
 
 ## Product Work After The Native Transition
 

@@ -2784,3 +2784,36 @@ Consequences:
 - row-level damage is not justified by this profile and remains deferred;
 - renderer modularization, default-launcher, installer, release, and rollout
   work remain outside this capability family.
+
+## Defer Public Surface And Visual Material Work Until Build Conclusion
+
+Status: accepted (2026-07-24)
+
+Decision: shelf installer, updater, release, rollout, public-GitHub
+presentation, and visual-material work until the concluding build phase.
+Interim slices remain functional and local-first. They must not expand into
+packaging, archives, release workflows, public-repository presentation assets,
+pane materials, spacing, transitions, or other visual polish merely because
+those surfaces are adjacent.
+
+Work 5 is therefore narrowed to making native Casey's default local launcher
+while preserving an explicit terminal escape hatch. Its initial inventory
+covers the development command and local `mandatum` / `mandatum-native`
+executable seams only. If a local default cannot be selected without changing
+tracked public-distribution surfaces, the slice stops at that boundary.
+
+Context: installer, release, rollout, and visual presentation need to describe
+the finished product as one coherent public surface. Changing them throughout
+the functional refactor would create churn and prematurely expose intermediate
+build decisions in the public GitHub repository.
+
+Consequences:
+
+- existing installer, updater, release, archive, and rollout behavior remains
+  untouched during interim slices;
+- public GitHub presentation and visual materials are not opportunistic
+  cleanup targets;
+- daily use may still surface functional reliability bugs, but it does not
+  reopen the shelved visual-material roadmap;
+- the concluding build phase incorporates the deferred public and visual work
+  together.

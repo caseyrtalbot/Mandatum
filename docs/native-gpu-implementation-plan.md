@@ -14,9 +14,10 @@ feel, living outside the terminal.
 - Daily-driver quality for Casey on known macOS hardware is the adoption bar.
 - The terminal frontend is a maintained tool for SSH, headless use, recovery,
   and an explicit escape hatch.
-- There is no public-release audience or rollout ceremony.
-- Native polish and richer workflow surfaces are direct product work, not
-  experiments waiting for permission.
+- Installer, release, rollout, public-GitHub presentation, and visual-material
+  work are shelved until the concluding build phase.
+- Native polish and richer workflow surfaces remain product work, but do not
+  enter interim functional slices.
 
 ## Product Roles
 
@@ -305,20 +306,34 @@ Exit: accepted face, palette, and row-run behavior is displayed and gated; the
 bounded cache shows a measurable shaping-cost reduction without an unbounded
 entry or accounted-byte resource.
 
-## Work 5 — Make Native The Default And Build Feel
+## Work 5 — Make Native The Local Default
 
 - Make native Casey's default launcher.
 - Keep an explicit terminal escape hatch.
 - Let daily use determine the hardening queue.
 - Fix concrete failures as product bugs; do not recreate pre-certification.
 
-1. Typography.
-2. Pane materials and visual hierarchy.
-3. Spacing and information density.
-4. Focus treatment.
-5. Fluid resize.
-6. Purposeful transitions with reduced-motion behavior.
-7. Artifact surfaces and native workflow affordances.
+Interim Work 5 is functional only. Do not change the installer, updater,
+release workflow, archives, rollout, public GitHub presentation, or visual
+materials.
+
+## Concluding Build Phase — Shelved
+
+After the functional build is complete, incorporate the deferred public and
+visual surfaces as one coherent phase:
+
+1. Installer and updater.
+2. Release and rollout.
+3. Public GitHub presentation and visual materials.
+4. Typography polish.
+5. Pane materials and visual hierarchy.
+6. Spacing and information density.
+7. Focus treatment.
+8. Fluid resize.
+9. Purposeful transitions with reduced-motion behavior.
+10. Artifact surfaces and native workflow affordances.
+
+Concluding-phase exit checks:
 
 - startup and shutdown never strand runtimes;
 - keyboard, pointer, clipboard, and IME behavior are trustworthy;
@@ -357,13 +372,14 @@ Do not reintroduce these as adoption gates:
 - no native reacharound into app or runtime state;
 - no generalized damage framework before profiling;
 - no transparent mid-session frontend migration;
-- no public distribution program.
+- no public distribution work before the concluding build phase.
 
 ## Immediate Next Action
 
 Begin Work 5 by making the native shell Casey's default local launcher while
-preserving an explicit terminal escape hatch. First inventory the current
-development command, `mandatum` terminal command, installer, and updater
-entrypoints; choose one narrow default-launch seam without changing legacy
-archives or creating public distribution work. Stop before pane-material,
-spacing, transition, installer, release, or rollout changes.
+preserving an explicit terminal escape hatch. Inventory only the current
+development command and the local `mandatum` and `mandatum-native` executable
+seams. Choose one narrow local-only default-launch seam. If that cannot be done
+without changing tracked public-distribution surfaces, stop and report the
+boundary. Do not touch visual materials, the installer, updater, release
+workflow, archives, rollout, or public GitHub presentation.
