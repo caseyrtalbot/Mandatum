@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -26,6 +26,7 @@ use crate::row_run::{
     RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, admit_layout,
     anchored_fallback_runs, build_row_runs, split_at_span,
 };
+use crate::shaping_cache::{ShapingCache, ShapingCacheContext, ShapingCacheKey};
 
 const BASE_FONT_PT: f32 = 15.0;
 const MAX_GPU_PANES: usize = 256;
@@ -35,6 +36,7 @@ const MAX_GPU_ROWS: usize = 4_096;
 const MAX_GPU_TEXT_BUFFERS: usize = 32_768;
 const MAX_GPU_RASTER_DIMENSION: usize = 4_096;
 const MAX_GPU_RASTER_BYTES: usize = 64 * 1024 * 1024;
+const SHAPING_POLICY_GENERATION: u64 = 1;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeTextSettings {
@@ -150,11 +152,26 @@ pub enum GpuDeviceLossReason {
     Destroyed,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuFrameTimings {
+    pub shaping: Duration,
+    pub frame_prepare: Duration,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GpuRenderOutcome {
-    Presented(Instant),
-    Skipped(GpuFrameSkip),
-    SurfaceReconfigured(GpuSurfaceRecovery),
+    Presented {
+        at: Instant,
+        timings: GpuFrameTimings,
+    },
+    Skipped {
+        reason: GpuFrameSkip,
+        timings: GpuFrameTimings,
+    },
+    SurfaceReconfigured {
+        recovery: GpuSurfaceRecovery,
+        timings: GpuFrameTimings,
+    },
 }
 
 #[cfg(feature = "fault-injection")]
@@ -187,6 +204,15 @@ pub struct GpuLifecycleSnapshot {
     pub raster_cache_entries_high_water: usize,
     pub raster_cache_bytes: usize,
     pub raster_cache_bytes_high_water: usize,
+    pub shaping_cache_entries: usize,
+    pub shaping_cache_entries_high_water: usize,
+    pub shaping_cache_accounted_bytes: usize,
+    pub shaping_cache_accounted_bytes_high_water: usize,
+    pub shaping_cache_hits: u64,
+    pub shaping_cache_misses: u64,
+    pub shaping_cache_evictions: u64,
+    pub shaping_cache_rejections: u64,
+    pub shaping_cache_invalidations: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -961,11 +987,75 @@ fn glyph_attrs<'a>(style: ResolvedGlyphStyle, family: &'a str) -> Attrs<'a> {
     attrs
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct FontObservation {
     font_id: glyphon::fontdb::ID,
     glyph_id: u16,
     sample: String,
+}
+
+#[derive(Clone, Debug)]
+struct CachedShaping {
+    buffer: Arc<Buffer>,
+    observations: Arc<[FontObservation]>,
+}
+
+#[derive(Debug)]
+struct ShapedRow {
+    row: RowRun,
+    buffer: ShapedBuffer,
+}
+
+#[derive(Debug)]
+enum ShapedBuffer {
+    Shared(Arc<Buffer>),
+    RowPool(usize),
+}
+
+/// Conservative retained-byte charge for one shaped buffer.
+///
+/// Cosmic-text deliberately hides allocation capacities inside `Buffer`.
+/// Charge every directly retained key/output byte, a fixed buffer floor, and
+/// conservative per-input/per-glyph/per-style expansion. This is an explicit
+/// resource-accounting contract rather than an allocator-specific heap probe.
+fn shaping_cache_accounted_bytes(
+    key: &ShapingCacheKey,
+    run: &RowRun,
+    observations: &[FontObservation],
+) -> usize {
+    const BUFFER_FLOOR: usize = 1_024;
+    const BYTES_PER_INPUT_BYTE: usize = 16;
+    const BYTES_PER_GLYPH: usize = 512;
+    const BYTES_PER_STYLE_RANGE: usize = 256;
+    const BYTES_PER_CELL_SPAN: usize = 128;
+
+    observations
+        .iter()
+        .fold(
+            key.owned_bytes()
+                .saturating_add(BUFFER_FLOOR)
+                .saturating_add(run.text.len().saturating_mul(BYTES_PER_INPUT_BYTE))
+                .saturating_add(
+                    observations
+                        .len()
+                        .saturating_mul(BYTES_PER_GLYPH),
+                )
+                .saturating_add(
+                    run.style_ranges
+                        .len()
+                        .saturating_mul(BYTES_PER_STYLE_RANGE),
+                )
+                .saturating_add(
+                    run.byte_cells
+                        .len()
+                        .saturating_mul(BYTES_PER_CELL_SPAN),
+                ),
+            |bytes, observation| {
+                bytes
+                    .saturating_add(std::mem::size_of::<FontObservation>())
+                    .saturating_add(observation.sample.len())
+            },
+        )
 }
 
 fn shape_row_buffer(
@@ -1242,6 +1332,10 @@ pub struct GpuText {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     row_buffers: RowBufferPool,
+    shaping_cache: ShapingCache<CachedShaping>,
+    shaping_cache_palette: Option<TerminalPalette>,
+    shaping_cache_enabled: bool,
+    scale_generation: u64,
 
     font_profile: ResolvedFontProfile,
     fallback_report: FallbackReport,
@@ -1615,6 +1709,10 @@ impl GpuText {
             atlas,
             text_renderer,
             row_buffers: RowBufferPool::new(),
+            shaping_cache: ShapingCache::new(),
+            shaping_cache_palette: None,
+            shaping_cache_enabled: true,
+            scale_generation: 1,
             fallback_report: FallbackReport::new(font_profile.generation()),
             row_run_diagnostics: BTreeSet::new(),
             scale,
@@ -1637,6 +1735,10 @@ impl GpuText {
 
     pub fn surface_size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
     }
 
     pub fn adapter_metadata(&self) -> &GpuAdapterMetadata {
@@ -1662,6 +1764,29 @@ impl GpuText {
             raster_cache_entries_high_water: self.raster_cache_entries_high_water,
             raster_cache_bytes,
             raster_cache_bytes_high_water: self.raster_cache_bytes_high_water,
+            shaping_cache_entries: self.shaping_cache.len(),
+            shaping_cache_entries_high_water: self.shaping_cache.stats().entries_high_water,
+            shaping_cache_accounted_bytes: self.shaping_cache.accounted_bytes(),
+            shaping_cache_accounted_bytes_high_water: self
+                .shaping_cache
+                .stats()
+                .accounted_bytes_high_water,
+            shaping_cache_hits: self.shaping_cache.stats().hits,
+            shaping_cache_misses: self.shaping_cache.stats().misses,
+            shaping_cache_evictions: self.shaping_cache.stats().evictions,
+            shaping_cache_rejections: self.shaping_cache.stats().rejections,
+            shaping_cache_invalidations: self.shaping_cache.stats().invalidations,
+        }
+    }
+
+    /// Lab-only control for paired cached/uncached renderer measurements.
+    ///
+    /// The production feature closure has no cache-disable surface.
+    #[cfg(feature = "fault-injection")]
+    pub fn set_shaping_cache_enabled(&mut self, enabled: bool) {
+        if self.shaping_cache_enabled != enabled {
+            self.shaping_cache.invalidate();
+            self.shaping_cache_enabled = enabled;
         }
     }
 
@@ -1721,6 +1846,8 @@ impl GpuText {
         let next_device_generation = self.device_generation.saturating_add(1);
         let next_surface_generation = self.surface_generation.saturating_add(1);
         let next_device_recreations = self.device_recreations.saturating_add(1);
+        let shaping_cache_stats = self.shaping_cache.stats();
+        let shaping_cache_had_entries = self.shaping_cache.len() > 0;
         let mut replacement = Self::new_with_device_generation(
             self.window.clone(),
             self.font_profile.clone_for_device_recreation(),
@@ -1739,6 +1866,13 @@ impl GpuText {
         replacement.raster_cache_bytes_high_water = self.raster_cache_bytes_high_water;
         replacement.fallback_report = self.fallback_report.clone();
         replacement.row_run_diagnostics = self.row_run_diagnostics.clone();
+        replacement.shaping_cache_enabled = self.shaping_cache_enabled;
+        replacement
+            .shaping_cache
+            .preserve_stats_after_cold_reset(
+                shaping_cache_stats,
+                shaping_cache_had_entries,
+            );
         retire_gpu_generation(&self.device_fault, next_device_generation);
         *self = replacement;
         Ok(())
@@ -1756,6 +1890,8 @@ impl GpuText {
             return Ok(());
         }
         self.scale = scale;
+        self.scale_generation = self.scale_generation.saturating_add(1);
+        self.shaping_cache.invalidate();
         self.font_size = (self.base_font_size * scale).round();
         let line_height = (self.font_size * 1.3).round();
         let metrics = Metrics::new(self.font_size, line_height);
@@ -1793,12 +1929,18 @@ impl GpuText {
     fn handle_surface_signal(
         &mut self,
         signal: SurfaceAcquireSignal,
+        timings: GpuFrameTimings,
     ) -> Result<GpuRenderOutcome, GpuRenderError> {
         match surface_acquire_directive(signal) {
-            SurfaceAcquireDirective::Skip(reason) => Ok(GpuRenderOutcome::Skipped(reason)),
+            SurfaceAcquireDirective::Skip(reason) => {
+                Ok(GpuRenderOutcome::Skipped { reason, timings })
+            }
             SurfaceAcquireDirective::Recover(recovery) => {
                 self.recover_surface(recovery)?;
-                Ok(GpuRenderOutcome::SurfaceReconfigured(recovery))
+                Ok(GpuRenderOutcome::SurfaceReconfigured {
+                    recovery,
+                    timings,
+                })
             }
             SurfaceAcquireDirective::FailValidation => Err(GpuRenderError::SurfaceValidation),
         }
@@ -1929,19 +2071,82 @@ impl GpuText {
         }
     }
 
+    fn sync_shaping_cache_palette(&mut self, palette: TerminalPalette) {
+        if self
+            .shaping_cache_palette
+            .is_some_and(|previous| previous != palette)
+        {
+            self.shaping_cache.invalidate();
+        }
+        self.shaping_cache_palette = Some(palette);
+    }
+
+    fn shaping_cache_context(&self, metrics: Metrics) -> ShapingCacheContext {
+        ShapingCacheContext {
+            font_generation: self.font_profile.generation(),
+            scale_generation: self.scale_generation,
+            renderer_config_generation: SHAPING_POLICY_GENERATION,
+            font_size_bits: metrics.font_size.to_bits(),
+            line_height_bits: metrics.line_height.to_bits(),
+            cell_width_bits: self.cell_w.to_bits(),
+            cell_height_bits: self.cell_h.to_bits(),
+        }
+    }
+
+    fn observe_font_output(&mut self, run_text: &str, observations: &[FontObservation]) {
+        if observations.is_empty() && self.fallback_report.observe_missing_glyph(run_text) {
+            self.emit_new_fallback_record();
+        }
+        for observation in observations {
+            if observation.glyph_id == 0
+                && self
+                    .fallback_report
+                    .observe_missing_glyph(&observation.sample)
+            {
+                self.emit_new_fallback_record();
+            }
+            if self.fallback_report.observe_face(
+                &self.font_profile,
+                observation.font_id,
+                &observation.sample,
+            ) {
+                self.emit_new_fallback_record();
+            }
+        }
+    }
+
     fn shape_row_runs(
         &mut self,
         initial: Vec<RowRun>,
         metrics: Metrics,
-    ) -> Result<Vec<RowRun>, GpuRenderError> {
+    ) -> Result<Vec<ShapedRow>, GpuRenderError> {
         let mut pending = initial
             .into_iter()
             .map(|run| (run, false))
             .collect::<VecDeque<_>>();
         let mut accepted = Vec::new();
+        let cache_context = self.shaping_cache_context(metrics);
 
         while let Some((run, forced_anchor)) = pending.pop_front() {
             enforce_text_buffer_work_limit(accepted.len(), pending.len(), 1)?;
+
+            let cache_key = shaping_cache_key_for_candidate(
+                self.shaping_cache_enabled,
+                forced_anchor,
+                &run,
+                cache_context,
+            );
+            if let Some(cached) = cache_key
+                .as_ref()
+                .and_then(|key| self.shaping_cache.get_cloned(key))
+            {
+                self.observe_font_output(&run.text, &cached.observations);
+                accepted.push(ShapedRow {
+                    row: run,
+                    buffer: ShapedBuffer::Shared(cached.buffer),
+                });
+                continue;
+            }
 
             let buffer_index = accepted.len();
             self.row_buffers.ensure_len(
@@ -1963,27 +2168,7 @@ impl GpuText {
                 layout_facts_and_observations(buffer, &run)
             };
 
-            if observations.is_empty()
-                && self.fallback_report.observe_missing_glyph(&run.text)
-            {
-                self.emit_new_fallback_record();
-            }
-            for observation in observations {
-                if observation.glyph_id == 0
-                    && self
-                        .fallback_report
-                        .observe_missing_glyph(&observation.sample)
-                {
-                    self.emit_new_fallback_record();
-                }
-                if self.fallback_report.observe_face(
-                    &self.font_profile,
-                    observation.font_id,
-                    &observation.sample,
-                ) {
-                    self.emit_new_fallback_record();
-                }
-            }
+            self.observe_font_output(&run.text, &observations);
 
             let admission = if forced_anchor {
                 RowRunAdmission::Accepted
@@ -1993,7 +2178,32 @@ impl GpuText {
                 admit_layout(&run, &layout, self.cell_w, 1.0)
             };
             match admission {
-                RowRunAdmission::Accepted => accepted.push(run),
+                RowRunAdmission::Accepted => {
+                    if let Some(key) = cache_key {
+                        let replacement = Buffer::new(&mut self.font_system, metrics);
+                        let buffer = Arc::new(std::mem::replace(
+                            &mut self.row_buffers.rows[buffer_index],
+                            replacement,
+                        ));
+                        let observations = Arc::<[FontObservation]>::from(observations);
+                        let value = CachedShaping {
+                            buffer: buffer.clone(),
+                            observations: observations.clone(),
+                        };
+                        let accounted_bytes =
+                            shaping_cache_accounted_bytes(&key, &run, &observations);
+                        self.shaping_cache.insert(key, value, accounted_bytes);
+                        accepted.push(ShapedRow {
+                            row: run,
+                            buffer: ShapedBuffer::Shared(buffer),
+                        });
+                    } else {
+                        accepted.push(ShapedRow {
+                            row: run,
+                            buffer: ShapedBuffer::RowPool(buffer_index),
+                        });
+                    }
+                }
                 RowRunAdmission::Fallback { reason, action } => {
                     self.record_row_run_diagnostic(format!(
                         "row-run fallback {reason:?} for {:?}",
@@ -2038,15 +2248,19 @@ impl GpuText {
         if let Some(fault) = take_gpu_fault(&self.device_fault, self.device_generation) {
             return Err(fault);
         }
+        let frame_prepare_started = Instant::now();
         let prepared = prepare_scene(scene, theme)?;
         let program = prepare_cell_program(prepared.cell_program(), theme)?;
         let frame_colors = native_frame_colors(theme);
         self.sync_raster_cache(prepared.artifacts());
+        self.sync_shaping_cache_palette(theme.terminal_palette);
         let metrics = Metrics::new(self.font_size, self.cell_h);
         for issue in &program.issues {
             self.record_row_run_diagnostic(format!("row-run build issue: {issue:?}"));
         }
+        let shaping_started = Instant::now();
         let rows = self.shape_row_runs(program.rows, metrics)?;
+        let shaping = shaping_started.elapsed();
 
         // The cell compiler has already applied pane order, opacity, chrome,
         // content, overlay, selection, and cursor semantics. The GPU adapter
@@ -2130,14 +2344,18 @@ impl GpuText {
             },
         );
 
-        let text_areas = rows.iter().enumerate().map(|(index, row)| {
-            let left = f32::from(row.x) * self.cell_w;
-            let top = f32::from(row.y) * self.cell_h;
+        let text_areas = rows.iter().map(|row| {
+            let left = f32::from(row.row.x) * self.cell_w;
+            let top = f32::from(row.row.y) * self.cell_h;
             let clip = row
+                .row
                 .clipped_cell_bounds()
-                .unwrap_or_else(|| SceneRect::new(row.x, row.y, row.width, 1));
+                .unwrap_or_else(|| SceneRect::new(row.row.x, row.row.y, row.row.width, 1));
             TextArea {
-                buffer: &self.row_buffers.rows[index],
+                buffer: match &row.buffer {
+                    ShapedBuffer::Shared(buffer) => buffer.as_ref(),
+                    ShapedBuffer::RowPool(index) => &self.row_buffers.rows[*index],
+                },
                 left,
                 top,
                 scale: 1.0,
@@ -2176,6 +2394,11 @@ impl GpuText {
             }
             return Err(GpuRenderError::TextAtlasFull);
         }
+        let frame_prepare = frame_prepare_started.elapsed();
+        let timings = GpuFrameTimings {
+            shaping,
+            frame_prepare,
+        };
 
         if let Some(fault) = take_gpu_fault(&self.device_fault, self.device_generation) {
             return Err(fault);
@@ -2184,19 +2407,19 @@ impl GpuText {
             wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
             wgpu::CurrentSurfaceTexture::Timeout => {
-                return self.handle_surface_signal(SurfaceAcquireSignal::Timeout);
+                return self.handle_surface_signal(SurfaceAcquireSignal::Timeout, timings);
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
-                return self.handle_surface_signal(SurfaceAcquireSignal::Occluded);
+                return self.handle_surface_signal(SurfaceAcquireSignal::Occluded, timings);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                return self.handle_surface_signal(SurfaceAcquireSignal::Outdated);
+                return self.handle_surface_signal(SurfaceAcquireSignal::Outdated, timings);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                return self.handle_surface_signal(SurfaceAcquireSignal::Lost);
+                return self.handle_surface_signal(SurfaceAcquireSignal::Lost, timings);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                return self.handle_surface_signal(SurfaceAcquireSignal::Validation);
+                return self.handle_surface_signal(SurfaceAcquireSignal::Validation, timings);
             }
         };
         let view = frame
@@ -2277,8 +2500,20 @@ impl GpuText {
         if reconfigure_after_present {
             self.recover_surface(GpuSurfaceRecovery::Outdated)?;
         }
-        Ok(GpuRenderOutcome::Presented(present))
+        Ok(GpuRenderOutcome::Presented {
+            at: present,
+            timings,
+        })
     }
+}
+
+fn shaping_cache_key_for_candidate(
+    cache_enabled: bool,
+    forced_anchor: bool,
+    run: &RowRun,
+    context: ShapingCacheContext,
+) -> Option<ShapingCacheKey> {
+    (cache_enabled && !forced_anchor).then(|| ShapingCacheKey::from_run(run, context))
 }
 
 /// Map a scene color onto RGB, using the given default for
@@ -3436,6 +3671,47 @@ mod tests {
             observations
                 .iter()
                 .all(|observation| observation.font_id == profile.selected_faces().regular)
+        );
+
+        let context = ShapingCacheContext {
+            font_generation: profile.generation(),
+            scale_generation: 1,
+            renderer_config_generation: SHAPING_POLICY_GENERATION,
+            font_size_bits: metrics.font_size.to_bits(),
+            line_height_bits: metrics.line_height.to_bits(),
+            cell_width_bits: cell_width.to_bits(),
+            cell_height_bits: line_height.to_bits(),
+        };
+        let key = shaping_cache_key_for_candidate(true, false, row, context)
+            .expect("normally admitted shaping units are cache candidates");
+        assert!(
+            shaping_cache_key_for_candidate(true, true, row, context).is_none(),
+            "forced-anchor fallback must bypass lookup and insertion"
+        );
+        assert!(
+            shaping_cache_key_for_candidate(false, false, row, context).is_none(),
+            "the lab bypass must preserve the direct uncached path"
+        );
+
+        let cached_buffer = Arc::new(buffer);
+        let cached_observations = Arc::<[FontObservation]>::from(observations);
+        let value = CachedShaping {
+            buffer: cached_buffer.clone(),
+            observations: cached_observations.clone(),
+        };
+        let accounted = shaping_cache_accounted_bytes(&key, row, &cached_observations);
+        let mut cache = ShapingCache::new();
+        assert!(cache.insert(key.clone(), value, accounted));
+        let hit = cache.get_cloned(&key).expect("admitted shaping cache hit");
+        assert!(Arc::ptr_eq(&hit.buffer, &cached_buffer));
+        assert_eq!(hit.observations.len(), cached_observations.len());
+        assert!(
+            hit.observations
+                .iter()
+                .zip(cached_observations.iter())
+                .all(|(hit, expected)| hit.font_id == expected.font_id
+                    && hit.glyph_id == expected.glyph_id
+                    && hit.sample == expected.sample)
         );
     }
 

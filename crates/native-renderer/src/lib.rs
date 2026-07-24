@@ -5,6 +5,7 @@
 
 mod font;
 pub mod row_run;
+mod shaping_cache;
 
 pub use font::{
     BUNDLED_FAMILY, DEFAULT_FONT_SIZE, FallbackRecord, FallbackReport, FontFacesInfo, FontInfo,

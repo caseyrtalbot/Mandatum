@@ -3,7 +3,7 @@
 Status: native-first direction accepted on 2026-07-24. Work 2 promoted the
 production shell and renderer into the workspace. Work 3 completed with a
 negative typography verdict. The accepted typography foundation is now
-implemented and displayed; the bounded Work 4 shaping cache is next.
+implemented, displayed, and backed by the bounded Work 4 shaping cache.
 
 ## Product Direction
 
@@ -63,7 +63,6 @@ Standing procedures and current dated runs live in
 These are work, not reasons to resist the direction:
 
 - Native is not yet the default launcher.
-- The renderer reshapes repeated graphemes without the planned bounded cache.
 
 ## Work 1 — Reorder Startup — Complete
 
@@ -160,9 +159,8 @@ contract is accepted.
 
 ## Work 4 — Implement Accepted Typography, Then Add A Bounded Shaping Cache
 
-The focused decision and foundation capability family are complete. The
-contract below is implemented; the bounded cache is the remaining Work 4
-slice.
+Completed on 2026-07-24. The focused decision, foundation capability family,
+and bounded cache are implemented.
 
 ### Font provisioning and face truth
 
@@ -277,21 +275,35 @@ support is explicitly separate from this cache-preparation family.
 - Display the shared typography corpus at Casey's accepted font, size, theme,
   and scale before beginning the cache.
 
-The foundation checks are green. The next slice may now:
+The foundation checks and cache are green:
 
-- memoize accepted shaped runs by text, resolved style, font-catalog/profile
+- accepted shaped runs are memoized by text, resolved style,
+  byte-to-cell topology, font-catalog/profile
   generation, metrics, and scale generation; observed fallback identities live
   in the cached value and diagnostics because they are shaping outputs;
-- bound the cache by count and retained bytes;
-- invalidate by generation when font, palette, metrics, scale, or renderer
+- the cache is bounded at 4,096 entries, 512 KiB conservative accounted bytes
+  per entry, and 32 MiB conservative aggregate accounted bytes; these are
+  explicit accounting limits because cosmic-text does not expose exact
+  allocator retention for `Buffer`;
+- amortized O(1) LRU eviction prevents refill churn from scanning the cache;
+- generation changes invalidate when font, palette, metrics, scale, or renderer
   configuration changes;
-- keep cache ownership in the native renderer;
-- record shaping and frame-stage cost before and after; and
-- add row-level damage tracking only if the remaining profile demands it.
+- device recreation retains lifetime counters but no cached buffers;
+- cache ownership remains in the native renderer; and
+- the lab records cache statistics, shaping time, full frame-preparation time,
+  actual backing scale, surface size, and scene geometry.
 
-Exit: accepted face, palette, and row-run behavior is displayed and gated; then
-the bounded cache shows a measurable shaping-cost reduction without unbounded
-retained resources.
+Three paired 400-input runs on the same 60 Hz Apple M4 Pro/Metal surface used
+bundled JetBrains Mono 13 at backing scale 2.0, 1600×1200, and 102×35. Median
+uncached versus cached shaping p50 was 0.355 ms versus 0.039 ms; median p95 was
+0.470 ms versus 0.074 ms. Median whole-frame preparation p50/p95 changed from
+3.436/4.393 ms to 3.388/4.107 ms. Cached runs retained 335–368 entries,
+5.13–5.65 MiB accounted, 70,700–72,391 hits, zero evictions, and zero
+rejections. The profile does not justify row-level damage tracking now.
+
+Exit: accepted face, palette, and row-run behavior is displayed and gated; the
+bounded cache shows a measurable shaping-cost reduction without an unbounded
+entry or accounted-byte resource.
 
 ## Work 5 — Make Native The Default And Build Feel
 
@@ -349,7 +361,9 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Implement the bounded generation-aware shaping cache, record shaping cost
-before and after, and keep the existing fallback identities in cached values.
-Stop before renderer modularization, row damage, default launcher, installer,
-release, or rollout work.
+Begin Work 5 by making the native shell Casey's default local launcher while
+preserving an explicit terminal escape hatch. First inventory the current
+development command, `mandatum` terminal command, installer, and updater
+entrypoints; choose one narrow default-launch seam without changing legacy
+archives or creating public distribution work. Stop before pane-material,
+spacing, transition, installer, release, or rollout changes.

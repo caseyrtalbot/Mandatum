@@ -382,15 +382,15 @@ impl App {
             Err(error) => return Err(error),
         };
         match outcome {
-            GpuRenderOutcome::Presented(_) => {
+            GpuRenderOutcome::Presented { .. } => {
                 self.scene_presentable = true;
                 self.consecutive_surface_recoveries = 0;
                 self.consecutive_device_recoveries = 0;
             }
-            GpuRenderOutcome::Skipped(_) => {
+            GpuRenderOutcome::Skipped { .. } => {
                 self.host_mut().suspend_scene_interaction();
             }
-            GpuRenderOutcome::SurfaceReconfigured(_) => {
+            GpuRenderOutcome::SurfaceReconfigured { .. } => {
                 self.host_mut().suspend_scene_interaction();
                 self.consecutive_surface_recoveries =
                     self.consecutive_surface_recoveries.saturating_add(1);

@@ -2720,3 +2720,67 @@ Consequences:
   the accepted generation/metrics contract;
 - renderer modularization, row damage, default-launcher, installer, release,
   and rollout changes remain outside this capability family.
+
+## Cache Only Normally Admitted Shaping Units
+
+Status: accepted and completed (2026-07-24)
+
+Decision: keep a bounded generation-aware shaping cache inside
+`mandatum-native-renderer`. A key owns the exact UTF-8 text, resolved rich-style
+ranges, declared run width and byte-to-cell topology, font-catalog generation,
+font/line/cell metrics, scale generation, and shaping-policy generation.
+Position, paint-scope identity, and clip remain per-occurrence `TextArea`
+geometry and are not shaping identity.
+
+Only a run that independently returns `RowRunAdmission::Accepted` may populate
+the cache. A rejected parent never enters it. Split children must pass normal
+admission under their own topology. Bidi and `AnchorAll` descendants bypass
+both lookup and insertion, so an anchored fail-safe can never become a hit for
+a normally accepted unit. Cached values share the immutable shaped `Buffer`
+and retain the observed font IDs, missing-glyph facts, and bounded samples that
+must still flow through `FallbackReport` on a hit.
+
+Use amortized O(1) LRU eviction with three independent limits: 4,096 entries,
+512 KiB conservative accounted bytes per entry, and 32 MiB conservative
+aggregate accounted bytes. Cosmic-text 0.19 intentionally hides some internal
+`Buffer` allocation capacities, so the byte metric is named and documented as
+accounted rather than exact resident memory; the entry ceiling remains a hard
+independent bound. Invalidation replaces the LRU index so its allocation is
+released. Palette and real scale changes clear entries; metrics and scale
+generation remain in the key so a 1→2→1 round trip cannot resurrect an old
+layout. Device recreation keeps lifetime counters and high-water facts but
+starts with no cached buffers.
+
+Context: the accepted row-run path was correct but reshaped stable workstation
+text every frame. A first scan-based cache draft passed small unit tests but
+aggregate review found that high-churn refill could scan 4,096 entries per
+miss, that opaque buffer retention was being described too precisely, that
+cacheable misses retained both a pool buffer and its clone, and that device
+recreation discarded pre-recovery cache evidence. The completed design uses
+the locked `lru` dependency, transfers cacheable buffers out of the scratch
+pool, preserves a direct pool-backed lab bypass for comparable uncached runs,
+and carries render-stage timings even when a prepared frame is skipped or
+reconfigured at surface acquisition.
+
+Verification: 57 renderer unit tests covered identity, every generation and
+metric bit, topology separation, true LRU behavior, count/entry/aggregate
+ceilings, checked-add overflow, replacement, long churn, cold-reset statistics,
+real JetBrains Mono ligature shaping, cached observation retention, and forced
+anchor bypass. The excluded lab's 23 tests covered its version-2 evidence
+schema and cache bypass. Three paired 400-input displayed runs used Apple M4
+Pro/Metal at 60 Hz, backing scale 2.0, 1600×1200, scene 102×35, and bundled
+JetBrains Mono 13. Median uncached/cached shaping p50 was 0.355/0.039 ms and
+median p95 was 0.470/0.074 ms. Median whole-frame preparation p50/p95 was
+3.436/4.393 ms uncached and 3.388/4.107 ms cached.
+
+Consequences:
+
+- repeat-heavy frames avoid shaping while retaining exact per-occurrence
+  placement and clips;
+- the lab-only `--disable-shaping-cache` option is absent from the production
+  feature closure and exists only for paired measurement;
+- cache lifecycle and frame-stage evidence are machine-readable alongside
+  actual render geometry;
+- row-level damage is not justified by this profile and remains deferred;
+- renderer modularization, default-launcher, installer, release, and rollout
+  work remain outside this capability family.

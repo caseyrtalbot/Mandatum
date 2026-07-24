@@ -66,7 +66,7 @@ A Menlo control showed that cursor, styles, selection, Unicode fallback,
 resize, and live 1.0→2.0→1.0 backing-scale transitions were functional, but
 did not erase those structural gaps. Work 4 has since closed them.
 
-### 4. Implement the accepted typography path — foundation complete; cache next
+### 4. Implement the accepted typography path — complete
 
 The pinned JetBrains Mono faces/license, pre-host primary resolution, bounded
 observable fallback reporting, `Theme::terminal_palette`, paint scopes, and
@@ -76,11 +76,19 @@ cursor/selection quads, wide cells, and decorations; RTL/bidi reordering takes
 the bounded observable anchored fallback until a renderer-neutral cell/caret
 mapping exists.
 
-The displayed corpus and deterministic foundation checks are green. Next,
-memoize the accepted shaped-run unit by text, style, font-catalog generation,
-and metrics; bound retained count/bytes, invalidate by
-font/palette/metrics/scale generation, and profile before considering row-level
-damage tracking.
+The displayed corpus, deterministic foundation checks, and generation-aware
+shaping cache are green. Only normally admitted runs enter the cache; exact
+text/style/topology plus font, metrics, scale, and shaping-policy generations
+form identity. Count, per-entry, and conservative accounted-byte ceilings are
+independent, and palette/scale/device changes invalidate without carrying
+buffers across generations.
+
+Three paired 400-input runs at the same 2.0 backing scale, 1600×1200 surface,
+102×35 scene, and bundled JetBrains Mono 13 reduced median shaping p50 from
+0.355 ms uncached to 0.039 ms cached and median p95 from 0.470 ms to 0.074 ms.
+Median whole-frame preparation changed from 3.436/4.393 ms p50/p95 to
+3.388/4.107 ms. The remaining profile does not justify row-level damage
+tracking in this slice.
 
 ### 5. Make native the default and build feel
 

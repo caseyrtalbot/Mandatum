@@ -110,7 +110,8 @@ and has no terminal-engine dependency (banned by the L1 gate).
 `mandatum-native-renderer`: scene-only wgpu/glyphon presentation. It owns GPU
 surface/device recovery, bundled/static font provisioning, bounded fallback
 diagnostics, terminal-palette materialization, clipped row-run shaping, text
-and raster resource bounds, and frame preparation. Vendored JetBrains Mono
+and raster resource bounds, a generation-aware admitted-run shaping cache, and
+frame preparation/stage timing. Vendored JetBrains Mono
 faces, OFL, and provenance live under `assets/fonts/`. Its only internal
 workspace dependency is `mandatum-scene`; synthetic fault injection is
 feature-gated for the excluded lab.

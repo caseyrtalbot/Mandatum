@@ -107,6 +107,7 @@ struct Config {
     fault: Option<FaultConfig>,
     fault_after: Duration,
     memory_interval: Duration,
+    shaping_cache_enabled: bool,
     text_settings: NativeTextSettings,
     harness_project_path: Option<String>,
 }
@@ -136,6 +137,7 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
         fault: None,
         fault_after: Duration::from_secs(1),
         memory_interval: DEFAULT_MEMORY_INTERVAL,
+        shaping_cache_enabled: true,
         text_settings: defaults,
         harness_project_path: None,
     };
@@ -212,6 +214,7 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
                 config.memory_interval = parse_duration_ms(&value, 250, 60_000)
                     .ok_or_else(|| invalid_value(&arg, &value, "250..=60000 ms"))?;
             }
+            "--disable-shaping-cache" => config.shaping_cache_enabled = false,
             "--inject-fault" => {
                 let value = required_value(&mut args, &arg)?;
                 config.fault = Some(match value.as_str() {
@@ -445,6 +448,15 @@ struct LifecycleEvidence {
     raster_cache_entries_high_water: usize,
     raster_cache_bytes: usize,
     raster_cache_bytes_high_water: usize,
+    shaping_cache_entries: usize,
+    shaping_cache_entries_high_water: usize,
+    shaping_cache_accounted_bytes: usize,
+    shaping_cache_accounted_bytes_high_water: usize,
+    shaping_cache_hits: u64,
+    shaping_cache_misses: u64,
+    shaping_cache_evictions: u64,
+    shaping_cache_rejections: u64,
+    shaping_cache_invalidations: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -458,6 +470,7 @@ struct WorkloadEvidence {
     soak_seconds: Option<u64>,
     stress_interval_ms: Option<u64>,
     memory_interval_ms: u64,
+    shaping_cache_enabled: bool,
     injected_fault: Option<&'static str>,
     fault_after_ms: Option<u64>,
     scale_after_ms: Option<u64>,
@@ -476,16 +489,33 @@ struct RunEvidence {
     platform: PlatformEvidence,
     gpu: Option<GpuEvidence>,
     display_refresh_hz: Option<f64>,
+    render_geometry: Option<RenderGeometryEvidence>,
     first_usable_frame_ms: Option<f64>,
     first_usable_frame_within_1s: Option<bool>,
     workload: WorkloadEvidence,
     input_to_present_ms: MetricSummary,
     frame_ms: MetricSummary,
+    render_stages: RenderStageEvidence,
     stress: Option<StressSummary>,
     fault_injection: Option<FaultEvidence>,
     memory: MemorySummary,
     lifecycle: LifecycleEvidence,
     notes: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct RenderStageEvidence {
+    shaping_ms: MetricSummary,
+    frame_prepare_ms: MetricSummary,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct RenderGeometryEvidence {
+    backing_scale: f32,
+    surface_width_px: u32,
+    surface_height_px: u32,
+    scene_columns: u16,
+    scene_rows: u16,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -536,6 +566,7 @@ fn workload_evidence(config: &Config, elapsed: Duration) -> WorkloadEvidence {
             .or(default_interval)
             .map(|interval| interval.as_millis() as u64),
         memory_interval_ms: config.memory_interval.as_millis() as u64,
+        shaping_cache_enabled: config.shaping_cache_enabled,
         injected_fault: config.fault.map(FaultConfig::label),
         fault_after_ms: config.fault.map(|_| config.fault_after.as_millis() as u64),
         scale_after_ms: config.scale_after.map(|seconds| (seconds * 1_000.0) as u64),
@@ -596,12 +627,13 @@ fn print_failure(
         fault: None,
         fault_after: Duration::from_secs(1),
         memory_interval: DEFAULT_MEMORY_INTERVAL,
+        shaping_cache_enabled: true,
         text_settings: fallback,
         harness_project_path: None,
     };
     let config = config.unwrap_or(&fallback_config);
     let evidence = RunEvidence {
-        schema_version: 1,
+        schema_version: 2,
         outcome: OutcomeEvidence::failure(phase, kind, message),
         platform: PlatformEvidence {
             os: std::env::consts::OS,
@@ -609,11 +641,13 @@ fn print_failure(
         },
         gpu: None,
         display_refresh_hz: None,
+        render_geometry: None,
         first_usable_frame_ms: None,
         first_usable_frame_within_1s: None,
         workload: workload_evidence(config, Duration::ZERO),
         input_to_present_ms: MetricSummary::default(),
         frame_ms: MetricSummary::default(),
+        render_stages: RenderStageEvidence::default(),
         stress: None,
         fault_injection: config.fault.map(|fault| FaultEvidence {
             requested: fault.label(),
@@ -751,6 +785,8 @@ struct App {
 
     input_to_present: Samples,
     frame_ms: Samples,
+    shaping_ms: Samples,
+    frame_prepare_ms: Samples,
     memory: MemorySamples,
     next_memory_sample: Instant,
     memory_trend_at: Option<Instant>,
@@ -813,6 +849,8 @@ impl App {
             clipboard: None,
             input_to_present: Samples::with_limit(MAX_MEASUREMENT_SAMPLES),
             frame_ms: Samples::with_limit(MAX_MEASUREMENT_SAMPLES),
+            shaping_ms: Samples::with_limit(MAX_MEASUREMENT_SAMPLES),
+            frame_prepare_ms: Samples::with_limit(MAX_MEASUREMENT_SAMPLES),
             memory: MemorySamples::default(),
             next_memory_sample: now,
             memory_trend_at: None,
@@ -917,6 +955,29 @@ impl App {
         self.lifecycle.raster_cache_entries_high_water = snapshot.raster_cache_entries_high_water;
         self.lifecycle.raster_cache_bytes = snapshot.raster_cache_bytes;
         self.lifecycle.raster_cache_bytes_high_water = snapshot.raster_cache_bytes_high_water;
+        self.lifecycle.shaping_cache_entries = snapshot.shaping_cache_entries;
+        self.lifecycle.shaping_cache_entries_high_water = snapshot.shaping_cache_entries_high_water;
+        self.lifecycle.shaping_cache_accounted_bytes = snapshot.shaping_cache_accounted_bytes;
+        self.lifecycle.shaping_cache_accounted_bytes_high_water =
+            snapshot.shaping_cache_accounted_bytes_high_water;
+        self.lifecycle.shaping_cache_hits = snapshot.shaping_cache_hits;
+        self.lifecycle.shaping_cache_misses = snapshot.shaping_cache_misses;
+        self.lifecycle.shaping_cache_evictions = snapshot.shaping_cache_evictions;
+        self.lifecycle.shaping_cache_rejections = snapshot.shaping_cache_rejections;
+        self.lifecycle.shaping_cache_invalidations = snapshot.shaping_cache_invalidations;
+    }
+
+    fn render_geometry_evidence(&self) -> Option<RenderGeometryEvidence> {
+        let gpu = self.gpu.as_ref()?;
+        let (surface_width_px, surface_height_px) = gpu.surface_size();
+        let scene = self.scene_size()?;
+        Some(RenderGeometryEvidence {
+            backing_scale: gpu.scale(),
+            surface_width_px,
+            surface_height_px,
+            scene_columns: scene.width,
+            scene_rows: scene.height,
+        })
     }
 
     fn scene_size(&self) -> Option<SceneSize> {
@@ -1049,7 +1110,14 @@ impl App {
             Err(error) => return Err(error),
         };
         match outcome {
-            GpuRenderOutcome::Presented(present) => {
+            GpuRenderOutcome::Presented {
+                at: present,
+                timings,
+            } => {
+                self.shaping_ms
+                    .push(timings.shaping.as_secs_f64() * 1_000.0);
+                self.frame_prepare_ms
+                    .push(timings.frame_prepare.as_secs_f64() * 1_000.0);
                 self.scene_presentable = true;
                 self.consecutive_surface_recoveries = 0;
                 self.consecutive_device_recoveries = 0;
@@ -1078,7 +1146,11 @@ impl App {
                     self.dirty_from_runtime = false;
                 }
             }
-            GpuRenderOutcome::Skipped(reason) => {
+            GpuRenderOutcome::Skipped { reason, timings } => {
+                self.shaping_ms
+                    .push(timings.shaping.as_secs_f64() * 1_000.0);
+                self.frame_prepare_ms
+                    .push(timings.frame_prepare.as_secs_f64() * 1_000.0);
                 self.scene_presentable = false;
                 self.host_mut().suspend_scene_interaction();
                 self.frame_ms.miss();
@@ -1100,7 +1172,11 @@ impl App {
                     }
                 }
             }
-            GpuRenderOutcome::SurfaceReconfigured(recovery) => {
+            GpuRenderOutcome::SurfaceReconfigured { recovery, timings } => {
+                self.shaping_ms
+                    .push(timings.shaping.as_secs_f64() * 1_000.0);
+                self.frame_prepare_ms
+                    .push(timings.frame_prepare.as_secs_f64() * 1_000.0);
                 self.scene_presentable = false;
                 self.host_mut().suspend_scene_interaction();
                 match recovery {
@@ -1332,7 +1408,7 @@ impl App {
             .misses
             .saturating_add(self.pending_inputs.len() as u64);
         let evidence = RunEvidence {
-            schema_version: 1,
+            schema_version: 2,
             outcome,
             platform: PlatformEvidence {
                 os: std::env::consts::OS,
@@ -1340,11 +1416,16 @@ impl App {
             },
             gpu: self.gpu_evidence.clone(),
             display_refresh_hz: self.display_refresh_hz,
+            render_geometry: self.render_geometry_evidence(),
             first_usable_frame_ms: self.first_usable_frame_ms,
             first_usable_frame_within_1s: self.first_usable_frame_ms.map(|ms| ms <= 1_000.0),
             workload: workload_evidence(&self.config, now.saturating_duration_since(self.start)),
             input_to_present_ms: input_to_present,
             frame_ms: self.frame_ms.summary(),
+            render_stages: RenderStageEvidence {
+                shaping_ms: self.shaping_ms.summary(),
+                frame_prepare_ms: self.frame_prepare_ms.summary(),
+            },
             stress,
             fault_injection: self.config.fault.map(|fault| FaultEvidence {
                 requested: fault.label(),
@@ -1353,7 +1434,7 @@ impl App {
             }),
             memory,
             lifecycle: self.lifecycle,
-            notes: "FrontendHost is preserved across renderer recovery; input-to-present is emitted only by the isolated typing benchmark; soak input is action-counted without claiming causal latency; frame timing excludes idle gaps >=250ms",
+            notes: "FrontendHost is preserved across renderer recovery; input-to-present is emitted only by the isolated typing benchmark; soak input is action-counted without claiming causal latency; frame timing excludes idle gaps >=250ms; shaping_ms covers cache lookup plus miss shaping and admission; frame_prepare_ms starts before scene preparation and ends after glyphon prepare, before surface acquisition, submit, and present",
         };
         println!(
             "{}",
@@ -1647,7 +1728,7 @@ impl ApplicationHandler<UserEvent> for App {
                 })
             },
         );
-        let (window, gpu, mut host) = match startup {
+        let (window, mut gpu, mut host) = match startup {
             Ok(started) => started,
             Err(error) => {
                 self.fail(
@@ -1660,6 +1741,7 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        gpu.set_shaping_cache_enabled(self.config.shaping_cache_enabled);
         self.clipboard = match arboard::Clipboard::new() {
             Ok(clipboard) => Some(clipboard),
             Err(error) => {
@@ -2274,11 +2356,11 @@ mod tests {
     use super::{
         DEFAULT_MEMORY_INTERVAL, DEFAULT_SOAK_DURATION, FaultConfig, LifecycleEvidence,
         MemorySummary, MetricSummary, OutcomeEvidence, PlatformAction, PlatformEvidence,
-        PressedPointerButtons, RunEvidence, StressConfig, WorkloadEvidence, configured_run_timeout,
-        ime_event_is_accepted, key_for_platform_translation, pane_geometry_is_suspended,
-        parse_config_from, parse_font_family, parse_font_size, parse_ps_rss_kib, parse_scale_delay,
-        parse_scale_factor, run_exit_code, scene_size_from_metrics, start_after_preflight,
-        translate_ime, translate_key,
+        PressedPointerButtons, RenderStageEvidence, RunEvidence, StressConfig, WorkloadEvidence,
+        configured_run_timeout, ime_event_is_accepted, key_for_platform_translation,
+        pane_geometry_is_suspended, parse_config_from, parse_font_family, parse_font_size,
+        parse_ps_rss_kib, parse_scale_delay, parse_scale_factor, run_exit_code,
+        scene_size_from_metrics, start_after_preflight, translate_ime, translate_key,
     };
     use mandatum_scene::input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, TextRange,
@@ -2471,6 +2553,14 @@ mod tests {
         assert_eq!(typing.typing_samples, 1000);
         assert_eq!(typing.typing_interval.as_millis(), 20);
 
+        let uncached = parse_config_from(
+            ["--typing-samples", "10", "--disable-shaping-cache"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("paired uncached measurement config");
+        assert!(!uncached.shaping_cache_enabled);
+
         let soak = parse_config_from(["--soak"].into_iter().map(str::to_owned))
             .expect("standard soak config");
         assert_eq!(
@@ -2519,7 +2609,7 @@ mod tests {
     #[test]
     fn startup_evidence_schema_keeps_unavailable_first_frame_explicitly_null() {
         let evidence = RunEvidence {
-            schema_version: 1,
+            schema_version: 2,
             outcome: OutcomeEvidence::failure("startup", "no_display", "headless"),
             platform: PlatformEvidence {
                 os: "test-os",
@@ -2527,6 +2617,7 @@ mod tests {
             },
             gpu: None,
             display_refresh_hz: None,
+            render_geometry: None,
             first_usable_frame_ms: None,
             first_usable_frame_within_1s: None,
             workload: WorkloadEvidence {
@@ -2539,6 +2630,7 @@ mod tests {
                 soak_seconds: None,
                 stress_interval_ms: None,
                 memory_interval_ms: DEFAULT_MEMORY_INTERVAL.as_millis() as u64,
+                shaping_cache_enabled: true,
                 injected_fault: None,
                 fault_after_ms: None,
                 scale_after_ms: None,
@@ -2551,6 +2643,7 @@ mod tests {
             },
             input_to_present_ms: MetricSummary::default(),
             frame_ms: MetricSummary::default(),
+            render_stages: RenderStageEvidence::default(),
             stress: None,
             fault_injection: None,
             memory: MemorySummary::default(),
@@ -2561,6 +2654,8 @@ mod tests {
         assert!(json["first_usable_frame_ms"].is_null());
         assert!(json["first_usable_frame_within_1s"].is_null());
         assert!(json["input_to_present_ms"]["p50"].is_null());
+        assert!(json["render_stages"]["shaping_ms"]["p50"].is_null());
+        assert_eq!(json["schema_version"], 2);
         assert_eq!(json["outcome"]["kind"], "no_display");
     }
 

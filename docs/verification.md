@@ -134,6 +134,8 @@ The native gate covers:
 - bounded event draining and wake races;
 - resize/scale stress and resource high-water bounds;
 - glyph, clipping, IME, artifact, and overlay correctness.
+- shaping-cache identity, admission isolation, generation invalidation,
+  count/accounted-byte bounds, and cache-aware frame-stage evidence.
 
 `./ci/gate.sh` invokes the native gate and GitHub Actions continues running
 that one authoritative command. Latency, idle CPU, resize storms, fault
@@ -327,6 +329,21 @@ developer unfamiliar with the current implementation can identify:
   direct `ttf-parser` edge, after which `./ci/native-frontend.sh` passed. With
   source, active docs, and the continuation handoff synchronized,
   `./ci/gate.sh` reported `GATE GREEN`.
+- **2026-07-24:** Work 4 added the native renderer's admitted-run shaping
+  cache. Exact text/style/byte-cell topology plus font, metrics, scale, and
+  policy generations form identity; rejected parents and forced-anchor/bidi
+  fallbacks cannot populate or hit it. Amortized O(1) LRU retention is capped
+  at 4,096 entries, 512 KiB conservative accounted bytes per entry, and 32 MiB
+  conservative aggregate accounted bytes. The renderer suite passed 57 tests
+  and the lab suite passed 23. Three paired 400-input displayed runs used the
+  same Apple M4 Pro/Metal 60 Hz surface, backing scale 2.0, 1600×1200, scene
+  102×35, and bundled JetBrains Mono 13. Median uncached/cached shaping p50 was
+  0.355/0.039 ms and p95 was 0.470/0.074 ms; median whole-frame preparation
+  p50/p95 was 3.436/4.393 ms uncached and 3.388/4.107 ms cached. Cached runs
+  retained 335–368 entries and 5.13–5.65 MiB accounted with 70,700–72,391
+  hits, zero evictions, and zero rejections. Row-level damage remains deferred.
+  With source and active docs synchronized, `./ci/gate.sh` reported
+  `GATE GREEN`.
 
 ## Completion Rule
 
