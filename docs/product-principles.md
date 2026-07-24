@@ -2,12 +2,14 @@
 
 ## Thesis
 
-Mandatum is a development workstation for terminal-centered builders. It brings
-shells, editors, builds, tests, servers, agents, diffs, approvals, logs, and
-recovery into one spatial session surface.
+Mandatum is a personal GPU-native development workstation for builders. It
+brings shells, editors, builds, tests, servers, agents, diffs, approvals, logs,
+artifacts, and recovery into one spatial session surface.
 
-The product should feel like a terminal environment expanded into a complete
-work loop: fast, precise, commandable, inspectable, and calm under load.
+The product lives outside the terminal while preserving a terminal soul. It
+should feel as immediate and polished as Ghostty while expanding into a
+complete work loop: fast, precise, commandable, inspectable, and calm under
+load.
 
 ## User
 
@@ -65,11 +67,12 @@ Agents are visible workers in the session. Their panes show objective, status,
 current action, approvals, changed files, commands, checks, blockers, and
 handoff state.
 
-### 7. Renderer Optionality
+### 7. Native Product, Honest Terminal Tool
 
-Product behavior belongs in the engine and scene model, not in a frontend. A
-terminal frontend, native frontend, GPU-backed frontend, or platform-specific
-frontend should all be possible without rewriting the workstation model.
+The native wgpu frontend is the product and visual design target. The terminal
+frontend remains maintained for SSH, headless use, recovery, and an explicit
+escape hatch. Product behavior still belongs in the engine and scene model so
+both roles consume one truth.
 
 ## Quality Bar
 

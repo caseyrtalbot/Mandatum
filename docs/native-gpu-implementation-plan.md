@@ -1,669 +1,211 @@
-# Native GPU Frontend Implementation Plan
-
-Status: capability branch accepted; Phases 1–6 complete in the excluded
-adapter; production GPU admission pending (2026-07-24).
-
-This document is the durable implementation plan for a native window and
-GPU-backed renderer. It does not change the current product verdict: the
-terminal frontend remains v1, and the GPU adapter remains an excluded spike
-until the fail-closed admission conditions in `ci/conformance.sh` are met.
-
-## Outcome
-
-Build a native frontend that runs the real Mandatum workstation state machine,
-not a second terminal demo:
-
-```text
-terminal shell ─┐
-native shell ───┼─> FrontendHost ─> AppState ─> RuntimeEngine
-headless tests ─┘                         │
-                                         └─> WorkspaceScene ─> adapter paint
-```
-
-There is exactly one `AppState` and one `RuntimeEngine` per run. The native
-shell owns platform lifecycle, window metrics, IME context, clipboard
-integration, surface/device resources, and paint scheduling. It does not own
-PTYs, parsers, command routing, approvals, persistence, recovery policy, or a
-parallel product model.
-
-## Current Baseline
-
-| Concern | Verified state | Planning consequence |
-|---|---|---|
-| Product state | `RuntimeEngine` owns all live terminal, task, and agent state; `AppState` folds durable and presentation state. | Reuse this state machine unchanged. |
-| Renderer contract | `WorkspaceScene` carries layout, pane surfaces, overlays, themes, and hit targets; `mandatum-scene` compiles the complete frame into one neutral `CellProgram` consumed by both adapters. | Extend the semantic scene contract only for an admitted product capability, never for a renderer convenience. |
-| Terminal frontend | `app_shell.rs` drives `FrontendHost` while retaining the crossterm lifecycle, input reader, 250 ms heartbeat schedule, 8 ms redraw cap, rendering, and terminal effect encoding. | Keep this shipped fallback unchanged while the excluded native adapter advances through parity work. |
-| GPU spike | The excluded winit/wgpu shell drives the real `FrontendHost`, paints real `WorkspaceScene` snapshots through its scene-only renderer, and now has typed surface/device recovery, explicit failures, bounded scheduling, stress tooling, and structured evidence. Its duplicate `TerminalSession`, parser, input encoder, and scene bridge are gone. | Preserve the completed shared-host boundary; do not add a second product state machine or promote the excluded dependency tree without Phase 7 admission. |
-| Clipboard | `AppState` emits FIFO `FrontendEffect::SetClipboard(String)` values; `app_shell.rs` alone maps them to OSC 52. | Phase 1A is complete and proves the first renderer-neutral platform effect. |
-| Wake path | `AppEventSender` is the only send side for input, PTY, restore-preserved input/artifact completions, agent events, and artifact workers. The channel remains truth; an optional callback coalesces notifications while the queue is non-empty. | The excluded native shell binds that callback to `EventLoopProxy<UserEvent>` without moving a GUI type into app state. |
-| Performance evidence | Three paired 1,000-sample trials used identical targeted input and ScreenCaptureKit endpoints. Native p95 was 61.14–62.54 ms; terminal p95 was 76.12–84.14 ms with four recovered misses. | Acquisition is complete, but sub-20 ms, zero-miss, and every-pair 25% improvement admission thresholds are not met. |
-| Admission | Phases 1–6, including Artifact Preview, parity, advanced text/IME, recovery, stress, and structured acquisition, are complete in the excluded adapter. | Capability and hardening proof do not admit dependencies; Phase 7 still requires an explicit decision plus the deferred soak, matrix, dependency, packaging, and rollout evidence. |
-
-The detailed evidence and standing procedures live in
-[frontend-platform.md](frontend-platform.md),
-[verification.md](verification.md), and the dated
-[spike results](../spikes/frontend-wgpu/RESULTS.md).
-
-## Architectural Rules
-
-1. One state machine owns the workstation. A frontend may cache paint data but
-   never invent product truth.
-2. `WorkspaceScene` remains the only paint input. Renderers do not compute
-   layout or read terminal-parser types.
-3. Platform input becomes `mandatum_scene::input::InputEvent` before it reaches
-   product logic.
-4. Runtime identity, generation/token rejection, flow-credit backpressure,
-   approval control, persistence, and shutdown ordering remain in the current
-   app/runtime modules.
-5. Frontend-specific output leaves the state machine as typed effects. The
-   first required effect is `SetClipboard(String)`.
-6. GPU resources, window handles, surface state, glyph atlases, DPI state, and
-   IME composition are live frontend state and are never serialized.
-7. The terminal frontend remains available for SSH, headless use, recovery,
-   and unsupported native environments.
-8. No production GPU dependency or release allowlist changes until the Phase 7
-   production-admission decision and its evidence are accepted.
-
-## Shared Host Interface
-
-`crates/app/src/frontend_host.rs` now implements this boundary:
-
-```rust
-pub struct FrontendHost { /* owns one private AppState */ }
-
-pub struct FrameSnapshot {
-    pub scene: WorkspaceScene,
-    pub theme: Theme,
-    pub revision: u64,
-}
-
-impl FrontendHost {
-    pub fn new_with_wake_callback(
-        config: AppConfig,
-        wake: impl Fn() + Send + Sync + 'static,
-    ) -> Self;
-    pub fn handle_input(&mut self, input: InputEvent);
-    pub fn wait_event(&mut self, timeout: Duration) -> bool;
-    pub fn drain_runtime(&mut self) -> usize;
-    pub fn heartbeat(&mut self);
-    pub fn frame(&mut self, size: SceneSize) -> FrameSnapshot;
-    pub fn take_effects(&mut self) -> Vec<FrontendEffect>;
-    pub fn should_quit(&self) -> bool;
-    pub fn shutdown(&mut self) -> bool;
-}
-```
-
-The host accepts neutral input, blocks on and drains the unified event stream,
-performs heartbeat work when its shell schedules it, produces owned frame
-snapshots, drains typed effects in FIFO order, exposes quit state, and makes
-shutdown behaviorally idempotent. A frame revision is snapshot identity only:
-it starts at 1 and advances for every produced snapshot, even when content is
-unchanged. This slice deliberately adds no semantic dirty detector,
-`FrontendUpdate`, redraw flag, or deadline metadata; terminal scheduling stays
-in `app_shell.rs`.
-
-The terminal input reader, PTY readers, restore-preserved input, and agent
-forwarders all receive clones of one crate-private `AppEventSender`. A frontend
-may install a neutral callback through `FrontendHost::new_with_wake_callback`.
-The callback fires only when the queue changes from empty to non-empty; shared
-queue accounting serializes the last receive against the next send so a racing
-enqueue cannot lose its wake. The callback remains notification only and the
-`std::sync::mpsc` channel remains the source of event truth.
-
-## Phase 0 — Select And Record The Product Trigger
-
-Result: **complete — capability branch selected.**
-
-The first pixel-native capability is an **Artifact Preview Pane**: open a
-task- or agent-produced PNG screenshot, diagram, chart, or visual diff as a
-reviewable workspace pane without leaving Mandatum. This is the first concrete
-step toward a useful workspace containing task, agent, and artifact panes with
-no terminal pane required.
-
-Implemented typed contract and ownership:
-
-- `mandatum-core` persists only `ArtifactPaneIntent`: a project-relative source
-  path, title/alt text, and contain-fit mode.
-- `crates/app` validates, decodes, bounds, reloads, and caches the artifact.
-  Decoded bytes and file handles are live state, never durable intent.
-- `mandatum-scene` carries typed artifact loading/ready/failed state and a
-  bounded RGBA8 sRGB `RasterSurface` with pixel dimensions and revision.
-- the terminal renderer paints a deterministic labeled fallback card;
-  the native GPU renderer uploads the same surface as a texture.
-
-First-slice guardrails: PNG only; project-relative local files; reject symlink
-escapes, URLs, SVG, HTML, PDF, video, and animation; maximum encoded file
-16 MiB, dimensions 4096×4096, decoded buffer 64 MiB; malformed or oversized
-input becomes visible failed state; useful alt text is required or visibly
-defaults to the filename.
-
-Rollout boundary:
-
-- macOS arm64 is the initial displayed development reference;
-- `native` is explicit opt-in and the terminal frontend remains the default on
-  all four current release targets;
-- startup fallback may occur only before `AppState` and live runtimes exist;
-- there is no transparent mid-session process switch;
-- latency remains an observation, not the selected product trigger.
-
-Phase 0 accepts the product direction only. It is not production GPU-admission
-evidence. `ci/conformance.sh` remains unchanged in force until the typed scene
-surface, terminal fallback test, excluded-GPU render-plan test, and later Phase
-7 admission decision exist.
-
-## Phase 1 — Extract The Frontend-Neutral Host
-
-Dependency: accepted Phase 0 capability decision. This phase adds no winit,
-wgpu, glyphon, or
-other native/GPU production dependency.
-
-### 1A. Neutral frontend effects — COMPLETE (2026-07-21)
-
-- Added a typed `FrontendEffect` owned by the app.
-- Replaced terminal-encoded clipboard payloads with a FIFO raw-text effect
-  queue.
-- Kept selection extraction, last-copied state, and status updates in
-  `AppState`.
-- Moved OSC 52 encoding and output fully behind the terminal shell.
-- Tests prove FIFO ordering, drain-once behavior, restore clearing, both copy
-  paths, and terminal-boundary encoding.
-
-### 1B. Frame and lifecycle seam — COMPLETE (2026-07-22)
-
-- Added `crates/app/src/frontend_host.rs`, owning one private `AppState`.
-- Moved run-loop operations behind product-shaped methods:
-  `handle_input`, `drain_runtime`, `heartbeat`, `frame`, `take_effects`,
-  `should_quit`, and idempotent `shutdown`, plus the blocking `wait_event`.
-- Added owned `FrameSnapshot` values containing `WorkspaceScene`, `Theme`, and
-  a monotonic snapshot-order revision. No semantic dirty state is claimed.
-- Kept hit targets tied to the exact scene snapshot requested for paint.
-- Kept concrete runtime registries and `AppEvent` out of the public surface.
-
-### 1C. Wake-aware event sender — COMPLETE (2026-07-22)
-
-- Wrapped the unified app sender in app-owned `AppEventSender` and routed input,
-  PTY, restore-preserved input, and agent producers through it.
-- Preserved `std::sync::mpsc`, runtime stamps, flow credits, the 256-event drain
-  budget, and terminal-loop timing.
-- Added an optional frontend-neutral callback that coalesces notifications for
-  every non-empty queue interval.
-- Added controlled tests for input/channel truth, burst coalescing with FIFO
-  preservation, concurrent drain/enqueue wake safety, real PTY plus agent
-  producer routing, and `FrontendHost` callback injection.
-
-### 1D. Terminal migration — TERMINAL ADOPTION COMPLETE (2026-07-22)
-
-- Rewrote `app_shell.rs` to drive `FrontendHost` for state, input, frames,
-  effects, quit, runtime drains, heartbeat work, and shutdown.
-- Preserved the 250 ms heartbeat, 8 ms redraw cap, input failure propagation,
-  runtime shutdown, reader join, terminal restoration, and primary-error
-  precedence.
-- Added controlled host tests before any native frontend consumes the
-  interface.
-
-Phase 1 exit gate:
-
-- `./ci/gate.sh` is green.
-- The terminal latency probe remains below its p50 25 ms regression bar.
-- Tests prove input, PTY wake, agent wake, redraw coalescing, clipboard,
-  quit, and error shutdown.
-- No native or GPU dependency enters a production workspace member.
-
-Phase 1 evidence proves neutral and queued input, bounded drain, snapshot
-revision, exact-prior-frame hit targets, FIFO effects, quit, idempotent
-shutdown, the existing terminal error-cleanup order, coalesced callback wakes,
-and no lost wake across concurrent drain/enqueue. The 2026-07-22 Phase 1C
-fresh-release probe measured p50 10.60 ms / p95 12.06 ms / max 13.38 ms over
-100 samples with zero misses. `./ci/gate.sh` passed 467 tests with 2
-intentionally ignored live-Claude-CLI tests, plus format, Clippy with warnings
-denied, build, conformance, and doc trace. No native/GPU production dependency
-was added.
-
-## Phase 2 — Prove One Real Native Workstation Slice — COMPLETE (2026-07-22)
-
-Dependency: Phase 1. Keep this work in `spikes/frontend-wgpu` and outside
-product release surfaces.
-
-- Instantiated `FrontendHost` instead of the spike's `TerminalSession`.
-- Translated winit input directly to neutral `InputEvent` values.
-- Bound the host's coalesced wake callback to `EventLoopProxy<UserEvent>`.
-- Rendered the real scene header, one real terminal pane, status strip, and
-  command-palette overlay.
-- Removed the duplicate spike PTY/parser/input path and `scene_bridge` after the
-  real host path was proven.
-
-User-visible proof:
-
-1. Start the excluded native spike in a project directory.
-2. Type `printf GPU_HOST_OK` and observe output from the real RuntimeEngine.
-3. Open and close the real command palette.
-4. Quit and verify no child or reader thread remains.
-
-Exit gate:
-
-- Exactly one AppState/RuntimeEngine owns behavior.
-- `./ci/gate.sh` and `./ci/gpu-spike.sh` are green.
-- A headless test paints a real host scene through the GPU renderer.
-- A displayed native-window smoke passes on the reference Mac.
-- The spike remains excluded from workspace and release artifacts.
-
-Phase 2 evidence: the focused real-host wake test passed; `./ci/gpu-spike.sh`
-passed six tests plus the renderer-boundary scan; all 248 `mandatum-app` library
-tests passed; and the displayed macOS smoke showed `GPU_HOST_OK`, opened and
-closed the real command palette, and quit cleanly with `Ctrl+Q`. The fresh
-release terminal probe measured p50 11.39 ms / p95 12.56 ms / max 13.69 ms over
-100 samples with zero misses; its endpoint remains key-to-app-output bytes and
-excludes host-terminal paint. The final `./ci/gate.sh` passed. The native shell
-remains an excluded spike, Artifact Preview remains unbuilt, and production GPU
-admission remains pending.
-
-## Phase 3 — Complete Scene And Input Parity
-
-Dependency: Phase 2.
-
-First narrow increment complete (2026-07-22): the excluded scene-only render
-plan now accepts real one-pane task and agent scenes emitted by
-`FrontendHost`. Task metadata retains the terminal adapter's one-row,
-tail-preserving fit; live task output remains below those rows; agent detail
-text wraps within the pane body. Header, one-pane geometry, terminal content,
-status, theme, and command-palette behavior remain intact.
-
-Second narrow increment complete (2026-07-22): a fresh real `FrontendHost`
-with PTY spawning disabled produces the existing one-pane
-`PaneContent::Empty` fallback, and the excluded render plan now paints its cwd,
-restart generation, and no-live-grid detail lines with pane-body wrapping. The
-displayed macOS smoke reproduced that same product state by deliberately
-failing PTY spawn in a disposable project. Multiple panes and broader layouts,
-other overlays, restore, and the remaining input/theme/style parity are still
-explicitly unsupported. Artifact Preview and production GPU admission remain
-unbuilt and blocked.
-
-Third narrow increment complete (2026-07-22): a neutral right-click against
-the exact pane-body hit target from a fresh real-host frame produces the
-existing `OverlayScene::ContextMenu`, and the excluded render plan now retains
-and paints its resolved area, ordered labels and chord hints, and selected row.
-The displayed macOS smoke kept the real Empty pane, header, status, geometry,
-and theme beneath the bordered menu. Additional overlays, multi-pane layouts,
-restore, and broader input/theme/style parity remain explicitly unsupported.
-
-Fourth narrow increment complete (2026-07-22): a writable disposable project
-and fresh real `FrontendHost` recorded the existing Show timeline dispatch,
-then the neutral palette `/` route produced `OverlayScene::Timeline` over the
-supported Empty pane. The excluded render plan retains and paints the scene's
-resolved area, query, windowed event rows, selected index, skipped-malformed
-footer, and existing semantic theme roles. The displayed macOS smoke kept the
-real Empty pane and product chrome beneath the bordered timeline, painted the
-recorded event and live `show` filter, closed with Escape, and quit cleanly.
-Additional overlays, multi-pane layouts, restore, and broader
-input/theme/style parity remain explicitly unsupported.
-
-Fifth narrow increment complete (2026-07-22): a fresh real `FrontendHost` with
-PTY spawning disabled drove the neutral Ctrl+P then `m` route and produced the
-existing `OverlayScene::SessionMap` over the supported Empty pane. The excluded
-render plan retains and paints the scene's resolved area, ordered session/pane
-rows, tree depth, glyph, label, live state, focus marker, layout badges,
-selected index, and footer with the existing semantic overlay theme roles. The
-displayed missing-shell smoke kept the Empty pane and product chrome beneath
-the bordered map, showed the active session and selected focused pane, closed
-with Escape, and quit cleanly. Additional overlays, multi-pane layouts,
-restore, and broader input/theme/style parity remain explicitly unsupported.
-
-Sixth narrow increment complete (2026-07-22): a fresh real `FrontendHost` with
-PTY spawning disabled created and zoomed an agent pane, then drove the neutral
-Ctrl+P then `p` route and produced the existing `OverlayScene::Prompt`. The
-excluded render plan retains and paints the prompt's resolved area, focused
-pane title, configured objective input, block cursor, and footer with the
-existing semantic overlay theme roles. The displayed macOS smoke showed that
-same objective prompt over the real zoomed agent scene, closed with Escape, and
-quit cleanly. Additional overlays, multi-pane layouts, restore, and broader
-input/theme/style parity remain explicitly unsupported.
-
-Seventh narrow increment complete (2026-07-22): a fresh real `FrontendHost`
-with PTY spawning disabled created and zoomed an agent pane, then drove the
-neutral Ctrl+Shift+F route and produced the existing `OverlayScene::Search`.
-The excluded render plan retains and paints the resolved area, live query and
-block cursor, grouped source labels, matched output text and char indices,
-selection, overflow/footer state, and row alignment with the existing semantic
-overlay roles. The tracer bullet deliberately matched the deterministic
-`search-session` timeline event: current Search indexes pane runtime output and
-timeline snapshots, not durable agent-objective text, so no app/search behavior
-changed. The displayed macOS smoke showed grouped results over the real zoomed
-agent with no base-pane glyph leakage visible at that observed scale, then closed
-with Escape and quit cleanly. Help, welcome, multiple panes, restore, and
-broader input/theme/style parity remain explicitly unsupported.
-
-Eighth narrow increment complete (2026-07-22): a fresh real `FrontendHost` with
-PTY spawning disabled drove neutral F1 over the supported Empty pane and typed a
-filter retaining the existing Search session output command. The product frame
-contained the existing `OverlayScene::Help` with its resolved area, live query,
-ordered App heading and command entry, configured Ctrl+Shift+F route, selected
-index, and footer. The excluded render plan retains those scene-owned values and
-paints the opaque overlay surface, palette border and selection roles, live
-block cursor, grouped headings, labels, key hints, and pinned footer. The
-displayed macOS smoke showed that exact filtered Help over the real Empty pane
-with no base-pane glyph leakage visible at that observed scale, then closed
-with Escape and quit cleanly.
-Welcome, multiple panes, restore, and broader input/theme/style parity remain
-explicitly unsupported.
-
-Ninth narrow increment complete (2026-07-22): startup restore against a missing
-workspace file in a writable disposable project produced the real first-run
-`OverlayScene::Welcome` over the supported Empty pane without synthetic product
-state. The excluded render plan retains the scene's resolved area,
-introduction, ordered generated key routes and descriptions, and dismissal
-text. Displayed paint adds the semantic opaque overlay surface and palette
-border, aligns and bounds the route rows, and clips base-pane glyphs around the
-card. A displayed disposable harness joined that exact local app/scene path to
-the exact local GPU renderer; the card painted, Escape dismissed the non-modal
-note, and Ctrl+Q quit cleanly. Multiple panes, restore in the excluded native
-shell, and broader input/theme/style parity remain explicitly unsupported.
-
-Tenth narrow increment complete (2026-07-22): a fresh real `FrontendHost` with
-PTY spawning disabled drove the generated Ctrl+P then `v` Split pane right
-route after an 80x24 resize. The resulting scene contained exactly two
-side-by-side tiled Empty panes with scene-owned 40x22 rectangles, durable
-titles, focus on the new right pane, and the existing Empty detail. The
-prepared plan now retains a per-pane paint record, and the GPU path paints both
-pane backgrounds, borders, titles, and body text while preserving every
-covered one-pane content and overlay path. A displayed missing-shell release
-smoke showed the same two-pane scene in the native window. Vertical, stacked,
-floating, dense, and three-plus-pane layouts, restore in the excluded native
-shell, and broader input/theme/style parity remain explicitly unsupported.
-
-Eleventh narrow increment complete (2026-07-22): the same real-host path drove
-the generated Ctrl+P then `s` Split pane down route after an 80x24 resize. The
-resulting scene contained exactly two top-to-bottom tiled Empty panes with
-scene-owned 80x11 rectangles, durable titles, focus on the new lower pane, and
-complete Empty detail. The prepared plan now admits this exact vertical shape,
-and the existing scene-order GPU path paints both pane backgrounds, borders,
-titles, and body text from their individual rectangles. Every covered one-pane
-content/overlay path and the two-horizontal-Empty-pane path remain intact. A
-displayed missing-shell release smoke showed the same vertical scene in the
-native window. Stacked, floating, dense, mixed-content, and three-plus-pane
-layouts, restore in the excluded native shell, and broader input/theme/style
-parity remain explicitly unsupported.
-
-Twelfth narrow increment complete (2026-07-23): a fresh real `FrontendHost`
-with PTY spawning disabled drove the generated Ctrl+P then `v` Split pane right
-route followed by Ctrl+P then `f` Float pane after an 80x24 resize. The
-resulting scene contained tiled `pane-1` at `(0, 1, 80, 22)` and focused
-floating `pane-2` at `(8, 5, 72, 18)`, with durable titles, exact layout flags,
-and complete Empty detail. The prepared plan admits that default floating
-shape by calling the scene layer's canonical `FloatingRect::default()`
-resolution and clamping path, and the existing scene-order GPU path paints the
-tiled pane before the float from their scene-owned rectangles. The float paints
-an opaque background, and lower-pane title/body glyph bounds are clipped around
-it so wrapped detail cannot bleed through. Displayed verification exposed the
-required intermediate two-horizontal-Empty plus Palette frame; its opaque
-surface now clips wrapped underlying pane detail too. Real-host regressions
-cover that exact command transition, and admission remains limited to it.
-Stacked, moved/resized or additional floating panes, dense, mixed-content, and
-three-plus-pane layouts remain explicitly unsupported.
-
-Corrections-only increment complete (2026-07-23): the renderer now converts
-each complete pane title/body rectangle to final pixel `TextBounds` before
-subtracting outward-rounded later-float or current opaque-overlay bounds.
-Fractional-cell-width regressions prove the submitted body bounds do not
-intersect any of those opaque surfaces; the real-host long-path Palette tracer
-exercises the same final-pixel seam. Header and status text are clipped around
-the same overlay bounds; a minimum-frame regression proves a full-frame opaque
-overlay leaves no chrome glyph region to submit. Every admitted multi-pane
-rectangle must also be at least 3x3 cells, leaving one real interior cell inside
-the one-cell border. Real-host resize coverage accepts the default horizontal
-layout at 6x5, the default vertical layout at 3x8, and the default float at
-11x9, and rejects the immediately smaller width or height. The scene resolver
-still returns `(5, 1, 1, 1)` at 6x3 as a geometry/clamping fact, but the GPU
-adapter rejects that degenerate frame. Checked right/bottom endpoint arithmetic
-also rejects malformed maximum-dimension panes whose true edge would overflow
-`u16`.
-
-Layout/composition capability family complete (2026-07-23): the renderer no
-longer admits one named topology at a time. `prepare_scene` validates only
-renderer-safety invariants and checked resource limits before consuming the
-scene compiler's final cell program. Layout meaning, identity, overlap,
-stack/zoom flags, and draw order remain owned by `mandatum-scene`; the excluded
-adapter has an explicit 256-pane ceiling.
-
-The shared compiler accepts tiled, stacked, zoomed, gapped/overlapping,
-mixed-content, three-plus-pane, moved/custom-float, multiple-float, and overlay
-combinations through the same path. It applies scene order once and replaces
-covered coordinates while compiling, so retained cells are bounded by frame
-coverage. Focused real-host tracers cover a stack, three tiled panes, and two
-ordered floats; one capability matrix covers the broader structural
-combinations and resource hazards.
-
-This changes the unit of work. Individual variants may still start with a
-focused RED/GREEN tracer, but one aggregate review, displayed scenario matrix,
-documentation update, full gate, handoff, and commit complete the entire
-capability family.
-
-Content/style capability family complete (2026-07-23): `mandatum-scene`
-compiles the whole frame into a renderer-neutral `CellProgram`. At that Phase 3
-stop point a program cell used `Glyph(char)` or explicit `WideContinuation`;
-Phase 5 below supersedes it with bounded grapheme occupancy. Complete
-`SceneCellStyle`, one selection kind when selected, and a cursor mark remain.
-The compiler owns all current presentation rules for terminal, task, agent,
-Empty, header attention, status, pane chrome, and every overlay. Later opaque
-cells replace earlier scene-order paint.
-
-The shipped ratatui renderer is now a thin translation of that program; its
-orphaned pane/surface/overlay implementations are removed. The excluded GPU
-renderer validates structural and checked aggregate-resource limits, then
-translates the same topmost cells into background quads and styled glyph rows.
-It maps ANSI/indexed/RGB colors, custom and built-in semantic roles, bold, dim,
-italic, underline, inverse, hidden, strikethrough, terminal/item selection, and
-cursor without content-specific paint branches. This family established the
-continuation seam that Phase 5 later completed with grapheme-width correctness.
-
-### Completed Phase 3 capability family
-
-Input/lifecycle parity:
-
-- workspace chords before terminal fallback;
-- BackTab, Alt-as-Meta, paste, pointer capture/passthrough, scrollback,
-  selection, focus, resize, and quit;
-- keyboard-only completeness and reduced-motion behavior;
-- native restore/startup behavior, scale changes, clipboard effects, and clean
-  shutdown through the existing `FrontendHost` boundary.
-
-The native shell now preserves configurable workspace-chord precedence before
-platform clipboard fallback, translates the baseline xterm key/modifier
-families (including BackTab, Alt-as-Meta, control aliases, and F1-F24), and
-drives native paste, pointer drag/capture/passthrough, wheel scrollback,
-selection/copy, focus, resize, scale, restore, and quit through
-`FrontendHost`. Focus or geometry changes cancel workspace gestures and release
-child mouse capture; unpresentable frames clear hit targets and suppress pointer
-input until a valid present. Startup restore recreates every visible terminal
-runtime, and shutdown is idempotent.
-
-Exit gate met: no unplanned `SceneCompileError` is reachable for the covered
-product-generated scene/input matrix, and the exact automated, displayed,
-latency, idle-CPU, and shutdown evidence is recorded in
-[verification.md](verification.md).
-
-## Phase 4 — Build The Artifact Preview Capability
-
-Dependency: Phase 3 capability families.
-
-Result: **complete (2026-07-23).**
-
-The product trigger accepted in Phase 0 now exists as one vertical capability
-family:
-
-- persist only project-relative `ArtifactPaneIntent`;
-- validate and decode bounded PNG files in app-owned live state;
-- carry loading, ready, and failed states plus bounded RGBA8 sRGB pixels through
-  a typed scene surface;
-- paint a deterministic labeled fallback card in the terminal adapter;
-- upload and contain-fit the same scene-owned surface in the GPU adapter;
-- prove path containment, symlink rejection, byte/dimension/decoded-size caps,
-  reload/revision behavior, malformed input, and visible failure states.
-
-Exit gate: a task- or agent-produced PNG opens as a reviewable workspace pane
-through the real host, both adapters consume the same typed scene state, and no
-GPU dependency enters a production crate.
-
-Exit gate met. The fuzzy palette opens project-relative PNGs; Restart Pane
-forces reload. The app observes unchanged sources cheaply, then uses
-component-relative `O_NOFOLLOW` opens on macOS/Linux, rejects animation and
-non-PNG input, and bounds encoded bytes, dimensions, aggregate decoded memory,
-worker fan-out, and open descriptors before decode. Durable restore carries
-intent only and preserves completion events long enough to release stale
-reservations. The scene exposes loading/ready/failed content plus immutable
-RGBA8 sRGB bytes and revision. Ratatui renders the labeled fallback; the
-excluded GPU adapter validates aggregate texture bytes, evicts all stale
-revisions before replacement, contain-fits, and clips against later panes and
-overlays. Automated, aggregate-review, and displayed evidence is in
-`verification.md`.
-
-## Phase 5 — Make Advanced Text And IME Correct
-
-Dependency: Phase 3 neutral cell semantics and Phase 4.
-
-- Consume the Phase 3 cell/continuation representation while completing
-  grapheme clusters, combining marks, fallback, cursor, and selection alignment.
-- Preserve terminal-cell semantics rather than reshaping raw terminal output
-  into proportional text.
-- Add a neutral text/IME composition contract; composed text is not paste.
-- Cover CJK, emoji/fallback, combining marks, dead keys, preedit, commit,
-  cancellation, and runtime DPI changes.
-- Define native font family/size/scale settings without adding inert settings
-  to the terminal frontend.
-
-Exit gate: fixtures and visual checks prove cell alignment, selection, cursor,
-IME, and scaling across the supported platform matrix.
-
-Exit gate met. Terminal snapshots and the neutral cell program carry bounded
-extended grapheme clusters plus explicit wide continuations. Grid mutation,
-copy/search/selection, wrapping, cursor, both adapters, and GPU clipping share
-the same one- or two-cell width policy. The input contract carries transient
-preedit, one-shot commit, and cancel; `AppState` locks composition to the active
-terminal or overlay text target and cancels it on focus/modal/pointer changes.
-The winit shell supplies IME caret geometry, ignores IME while unfocused, keeps
-left Option for native composition, and reserves right Option for terminal
-Meta. Native font family, size, and scale are bounded shell settings. Automated,
-review, latency, and displayed evidence is in `verification.md`.
-
-## Phase 6 — Harden And Measure
-
-Dependency: feature parity.
-
-Implement and test:
-
-- surface outdated/lost reconfiguration;
-- GPU device-loss recreation;
-- explicit out-of-memory behavior;
-- no-adapter and no-display startup results;
-- multi-monitor scale changes and resize storms;
-- bounded caches and damage tracking only where profiling justifies them;
-- current PTY flow-credit backpressure rather than a parallel queue policy;
-- structured measurement output containing platform, GPU, display refresh,
-  workload, sample count, misses, and latency percentiles.
-
-Proposed thresholds for the later admission decision, not current promises:
-
-- at least three 1,000-sample symmetric runs;
-- native p95 below 20 ms with zero misses and at least a 25% p95 improvement;
-- flood frame p95 within one 60 Hz frame after warmup;
-- 1,000 resize/scale changes without a blank or wedged surface;
-- 30-minute flood/resize/input soak without crash or monotonic memory growth;
-- idle below 1% of one CPU core;
-- first usable frame within one second on the reference matrix.
-
-Exit gate: every threshold actually accepted in Phase 0 passes. Historical
-p50-only or bytes-out measurements cannot substitute for symmetric evidence.
-
-Phase completion decision (2026-07-24): the excluded adapter's Phase 6
-hardening capability is complete. Deterministic tests and live fault probes
-cover surface outdated/lost recovery, device recreation, out-of-memory, stable
-startup classifications, bounded event-loop draining, and fail-closed
-occlusion. A 1,000-change resize/scale exercise completed every requested
-apply/present, and three paired 1,000-sample ScreenCaptureKit acquisitions
-completed on the same 85 Hz display.
-
-The thresholds above remain production-admission thresholds, not prerequisites
-for completing an excluded refactor. The accepted acquisition did not meet
-them: native p95 was 61.14–62.54 ms rather than below 20 ms, one paired
-improvement was below 25%, the third terminal trial recorded four recovered
-misses, and this Mac cannot prove a multi-display matrix. Repeated long soak
-attempts exposed and drove fixes for event-loop starvation and oversized
-synchronous runtime drains, but no clean admission-grade 30-minute result is
-claimed. That soak and the unproven platform matrix move to Phase 7 and must
-pass before any dependency or release admission.
-
-## Phase 7 — Admit And Promote The Product Adapter
-
-Dependency: accepted trigger plus Phase 6 evidence.
-
-- Add a production frontend crate only now.
-- Keep it dependent on the app host and scene contract, never concrete runtime
-  registries or parser types.
-- Replace the blanket GPU hold with a narrow package allowlist while retaining
-  negative tests that reject GPU dependencies in all other production crates.
-- Add a dedicated native/GPU verification script.
-- Keep the adapter out of the ordinary merge gate until its headless checks are
-  deterministic in CI.
-- Do not change release archives or the installer in this phase.
-
-Exit gate: admission decision, dependency-boundary negative tests, full gate,
-native gate, parity checks, and evidence record are all green.
-
-## Phase 8 — Roll Out Without Losing The Terminal
-
-Dependency: production admission.
-
-Introduce explicit frontend selection:
-
-- `terminal` remains the default for the first experimental release;
-- `native` fails clearly before runtime creation if the window/display/adapter
-  is unavailable;
-- `auto` may fall back only before `AppState` and live runtimes are created;
-- unrecoverable mid-session GPU failure reports clearly and restarts from
-  durable intent rather than pretending live PTYs can be serialized.
-
-Update the release workflow, installer, update path, binary allowlists, archive
-checks, distribution tests, and fresh-install/update smoke together. Either
-prove every existing macOS/Linux release target or explicitly narrow the
-accepted support matrix.
-
-Native becomes the default only after complete scene/input/theme/accessibility
-parity, accepted performance on the support matrix, device-loss recovery, a
-native stranger test, release/update proof, and one experimental release
-without a release-blocking regression.
-
-## Verification Matrix
-
-| Change | Required proof |
-|---|---|
-| Documentation or admission status | `./ci/gate.sh`, doc trace, decision/plan sync |
-| Scene contract or excluded adapter | `./ci/gate.sh` and `./ci/gpu-spike.sh` |
-| Host/run-loop/input/wake path | full gate plus `tui_probe` latency procedure |
-| GPU paint or shaping | semantic/golden tests, headless paint, displayed smoke |
-| DPI/surface/device recovery | deterministic fault tests plus resize/soak smoke |
-| Product crate admission | full gate, native gate, dependency negative tests |
-| Release surface | four-target or explicitly narrowed release smoke and update proof |
-
-Every verification claim belongs in [verification.md](verification.md) with
-the date, environment, command, endpoint, and result.
+# Native GPU Frontend Plan
+
+Status: native-first direction accepted on 2026-07-24. The current source still
+lives under `spikes/frontend-wgpu` until Work 2 promotes it into the workspace.
+That path is implementation lag, not product posture.
+
+## Product Direction
+
+Mandatum is a personal, GPU-native development environment with Ghostty-class
+feel, living outside the terminal.
+
+- The native wgpu frontend is the product and the primary development surface.
+- Daily-driver quality for Casey on known macOS hardware is the adoption bar.
+- The terminal frontend is a maintained tool for SSH, headless use, recovery,
+  and an explicit escape hatch.
+- There is no public-release audience or rollout ceremony.
+- Native polish and richer workflow surfaces are direct product work, not
+  experiments waiting for permission.
+
+## Product Roles
+
+- **Native:** owns the window/platform lifecycle, GPU resources, DPI, font, IME,
+  clipboard, pointer translation, frame scheduling, visual identity, and richer
+  typed scene surfaces. It consumes product truth only through `FrontendHost`
+  and `WorkspaceScene`.
+- **Terminal:** remains maintained for SSH, headless operation, recovery,
+  deterministic adapter checks, and an explicit escape hatch. It consumes the
+  same state machine and scene truth; it is not native's design ceiling.
+
+## Non-Negotiable Architecture
+
+1. There is exactly one `AppState` and `RuntimeEngine`.
+2. `FrontendHost` is the shared application seam.
+3. Frontends consume `WorkspaceScene`; they do not reconstruct product meaning.
+4. Rich native presentation enters through typed `mandatum-scene` extensions,
+   following the Artifact Preview `RasterSurface` pattern.
+5. `CellProgram` remains the terminal-parity representation. Native may also
+   consume richer semantic scene data.
+6. Input reaches product logic as neutral `InputEvent` values.
+7. Platform output leaves as typed `FrontendEffect` values.
+8. Window, GPU, glyph-cache, and other live resources are never serialized.
+9. Constitution laws L1–L5 and their executable gates remain authoritative.
+10. wgpu, winit, glyphon, and cosmic-text remain the selected stack unless the
+    typography comparison proves they cannot meet the quality bar.
+
+## Verified Starting Point
+
+The implementation already has one real `FrontendHost`, one app-owned event
+channel, real workstation scenes in both adapters, scene-owned layout and
+presentation, `CellProgram` parity, bounded Artifact Preview pixels, shared
+grapheme/IME contracts, native platform input, typed GPU recovery, and
+regression probes.
+
+Historical implementation evidence is frozen in
+[`spikes/frontend-wgpu/RESULTS.md`](../spikes/frontend-wgpu/RESULTS.md).
+Standing procedures and current dated runs live in
+[`docs/verification.md`](verification.md).
+
+## Known Implementation Gaps
+
+These are work, not reasons to resist the direction:
+
+- `FrontendHost` is currently constructed before native GPU preflight.
+- The native source and its renderer still live under `spikes/`.
+- `ci/conformance.sh` still encodes the retired admission policy.
+- `ci/gpu-spike.sh` is still spike-named and not run by ordinary CI.
+- Native is not yet the default launcher.
+- Typography quality has not been compared directly with Ghostty.
+- The renderer reshapes repeated graphemes without the planned bounded cache.
+
+## Work 1 — Reorder Startup
+
+Do this first because it is a known correctness defect.
+
+- Store `host: Option<FrontendHost>` during native application boot.
+- Inside `resumed()`, create the window, surface, adapter, device, queue, and
+  renderer before constructing `FrontendHost`.
+- Hold validated configuration, not live application state, during preflight.
+- Create `FrontendHost` only after native rendering can start.
+- Keep shutdown idempotent when failure occurs at any boot stage.
+
+- Force no-adapter startup and prove it fails before `AppState` exists.
+- Force no-display startup and prove it fails before `AppState` exists.
+- Prove no PTY or restored runtime starts on either failure.
+- Recheck normal startup, restore, native quit, and terminal behavior.
+- Run the native gate and `./ci/gate.sh`.
+
+Exit: GPU startup failure cannot strand live PTYs or partially created product
+state.
+
+## Work 2 — Promote Native Into The Workspace
+
+End the spike designation and make the native frontend a product component.
+
+- Move the native shell and renderer into a production workspace package.
+- Keep the product shell and renderer separate from measurement, stress, and
+  fault-injection tooling.
+- Retain one native executable with a stable development command.
+- Leave terminal release and installer artifacts unchanged.
+
+- Allow winit, wgpu, glyphon, and their frontend-only dependencies in the
+  production native package.
+- Keep negative dependency tests rejecting GPU/window crates in every
+  engine-side and non-native production crate.
+- Preserve the renderer's scene-only dependency direction.
+- Rename the conformance messages from admission policy to dependency-boundary
+  enforcement.
+- Rename the native maintenance script appropriately.
+- Make `./ci/gate.sh` invoke the renamed native gate so CI retains one
+  authoritative command.
+- Keep `./ci/gate.sh` authoritative for the workspace and Constitution.
+- Prove the dependency allowlist fails when a GPU edge enters the wrong crate.
+- Keep latency, idle, resize, recovery, and fault probes as regression tools.
+
+Exit: the native frontend is a workspace component; the native gate and
+`./ci/gate.sh` are green; terminal behavior is unchanged.
+
+## Work 3 — De-Risk Typography
+
+Run a displayed side-by-side before investing deeply in visual identity.
+
+Use Casey's real font, size, scale, theme, and display. Compare the same corpus
+in Mandatum and Ghostty:
+
+- stems, weight, contrast, and baseline stability;
+- spacing, line height, and perceived density;
+- ASCII, symbols, fallback glyphs, ligatures, CJK, combining text, and emoji;
+- cursor, selection, underlines, dim text, and style combinations;
+- live scale changes and fluid resize.
+
+- If glyphon/cosmic-text can delight, record and lock the typography direction.
+- If it cannot, pause visual-identity investment for a focused stack decision.
+- Do not infer text quality from performance measurements.
+
+Exit: record a displayed comparison and explicit typography verdict.
+
+## Work 4 — Add A Bounded Shaping Cache
+
+- Memoize shaped buffers by grapheme, style, and metrics.
+- Preserve per-grapheme clipping, declared cell spans, and wide-cell invariants.
+- Bound the cache by count and retained bytes.
+- Invalidate by generation when font, metrics, scale, or renderer configuration
+  changes.
+- Keep cache ownership in the native renderer.
+
+- Record shaping and frame-stage cost before and after.
+- Confirm correctness across decorated spaces, fallback glyphs, wide text,
+  selection, cursor, overlays, and scale changes.
+- Add row-level damage tracking only if the remaining profile demands it.
+
+Exit: correctness gates are green and the profile shows a measurable
+shaping-cost reduction without unbounded retained resources.
+
+## Work 5 — Make Native The Default And Build Feel
+
+- Make native Casey's default launcher.
+- Keep an explicit terminal escape hatch.
+- Let daily use determine the hardening queue.
+- Fix concrete failures as product bugs; do not recreate pre-certification.
+
+1. Typography.
+2. Pane materials and visual hierarchy.
+3. Spacing and information density.
+4. Focus treatment.
+5. Fluid resize.
+6. Purposeful transitions with reduced-motion behavior.
+7. Artifact surfaces and native workflow affordances.
+
+- startup and shutdown never strand runtimes;
+- keyboard, pointer, clipboard, and IME behavior are trustworthy;
+- text is delightful at Casey's normal settings;
+- resize, recovery, and continuous output remain responsive;
+- failures are visible and recoverable;
+- probes reveal regressions without becoming permission gates.
+
+## Verification Policy
+
+- `./ci/gate.sh` remains authoritative.
+- The native gate runs for native changes and in CI after promotion.
+- Conformance proves frontend dependency isolation.
+- Scene changes require semantic and adapter coverage.
+- Startup and recovery changes require deterministic fault tests.
+- Visual changes require a representative displayed check.
+- Latency and idle measurements are regression signals only.
+- Record only commands and observations that actually occurred.
+
+## Retired Policy
+
+Do not reintroduce these as adoption gates:
+
+- sub-20 ms end-to-end latency;
+- 25% paired improvement;
+- a 30-minute soak prerequisite;
+- a multi-display matrix;
+- Linux-native qualification;
+- accessibility or theme parity before daily use;
+- Phase 7/8 admission or rollout ceremony.
 
 ## Non-Goals
 
-- Replacing or removing ratatui immediately.
-- Moving product behavior into the renderer.
-- Promoting the spike's duplicate terminal runtime.
-- Serializing windows, GPU resources, atlases, or live handles.
-- Adding a pixel-native scene type without a named capability.
-- Adding damage tracking before profiling.
-- Claiming Windows support without adding it to the release matrix.
-- Building a separate Swift/AppKit/Metal product branch for the first native
-  implementation.
-- Seamless mid-session cross-process fallback.
+- no Metal or Swift renderer rewrite;
+- no second product state machine;
+- no native reacharound into app or runtime state;
+- no generalized damage framework before profiling;
+- no transparent mid-session frontend migration;
+- no public distribution program.
 
-## Next Implementation Slice
+## Immediate Next Action
 
-Prepare the Phase 7 admission decision without presuming promotion. Re-run and
-accept the clean 30-minute flood/resize/input soak, qualify the intended
-multi-display/support matrix, and decide whether the latency, miss, dependency,
-packaging, and rollout evidence justifies admitting a production native
-frontend. If any accepted threshold remains unmet, keep the spike excluded.
-Do not change installer/release surfaces before that explicit decision.
+Implement Work 1: reorder native startup so window, surface, adapter, and device
+succeed before `FrontendHost` creates `AppState` or live runtimes.

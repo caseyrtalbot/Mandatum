@@ -2,24 +2,24 @@
 
 # Mandatum
 
-**A development workstation for terminal-centered builders.**
+**A personal, GPU-native development workstation with a terminal soul.**
 
 Shells, tasks, dev servers, and AI agents in one spatial session surface,
 with first-class approvals, an execution timeline, and recovery that
 survives restarts.
 
 [![CI](https://github.com/caseyrtalbot/Mandatum/actions/workflows/ci.yml/badge.svg)](https://github.com/caseyrtalbot/Mandatum/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/caseyrtalbot/Mandatum)](https://github.com/caseyrtalbot/Mandatum/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.96](https://img.shields.io/badge/rust-1.96-orange.svg)](rust-toolchain.toml)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux-lightgrey.svg)](#install)
+[![Native target](https://img.shields.io/badge/native-macOS-lightgrey.svg)](#status)
 
 <img src="docs/assets/hero-approval.svg" alt="Mandatum workstation: a live shell, a failed check task, a dev-server pane, and a floating agent pane waiting for approval to run rm .flip, with the attention strip reading 1 approval waiting and 1 task failed" width="100%">
 
-*Captured from the current binary: an agent paused mid-task, asking
-permission to delete a file. The header knows a check failed, too. One
-keypress decides; the decision persists across restarts in durable pane
-history and the timeline's bounded audit window.*
+*Captured from the maintained terminal tool while the native product surface is
+promoted. An agent is paused mid-task, asking permission to delete a file. The
+header knows a check failed, too. One keypress decides; the decision persists
+across restarts in durable pane history and the timeline's bounded audit
+window.*
 
 </div>
 
@@ -27,20 +27,21 @@ history and the timeline's bounded audit window.*
 
 ## Why
 
-Terminal work today is a pile of contexts: a shell here, a test runner
+Development work today is a pile of contexts: a shell here, a test runner
 there, a dev server in another tab, and now agents doing real work you
-cannot see. Mandatum is a terminal environment expanded into a session
-operating system. It exists so you can always answer, from the screen
-alone:
+cannot see. Mandatum is a GPU-native spatial environment that brings those
+contexts into one session operating system. It exists so you can always
+answer, from the screen alone:
 
 > What session am I in? What is running? What failed, and which command
 > produced it? Which agents are active, blocked, or waiting for my
 > approval? What files changed? What can I rerun, stop, restore, or
 > search? What survives a restart?
 
-It is deliberately **not** a chat app, a dashboard that hides raw output,
-or an editor clone. Raw terminal output stays primary; the workstation adds
-structure around it.
+It is deliberately **not** a chat app, a dashboard that hides raw output, or
+an editor clone. Terminals remain first-class, but the product lives outside
+the terminal and adds native structure, artifacts, and visual polish around
+the complete development loop.
 
 ## The tour
 
@@ -96,10 +97,9 @@ keymap, with drift-failing tests.
 
 **Review visual artifacts in place.** Search the palette for "Open artifact
 preview" and enter a project-relative PNG. The pane persists only path/title/
-alt/contain intent, reloads through "Restart pane", and shows a deterministic
-loading/ready/failed fallback in the shipped terminal frontend. The excluded
-native GPU adapter additionally renders the bounded RGBA8 surface contain-fit;
-this does not admit GPU dependencies into the product build.
+alt/contain intent, reloads through "Restart pane", and shows deterministic
+loading/ready/failed state. The native GPU frontend renders the bounded RGBA8
+surface contain-fit; the terminal tool keeps an honest labeled fallback.
 
 **Terminal soul.** The workspace never steals input from a child terminal
 except through explicit workspace control. Apps that request mouse
@@ -111,12 +111,13 @@ p50 13.3 ms on the external probe (down from 42.6 ms on the old 40 ms poll
 loop). PTY floods are backpressured: a `yes` flood holds ~12 MB RSS and
 the app quits in under a second, measured on the release binary.
 
-## Install
+## Install the maintained terminal tool
 
-The installer supports Apple Silicon and Intel Macs plus arm64 and x86-64
-glibc Linux. It downloads the latest release, verifies its SHA-256 checksum,
-and puts both the `mandatum` command and its approval bridge in
-`~/.local/bin`:
+The existing installer supports Apple Silicon and Intel Macs plus arm64 and
+x86-64 glibc Linux. It installs the maintained terminal tool, not the
+native-first development frontend. It downloads the latest release, verifies
+its SHA-256 checksum, and puts both the `mandatum` command and its approval
+bridge in `~/.local/bin`:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/caseyrtalbot/Mandatum/main/install.sh | sh
@@ -288,31 +289,24 @@ crates/app            the workstation: deep RuntimeEngine over terminal/task/
                       agent registries, bounded artifact loader/cache, event
                       loop, scene builder, timeline, search, config,
                       transactional save/restore
-spikes/               experiments outside the Cargo workspace; they may depend
-                      on product or engine crates, but their heavy dependency
-                      trees never join the product build, release, or merge
-                      gate; the GPU spike has an opt-in maintenance check
+spikes/               experiments outside the Cargo workspace; the native
+                      frontend remains here only until its signed promotion
+                      into a production workspace package
   frontend-wgpu/gpu-renderer/
                       scene-only GPU paint crate with no app/runtime dependency
 ```
 
 The scene contract keeps frontends swappable: the same `WorkspaceScene`
-drives the ratatui frontend and the excluded winit+wgpu adapter. The current
-symmetric ScreenCaptureKit acquisition measured native p95 61.14–62.54 ms and
-terminal p95 76.12–84.14 ms across three paired 1,000-sample trials; those
-results do not meet the proposed production-admission bar. The terminal
-frontend is v1; the GPU adapter stays excluded, but its native shell drives the real
-`FrontendHost`, translates winit input to neutral events, and paints real
-workstation scenes without a duplicate PTY/parser state machine. It also
-uploads and contain-fits the typed Artifact Preview surface while respecting
-scene-owned occlusion and aggregate resource limits. Its excluded Phase 6
-hardening now also covers typed surface/device recovery, explicit GPU failure
-outcomes, bounded event draining, resize/scale stress, and structured symmetric
-measurement. The accepted measurements do not meet the later production-
-admission thresholds, so the adapter remains excluded. Evidence and verdict:
-[spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md). The
-admission-gated path from the spike to a real workstation frontend is in the
-[native GPU implementation plan](docs/native-gpu-implementation-plan.md).
+drives the terminal tool and native winit+wgpu product frontend. The native
+shell drives the real `FrontendHost`, translates platform input to neutral
+events, and paints real workstation scenes without a duplicate PTY/parser state
+machine. It also renders typed Artifact Preview pixels and includes surface/
+device recovery, bounded event draining, resize/scale stress, and regression
+measurement tooling. The source still lives under `spikes/` until the signed
+promotion work moves it into the workspace. Historical evidence is frozen in
+[spikes/frontend-wgpu/RESULTS.md](spikes/frontend-wgpu/RESULTS.md); the
+forward native-first plan is
+[docs/native-gpu-implementation-plan.md](docs/native-gpu-implementation-plan.md).
 
 ## Development
 
@@ -332,17 +326,18 @@ the Constitution are the review. Security reports: [SECURITY.md](SECURITY.md).
 
 ## Status
 
-Public pre-1.0 release (`v0.2.0`), with post-release work continuing in
-verified vertical slices. Everything in [the tour](#the-tour) works today
-behind the merge gate. The dated charter close and its red-team evidence are
-preserved in
+The existing `v0.2.0` terminal release remains available as operational
+tooling, while current development moves the native wgpu frontend into the
+workspace and toward Casey's daily driver. There is no public-release audience.
+Everything in [the tour](#the-tour) works today behind the merge gate. The
+dated charter close and its red-team evidence are preserved in
 [docs/history/charter-closure-2026-07-10.md](docs/history/charter-closure-2026-07-10.md);
 current status and forward work live in [PLAN.md](PLAN.md).
 
-Deliberately deferred: the GPU production adapter (spike proven, terminal
-frontend stays v1), rewrap-on-resize (belongs in the terminal engine), and the
-`lru` upgrade currently blocked behind the ratatui 0.29 pin. [PLAN.md](PLAN.md)
-holds the forward horizon;
+Immediate work: reorder native startup, promote the native frontend into the
+workspace, compare typography with Ghostty, add a bounded shaping cache, and
+make native the default development surface. Rewrap-on-resize remains a terminal
+engine concern. [PLAN.md](PLAN.md) holds the forward horizon;
 [docs/decisions.md](docs/decisions.md) records every judgment call.
 
 ## License

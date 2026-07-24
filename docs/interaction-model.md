@@ -340,31 +340,26 @@ protocols such as CSI-u are not implied by this baseline.
 enter a project-relative PNG path, and Mandatum opens a focused floating
 artifact pane. The pane always states source, useful alt text (filename by
 default), and loading/ready/failed state. The terminal frontend keeps that
-deterministic labeled fallback; the excluded native adapter paints the same
+deterministic labeled fallback; the native adapter paints the same
 ready scene surface contain-fit without stretching. "Restart pane" on an
 artifact is an explicit reload and does not mutate terminal restart intent.
 Missing, malformed, animated, oversized, escaping, symlinked, or over-budget
 sources remain visible in the pane and never panic. URLs, SVG, HTML, PDF,
 video, and animation are outside this slice.
 
-**Font scaling — honest limits.** The terminal frontend renders in the
-host terminal and therefore inherits its font, size, and zoom; scale text
-with your terminal's own controls (this is also why there is no `[ui]
-font_scale` key: it could not do anything here, and a silently inert
-setting is worse than the loud unknown-key warning the config boundary
-gives today). A native GPU frontend owns its glyph rendering and therefore
-needs an explicit font, scale, DPI, and IME contract. Renderer-neutral product
-behavior remains authoritative. The excluded native shell now handles live
+**Font scaling.** The maintained terminal tool inherits its host terminal's
+font, size, and zoom. The native product owns its font, scale, DPI, and IME
+contract. Renderer-neutral product behavior remains authoritative. The current
+native shell handles live
 scale changes through a single transition that cancels stale pointer ownership,
 updates glyph metrics, recomputes pointer cells, resizes the host/PTYs, and
 requires a successful new present before interaction resumes. It also validates
 native-only font family/size settings, keeps left Option for dead-key
 composition and right Option for terminal Meta, and routes renderer-neutral
-preedit/commit/cancel to the active text surface. Grapheme/wide-cell and IME
-correctness are complete; multi-display qualification and surface/device
-hardening remain staged in the
+preedit/commit/cancel to the active text surface. The next quality decision is a
+side-by-side typography comparison with Ghostty, followed by the bounded shaping
+cache described in the
 [native GPU implementation plan](native-gpu-implementation-plan.md).
 
-Still planned: descriptive labels for non-terminal surfaces beyond the
-current title flags, and platform accessibility hooks in native
-frontends.
+Descriptive labels and platform accessibility hooks remain valid native
+enhancements, but they are not prerequisites for Casey's daily use.

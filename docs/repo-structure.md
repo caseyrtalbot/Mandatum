@@ -5,7 +5,7 @@
 ```text
 README.md      product entrypoint
 AGENTS.md      agent operating contract
-PLAN.md        shipped charter summary + forward horizon
+PLAN.md        current direction + ordered forward work
 CONTRIBUTING.md contributor contract (the gate is the review)
 SECURITY.md    private vulnerability reporting + scope notes
 LICENSE        Apache-2.0
@@ -13,14 +13,14 @@ Cargo.toml     Rust workspace manifest + shared release version
 Cargo.lock     locked Rust dependencies
 rust-toolchain.toml  pinned gate toolchain
 install.sh     latest-release installer (checksum verification + both binaries)
-ci/            the merge gate plus gpu-spike.sh opt-in maintenance check
-.github/       GitHub Actions CI + tag-driven native release archives,
+ci/            merge gate plus current native frontend maintenance check
+.github/       GitHub Actions CI + maintained terminal-tool release archives,
                Dependabot config, issue and PR templates
 docs/          product and architecture specs
 docs/assets/   README frames: SVGs generated from real captured sessions
 crates/        implementation modules
 examples/      live-slice driven demo (the stranger-test scene)
-spikes/        frontend-wgpu GPU spike (outside the workspace)
+spikes/        experiments; native source remains here pending promotion
 .agents/       repo-local agent skills
 ```
 
@@ -30,15 +30,15 @@ spikes/        frontend-wgpu GPU spike (outside the workspace)
 docs/constitution.md        the five laws and their executable gates
 docs/product-principles.md  product thesis and quality bar
 docs/architecture.md        engine, runtime, scene, and frontend responsibilities
-docs/frontend-platform.md   frontend strategy + GPU spike decision record
+docs/frontend-platform.md   native product + maintained terminal roles
 docs/rendering-strategy.md  scene and visual performance strategy
 docs/terminal-engine.md     terminal parser/grid/backend strategy
 docs/agent-runtime.md       agent actor model and runtime surface
 docs/interaction-model.md   commands, panes, session map, timeline, input
 docs/workflows.md           end-to-end developer workflows (built vs not yet)
 docs/native-gpu-implementation-plan.md
-                            admission-gated path to a native GPU frontend
-docs/verification.md        proof commands, scans, and quality gates
+                            ordered native-first implementation plan
+docs/verification.md        standing procedures + dated evidence ledger
 docs/repo-structure.md      current file layout
 docs/decisions.md           decision log (append-only)
 docs/history/               dated evidence and superseded closure records
@@ -106,7 +106,7 @@ and has no terminal-engine dependency (banned by the L1 gate).
 
 ### `crates/app`
 
-The shared workstation runtime and shipped terminal shell:
+The shared workstation runtime and maintained terminal shell:
 
 - `app_shell.rs`: crossterm/terminal lifecycle, input-reader lifecycle,
   heartbeat/redraw scheduling, renderer handoff, and terminal effect encoding;
@@ -115,7 +115,7 @@ The shared workstation runtime and shipped terminal shell:
   `AppState`; blocking/bounded event consumption, heartbeat work, owned
   `FrameSnapshot` scene/theme/revision values, FIFO effects, quit, and
   idempotent shutdown; optional neutral wake-callback installation used by the
-  excluded winit shell
+  current winit shell
 - `app_state.rs`: command dispatch plus durable workspace, timeline, status,
   and presentation folds over typed runtime effects
 - `app_state/tests.rs`: private app-state unit and live-PTY tests
@@ -163,13 +163,14 @@ history (see docs/workflows.md for what remains unbuilt here).
 ## Spikes And Examples
 
 ```text
-spikes/frontend-wgpu/   excluded winit shell over mandatum-app FrontendHost,
+spikes/frontend-wgpu/   current native product source pending workspace
+                        promotion; winit shell over mandatum-app FrontendHost,
                         neutral key/composition input translation, grapheme-
                         anchored GPU presentation (including bounded Artifact
                         Preview texture upload/contain-fit),
                         and the tui_probe latency harness; its gpu-renderer/
                         member is a scene-only paint crate; RESULTS.md is the
-                        evidence record
+                        frozen historical evidence record
 examples/live-slice/    driven demo workspace for the stranger test
 ```
 

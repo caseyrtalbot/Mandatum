@@ -142,7 +142,7 @@ queue accounting makes the last receive and next enqueue one race-safe state
 transition. PTY readers remain bounded by flow-credit backpressure (256 KiB in
 flight per pane).
 
-The excluded native shell binds that neutral callback to
+The current native shell binds that neutral callback to
 `EventLoopProxy<UserEvent>`. The proxy is a disposable platform notification;
 the unified channel remains event truth, and the native shell drains it through
 `FrontendHost` rather than owning a parallel runtime path.
@@ -180,10 +180,10 @@ Own rendering and platform input:
 
 - terminal frontend (`mandatum-renderer`: the ratatui adapter over
   `mandatum-scene`; computes no layout, no direct terminal-engine
-  dependency; shipped, v1)
-- excluded native/GPU frontend (`spikes/frontend-wgpu`): a working winit shell
-  over the real `FrontendHost`, with a scene-only GPU renderer; not shipped
-- production native or platform-specific frontends (not admitted)
+  dependency; maintained for SSH, headless use, recovery, and escape-hatch use)
+- native/GPU product frontend (currently `spikes/frontend-wgpu` until workspace
+  promotion): a working winit shell over the real `FrontendHost`, with a
+  scene-only GPU renderer and native visual ownership
 
 Frontend adapters should draw a scene and emit input/hit-test events. They do
 not own product behavior.
@@ -214,7 +214,7 @@ and agent forwarders all use clones of one crate-private `AppEventSender`; no
 raw sender escapes. The callback coalesces while events remain queued and the
 channel stays authoritative. No platform waker type exists in the app layer.
 
-The excluded winit shell is the second exercised consumer of this boundary. It
+The current winit shell is the second exercised consumer of this boundary. It
 binds the callback to `EventLoopProxy<UserEvent>`, translates platform events to
 neutral `InputEvent` values, and paints the host's real scene header, terminal
 pane, task pane with optional live output, agent pane, status strip, and command
@@ -242,7 +242,7 @@ decides whether the first-run note exists, and the scene carries its resolved
 area, introduction, ordered live key routes and descriptions, and dismissal
 text. The adapter paints and clips that opaque card without reading persistence,
 the keymap, or app state.
-The excluded GPU adapter treats layout/composition and content/style as two
+The current GPU adapter treats layout/composition and content/style as two
 completed capability families. `prepare_scene` validates renderer-safety
 invariants and checked aggregate resource limits, then receives the one
 whole-frame `CellProgram` compiled by `mandatum-scene`; it does not recognize
@@ -280,7 +280,7 @@ Option remains available to dead-key composition and right Option is terminal
 Meta. Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
 removed; its window, platform-input translation, GPU, and paint-scheduling
 state remain frontend-local. Phase 3 input/lifecycle parity is complete in the
-excluded shell: configured workspace chords have first refusal before native
+native shell: configured workspace chords have first refusal before native
 copy/paste fallback; the neutral key seam covers xterm baseline modifiers and
 control aliases; pointer drag, child capture, any-event motion, scrollback,
 selection, focus cancellation, resize, runtime scale changes, restore, and
@@ -291,18 +291,18 @@ successful present.
 A native shell may own a window, platform wake handle, DPI/IME state,
 clipboard integration, GPU surface/device resources, glyph caches, and paint
 scheduling. It may not own a second PTY/parser path, command router, approval
-model, persistence model, or recovery policy. The full contingent sequence and
-its stop/go gate are in
+model, persistence model, or recovery policy. The ordered native-first work and
+verification policy are in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
-Phase 3 is complete across layout/composition, content/style, and
-input/lifecycle capability families. Phase 4 Artifact Preview and Phase 5
-advanced text/IME are complete without admitting GPU dependencies into the
-product workspace. Phase 6 hardening and measurement is complete in the
-excluded adapter: typed surface/device recovery, explicit failure outcomes,
-bounded event-loop work, resize/scale stress, and structured paired evidence
-remain behind the same `FrontendHost` and `WorkspaceScene` boundaries. The
-long-duration soak, multi-display matrix, dependency admission, and rollout
-remain Phase 7 work.
+The native implementation already covers layout/composition, content/style,
+input/lifecycle, Artifact Preview, advanced text/IME, typed surface/device
+recovery, explicit failure outcomes, bounded event-loop work, resize/scale
+stress, and regression measurement behind the same `FrontendHost` and
+`WorkspaceScene` boundaries. Its source still lives under `spikes/` until the
+signed promotion change moves it into a production workspace package. Startup
+reorder, promotion, typography validation, shaping-cache work, and native
+default selection are the forward path; the former Phase 7/8 admission and
+rollout policy is retired.
 
 ### `workflows`
 

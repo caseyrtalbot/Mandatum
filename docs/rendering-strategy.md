@@ -32,8 +32,9 @@ each frame (`scene_builder` converts terminal-engine grids into scene
 surfaces app-side), and `mandatum-renderer` is one adapter: it draws a
 scene with ratatui and computes no layout. A test-only plain-text frontend
 renders the same scenes to prove the contract is renderer-neutral
-(`crates/app/tests/frontend_parity.rs`), and the GPU spike renders from the
-same contract (`spikes/frontend-wgpu`, see docs/frontend-platform.md).
+(`crates/app/tests/frontend_parity.rs`), and the current native GPU renderer
+uses the same contract (its source remains at `spikes/frontend-wgpu` until
+workspace promotion; see docs/frontend-platform.md).
 
 ## Scene Requirements
 
@@ -102,17 +103,17 @@ Current bars and boundedness contracts:
 Ongoing targets without a standing check: no visible freeze during pane
 resize, recoverable parser or render failures.
 
-Advanced targets (GPU-frontend territory, not yet product goals):
+Native product priorities:
 
 - smooth scrollback
 - frame pacing suitable for native display refresh
 - low idle CPU
 - high-DPI correctness
 - efficient glyph caching
-- minimized redraw regions
+- profiling-guided redraw reduction after the shaping cache, only if justified
 - large-output stress stability
 
-The gated path for turning these into product commitments is in
+The ordered path for delivering these priorities is in
 [native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
 
 ## Frontend Adapter Expectations
@@ -127,7 +128,7 @@ Every frontend adapter must:
 
 Artifact adapters consume one scene contract. The shipped ratatui adapter
 renders source, alt text, dimensions/state, and calm failure detail as cells.
-The excluded GPU adapter additionally consumes final-topmost
+The current native GPU adapter additionally consumes final-topmost
 `ProgramCell::raster_layer` markers, validates each RGBA8 surface and the
 64 MiB aggregate, drops every stale texture before replacement, contain-fits
 without distortion, and scissors pixels around later panes and overlays. File

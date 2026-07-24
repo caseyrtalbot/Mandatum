@@ -1,9 +1,14 @@
-# Frontend spike: winit + wgpu GPU terminal frontend
+# Historical Frontend Spike Evidence
 
-Status: **Phases 1–6 are complete in the excluded adapter. Shared-host
-integration, layout/content/input parity, bounded Artifact Preview, advanced
-text/IME, and GPU hardening all cross the real host; production GPU admission
-remains blocked.**
+> **Superseded current-status framing — frozen 2026-07-24.**
+> This file is an immutable record of the former wgpu spike and its measurements.
+> It does not describe Mandatum's current direction. The native wgpu frontend is
+> now the product; the terminal frontend is a maintained SSH/headless/recovery
+> tool. Former production-admission thresholds and Phase 7/8 rollout gates are
+> retired. Measurements below remain useful regression baselines. See
+> [the native plan](../../docs/native-gpu-implementation-plan.md) and the latest
+> entry in [the decision log](../../docs/decisions.md).
+
 A native macOS window drives `mandatum_app::FrontendHost` and its real
 `RuntimeEngine`, translates winit events to neutral `InputEvent` values, and
 renders the host's real header, terminal, task, agent, and Empty panes, status

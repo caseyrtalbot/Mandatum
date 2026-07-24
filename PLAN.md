@@ -1,161 +1,94 @@
 # Plan
 
-PLAN.md points forward. History and rationale live in `docs/decisions.md`;
-verification procedures live in `docs/verification.md`.
+`PLAN.md` points forward. Decisions and historical rationale live in
+`docs/decisions.md`; standing procedures and dated evidence live in
+`docs/verification.md`.
 
-## Shipped
+## Direction
 
-The seven-outcome charter build is complete. Each outcome landed behind a
-green `./ci/gate.sh`:
+Mandatum is a personal, GPU-native development environment with Ghostty-class
+feel. The native wgpu frontend is the product. The terminal frontend is a
+maintained tool for SSH, headless use, recovery, and an explicit escape hatch.
 
-1. Constitution and executable gates: five laws, conformance + doc-trace
-   scripts, GitHub Actions running the same gate script, Apache-2.0
-   (`cdfe04c`).
-2. GPU feasibility spike completed (not product-shipped): winit+wgpu window on
-   a live PTY with measured latency (`4687a7d`), then scene-contract binding
-   and the side-by-side against the ratatui frontend (`94c7cd6`). Verdict:
-   terminal frontend stays v1.
-3. Renderer-neutral scene contract: `mandatum-scene` owns the WorkspaceScene
-   output model and layout math; the renderer became one adapter (`cd457ed`).
-4. Agent runtime: connector contract, session actors, and a real approval
-   gate enforced at the connector boundary, proven against live Claude CLI
-   (`7a3cd29`).
-5. Intuitive UX: pointer support honoring L5, fuzzy palette, config files,
-   remappable keymap, themes (`703d53f`, host-termios fix `10a7043`).
-6. Workstation visibility: execution timeline, session map, attention strip,
-   verified by a stranger test (`e82626e`).
-7. Brilliance pass: event-driven loop (key-to-bytes-out p50 42.6 -> 13.3 ms),
-   PTY flood backpressure, session search, generated help/first-run/legends,
-   calm failure states (`6b5c209`).
+Daily-driver quality for Casey on known macOS hardware is the adoption bar.
+There is no public-release audience and no Phase 7/8 admission ceremony.
+Latency, idle, resize, recovery, and fault probes remain regression checks, not
+permission gates.
 
-Operational hardening after the charter added a public `mandatum` executable,
-checksum-verified release archives for macOS and Linux (the approval bridge
-ships beside the app), a latest-release installer, and cross-renderer-safe
-README captures. The Cargo package remains `mandatum-app`; package selection
-is an internal build concern, while `mandatum` is the user-facing command.
-`mandatum update` now consumes the latest published release without requiring
-a checkout or GitHub permissions; publication remains a version-tagged
-maintainer action, and every workspace crate inherits one root release version.
+The complete ordered plan is
+[docs/native-gpu-implementation-plan.md](docs/native-gpu-implementation-plan.md).
 
-The post-charter developer-trust pass made the existing workstation safer and
-more useful without pretending the wider vision is finished:
+## Current Baseline
 
-- `mandatum --help` and `mandatum --version` are non-interactive public
-  contracts; unknown arguments fail clearly instead of entering the TUI.
-- config reload now resolves a complete effective snapshot, so deleting or
-  invalidating a shell, task, connector, or model override restores the
-  product default instead of retaining stale runtime behavior.
-- frontend input-reader failures stop all live runtimes, restore the host
-  terminal, and return the original error instead of trapping the user in an
-  unwakeable alternate screen.
-- New session creates a fresh session in the current project without
-  duplicating that project or reusing a same-id pane's live runtime; the
-  historical `open-project` config name remains a compatibility alias, not a
-  fictional project chooser.
-- a failed task can become a new agent mandate carrying its command, cwd,
-  failure status, and a bounded output tail. Every fact is JSON-escaped,
-  line-prefixed, and explicitly labeled as untrusted evidence. It launches
-  through the existing connector and approval gate and restores only as
-  durable intent.
-- `RuntimeEngine` is now the deep app-local Module over terminal, task, and
-  agent runtime Implementations. It owns the unified event channel, runtime
-  identity, reconciliation, replacement, approval control, shutdown, and
-  transactional restore. `AppState` receives typed effects and lifecycle
-  facts while durable workspace and presentation state remain outside the
-  live engine.
-- `FrontendHost` now owns the terminal run's one private `AppState`, exposes
-  neutral input and bounded event consumption, and returns owned
-  scene/theme/revision snapshots plus FIFO platform effects. The shipped
-  terminal frontend exercises this seam while retaining crossterm, terminal
-  lifecycle, heartbeat/redraw scheduling, rendering, and OSC 52 encoding.
-- The unified input/PTY/agent channel now has one app-owned `AppEventSender`.
-  It keeps `std::sync::mpsc` as event truth and can notify a frontend through
-  a coalesced, renderer-neutral callback when the queue changes from empty to
-  non-empty; sender/receiver accounting prevents a concurrent final drain and
-  enqueue from losing the next wake.
-- focus now normally accents only the pane title (bright blue in the default dark
-  theme) while the full perimeter stays calm; the explicit `focused` label
-  preserves a non-color signal, with a one-cell corner fallback when a pane is
-  too narrow to show any title text.
-- Shift+Tab now reaches terminal applications as the standard xterm BackTab
-  sequence instead of being dropped, while explicit workspace chords continue
-  to intercept before terminal fallback.
-- overlays now paint explicit foreground/background surfaces instead of
-  reading as nested panes, and the first-run card separates emphasized live
-  key routes, normal descriptions, and dim dismissal guidance.
-- first-run status now contributes only `new workspace`; the permanent
-  keymap-derived control hint owns palette, menu, and help guidance, so the
-  footer names each route once.
+The workstation already has the five constitutional boundaries, one
+`AppState`/`RuntimeEngine`, the shared `FrontendHost`, one app-owned event
+channel, renderer-neutral input/effects, scene-owned layout and presentation,
+terminal parity through `CellProgram`, typed Artifact Preview pixels, shared
+grapheme/IME contracts, native input and lifecycle routes, GPU recovery, and
+measurement tooling.
 
-## Next horizon
+The native implementation still lives under `spikes/frontend-wgpu`; the root
+workspace, `ci/conformance.sh`, `ci/gpu-spike.sh`, and default launcher still
+reflect the retired posture. Those are explicit implementation gaps, not the
+product direction.
 
-- **Named task and dev-server recipes.** Replace the one configured command
-  with a project-local catalog for build, test, lint, and server recipes. Keep
-  recipe intent in `mandatum-workflows`; add duration, cwd, start time, port,
-  and health facts without moving runtime handles into durable state.
-- **Recovery cockpit.** On restore, itemize what was recreated, what was
-  intentionally detached, and what needs an explicit rerun or relaunch. Add
-  acknowledgement for resolved failures so attention remains signal, not
-  history.
+## Ordered Work
+
+### 1. Reorder native startup
+
+Create the window, surface, adapter, device, queue, and renderer before
+constructing `FrontendHost`. Keep `host: None` during preflight. Forced
+no-adapter and no-display failures must occur before `AppState`, restore, or any
+PTY exists.
+
+### 2. Promote native into the workspace
+
+Move the native shell and renderer into a production workspace package. Keep
+lab and measurement tooling separate. Narrowly allow winit/wgpu/glyphon in the
+native package, retain negative dependency checks everywhere else, rename the
+native gate, and make `./ci/gate.sh` invoke it so CI retains one authority.
+Terminal behavior and existing installer/release artifacts stay unchanged.
+
+### 3. De-risk typography
+
+Compare glyphon/cosmic-text side by side with Ghostty using Casey's font, size,
+scale, theme, and display. Decide whether the stack can deliver delightful text
+before investing deeply in the broader visual identity.
+
+### 4. Add a bounded shaping cache
+
+Memoize shaped buffers by grapheme, style, and metrics while preserving
+per-grapheme clipping and cell-span invariants. Bound retained count/bytes,
+invalidate by font/metrics/scale generation, and profile before considering
+row-level damage tracking.
+
+### 5. Make native the default and build feel
+
+Casey daily-drives native with an explicit terminal escape hatch. Daily use
+sets the hardening queue. Build the feel roadmap in this order: typography,
+pane materials and hierarchy, spacing and density, focus treatment, fluid
+resize, purposeful transitions, and richer artifact/workflow surfaces.
+
+## Product Work After The Native Transition
+
+- **Named task and dev-server recipes.** Add a project-local catalog for build,
+  test, lint, and server recipes with duration, cwd, start time, port, and
+  health facts.
+- **Recovery cockpit.** Explain what restore recreated, intentionally detached,
+  or needs an explicit rerun; allow resolved failures to be acknowledged.
 - **Connector catalog and automation surface.** Add capability-described
-  connectors beyond Claude/Fake plus a scriptable command/control surface for
-  projects, sessions, recipes, and approval profiles. Human approval remains
-  the default; policy broadening requires its own decision and proof.
-- **Native GPU frontend, admission-gated.** The implementation sequence is
-  specified in
-  [docs/native-gpu-implementation-plan.md](docs/native-gpu-implementation-plan.md):
-  shared host/effect seam, terminal migration, real-state-machine native slice,
-  parity, text/IME, recovery/performance, admission, and opt-in rollout.
-  The capability branch is selected: task/agent-produced PNG artifacts become
-  pixel-native preview panes with a deterministic terminal fallback. Phase
-  1 is complete: neutral effects, the shared host, the coalesced wake-aware
-  sender, and shipped-terminal adoption all exercise one state machine. Phase
-  2 is also complete inside the excluded spike: its winit shell now drives the
-  real `FrontendHost`, wakes through `EventLoopProxy`, translates neutral input,
-  and paints the real header, terminal pane, status strip, and command palette
-  without its former duplicate PTY/parser state machine. Phase 3 is now
-  organized by capability family instead of one lifecycle per scene variant.
-  Its layout/composition family compiles the scene's ordered pane records
-  generically: tiled, stacked, zoomed, mixed-content, three-plus-pane,
-  moved/custom-float, multiple-float, and overlay combinations share one
-  structural validator and ordered paint path. Its content/style family is
-  complete too: `mandatum-scene` compiles terminal, task, agent, Empty, chrome,
-  and every overlay into one renderer-neutral `CellProgram`; both the shipped
-  ratatui adapter and excluded GPU adapter translate that same program,
-  including semantic colors, all current style modifiers, terminal/item
-  selection, cursor, opacity, and an explicit wide-continuation seam.
-  `mandatum-scene` remains the sole owner of layout and presentation meaning.
-  Phase 3 input/lifecycle parity is complete too: the native shell preserves
-  configured workspace-chord precedence, complete xterm baseline key/modifier
-  encoding, native copy/paste, pointer drag/capture/passthrough, wheel
-  scrollback, focus/resize/scale transitions, startup restore, and idempotent
-  shutdown through `FrontendHost`. Tiny or unpresentable frames suspend pointer
-  interaction until a valid frame is presented, while malformed large
-  geometry remains visible as a fatal adapter error. Phase 4 Artifact Preview
-  is complete: project-relative PNG intent persists without pixels, the app
-  opens each changed source through no-follow descriptor traversal, bounds and
-  decodes it into typed RGBA8 scene data, ratatui paints the deterministic
-  fallback, and the excluded GPU adapter contain-fits the texture with checked
-  aggregate admission and occlusion. Phase 5 advanced text and IME is complete:
-  terminal snapshots, scenes, both adapters, and native input now share an
-  extended-grapheme/wide-cell contract; the native shell carries neutral
-  preedit/commit/cancel with left-Option composition and right-Option Meta.
-  Phase 6 hardening and measurement is complete in the excluded adapter:
-  surface outdated/lost recovery, device recreation, explicit failure
-  classifications, bounded event draining, a 1,000-change resize/scale storm,
-  and three paired 1,000-sample acquisitions are verified. The admission-grade
-  30-minute soak and multi-display matrix remain Phase 7 evidence. The accepted
-  paired results also miss the proposed native p95 and per-pair improvement
-  thresholds, so production GPU dependencies and release admission remain
-  blocked.
-- **Rewrap on resize.** Currently xterm-style no-rewrap; content wrapped at
-  narrow widths stays wrapped. If adopted, it belongs in the
-  `mandatum-terminal-vt` grid, not the scene or renderer layers.
-- **Damage tracking.** Per-frame grid-to-surface conversion is an accepted
-  cost until profiling says otherwise.
-- **Minors worth doing.**
-  - Cap `approval_history` growth in `AgentPaneIntent` once long-running
-    agents make workspace files noticeably large.
-  - Bump ratatui before updating the transitive `lru` dependency.
-  - Idle heartbeat repaints the clock UI (~4 Hz); repaint only when a
-    time-derived surface is visible if idle output ever matters.
+  connectors and a scriptable command surface without weakening human approval
+  by default.
+- **Rewrap on resize.** If adopted, implement it in `mandatum-terminal-vt`, not
+  the scene or either renderer.
+
+## Standing Invariants
+
+- One state machine; frontends never invent product truth.
+- Rich native presentation enters only through typed `mandatum-scene`
+  extensions with honest terminal fallbacks.
+- `CellProgram` remains terminal parity; native may consume richer semantic
+  scene data.
+- Keep wgpu/winit/glyphon; no Metal/Swift rewrite.
+- Keep `./ci/gate.sh`, conformance, doc trace, and regression probes.
+- Add damage tracking only if profiling after the shaping cache justifies it.

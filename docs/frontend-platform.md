@@ -1,230 +1,136 @@
 # Frontend Platform Strategy
 
-## Purpose
+## Direction
 
-Mandatum's product is not defined by a single frontend. The engine and scene
-model should support multiple adapters so the product can serve local, remote,
-terminal, native, and high-polish use cases.
+Mandatum is a personal GPU-native development environment. The native
+wgpu/winit frontend is the product and the primary daily-driver target. The
+terminal frontend is a maintained operational tool. There is no public-release
+audience.
+
+Product behavior remains frontend-neutral: one `AppState`/`RuntimeEngine`,
+`FrontendHost`, and `WorkspaceScene` support both roles without duplicating
+terminal, task, agent, approval, persistence, or recovery truth.
 
 ## Frontend Roles
 
-### Terminal Frontend (shipped, v1)
-
-The ratatui adapter in `crates/renderer`, driven by `crates/app`. This is
-the shipped v1 frontend (see the platform decision below).
+### Native frontend — product
 
 Use for:
 
-- fast development verification
-- remote sessions
-- SSH-friendly operation
-- automation-friendly smoke tests
-- fallback when no native frontend is available
+- Casey's normal local development;
+- Ghostty-class text, input, resize, and frame feel;
+- precise pointer, selection, clipboard, and IME behavior;
+- native visual identity, motion, and richer typed surfaces;
+- artifact and workflow presentation that cannot be expressed honestly as
+  terminal cells.
 
-Requirements:
+It owns the window, platform events, GPU lifecycle, font/scale state, glyph and
+texture caches, and presentation scheduling. It receives product state only
+through `FrontendHost` and paints only `WorkspaceScene`.
 
-- preserve child terminal input
-- render terminal grids and pane chrome clearly
-- support command palette
-- support copy/scrollback baseline
-- support task and agent panes
-- remain lightweight and testable
+The implementation currently remains at `spikes/frontend-wgpu` until the
+promotion work moves it into the root workspace. That location is current code
+state, not a product decision.
 
-### Native/GPU Frontend (proven option, not shipped)
-
-A working wgpu adapter exists as an excluded spike (`spikes/frontend-wgpu`).
-It now drives the real `FrontendHost`/`RuntimeEngine` and paints real scene
-snapshots, but remains held outside the product workspace and release surfaces
-(see the platform decision below).
+### Terminal frontend — maintained tool
 
 Use for:
 
-- smooth resizing
-- high-quality text rendering
-- precise pointer interaction
-- low-latency scrollback
-- richer selection behavior
-- animation and visual polish
-- accessibility integration
-- platform-native menus and window behavior
+- SSH and remote operation;
+- headless or low-dependency environments;
+- recovery when native startup is unavailable;
+- deterministic frontend checks;
+- an explicit escape hatch.
 
-Requirements:
+It remains a first-class terminal experience and continues to preserve L5 input
+routing. It is not the design ceiling or default product target.
 
-- consume the same scene layer as the terminal frontend
-- keep product behavior in engine modules
-- expose input and hit-test events to runtime/command routing
-- measure frame pacing, latency, memory, and CPU
-- support automated smoke verification
+## Shared Contract
 
-### Platform-Specific Frontend
+Every frontend must:
 
-Use when platform fit materially improves the product.
+- consume neutral input and typed effects through `FrontendHost`;
+- paint from `WorkspaceScene`;
+- leave layout, product state, command routing, persistence, runtime identity,
+  and recovery policy in shared modules;
+- expose platform failures clearly;
+- keep live frontend resources out of durable state;
+- support deterministic checks at the deepest practical seam.
 
-Examples:
+`CellProgram` is the complete terminal-parity representation. Native may also
+consume richer semantic scene data, but only through typed `mandatum-scene`
+extensions. Artifact Preview's bounded `RasterSurface` is the reference
+pattern: durable intent in core, safe live loading in app, typed pixels in the
+scene, native presentation, and an honest terminal fallback.
 
-- macOS-native windowing and text rendering
-- platform clipboard, accessibility, and menu integration
-- platform GPU APIs where they improve quality and performance
+## Selected Stack
 
-Requirements:
+Keep:
 
-- product state remains in the shared engine
-- platform code remains behind adapter interfaces
-- build and verification steps are explicit
-- cross-platform assumptions are not smuggled into `core`
+- winit for window and platform event integration;
+- wgpu for portable native GPU rendering;
+- glyphon/cosmic-text for the current text path;
+- `mandatum-scene` as the frontend contract.
 
-## Decision Criteria
+Do not start a Metal or Swift renderer fork. First compare the current text
+stack directly with Ghostty using Casey's actual font, size, scale, theme, and
+display. If the comparison cannot delight, record a focused stack decision
+before investing in broader polish.
 
-Evaluate frontend options against:
+## Verified Baseline
 
-- startup time
-- input latency
-- resize latency
-- scroll latency
-- frame pacing under output
-- text crispness and shaping
-- glyph fallback
-- color fidelity
-- selection precision
-- mouse/pointer support
-- accessibility hooks
-- crash recovery
-- test automation
-- packaging complexity
+The current native implementation:
 
-## The Spike (Done) And The Platform Decision
+- drives the real `FrontendHost` and `RuntimeEngine`;
+- wakes from the app-owned event channel through `EventLoopProxy`;
+- translates platform input into neutral `InputEvent`;
+- paints real terminal, task, agent, Empty, artifact, chrome, status, and
+  overlay scene data;
+- shares layout, paint order, styles, grapheme spans, cursor, selection, and
+  composition semantics with the terminal adapter;
+- handles clipboard, pointer capture, scrollback, focus, resize, scale, restore,
+  and shutdown without a second product state machine;
+- has typed surface/device recovery, explicit GPU failures, bounded draining,
+  resource bounds, stress tooling, and regression probes.
 
-The required feasibility spike ran and completed (2026-07-09). It initially
-delivered a native window rendering a live PTY-backed terminal grid, typing and
-paste, resize, scrollback, mouse selection and copy, a status strip, and
-self-instrumenting latency/frame-time measurement. Phase 2 then replaced that
-spike-local PTY/parser/input state machine with the product's real
-`FrontendHost`: winit emits neutral `InputEvent` values, the host's coalesced
-wake callback drives `EventLoopProxy`, typed clipboard effects return to the
-native shell, and the GPU renderer paints the real header, terminal, task,
-agent, and Empty panes, status strip, command palette, context menu, execution
-timeline, session map, objective prompt, session-output Search, and generated
-Help and Welcome surfaces from `FrameSnapshot` scene/theme data. Phase 3
-layout/composition, content/style, and input/lifecycle parity are complete
-behind one
-`mandatum-scene::CellProgram`: tiled, stacked, zoomed, dense, overlapping,
-floating, mixed-content, and three-plus-pane scenes use the same path, as do
-semantic colors, current modifiers, selection, cursor, chrome, and every
-overlay. Configured chord precedence, xterm baseline key/modifier translation,
-native copy/paste, pointer drag/capture/passthrough, scrollback, focus/resize/
-scale transitions, startup restore, and clean shutdown all cross the real
-`FrontendHost` boundary. Phase 4 adds bounded Artifact Preview pixels without
-renderer filesystem authority. Phase 5 completes the shared text contract:
-terminal snapshots and the cell program carry extended grapheme clusters and
-wide continuations, both adapters anchor glyphs to declared cell spans, and
-neutral preedit/commit/cancel composition targets the active text surface.
+Detailed historical runs are frozen in
+[`spikes/frontend-wgpu/RESULTS.md`](../spikes/frontend-wgpu/RESULTS.md). Current
+procedures and dated one-line evidence live in
+[`docs/verification.md`](verification.md).
 
-The adapter remains outside the Cargo workspace, product build, release
-artifacts, and merge gate. The opt-in `./ci/gpu-spike.sh` maintenance check runs
-spike-local format, warnings-denied clippy, locked all-target tests, and the renderer
-dependency-boundary proof after scene-contract or spike changes. The paint path
-is a separate spike-local crate that cannot depend on the PTY or terminal
-parser. Full evidence:
-[`spikes/frontend-wgpu/RESULTS.md`](../spikes/frontend-wgpu/RESULTS.md).
+## Forward Work
 
-### Measured numbers (from RESULTS.md)
+The ordered work is:
 
-| Path | What is timed | p50 | p95 |
-|------|---------------|----:|----:|
-| GPU spike | key -> GPU present (paint included) | 21.6 ms | 22.2 ms |
-| ratatui frontend, 40 ms poll loop (then-current) | key -> app-emitted bytes (host paint excluded) | 42.9 ms | 45.8 ms |
+1. Reorder startup so GPU preflight succeeds before `FrontendHost` exists.
+2. Move the native frontend into the workspace, narrow the GPU dependency
+   allowlist, and make the authoritative gate run the native checks in CI.
+3. Compare text quality directly with Ghostty.
+4. Add a bounded generation-aware shaping cache and profile it.
+5. Make native Casey's default and build the feel roadmap through daily use.
 
-Max latency is omitted: RESULTS.md's original headline max (23.1 ms) disagrees
-with the raw run JSON in the same file (41.2 ms), so only the figures
-consistent across both are cited (see the correction note in RESULTS.md).
+The authoritative detail is
+[`docs/native-gpu-implementation-plan.md`](native-gpu-implementation-plan.md).
 
-The comparison is asymmetric by construction and the asymmetry favors the
-TUI (its number stops before the host terminal paints), so the measured
-~2x gap understates the true end-to-end gap. Under a sustained scroll flood
-the spike held ~40 fps (frame time p50 25.0 ms, p95 25.8 ms over 94 frames),
-a floor set by an intentionally naive per-frame rebuild, not a ceiling. The
-spike's renderer consumes only the `mandatum-scene` contract and imports zero
-parser types. That paint boundary remained conforming through Phase 2, while
-the enclosing native shell stopped owning PTY, parser, command-routing, or
-product input behavior. The deleted `TerminalSession`, `scene_bridge`, duplicate
-key encoder, and duplicate `AtomicBool` wake latch are now historical spike
-implementation rather than current architecture.
+## Verification Policy
 
-### Verdict: the terminal frontend stays v1
+`./ci/gate.sh`, conformance, doc trace, and the native gate remain mandatory.
+Latency, idle, resize, recovery, and fault measurements remain visible
+regression checks. They are not adoption permission gates.
 
-Recorded in [`docs/decisions.md`](decisions.md#accepted-gpu-frontend-spike-verdict--terminal-frontend-stays-v1).
-The original spike succeeded as an adapter experiment, but a large share of
-its measured gap was the product's own 40 ms input poll loop. Phase 6 has since
-completed surface/device recovery, structured symmetric acquisition, and
-resize/stress tooling in the excluded adapter. A production GPU adapter still
-owes the Phase 7 admission decision, clean long soak, multi-display/support
-matrix, and dependency/release proof.
+Retired requirements include the former sub-20 ms threshold, 25% paired
+improvement, mandatory long soak, multi-display matrix, Linux-native target,
+accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
 
-The poll-loop prediction was then confirmed: after the run loop became
-event-driven (docs/decisions.md, "Event-Driven Main Loop With Heartbeat And
-Redraw Cap"), the same external probe measured the terminal frontend at
-**p50 13.30 ms / p95 15.04 ms / max 15.27 ms** key-to-bytes-out (procedure
-and before/after table: docs/verification.md, "Input Latency Regression
-Check"; addendum in RESULTS.md).
+## Current Implementation Drift
 
-A 2026-07-14 live refresh measured **p50 11.71 ms / p95 13.56 ms / max
-17.84 ms**, also key-to-bytes-out with host-terminal paint excluded. It
-therefore does not prove sub-20 ms end-to-end latency. The authoritative dated
-run and procedure live in [verification.md](verification.md).
+Until promotion lands:
 
-The 2026-07-22 Phase 1C refresh, after all input, PTY, and agent producers
-moved behind the coalesced app-owned sender, measured **p50 10.60 ms / p95
-12.06 ms / max 13.38 ms** over 100 samples with zero misses. It has the same
-key-to-app-output endpoint and therefore does not change the admission verdict.
+- native still lives under `spikes/frontend-wgpu`;
+- `ci/gpu-spike.sh` retains its historical name and is not ordinary CI;
+- `ci/conformance.sh` still encodes the retired admission branch;
+- native startup still constructs `FrontendHost` before GPU success;
+- native is not yet the default launcher.
 
-The 2026-07-22 Phase 2 refresh, after the excluded native adapter moved onto the
-real host, measured **p50 11.39 ms / p95 12.56 ms / max 13.69 ms** over 100
-samples with zero misses. This remains the terminal frontend's
-key-to-app-output measurement, excludes host-terminal paint, and is neither a
-native input-to-photon result nor production-admission evidence.
-
-The wgpu adapter stays warm behind the scene contract, with its probe
-(`spikes/frontend-wgpu/src/bin/tui_probe.rs`) kept as the product's standing
-latency-regression harness. Production admission remains gated on the Phase 7
-decision and its deferred soak, matrix, dependency, packaging, and rollout
-evidence; the completed product capability, host integration, and Phase 6
-hardening alone are not admission evidence.
-
-The selected capability branch is now implemented: an Artifact Preview Pane
-displays a task- or agent-produced project-relative PNG as a typed pixel-native
-scene surface, while the terminal frontend renders a deterministic labeled
-fallback card. The app owns no-follow file opening, bounds, decode, reload, and
-live cache; durable core state holds intent only. The latency branch is not
-selected. Completing this product trigger is still not production admission:
-the GPU adapter remains unshipped and excluded from the product
-workspace/build/release.
-
-Advanced text is complete in the excluded path. One bounded grapheme occupies a
-declared one- or two-cell span; explicit continuation cells prevent selection,
-cursor, search, wrapping, and clipping from splitting wide text. The native
-shell exposes bounded font family/size/scale settings, positions the platform
-IME caret from scene geometry, keeps left Option for native dead keys, and
-reserves right Option for terminal Meta. Composition remains transient and
-renderer-neutral; it is never represented as paste or durable workspace state.
-
-## Implementation Plan
-
-The native frontend has a durable, admission-gated implementation sequence in
-[native-gpu-implementation-plan.md](native-gpu-implementation-plan.md). It
-keeps one `AppState`/`RuntimeEngine`, extracts a shared frontend host and typed
-platform effects, migrates the terminal shell first, and only then connects the
-excluded native adapter to real workstation state. Phases 1 and 2 are complete:
-the terminal and excluded native shells now exercise the same host, runtime,
-neutral input, scene, wake, and typed-effect boundaries. Phase 3 is complete:
-layout/composition, content/style, and input/lifecycle are complete capability
-families. The
-excluded renderer consumes one neutral whole-frame cell program for all current
-pane content, chrome, overlays, theme roles, modifiers, selection, cursor, and
-scene-owned composition. Phase 4 adds the bounded artifact surface and
-final-cell raster markers to that same contract; the excluded adapter uploads,
-contain-fits, and clips it without gaining product-state ownership. Phase 5
-adds shared grapheme/wide-cell occupancy and neutral IME composition across the
-real host. Phase 6 adds typed recovery/failure outcomes, bounded scheduling,
-resize/stress tooling, and symmetric evidence. All six phases are complete in
-the excluded adapter. None of this weakens the production conformance gate or
-admits the GPU dependency tree; Phase 7 admission is next.
+These are explicit next-work items. Do not reinterpret them as reasons to return
+to the retired product posture.

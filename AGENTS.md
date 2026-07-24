@@ -1,18 +1,37 @@
 # AGENTS.md
 
-Mandatum is a development workstation with a terminal soul: shells, tasks,
-servers, agents, approvals, and recovery in one spatial session surface.
-Reason from the code on disk and the current doc set. Active specs describe
-current state; `docs/decisions.md` and `docs/history/` preserve dated rationale
-and evidence.
+Mandatum is a personal GPU-native development workstation with a terminal soul:
+shells, tasks, servers, agents, approvals, artifacts, and recovery in one
+spatial session surface. Reason from the code on disk and the current doc set.
+Active specs describe current state; `docs/decisions.md` and `docs/history/`
+preserve dated rationale and evidence.
+
+## Product direction
+
+The native wgpu frontend is the product and Casey's daily-driver target. The
+terminal frontend is a maintained tool for SSH, headless use, recovery, and an
+explicit escape hatch. The former Phase 7/8 admission framework is retired.
+There is no public-release audience.
+Sub-20 ms latency, paired percentage improvement, long soak, multi-display,
+Linux-native, accessibility/theme parity, and rollout ceremony are not adoption
+gates. Keep the probes as regression measurements; do not use them to resist
+native polish.
+
+Until the promotion change lands, native source still lives under
+`spikes/frontend-wgpu`, `ci/gpu-spike.sh` retains its historical name, and
+`ci/conformance.sh` retains the old dependency policy. Those are named
+implementation gaps, not current product posture. The authoritative ordered
+work is `docs/native-gpu-implementation-plan.md`.
 
 ## The gate
 
 `./ci/gate.sh` is the single merge gate: fmt, clippy `-D warnings`, build,
 test, `ci/conformance.sh`, `ci/doc-trace.sh`. GitHub Actions runs exactly this
-script, so local and remote CI cannot drift. Red means the change does not
-land. Run it before claiming any change complete; commits go directly to main,
-gated by a green run (solo repo, see docs/decisions.md).
+script, so local and remote CI cannot drift. Native promotion must add the
+renamed native gate as a stage inside `ci/gate.sh`, not create a second CI
+authority. Red means the change does not land. Run it before claiming any
+change complete; commits go directly to main, gated by a green run (solo repo,
+see docs/decisions.md).
 
 ## The Constitution
 
@@ -62,10 +81,10 @@ loses its documentation or its gate.
   unified event channel, identity checks, replacement, reconciliation, and
   restore lifecycle facts. `AppState` folds accepted typed effects into core
   intent, the timeline, status, and presentation state.
-- Spikes live in `spikes/`, outside the Cargo workspace: they may depend on
-  engine crates, but their dependency trees never join the product build or
-  gate. After a scene-contract or GPU-spike change, run `./ci/gpu-spike.sh` to
-  keep the deferred adapter source-compatible without promoting it.
+- Experiments live in `spikes/`, outside the Cargo workspace. The current
+  native frontend remains there only until the signed promotion work moves it
+  into a production workspace package. Until then, run `./ci/gpu-spike.sh`
+  after native or scene-contract changes.
 
 ## Test conventions
 
@@ -78,9 +97,9 @@ loses its documentation or its gate.
   `pty_flood_stays_bounded_responsive_and_quittable` runs a live `yes` and
   asserts bounded memory and a timely quit).
 - Latency regression: after any change to the run loop, input path, PTY event
-  plumbing, or redraw policy, run the `tui_probe` procedure in
-  `docs/verification.md`. Bar: key-to-bytes-out p50 well under 25 ms
-  (reference: 13.3 ms).
+  plumbing, or redraw policy, run the relevant procedure in
+  `docs/verification.md`. The terminal key-to-app-output bar remains p50 well
+  under 25 ms for regression detection; it is not a native adoption gate.
 - Generated surfaces (help overlay, first-run note, glyph legends) are
   derived from live data with drift-failing completeness tests. Never
   hand-write key or glyph text; extend the source tables.
@@ -98,9 +117,12 @@ loses its documentation or its gate.
 - `PLAN.md` points forward; `docs/decisions.md` points backward. Update both
   when an outcome ships or a deferral changes.
 - `docs/verification.md` owns standing procedures (latency check, stranger
-  test); a verification claim in any doc must trace to a run that happened.
+  test) plus dated one-line evidence; a claim in any doc must trace to a run
+  that happened.
 - Update `README.md` and `docs/repo-structure.md` when crates or the doc set
   change. Remove references to files that no longer exist.
+- Do not let historical decisions or frozen spike evidence overwrite the active
+  native-first direction.
 
 ## Capability-family completion protocol
 

@@ -2376,3 +2376,52 @@ completed with structured evidence. Three independent final reviews returned
 no finding. Exact counts, methodology, measurements, and remaining boundaries
 are recorded in `docs/verification.md` and
 `spikes/frontend-wgpu/RESULTS.md`.
+
+## Accepted: The Native wgpu Frontend Is The Product
+
+Status: accepted (2026-07-24)
+
+Decision: Mandatum is a personal GPU-native development environment. The native
+wgpu frontend is the primary product surface and daily-driver target. The
+terminal frontend is a maintained tool for SSH, headless use, recovery, and an
+explicit escape hatch. There is no public-release audience and no Phase 7/8
+admission ceremony.
+
+Context: the shared host, neutral input/effects, complete scene composition,
+typed Artifact Preview, advanced text/IME, GPU recovery, bounded scheduling,
+and measurement probes are already implemented. The former production-admission
+framing made personal adoption wait on requirements that do not serve the
+product's actual user or support matrix.
+
+Rationale: daily use on Casey's known macOS hardware is the relevant quality
+gate. Native polish and richer typed scene capabilities now create direct
+product value. Existing probes remain useful regression evidence, but do not
+grant permission to pursue the product direction.
+
+Consequences:
+
+- reorder startup so window, surface, adapter, and device succeed before
+  `FrontendHost` creates application state or live runtimes;
+- promote the native frontend into the workspace and ordinary native gate;
+- keep GPU/window dependencies confined to the native frontend;
+- compare glyphon/cosmic-text with Ghostty before visual-identity investment;
+- add a bounded shaping cache, then profile before adding row damage tracking;
+- make native the default after daily-driver readiness, with an explicit
+  terminal escape hatch;
+- retire the sub-20 ms admission bar, 25% comparison pairs, 30-minute soak and
+  multi-display prerequisites, Linux-native qualification, accessibility/theme
+  parity gates, and Phase 8 rollout ceremony;
+- retain latency, idle, resize, recovery, and fault probes as regression tools;
+- allow richer native presentation only through typed `mandatum-scene`
+  extensions; `CellProgram` remains terminal parity.
+
+Verification impact: `./ci/gate.sh` and the native gate must pass. Conformance
+allows GPU dependencies only in the production native frontend and retains
+negative checks elsewhere. Startup tests must prove forced no-adapter and
+no-display failure before `AppState` exists.
+
+This decision supersedes only the opt-in/default/admission posture in
+**Native GPU Capability Branch Is Selected; Production Admission Remains
+Gated** (2026-07-21) and **Phase 6 Completes The Excluded Hardening Refactor,
+Not Admission** (2026-07-24). Their architecture choices and recorded evidence
+remain historical fact.
