@@ -2576,3 +2576,100 @@ active, production Mandatum and Ghostty both moved through backing scale
 scale-transition corruption. The focused native result is recorded in
 `docs/verification.md`; after the evidence and active docs were synchronized,
 `./ci/gate.sh` reported `GATE GREEN`.
+
+## Accepted: Keep Glyphon/Cosmic-Text Behind A Verified Row-Run Contract
+
+Status: accepted (2026-07-24)
+
+Decision: retain glyphon 0.12 and cosmic-text 0.19. Implement native typography
+through three owned seams before adding the Work 4 cache:
+
+1. a renderer-owned font provisioner with bundled JetBrains Mono 13 as the
+   default, strict installed-family overrides, and bounded face/fallback
+   reporting;
+2. a scene-owned `TerminalPalette` inside `Theme`, materialized by the native
+   pixel renderer while the terminal escape hatch continues delegating reset
+   and named ANSI colors to its host; and
+3. a native-renderer row-run adapter that shapes adjacent same-style
+   graphemes with `Shaping::Advanced` and
+   `Buffer::set_monospace_width(Some(cell_width))`, clipped to the exact
+   declared cell span.
+
+Context: Work 3 proved that the current system-font-only initialization cannot
+see Ghostty's embedded primary face, the CLI accepts an unavailable family
+without detecting fallback, native owns an unconfigurable color table, and one
+buffer per grapheme prevents Arabic joining and cross-cell ligatures. The
+locked libraries already expose the missing primitives: `fontdb` accepts owned
+font bytes and exact family queries, face metadata is inspectable,
+`LayoutGlyph` exposes the selected `font_id`, rich text shapes across adjacent
+spans, monospace-width layout rounds advances to cell-width multiples, and
+glyphon `TextArea` bounds clip a complete run.
+
+Rationale: the defect is the adapter contract, not the selected GPU text stack.
+Replacing glyphon/cosmic-text would duplicate shaping, fallback, atlas, and
+wgpu integration while weakening the scene-only renderer boundary. A bundled
+open-licensed primary makes Casey's default reproducible; strict system
+overrides keep proprietary or preferred installed faces possible without
+allowing silent primary fallback. Palette data belongs beside the existing
+semantic theme because it already follows config reload through `AppState` and
+`FrontendHost`; putting it in `NativeTextSettings` would create a second
+presentation configuration path. Cell-aligned backgrounds, cursor, selection,
+wide occupancy, and clipping remain final `CellProgram` truth even when glyphs
+shape across cells.
+
+Consequences:
+
+- vendor the four unmodified JetBrains Mono v2.304 static faces (Regular, Bold,
+  Italic, Bold Italic), upstream OFL, source, version, and SHA-256 values; do not
+  relicense the fonts under Mandatum's Apache license;
+- the default primary is bundled and cannot be shadowed by an installed
+  duplicate; same-family system faces are removed or partitioned before bundle
+  insertion and primary selection is enforced by source identity;
+- `--font-family` becomes a strict non-generic, monospaced installed-family
+  override with exact `FaceInfo` weight/style matches for Regular, Bold,
+  Italic, and Bold Italic; closest-match query results and variable-only
+  families do not qualify in the first implementation, and failure exits before
+  window, GPU, or host creation;
+- `--font-info` resolves headlessly and prints stable JSON; normal startup
+  names the selected primary, and bounded post-shape diagnostics name fallback
+  faces or unresolved glyph samples without rejecting legitimate CJK/emoji
+  fallback; the report resets per font-catalog generation and retains at most
+  64 records / 64 KiB total with 256-byte string/sample caps;
+- build the complete font database before `FontSystem`; renderer recreation
+  reuses the resolved profile instead of rescanning;
+- `Theme::terminal_palette` owns direct RGB foreground/background and exactly
+  16 direct RGB ANSI slots, with partial `[theme.terminal]` overrides;
+- native resolves `Default` and every `Ansi(0..=15)` through that palette,
+  including semantic chrome; direct RGB and the indexed 16–255 cube/grayscale
+  keep their existing meaning;
+- the terminal adapter retains `Reset` and named ANSI output for SSH/recovery
+  host-palette behavior; explicit RGB terminal output would be a separate
+  decision;
+- row runs break at row, gap, plain whitespace, raster-backed cell, hidden
+  content, orphan continuation, cursor/selection transition, or any glyph-style
+  boundary; the scene compiler also assigns a renderer-neutral paint-scope
+  identity and clip so flattened cells from different panes, chrome, or
+  overlays never join;
+- a width-two grapheme and its continuation form one atomic standalone run;
+  the continuation adds no text, and per-cell quads continue to own
+  backgrounds, cursor, selection, inverse, and decorated-space geometry;
+- each shaped byte cluster's unioned x/advance interval must match its complete
+  declared-cell interval, and the total advance must match the run width, within
+  0.5 physical pixel at the active scale;
+- terminal grid order is authoritative: only monotonically increasing LTR
+  cluster intervals are admitted. RTL/bidi reordering takes the bounded
+  observable anchored fallback; correct bidi plus cell/caret mapping needs a
+  later renderer-neutral contract and is not claimed here;
+- the anchored grapheme adapter may remain only as a bounded, observable
+  fail-safe after splitting a malformed or unrepresentable run;
+- arbitrary font-file input, a terminal widget/parser import, a custom
+  HarfBuzz/swash atlas, a second renderer, Work 4 caching, renderer
+  modularization, row damage, default-launcher, installer, release, and rollout
+  changes remain out of this decision slice.
+
+Verification: three independent source-inspection lanes traced font
+provisioning, palette ownership, and row shaping through the repository and
+the locked dependency sources. They agreed that the existing boundaries and
+APIs can express the contract without a stack replacement. This slice changes
+architecture guidance only; no rendered-behavior or implementation claim is
+made.

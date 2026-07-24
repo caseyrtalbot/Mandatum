@@ -2,7 +2,8 @@
 
 Status: native-first direction accepted on 2026-07-24. Work 2 promoted the
 production shell and renderer into the workspace. Work 3 completed with a
-focused-typography-decision verdict; that decision precedes the Work 4 cache.
+negative typography verdict, and the focused typography architecture is now
+accepted. Implement that contract before the Work 4 cache.
 
 ## Product Direction
 
@@ -40,10 +41,9 @@ feel, living outside the terminal.
 7. Platform output leaves as typed `FrontendEffect` values.
 8. Window, GPU, glyph-cache, and other live resources are never serialized.
 9. Constitution laws L1–L5 and their executable gates remain authoritative.
-10. wgpu and winit remain selected. The focused typography decision must now
-    decide whether glyphon/cosmic-text stay and gain a row-run adapter or
-    whether the text stack changes; no Metal or Swift renderer fork follows
-    from that decision.
+10. wgpu, winit, glyphon, and cosmic-text remain selected. Native text gains a
+    focused row-run adapter; no Metal, Swift, terminal-widget, or second text
+    renderer fork follows from the typography decision.
 
 ## Verified Starting Point
 
@@ -63,11 +63,11 @@ Standing procedures and current dated runs live in
 These are work, not reasons to resist the direction:
 
 - Native is not yet the default launcher.
-- The production path cannot load Ghostty's embedded JetBrains Mono or verify
-  that a requested face resolved instead of silently falling back.
-- Native terminal colors are renderer constants rather than the active theme,
-  and the one-buffer-per-grapheme adapter cannot shape across grapheme/cell
-  boundaries.
+- The accepted bundled JetBrains Mono profile, strict system-family override,
+  and bounded face/fallback report are not implemented yet.
+- `Theme::terminal_palette` and the accepted native materialization policy are
+  not implemented, and the one-buffer-per-grapheme adapter has not yet been
+  replaced by bounded row runs.
 - The renderer reshapes repeated graphemes without the planned bounded cache.
 
 ## Work 1 — Reorder Startup — Complete
@@ -161,35 +161,141 @@ ownership, and row-run shaping is required before broader visual-identity
 investment or a shaping cache.
 
 Exit: displayed matrix and negative verdict recorded; the focused typography
-decision is next.
+contract is accepted.
 
-## Work 4 — Resolve Typography, Then Add A Bounded Shaping Cache
+## Work 4 — Implement Accepted Typography, Then Add A Bounded Shaping Cache
 
-Do not implement the cache until the focused typography decision defines the
-shaping unit and font/theme ownership.
+The focused decision is complete. Implement this contract as one capability
+family before adding the cache.
 
-- Decide whether glyphon/cosmic-text stays behind a row-run adapter or the text
-  stack changes.
-- Make requested-face resolution observable and fail closed for an explicit
-  unavailable face; define how Casey's selected font enters the product.
-- Put terminal foreground, background, and ANSI colors under explicit theme
-  ownership so reference comparisons can be exact.
+### Font provisioning and face truth
 
-- Memoize accepted shaped runs by text, style, and metrics.
-- Preserve cell clipping, declared cell spans, cursor/selection placement, and
-  wide-cell invariants.
-- Bound the cache by count and retained bytes.
-- Invalidate by generation when font, metrics, scale, or renderer configuration
-  changes.
-- Keep cache ownership in the native renderer.
+- Retain locked glyphon 0.12 / cosmic-text 0.19.
+- Make bundled JetBrains Mono 13 the native default. Vendor the unmodified
+  Regular, Bold, Italic, and Bold Italic faces from one pinned official release
+  with the upstream OFL, source URL, version, and SHA-256 values.
+- Build and validate the complete `fontdb` before constructing `FontSystem`.
+  Remove or partition every same-family system face before inserting bundled
+  faces, and select primary faces by source identity so an installed duplicate
+  cannot win an ordinary CSS-style query. Other system fonts remain available
+  for script and emoji fallback.
+- Treat `--font-family NAME` as a strict installed-family override. Reject
+  generic aliases, missing families, non-monospace faces, or missing required
+  style faces before the window, GPU, or `FrontendHost` starts. Query success
+  is insufficient because `fontdb` performs closest matching: require exact
+  `FaceInfo` weight/style metadata for Regular, Bold, Italic, and Bold Italic.
+  Variable-only system families are outside the first implementation. Do not
+  add an arbitrary `--font-file` path in this family.
+- Add `--font-info`, which resolves without a window or host and prints stable
+  JSON for source, requested family, size, and the four selected PostScript
+  faces. Normal startup emits one concise primary-face record.
+- Inspect shaped `LayoutGlyph::font_id` values. Deduplicate and bound observed
+  fallback-face and missing-glyph records; legitimate CJK/emoji fallback
+  remains allowed and named rather than treated as primary-face failure. The
+  report resets per font-catalog generation and retains at most 64 records /
+  64 KiB total, with every copied family, PostScript name, and sample truncated
+  to 256 UTF-8 bytes.
+- Device recreation reuses the resolved provisioning profile. It must not
+  rescan into a different primary face.
 
-- Record shaping and frame-stage cost before and after.
-- Confirm correctness across decorated spaces, fallback glyphs, wide text,
-  selection, cursor, overlays, and scale changes.
-- Add row-level damage tracking only if the remaining profile demands it.
+### Terminal palette ownership
 
-Exit: correctness gates are green and the profile shows a measurable
-shaping-cost reduction without unbounded retained resources.
+- Add a serializable `TerminalPalette` to `mandatum_scene::Theme`: direct RGB
+  foreground/background plus exactly 16 direct RGB ANSI slots.
+- Load partial overrides under `[theme.terminal]`; invalid or recursive
+  ANSI/default values are rejected, and missing values inherit the selected
+  built-in theme.
+- `SceneColor` and `CellProgram` remain abstract. The native renderer resolves
+  every `Default` and `Ansi(0..=15)` through the active terminal palette,
+  including semantic chrome roles; `Indexed(16..=255)` keeps the standard
+  cube/grayscale and direct RGB remains direct.
+- The maintained terminal renderer deliberately keeps `Reset` and named ANSI
+  output so SSH/recovery sessions inherit their host-terminal palette. Exact
+  materialization belongs to the native pixel surface; changing the escape
+  hatch to emit explicit RGB requires a separate decision.
+- Start built-in palettes with the current native constants so implementing
+  ownership alone does not smuggle in a visual redesign. Casey's recorded
+  Ghostty palette becomes expressible configuration.
+
+### Row-run shaping adapter
+
+- Replace `prepare_cell_program`'s one-buffer-per-grapheme output with one deep
+  native-renderer component that converts final topmost `CellProgram` cells
+  into bounded shaping runs. It does not read parser, PTY, app, or pane state.
+- Extend the renderer-neutral compiled program with a text paint-scope identity
+  and exact clip rect assigned by the scene compiler for pane content, pane
+  chrome, header/status, and each overlay. Flattening still chooses final
+  topmost cells, but native never joins cells across paint scopes and intersects
+  every run bound with the scope clip.
+- A run is a maximal same-row sequence of adjacent printable graphemes with the
+  same resolved glyph style. Gaps, plain whitespace, raster-backed cells,
+  hidden cells, orphan wide continuations, row changes, cursor/selection
+  transitions, paint-scope changes, and any style change are hard boundaries.
+  Decorated whitespace remains a standalone one-cell run.
+- A width-two grapheme and its continuation form one atomic standalone run in
+  the first implementation. The continuation contributes no text and extends
+  the grapheme's declared span to two cells.
+- Each run stores UTF-8 text, rich-text style ranges, and a checked byte-range
+  to declared-cell-span map. Shape it with `Shaping::Advanced`, `Wrap::None`,
+  `Buffer::set_monospace_width(Some(cell_width))`, and one exact
+  run-width/run-height `TextArea` bound. The locked API rounds glyph advances
+  to cell-width multiples while retaining ligatures and font fallback.
+- Generalize the existing one/two-cell `u8` text-bound helper to checked `u16`
+  run widths. Group laid-out glyphs by byte cluster; every cluster must map to
+  complete input spans, its unioned x/advance interval must match the mapped
+  declared-cell interval, and the total advance must match the run width, all
+  within 0.5 physical pixel at the active scale.
+- Terminal grid order is authoritative. The first row-run adapter admits only
+  monotonically increasing left-to-right cluster intervals. A layout carrying
+  RTL levels or visual bidi reordering fails admission and follows the
+  split/anchored path; native does not silently move a glyph away from the
+  cursor/selection cell that owns it. Correct bidi plus cell/caret mapping
+  requires a later renderer-neutral text-order contract, not an inference in
+  the GPU adapter.
+- Background, cursor, selection, inverse, and decorated-space geometry remains
+  final-cell quad truth. Shaped glyph positions never move those cell-aligned
+  marks. Text is clipped to the run's declared cell rectangle; no glyph may
+  paint into an adjacent pane, row, or artifact layer.
+- On a mapping/advance failure, split at the offending grapheme boundary.
+  Retain the existing anchored grapheme path only as the ultimate bounded
+  fail-safe, with a visible bounded diagnostic. It is not the default shaping
+  path or the cache key.
+
+Custom HarfBuzz/swash atlas work, a terminal widget/parser import, and a
+different GPU renderer all duplicate boundaries glyphon/cosmic-text already
+satisfy. Reconsider a focused lower-level positioning adapter only if the
+admitted row-run tracer cannot preserve clipping and cell geometry. Full bidi
+support is explicitly separate from this cache-preparation family.
+
+### Verification and cache order
+
+- Prove exact bundled/system face resolution, pre-host failure, stable
+  `--font-info`, bounded fallback reporting, and device-recreation identity.
+- Prove theme overlay/reload behavior, all 18 native palette colors, unchanged
+  abstract `CellProgram` colors, and unchanged host-palette terminal output.
+- Prove multi-cell LTR ligatures within a run; style/gap/row/cursor/selection/
+  raster/paint-scope boundaries; checked per-cluster maps and advances;
+  combining, emoji, fallback, wide cells, decorations, pane/artifact clipping,
+  and scale changes. Prove RTL/bidi input takes the bounded observable fallback
+  without bleed, panic, or cursor/selection drift; do not claim bidi support.
+- Display the shared typography corpus at Casey's accepted font, size, theme,
+  and scale before beginning the cache.
+
+Only after those checks are green:
+
+- memoize accepted shaped runs by text, resolved style, font-catalog/profile
+  generation, metrics, and scale generation; observed fallback identities live
+  in the cached value and diagnostics because they are shaping outputs;
+- bound the cache by count and retained bytes;
+- invalidate by generation when font, palette, metrics, scale, or renderer
+  configuration changes;
+- keep cache ownership in the native renderer;
+- record shaping and frame-stage cost before and after; and
+- add row-level damage tracking only if the remaining profile demands it.
+
+Exit: accepted face, palette, and row-run behavior is displayed and gated; then
+the bounded cache shows a measurable shaping-cost reduction without unbounded
+retained resources.
 
 ## Work 5 — Make Native The Default And Build Feel
 
@@ -247,6 +353,7 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Make the focused typography-path decision: font provisioning and verified face
-resolution, terminal palette ownership, and row-run shaping versus a different
-text stack. Stop before implementing the Work 4 cache.
+Implement the accepted font-provisioning, terminal-palette, and row-run adapter
+contract as one capability family. Stop before the Work 4 shaping cache,
+renderer modularization, row damage, default launcher, installer, release, or
+rollout work.

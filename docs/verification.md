@@ -290,6 +290,16 @@ developer unfamiliar with the current implementation can identify:
   focused-typography-decision branch; broader polish and the Work 4 cache wait
   on that decision. After the evidence and active docs were synchronized,
   `./ci/gate.sh` reported `GATE GREEN`.
+- **2026-07-24:** the focused typography architecture decision retained locked
+  glyphon 0.12 / cosmic-text 0.19 behind a cell-aware row-run adapter, selected
+  a pinned bundled JetBrains Mono default with strict observable system-family
+  overrides, and placed native terminal color materialization under a typed
+  scene theme palette while preserving host-palette output in the maintained
+  terminal adapter. Three independent read-only lanes traced the font,
+  palette, and shaping paths through current repository and locked dependency
+  sources. No implementation or rendered-behavior change is claimed by this
+  decision-only slice. The first synchronized `./ci/gate.sh` run reported
+  `GATE GREEN`.
 
 ## Completion Rule
 

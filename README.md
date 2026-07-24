@@ -337,10 +337,10 @@ dated charter close and its red-team evidence are preserved in
 [docs/history/charter-closure-2026-07-10.md](docs/history/charter-closure-2026-07-10.md);
 current status and forward work live in [PLAN.md](PLAN.md).
 
-Immediate work: resolve the font, palette, and row-run shaping path found by
-the Ghostty comparison, then add a bounded shaping cache and make native the
-default development surface. Rewrap-on-resize remains a terminal engine
-concern.
+Immediate work: implement the accepted bundled-font, theme-owned terminal
+palette, and clipped row-run shaping path found by the Ghostty comparison,
+then add a bounded shaping cache and make native the default development
+surface. Rewrap-on-resize remains a terminal engine concern.
 [PLAN.md](PLAN.md) holds the forward horizon;
 [docs/decisions.md](docs/decisions.md) records every judgment call.
 

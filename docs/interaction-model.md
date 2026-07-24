@@ -357,8 +357,10 @@ requires a successful new present before interaction resumes. It also validates
 native-only font family/size settings, keeps left Option for dead-key
 composition and right Option for terminal Meta, and routes renderer-neutral
 preedit/commit/cancel to the active text surface. The Ghostty comparison found
-that actual-font loading, palette ownership, and row-run shaping need a focused
-decision before the bounded shaping cache described in the
+the actual-font loading, palette ownership, and shaping-unit defects. The
+accepted path is a pinned bundled primary with strict observable overrides,
+theme-owned native terminal colors, and clipped cell-aware row runs; implement
+that contract before the bounded shaping cache described in the
 [native GPU implementation plan](native-gpu-implementation-plan.md).
 
 Descriptive labels and platform accessibility hooks remain valid native
