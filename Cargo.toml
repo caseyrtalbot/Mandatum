@@ -34,7 +34,7 @@ rust-version = "1.96"
 version = "0.2.0"
 
 [workspace.dependencies]
-crossterm = "0.28"
+crossterm = "0.29"
 mandatum-agent-runtime = { path = "crates/agent-runtime" }
 mandatum-core = { path = "crates/core" }
 mandatum-commands = { path = "crates/commands" }
