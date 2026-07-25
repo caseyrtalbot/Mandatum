@@ -3013,7 +3013,7 @@ defers scenario driving until initial native geometry settles.
 
 ## Native Presentation Meaning And UI Tokens Stay Typed
 
-Status: accepted; Phase 2 implementation complete (2026-07-24)
+Status: accepted; Phase 2 complete (2026-07-24)
 
 Decision: native visual presentation is one typed capability family spanning
 `Theme.ui`, coherent viewport input, scene-owned logical geometry and semantic
@@ -3061,5 +3061,8 @@ ordering/clipping/resource limits, multi-metric baseline/cache identity, and
 scenario determinism have focused tests. The displayed native token sampler
 showed every direct UI color role, `./ci/native-frontend.sh` passed, and the
 source-and-documentation repository gate reported `GATE GREEN`. Fixed-reference
-capture and explicit acceptance from the clean Phase 2 source commit are the
-remaining evidence step recorded in `docs/verification.md`.
+capture from clean source commit `6979318` replaced random fixture identity and
+corrected the seven Phase 1 images affected by an external compositor
+color-state transition. After explicit reviewed acceptance, all 11 strict
+comparisons returned SSIM 1.0 with zero changed or masked pixels. The final
+gate and push evidence are recorded in `docs/verification.md`.

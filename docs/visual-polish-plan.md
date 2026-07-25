@@ -1,7 +1,6 @@
 # Native Visual Polish Plan
 
-Status: Phase 2 implementation complete; fixed-reference evidence in progress
-(2026-07-24)
+Status: Phase 2 complete; Phase 3 next (2026-07-24)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -472,9 +471,26 @@ Implementation status (2026-07-24):
   review-facing snapshot, preventing random temporary paths from making strict
   comparisons nondeterministic while leaving runtime isolation intact.
 
-The remaining Phase 2 closure step is to capture the normalized scenarios from
-a clean source commit, review the fixed-reference differences, explicitly
-accept only the deterministic fixture-label change, and rerun the final gate.
+Fixed-reference completion evidence (2026-07-24):
+
+- all 11 scenarios were captured from clean Phase 2 source commit `6979318` on
+  the exact 1600 x 1200 physical / 800 x 600 logical / scale-2 / 60 Hz profile;
+- visual review confirmed the intended product-content change was limited to
+  replacing random fixture names and paths with `visual-project` and
+  `$VISUAL_PROJECT`;
+- the comparison exposed a Phase 1 evidence defect: its first four baselines
+  were captured before 18:00 with the normal compositor color state, while the
+  remaining seven abruptly shifted darker beginning three seconds after 18:00,
+  consistent with the observed Zoom screen-share transition;
+- the post-presentation Phase 2 set is internally color-consistent, and the
+  acceptance rationale explicitly records both deterministic fixture
+  normalization and, for the affected seven, correction of the external
+  compositor-state contamination;
+- every reviewed candidate was explicitly accepted, after which all 11 strict
+  comparisons returned SSIM 1.0, zero changed pixels, and zero masked pixels
+  across 1,920,000 compared pixels per scenario; and
+- the LG display was restored to its 3440 x 1440 / scale-1 / 60 Hz mode and
+  independently verified there.
 
 ### Phase 3 — Workspace Shell, Pane Materials, Density, And Focus
 
@@ -655,8 +671,7 @@ Defer until the complete system above succeeds without them:
 
 ## Immediate Next Action
 
-Close Phase 2's fixed-reference evidence from a clean source commit, then
-implement Phase 3 only: workspace canvas/pane/chrome/separator materials,
+Implement Phase 3 only: workspace canvas/pane/chrome/separator materials,
 header and status rails, pane titles and badges, compact focus and separator
 interaction states, floating-pane depth, initial/minimum window geometry, and
 the compact/comfortable density contract. Do not pull overlays, workflow

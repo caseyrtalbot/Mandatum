@@ -763,8 +763,18 @@ developer unfamiliar with the current implementation can identify:
   The first fixed-reference comparison also exposed random temporary fixture
   paths in review-facing scenes; the harness now normalizes those exact
   isolated identities and proves independently prepared snapshots equal.
-  Fixed-reference capture and explicit acceptance from the clean Phase 2
-  source commit remain pending and are not claimed by this entry.
+  All 11 scenarios were then captured from clean source commit `6979318` on
+  the exact LG scale-2 / 60 Hz profile. Visual review confirmed the intended
+  content change was limited to `visual-project` and `$VISUAL_PROJECT`.
+  Comparison also exposed that Phase 1's first four images had the normal color
+  state while the seven beginning three seconds after 18:00 were uniformly
+  darker, consistent with the observed Zoom screen-share transition at the
+  class boundary. The post-class Phase 2 set was internally consistent; its
+  explicit acceptance reasons record fixture normalization and, for those
+  seven, correction of the external compositor-state contamination. All 11
+  accepted comparisons then returned SSIM 1.0, zero changed pixels, zero
+  masked pixels, and 1,920,000 compared pixels. The display was restored and
+  verified at 3440 x 1440 / scale 1 / 60 Hz before the final gate.
 
 ## Completion Rule
 

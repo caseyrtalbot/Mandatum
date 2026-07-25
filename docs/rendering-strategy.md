@@ -197,11 +197,14 @@ provisioned static faces; shared baselines and clipping fail closed, and metric
 generation plus slot are part of shaping-cache identity. Direct UI colors come
 from `Theme.ui`, never from terminal ANSI identity.
 
-The accepted Phase 1 reference set lives under
+The current accepted Phase 2 reference set lives under
 `spikes/frontend-wgpu/visual-baselines/casey-m4pro-metal-scale2/`. Its 11
-baseline/metadata pairs record the current native surface from clean source
-commit `ebd7ee4`; later presentation work compares against these files and may
-replace them only through explicit reviewed acceptance.
+baseline/metadata pairs record the normalized native surface from clean source
+commit `6979318`; later presentation work compares against these files and may
+replace them only through explicit reviewed acceptance. The seven Phase 1
+images captured after an external compositor color-state transition were
+replaced during Phase 2 with a clean, internally consistent post-presentation
+set; the accepted metadata records that correction.
 
 ## Resize And Rewrap
 
