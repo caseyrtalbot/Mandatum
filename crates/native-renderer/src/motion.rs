@@ -303,11 +303,14 @@ impl PresentationMotion {
             .expect("motion sampling requires a stable target")
             .clone();
         let resolved = self.sample_without_scheduling(&target, now);
-        self.pointer_geometry_moving = self.active.iter().any(|active| {
-            active.role == TransitionRole::PaneGeometry
-                || (active.role == TransitionRole::Overlay
-                    && active.properties.contains(&TransitionProperty::Scale))
-        });
+        // Only pane-geometry motion invalidates hit targets: panes really
+        // move, so clicks against the previous layout would land wrong. An
+        // overlay's entrance scale is cosmetic — its hit rects are already
+        // final — so hover must keep tracking through it.
+        self.pointer_geometry_moving = self
+            .active
+            .iter()
+            .any(|active| active.role == TransitionRole::PaneGeometry);
         self.next_deadline = self
             .active
             .iter()
@@ -1175,7 +1178,11 @@ mod tests {
         let entered = motion.resolve(overlay.clone(), SceneMotionPolicy::default(), origin);
         assert_eq!(material_alpha(&entered), Some(0));
         assert!(material_rect(&entered).size.width_units() < rect.size.width_units());
-        assert!(motion.pointer_geometry_is_moving());
+        assert!(
+            !motion.pointer_geometry_is_moving(),
+            "an overlay's entrance scale is cosmetic: its hit rects are \
+             already final, so hover keeps tracking through it"
+        );
 
         let midpoint = motion.resolve(
             overlay.clone(),
