@@ -205,6 +205,22 @@ impl AppEventSender {
         }
     }
 
+    /// Re-fire the frontend wake when the queue is still non-empty.
+    ///
+    /// `send` wakes only on the empty→non-empty transition, so a consumer that
+    /// stops draining before the queue empties — a drain cut short by its
+    /// budget or its deadline — must re-arm the wake itself or the remainder
+    /// strands until the frontend's next heartbeat.
+    pub(crate) fn rearm_wake(&self) {
+        let queued = {
+            let state = self.state.lock().expect("app event wake state lock");
+            state.queued_events > 0
+        };
+        if queued && let Some(wake) = &self.wake {
+            wake();
+        }
+    }
+
     fn finish_receive(state: &mut WakeState) {
         state.queued_events = state
             .queued_events

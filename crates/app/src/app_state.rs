@@ -83,6 +83,13 @@ use crate::{
 /// shell loop; the reader-side flow gates bound how much can queue at all.
 const DRAIN_EVENT_BUDGET: usize = 256;
 
+/// Wall-clock ceiling on one `drain_events` call, checked after each applied
+/// event. The event budget alone bounds nothing useful: a single PTY chunk is
+/// up to 8 KiB whose parse can cost hundreds of milliseconds, so a
+/// budget-only drain can hold the frontend's loop — and every keystroke queued
+/// behind it — for seconds under a flood.
+const DRAIN_DEADLINE: Duration = Duration::from_millis(3);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CompositionTarget {
     Prompt,
@@ -1356,15 +1363,25 @@ impl AppState {
 
     /// Apply what is already buffered without blocking (burst drain: pointer
     /// drags and PTY floods arrive faster than any redraw), bounded to
-    /// [`DRAIN_EVENT_BUDGET`] events per call. The bound is what keeps a
-    /// producer that outruns the consumer (a `yes`/`cat` flood) from pinning
-    /// the loop in here forever: the shell always gets back to draw() and
-    /// the redraw-cap check between drains.
+    /// [`DRAIN_EVENT_BUDGET`] events and [`DRAIN_DEADLINE`] of work per call.
+    /// The bounds are what keep a producer that outruns the consumer (a
+    /// `yes`/`cat` flood) from pinning the loop in here forever: the shell
+    /// always gets back to draw() and the redraw-cap check between drains.
     pub(crate) fn drain_events(&mut self) -> usize {
         self.drain_events_bounded(DRAIN_EVENT_BUDGET)
     }
 
     pub(crate) fn drain_events_bounded(&mut self, budget: usize) -> usize {
+        self.drain_events_until(budget, Instant::now() + DRAIN_DEADLINE)
+    }
+
+    /// Apply buffered events until the event budget or `deadline` is spent,
+    /// then re-arm the frontend wake for whatever is still queued. Both
+    /// exhaustion paths end the same way, so a drain cut short by cost strands
+    /// nothing: the frontend gets woken again exactly as it does when the
+    /// event budget runs out. At least one event is applied per call so a
+    /// single expensive event can never stall the queue.
+    fn drain_events_until(&mut self, budget: usize, deadline: Instant) -> usize {
         let mut drained = 0;
         for _ in 0..budget.min(DRAIN_EVENT_BUDGET) {
             if self.should_quit {
@@ -1377,7 +1394,11 @@ impl AppState {
                 }
                 Err(_) => break,
             }
+            if Instant::now() >= deadline {
+                break;
+            }
         }
+        self.runtime.rearm_frontend_wake();
         drained
     }
 
@@ -2314,28 +2335,54 @@ impl AppState {
         let Some(effect) = self.runtime.apply_pty_event(event) else {
             return;
         };
-        match effect {
-            RuntimePtyEffect::TerminalRead { pane_id, bytes } if self.debug_status => {
-                self.status = format!("read {bytes} byte(s) from {pane_id}")
+        // Output the parser ignored (queries, unhandled OSCs, mode sets)
+        // changes nothing presentable, so it must not force a scene rebuild
+        // and a GPU frame. Every other effect moves status text, so it does.
+        let presentation_changed = match effect {
+            RuntimePtyEffect::TerminalRead {
+                pane_id,
+                bytes,
+                screen_changed,
+            } => {
+                if self.debug_status {
+                    self.status = format!("read {bytes} byte(s) from {pane_id}");
+                    true
+                } else {
+                    screen_changed
+                }
             }
-            RuntimePtyEffect::TaskRead { pane_id, bytes } if self.debug_status => {
-                self.status = format!("read {bytes} task byte(s) from {pane_id}")
+            RuntimePtyEffect::TaskRead {
+                pane_id,
+                bytes,
+                screen_changed,
+            } => {
+                if self.debug_status {
+                    self.status = format!("read {bytes} task byte(s) from {pane_id}");
+                    true
+                } else {
+                    screen_changed
+                }
             }
             RuntimePtyEffect::TerminalParserFailed { pane_id, error } => {
-                self.status = format!("terminal parser failed for {pane_id}: {error}")
+                self.status = format!("terminal parser failed for {pane_id}: {error}");
+                true
             }
             RuntimePtyEffect::TaskParserFailed { pane_id, error } => {
-                self.status = format!("task parser failed for {pane_id}: {error}")
+                self.status = format!("task parser failed for {pane_id}: {error}");
+                true
             }
             RuntimePtyEffect::ReaderClosed { pane_id } => {
-                self.status = format!("PTY reader closed for {pane_id}")
+                self.status = format!("PTY reader closed for {pane_id}");
+                true
             }
             RuntimePtyEffect::ReaderFailed { pane_id, error } => {
-                self.status = format!("PTY reader failed for {pane_id}: {error}")
+                self.status = format!("PTY reader failed for {pane_id}: {error}");
+                true
             }
-            RuntimePtyEffect::TerminalRead { .. } | RuntimePtyEffect::TaskRead { .. } => {}
+        };
+        if presentation_changed {
+            self.mark_redraw();
         }
-        self.mark_redraw();
     }
 
     /// Heartbeat work: notice exited children. Called from `tick_runtime`

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
@@ -2095,6 +2096,75 @@ fn drain_events_bounds_work_per_call() {
     );
 }
 
+// The event budget bounds event *count*, not cost: one PTY chunk can take
+// hundreds of milliseconds to parse, so a drain must also stop at a
+// wall-clock deadline. Stopping early is only safe if it re-arms the
+// frontend wake, which fires on the empty->non-empty transition alone —
+// otherwise the remainder strands until the frontend's next heartbeat.
+#[test]
+fn drain_stops_at_its_deadline_and_rearms_the_frontend_wake() {
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&wakes);
+    let mut state = AppState::new_with_frontend_wake(
+        test_config(),
+        Some(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })),
+    );
+    let sender = state.event_sender();
+    for _ in 0..8 {
+        sender.send(stale_pty_output()).unwrap();
+    }
+    let wakes_before = wakes.load(Ordering::SeqCst);
+
+    let drained = state.drain_events_until(DRAIN_EVENT_BUDGET, Instant::now());
+
+    assert_eq!(drained, 1, "an expired deadline must still apply one event");
+    assert!(
+        wakes.load(Ordering::SeqCst) > wakes_before,
+        "a drain cut short by its deadline must re-arm the frontend wake"
+    );
+    assert!(
+        state.runtime.try_recv_event().is_ok(),
+        "the events past the deadline must stay queued"
+    );
+}
+
+// The deadline is additive: with time to spare, a drain still spends the
+// whole event budget in one call.
+#[test]
+fn drain_with_a_generous_deadline_spends_the_event_budget() {
+    let mut state = state();
+    let sender = state.event_sender();
+    for _ in 0..DRAIN_EVENT_BUDGET + 10 {
+        sender.send(stale_pty_output()).unwrap();
+    }
+
+    let drained =
+        state.drain_events_until(DRAIN_EVENT_BUDGET, Instant::now() + Duration::from_secs(60));
+
+    assert_eq!(drained, DRAIN_EVENT_BUDGET);
+    assert!(
+        state.runtime.try_recv_event().is_ok(),
+        "events beyond the budget must stay queued"
+    );
+}
+
+/// A PTY event for a pane with no runtime: cheap to apply (the identity
+/// check rejects it) so drain-bounding tests measure the bound, not the
+/// parser.
+fn stale_pty_output() -> AppEvent {
+    AppEvent::Pty(
+        PtyRuntimeEvent::Output {
+            pane_id: PaneId::new("pane-none"),
+            restart_generation: 0,
+            runtime_token: 0,
+            bytes: b"x".to_vec(),
+        },
+        None,
+    )
+}
+
 // The flood regression the stranger test found: an infinite producer
 // (`yes`) must leave the workstation bounded in memory, responsive to
 // input, and quittable — the reader-side flow gate plus the bounded
@@ -2911,6 +2981,42 @@ fn old_reader_events_after_restart_are_ignored() {
     assert!(
         !rendered.contains("OLD_READER_OUTPUT"),
         "old pre-restart output was applied to the fresh runtime"
+    );
+
+    state.shutdown();
+}
+
+// Output the parser ignores — an OSC title set, queries, mode changes —
+// leaves the screen exactly as it was, so it must not bump the scene
+// generation: under a flood every such chunk would otherwise buy a full
+// scene rebuild and a GPU frame that draws the same pixels.
+#[test]
+fn pty_output_marks_a_redraw_only_when_the_screen_changed() {
+    let mut state = live_state();
+    state.handle_terminal_resize(80, 24);
+    let pane_id = PaneId::new("pane-1");
+    let runtime = state.runtime.terminals().get(&pane_id).unwrap();
+    let restart_generation = runtime.restart_generation;
+    let runtime_token = runtime.runtime_token;
+    let output = |bytes: &[u8]| PtyRuntimeEvent::Output {
+        pane_id: pane_id.clone(),
+        restart_generation,
+        runtime_token,
+        bytes: bytes.to_vec(),
+    };
+
+    let quiet = state.scene_generation();
+    state.apply_pty_runtime_event(output(b"\x1b]0;window title\x07"));
+    assert_eq!(
+        state.scene_generation(),
+        quiet,
+        "PTY output that changed no screen state forced a frame"
+    );
+
+    state.apply_pty_runtime_event(output(b"visible output"));
+    assert!(
+        state.scene_generation() > quiet,
+        "PTY output that wrote the grid did not mark a redraw"
     );
 
     state.shutdown();

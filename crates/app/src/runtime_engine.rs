@@ -84,12 +84,34 @@ impl std::error::Error for RuntimeReconcileError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimePtyEffect {
-    TerminalRead { pane_id: PaneId, bytes: usize },
-    TaskRead { pane_id: PaneId, bytes: usize },
-    TerminalParserFailed { pane_id: PaneId, error: String },
-    TaskParserFailed { pane_id: PaneId, error: String },
-    ReaderClosed { pane_id: PaneId },
-    ReaderFailed { pane_id: PaneId, error: String },
+    /// Parsed PTY output. `screen_changed` is the parser's own dirtiness
+    /// verdict: chunks that only carry queries, ignored OSCs, or mode sets
+    /// leave the grid untouched and must not force a frame.
+    TerminalRead {
+        pane_id: PaneId,
+        bytes: usize,
+        screen_changed: bool,
+    },
+    TaskRead {
+        pane_id: PaneId,
+        bytes: usize,
+        screen_changed: bool,
+    },
+    TerminalParserFailed {
+        pane_id: PaneId,
+        error: String,
+    },
+    TaskParserFailed {
+        pane_id: PaneId,
+        error: String,
+    },
+    ReaderClosed {
+        pane_id: PaneId,
+    },
+    ReaderFailed {
+        pane_id: PaneId,
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -310,6 +332,11 @@ impl RuntimeEngine {
 
     pub(crate) fn try_recv_event(&self) -> Result<AppEvent, TryRecvError> {
         self.event_tx.try_recv(&self.event_rx)
+    }
+
+    /// Re-arm the frontend wake for events a bounded drain left queued.
+    pub(crate) fn rearm_frontend_wake(&self) {
+        self.event_tx.rearm_wake();
     }
 
     /// Raw registry inspection is test-only. Production callers use the
@@ -1042,9 +1069,10 @@ impl RuntimeEngine {
             PtyRuntimeEvent::Output { pane_id, bytes, .. } => {
                 if let Some(runtime) = self.terminals.get_mut(&pane_id) {
                     return Some(match runtime.parser.feed_pty_bytes(&bytes) {
-                        Ok(_) => RuntimePtyEffect::TerminalRead {
+                        Ok(update) => RuntimePtyEffect::TerminalRead {
                             pane_id,
                             bytes: bytes.len(),
+                            screen_changed: update.screen_changed,
                         },
                         Err(error) => {
                             let error = error.to_string();
@@ -1058,9 +1086,10 @@ impl RuntimeEngine {
                     .get_mut(&pane_id)
                     .expect("an authenticated PTY event has a terminal or task runtime");
                 Some(match task.runtime.parser.feed_pty_bytes(&bytes) {
-                    Ok(_) => RuntimePtyEffect::TaskRead {
+                    Ok(update) => RuntimePtyEffect::TaskRead {
                         pane_id,
                         bytes: bytes.len(),
+                        screen_changed: update.screen_changed,
                     },
                     Err(error) => {
                         let error = error.to_string();

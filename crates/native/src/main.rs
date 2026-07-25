@@ -413,14 +413,15 @@ impl App {
         }
     }
 
-    fn drain_runtime(&mut self) -> (bool, bool) {
+    /// Apply one bounded slice of runtime work. The drain is bounded by both
+    /// an event budget and a wall-clock deadline, and re-sends this loop's
+    /// wake itself for anything it leaves queued, so the caller only has to
+    /// decide whether the slice changed the scene.
+    fn drain_runtime(&mut self) -> bool {
         let generation = self.host().scene_generation();
-        let drained = self.host_mut().drain_runtime_bounded(EVENT_DRAIN_BUDGET);
+        let _ = self.host_mut().drain_runtime_bounded(EVENT_DRAIN_BUDGET);
         self.apply_effects();
-        (
-            drained == EVENT_DRAIN_BUDGET,
-            self.host().scene_generation() != generation,
-        )
+        self.host().scene_generation() != generation
     }
 
     fn render_frame(&mut self) -> Result<(), GpuRenderError> {
@@ -796,15 +797,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.service_scheduled_work(event_loop) {
                     return;
                 }
-                let (more_pending, scene_changed) = self.drain_runtime();
+                let scene_changed = self.drain_runtime();
                 if self.exit_if_requested(event_loop) {
                     return;
-                }
-                if more_pending {
-                    // Wake coalescing remains set until the queue empties, so
-                    // continue bounded draining through the event loop rather
-                    // than waiting for a successful present or heartbeat.
-                    let _ = self.wake_proxy.send_event(UserEvent::Wake);
                 }
                 if scene_changed {
                     self.request_redraw();
@@ -824,7 +819,9 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                let (more_pending, _scene_changed) = self.drain_runtime();
+                // The frame below repaints regardless, so the drain's
+                // scene-change verdict is not needed here.
+                self.drain_runtime();
                 if self.exit_if_requested(event_loop) {
                     return;
                 }
@@ -835,10 +832,6 @@ impl ApplicationHandler<UserEvent> for App {
                     self.cancel_and_disable_ime();
                     self.shutdown_host();
                     event_loop.exit();
-                    return;
-                }
-                if more_pending {
-                    let _ = self.wake_proxy.send_event(UserEvent::Wake);
                 }
             }
             WindowEvent::Resized(size) => {
