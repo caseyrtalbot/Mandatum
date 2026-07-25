@@ -683,7 +683,7 @@ Status: accepted (2026-07-09)
 Decision: two bounds make the event loop calm under a PTY flood. (1) Each
 PTY reader thread owns a flow gate (`PtyFlowControl`,
 `crates/app/src/process_events.rs`): it must acquire a credit for every
-chunk before sending, blocks at 256 KiB in flight per pane — leaving the
+chunk before sending, blocks at 64 KiB in flight per pane — leaving the
 flooding child blocked in the kernel pipe instead of ballooning the app
 heap — and each credit travels with its event and releases on drop, so
 applied, stale-rejected, discarded, and channel-torn-down events all
@@ -701,7 +701,7 @@ That claim only became true with these bounds.
 
 Consequences:
 
-- worst-case queued PTY memory is 256 KiB per pane plus one chunk
+- worst-case queued PTY memory is 64 KiB per pane plus one chunk
 - input events queue behind at most that bounded backlog, so the quit
   chord and typing stay responsive during a flood
 - a finite flood drains at full parser speed; only an infinite producer

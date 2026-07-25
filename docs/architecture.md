@@ -139,7 +139,7 @@ unified channel (`AppEvent::Input | Pty | Agent`) behind app-owned
 `AppEventSender`, a 250 ms heartbeat, and an 8 ms redraw cap. The sender can
 invoke one frontend-neutral callback per non-empty queue interval; shared
 queue accounting makes the last receive and next enqueue one race-safe state
-transition. PTY readers remain bounded by flow-credit backpressure (256 KiB in
+transition. PTY readers remain bounded by flow-credit backpressure (64 KiB in
 flight per pane).
 
 The current native shell binds that neutral callback to

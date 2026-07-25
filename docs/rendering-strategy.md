@@ -94,7 +94,7 @@ Current bars and boundedness contracts:
   procedure live in
   [verification.md](verification.md#input-latency-regression-check))
 - bounded memory and responsiveness under a PTY flood: flow-credit
-  backpressure caps in-flight bytes at 256 KiB per pane; the quit chord
+  backpressure caps in-flight bytes at 64 KiB per pane; the quit chord
   works during a `yes` flood (test
   `pty_flood_stays_bounded_responsive_and_quittable`)
 - bounded scrollback memory (2000-row grid limit)

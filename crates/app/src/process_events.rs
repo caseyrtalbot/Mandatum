@@ -12,10 +12,12 @@ use crate::events::{AppEvent, AppEventSender};
 const PTY_READ_CHUNK_BYTES: usize = 8192;
 
 /// The most PTY output one pane may have in flight (read but not yet applied)
-/// before its reader thread blocks instead of sending more. While the reader
-/// is blocked the child's writes back up in the kernel pipe, so a flooding
-/// `yes`/`cat` blocks in the OS instead of ballooning the app heap.
-pub(crate) const MAX_IN_FLIGHT_BYTES: usize = 256 * 1024;
+/// before its reader thread blocks instead of sending more. Four to eight read
+/// chunks preserve streaming throughput without putting a large parse backlog
+/// ahead of newly queued input. While the reader is blocked the child's writes
+/// back up in the kernel pipe, so a flooding `yes`/`cat` blocks in the OS
+/// instead of ballooning the app heap or delaying workspace controls.
+pub(crate) const MAX_IN_FLIGHT_BYTES: usize = 64 * 1024;
 
 /// Per-reader flow control between a PTY reader thread and the main loop.
 ///
