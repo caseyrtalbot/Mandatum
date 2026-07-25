@@ -11,6 +11,7 @@ mod artifact_preview;
 mod attention;
 mod clipboard;
 mod config;
+mod config_write;
 mod copy_mode;
 mod events;
 mod frontend;

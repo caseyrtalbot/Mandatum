@@ -5332,3 +5332,35 @@ fn opening_appearance_closes_other_overlays_and_vice_versa() {
     assert!(state.appearance_overlay_scene(size).is_none());
     assert!(state.help_overlay_scene(size).is_some());
 }
+
+#[test]
+fn appearance_adjustments_persist_to_the_user_config_file() {
+    let temp = std::env::temp_dir().join(format!(
+        "mandatum-appearance-persist-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    std::fs::create_dir_all(&temp).unwrap();
+    let user_file = temp.join("config.toml");
+    let mut config = test_config();
+    config.user_config_file = Some(user_file.clone());
+    let mut state = AppState::new(config);
+
+    state.dispatch(CommandId::AdjustAppearance);
+    state.handle_key(key(KeyCode::Right));
+
+    let text = std::fs::read_to_string(&user_file).expect("adjustment wrote the user config");
+    let expected = format!("name = \"{}\"", state.theme().name);
+    assert!(text.contains(&expected), "{text}");
+    assert!(text.contains("[theme.terminal]"), "{text}");
+
+    // The written file reproduces the live values through the real loader.
+    let loaded = crate::config::load_config(Some(&user_file), &temp.join("missing.toml"));
+    assert_eq!(loaded.theme.name, state.theme().name);
+    assert_eq!(
+        loaded.theme.terminal_palette.background,
+        state.theme().terminal_palette.background
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}

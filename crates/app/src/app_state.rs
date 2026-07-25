@@ -42,6 +42,7 @@ use crate::{
     appearance::{self, AppearanceViewState},
     artifact_preview::ArtifactPreviewStore,
     config::{AgentConnectorKind, effective_runtime_settings, load_config, project_config_file},
+    config_write::{AppearanceUpdate, write_appearance_update},
     copy_mode::CopyModeState,
     events::AppEvent,
     frontend_effect::FrontendEffect,
@@ -4051,6 +4052,24 @@ impl AppState {
             return;
         };
         self.status = appearance::adjust_theme(&mut self.theme, field, direction);
+        self.persist_appearance();
+    }
+
+    /// Persist the appearance-owned keys to the user config file so the
+    /// adjustment survives restart. Failure degrades to a status warning:
+    /// the live session keeps the change either way.
+    fn persist_appearance(&mut self) {
+        let Some(path) = self.user_config_file.as_deref() else {
+            return;
+        };
+        let update = AppearanceUpdate {
+            theme_name: Some(self.theme.name.clone()),
+            terminal_background: Some(self.theme.terminal_palette.background),
+            ..AppearanceUpdate::default()
+        };
+        if let Err(problem) = write_appearance_update(path, &update) {
+            self.status = format!("{}; {problem}", self.status);
+        }
     }
 
     /// The appearance overlay for the current frame, `None` while closed.
