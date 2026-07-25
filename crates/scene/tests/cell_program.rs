@@ -1648,9 +1648,10 @@ fn appearance_bars_paint_truthful_stop_colors_with_a_contrast_marker() {
 
     // The bar row is the second item block (rows are two cells tall and start
     // at the inner rect). Inner starts at (1,1); bar cells start after the
-    // 22-cell label region.
+    // label region, sized to the longest label ("Background hue", 14) plus
+    // its three marker/padding cells.
     let bar_y = 3;
-    let first_bar_cell = program.cell_at(23, bar_y).expect("bar cell painted");
+    let first_bar_cell = program.cell_at(1 + 17, bar_y).expect("bar cell painted");
     assert_eq!(
         first_bar_cell.style.background,
         SceneColor::Rgb(10, 10, 10),

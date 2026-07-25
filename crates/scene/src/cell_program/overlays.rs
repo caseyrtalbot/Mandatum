@@ -44,9 +44,17 @@ impl Compiler {
         if inner.is_empty() {
             return;
         }
-        // Bars need room beyond their label; below this width fall back to
-        // value-only rows so nothing paints outside the overlay.
-        let label_width = usize::from(inner.width).min(22);
+        // The label region fits the longest row label plus its two-cell
+        // selection marker; bars paint in the room beyond it. On a narrower
+        // overlay the label region shrinks so nothing paints outside.
+        let label_width = usize::from(inner.width).min(
+            appearance
+                .rows
+                .iter()
+                .map(|row| display_width(&row.label).saturating_add(3))
+                .max()
+                .unwrap_or(24),
+        );
         for (row, index) in
             layout::session_map_item_window(inner, appearance.rows.len(), Some(appearance.selected))
                 .enumerate()
