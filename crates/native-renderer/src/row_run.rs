@@ -319,13 +319,17 @@ pub enum RowRunFallbackReason {
     NonFiniteLayout,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowRunFallbackAction {
-    SplitAtSpan(usize),
+    /// Partition around the complete offending cluster interval, never at a
+    /// bare span boundary: a ligature cluster may own several spans.
+    SplitAroundCluster {
+        cluster: Range<usize>,
+    },
     AnchorAll,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowRunAdmission {
     Accepted,
     Fallback {
@@ -362,9 +366,6 @@ pub fn admit_layout(
 
     let groups = match cluster_groups(run, layout) {
         Ok(groups) => groups,
-        Err(RowRunFallbackReason::PartialCellCluster) => {
-            return fallback_at(run, RowRunFallbackReason::PartialCellCluster, None);
-        }
         Err(reason) => return anchored(reason),
     };
     let mut previous_bytes_end = 0usize;
@@ -380,20 +381,28 @@ pub fn admit_layout(
             return fallback_at(
                 run,
                 RowRunFallbackReason::PartialCellCluster,
-                span_at_byte(run, group.bytes.start),
+                span_at_byte(run, group.bytes.start).map(|span| (span, span)),
             );
         };
         if group.bytes.start != previous_bytes_end
             || run.byte_cells[first].cells.start != previous_cell_end
         {
-            return fallback_at(run, RowRunFallbackReason::PartialCellCluster, Some(first));
+            return fallback_at(
+                run,
+                RowRunFallbackReason::PartialCellCluster,
+                Some((first, last)),
+            );
         }
         let expected_left = f32::from(run.byte_cells[first].cells.start) * cell_width;
         let expected_right = f32::from(run.byte_cells[last].cells.end) * cell_width;
         if !within_half_physical_pixel(group.left - expected_left, logical_to_physical_scale)
             || !within_half_physical_pixel(group.right - expected_right, logical_to_physical_scale)
         {
-            return fallback_at(run, RowRunFallbackReason::AdvanceMismatch, Some(first));
+            return fallback_at(
+                run,
+                RowRunFallbackReason::AdvanceMismatch,
+                Some((first, last)),
+            );
         }
         previous_bytes_end = group.bytes.end;
         previous_cell_end = run.byte_cells[last].cells.end;
@@ -403,7 +412,7 @@ pub fn admit_layout(
         return fallback_at(
             run,
             RowRunFallbackReason::PartialCellCluster,
-            span_at_byte(run, previous_bytes_end),
+            span_at_byte(run, previous_bytes_end).map(|span| (span, span)),
         );
     }
 
@@ -415,7 +424,7 @@ pub fn admit_layout(
         return fallback_at(
             run,
             RowRunFallbackReason::AdvanceMismatch,
-            run.byte_cells.len().checked_sub(1),
+            run.byte_cells.len().checked_sub(1).map(|last| (last, last)),
         );
     }
     RowRunAdmission::Accepted
@@ -506,20 +515,68 @@ fn anchored(reason: RowRunFallbackReason) -> RowRunAdmission {
     }
 }
 
+/// Choose the cheapest terminating fallback for a rejected run.
+///
+/// `offending` is the inclusive span interval owned by the cluster that failed
+/// admission. Reporting the whole interval keeps a multi-span ligature cluster
+/// intact, and retiring that cluster in one step is what stops the split
+/// policy from peeling one grapheme per round and re-shaping the remainder.
+/// An unidentifiable offender, or a run with a single span, has nothing left
+/// to partition and anchors outright.
 fn fallback_at(
     run: &RowRun,
     reason: RowRunFallbackReason,
-    offending_span: Option<usize>,
+    offending: Option<(usize, usize)>,
 ) -> RowRunAdmission {
     let spans = run.byte_cells.len();
-    let action = if spans <= 1 {
-        RowRunFallbackAction::AnchorAll
-    } else {
-        let offending = offending_span.unwrap_or(0);
-        let boundary = offending.clamp(1, spans - 1);
-        RowRunFallbackAction::SplitAtSpan(boundary)
+    let Some((first, last)) = offending.filter(|_| spans > 1) else {
+        return anchored(reason);
     };
-    RowRunAdmission::Fallback { reason, action }
+    let start = first.min(spans - 1);
+    let cluster = start..last.saturating_add(1).clamp(start + 1, spans);
+    RowRunAdmission::Fallback {
+        reason,
+        action: RowRunFallbackAction::SplitAroundCluster { cluster },
+    }
+}
+
+/// One piece of a rejected run partitioned around its offending cluster.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowRunPartitionPiece {
+    pub run: RowRun,
+    /// Span interval this piece occupies inside the partitioned run.
+    pub spans: Range<usize>,
+    /// The offending cluster is anchored directly: it already failed
+    /// admission in place, so a solo re-shape only pays for the same outcome.
+    pub forced_anchor: bool,
+}
+
+/// Partition a rejected run around one complete offending cluster.
+///
+/// The validated prefix and the untested tail stay eligible for contextual
+/// shaping and are re-admitted normally; empty pieces are omitted.
+pub fn partition_around_cluster(
+    run: &RowRun,
+    cluster: Range<usize>,
+) -> Result<Vec<RowRunPartitionPiece>, RowRunBuildError> {
+    let spans = run.byte_cells.len();
+    if cluster.start >= cluster.end || cluster.end > spans {
+        return Err(RowRunBuildError::InvalidSplitBoundary {
+            boundary: cluster.start,
+            spans,
+        });
+    }
+    [0..cluster.start, cluster.clone(), cluster.end..spans]
+        .into_iter()
+        .filter(|interval| interval.start < interval.end)
+        .map(|interval| {
+            Ok(RowRunPartitionPiece {
+                run: slice_run(run, interval.clone())?,
+                forced_anchor: interval == cluster,
+                spans: interval,
+            })
+        })
+        .collect()
 }
 
 /// Split a rejected run at a complete grapheme boundary for another shaping
@@ -544,7 +601,8 @@ pub fn anchored_fallback_runs(run: &RowRun) -> Result<Vec<RowRun>, RowRunBuildEr
         .collect()
 }
 
-fn slice_run(run: &RowRun, spans: Range<usize>) -> Result<RowRun, RowRunBuildError> {
+/// Copy one complete span interval out of a run as a standalone shaping unit.
+pub fn slice_run(run: &RowRun, spans: Range<usize>) -> Result<RowRun, RowRunBuildError> {
     let selected =
         run.byte_cells
             .get(spans.clone())
@@ -822,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn mapping_failure_requests_a_complete_grapheme_split() {
+    fn mapping_failure_partitions_around_the_offending_cluster() {
         let program = program_for_rows(vec![vec![
             SceneCell::grapheme("a", SceneCellStyle::default()),
             SceneCell::grapheme("b", SceneCellStyle::default()),
@@ -859,12 +917,162 @@ mod tests {
             admit_layout(run, &layout, 10.0, 1.0),
             RowRunAdmission::Fallback {
                 reason: RowRunFallbackReason::AdvanceMismatch,
-                action: RowRunFallbackAction::SplitAtSpan(1),
+                action: RowRunFallbackAction::SplitAroundCluster { cluster: 1..2 },
             }
         );
-        let (left, right) = split_at_span(run, 1).unwrap();
-        assert_eq!((left.text.as_str(), left.width), ("a", 1));
-        assert_eq!((right.text.as_str(), right.width), ("bc", 2));
+        // The old policy peeled span 0 and re-shaped "bc", which failed at its
+        // own span 0 again. One partition retires the offender instead.
+        let pieces = partition_around_cluster(run, 1..2).unwrap();
+        assert_eq!(
+            pieces
+                .iter()
+                .map(|piece| (
+                    piece.run.text.as_str(),
+                    piece.run.width,
+                    piece.forced_anchor
+                ))
+                .collect::<Vec<_>>(),
+            vec![("a", 1, false), ("b", 1, true), ("c", 1, false)]
+        );
+        assert_eq!(
+            pieces
+                .iter()
+                .map(|piece| piece.spans.clone())
+                .collect::<Vec<_>>(),
+            vec![0..1, 1..2, 2..3]
+        );
+        assert_eq!(pieces[2].run.x, run.x + 2);
+    }
+
+    #[test]
+    fn partition_keeps_a_multi_span_ligature_cluster_whole() {
+        let program = program_for_rows(vec![vec![
+            SceneCell::grapheme("a", SceneCellStyle::default()),
+            SceneCell::grapheme("-", SceneCellStyle::default()),
+            SceneCell::grapheme(">", SceneCellStyle::default()),
+            SceneCell::grapheme("b", SceneCellStyle::default()),
+        ]]);
+        let plan = build_row_runs(&program, glyph_style).unwrap();
+        let run = content_run(&plan, "a->b");
+        // "->" shapes as one ligature cluster owning spans 1 and 2, and lands
+        // half a cell short of its declared two-cell interval.
+        let layout = LayoutRunFacts {
+            rtl: false,
+            line_width: 35.0,
+            glyphs: vec![
+                LayoutGlyphFacts {
+                    bytes: 0..1,
+                    x: 0.0,
+                    advance: 10.0,
+                    rtl: false,
+                },
+                LayoutGlyphFacts {
+                    bytes: 1..3,
+                    x: 10.0,
+                    advance: 15.0,
+                    rtl: false,
+                },
+                LayoutGlyphFacts {
+                    bytes: 3..4,
+                    x: 25.0,
+                    advance: 10.0,
+                    rtl: false,
+                },
+            ],
+        };
+
+        assert_eq!(
+            admit_layout(run, &layout, 10.0, 1.0),
+            RowRunAdmission::Fallback {
+                reason: RowRunFallbackReason::AdvanceMismatch,
+                action: RowRunFallbackAction::SplitAroundCluster { cluster: 1..3 },
+            }
+        );
+        let pieces = partition_around_cluster(run, 1..3).unwrap();
+        assert_eq!(
+            pieces
+                .iter()
+                .map(|piece| (
+                    piece.run.text.as_str(),
+                    piece.run.width,
+                    piece.forced_anchor
+                ))
+                .collect::<Vec<_>>(),
+            vec![("a", 1, false), ("->", 2, true), ("b", 1, false)]
+        );
+        assert_eq!(pieces[1].run.byte_cells.len(), 2);
+    }
+
+    #[test]
+    fn every_cluster_mismatching_costs_one_admission_per_grapheme() {
+        let row = "abcdefgh"
+            .chars()
+            .map(|character| SceneCell::grapheme(character.to_string(), SceneCellStyle::default()))
+            .collect();
+        let plan = build_row_runs(&program_for_rows(vec![row]), glyph_style).unwrap();
+        let run = content_run(&plan, "abcdefgh");
+        // Every cluster shapes one cell narrow, so no sub-run ever admits.
+        let narrow_layout = |run: &RowRun| LayoutRunFacts {
+            rtl: false,
+            line_width: f32::from(run.width) * 5.0,
+            glyphs: run
+                .byte_cells
+                .iter()
+                .enumerate()
+                .map(|(index, span)| LayoutGlyphFacts {
+                    bytes: span.bytes.clone(),
+                    x: index as f32 * 5.0,
+                    advance: 5.0,
+                    rtl: false,
+                })
+                .collect(),
+        };
+
+        let mut pending = vec![(run.clone(), false)];
+        let mut leaves = Vec::new();
+        let mut admissions = 0usize;
+        while let Some((candidate, forced_anchor)) = pending.pop() {
+            if forced_anchor {
+                leaves.push(candidate);
+                continue;
+            }
+            admissions += 1;
+            match admit_layout(&candidate, &narrow_layout(&candidate), 10.0, 1.0) {
+                RowRunAdmission::Accepted => leaves.push(candidate),
+                RowRunAdmission::Fallback { action, .. } => match action {
+                    RowRunFallbackAction::SplitAroundCluster { cluster } => pending.extend(
+                        partition_around_cluster(&candidate, cluster)
+                            .unwrap()
+                            .into_iter()
+                            .rev()
+                            .map(|piece| (piece.run, piece.forced_anchor)),
+                    ),
+                    RowRunFallbackAction::AnchorAll => pending.extend(
+                        anchored_fallback_runs(&candidate)
+                            .unwrap()
+                            .into_iter()
+                            .rev()
+                            .map(|part| (part, true)),
+                    ),
+                },
+            }
+        }
+
+        // One admission per surviving suffix and no doomed solo re-admission
+        // of an already-rejected cluster. The old peel needed one extra solo
+        // admission per grapheme on top of this.
+        assert_eq!(admissions, run.byte_cells.len());
+        assert_eq!(
+            leaves
+                .iter()
+                .map(|leaf| (leaf.text.clone(), leaf.x, leaf.width))
+                .collect::<Vec<_>>(),
+            "abcdefgh"
+                .chars()
+                .enumerate()
+                .map(|(index, character)| (character.to_string(), run.x + index as u16, 1))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

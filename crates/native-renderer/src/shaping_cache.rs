@@ -81,20 +81,41 @@ impl From<&ByteCellSpan> for ByteCellSpanKey {
 pub(crate) struct ShapingCacheKey {
     context: ShapingCacheContext,
     width: u16,
+    /// Anchored buffers are cached in their own namespace: they were never
+    /// admitted, so no ordinary lookup may ever borrow one.
+    forced_anchor: bool,
     text: Box<str>,
     styles: Box<[ShapingStyleKey]>,
     byte_cells: Box<[ByteCellSpanKey]>,
 }
 
 impl ShapingCacheKey {
-    pub(crate) fn from_run(run: &RowRun, context: ShapingCacheContext) -> Self {
+    pub(crate) fn from_run(
+        run: &RowRun,
+        context: ShapingCacheContext,
+        forced_anchor: bool,
+    ) -> Self {
         Self {
             context,
             width: run.width,
+            forced_anchor,
             text: run.text.clone().into_boxed_str(),
             styles: run.style_ranges.iter().map(ShapingStyleKey::from).collect(),
             byte_cells: run.byte_cells.iter().map(ByteCellSpanKey::from).collect(),
         }
+    }
+
+    /// Input size the renderer's shaped-output accounting expands from.
+    pub(crate) fn text_len(&self) -> usize {
+        self.text.len()
+    }
+
+    pub(crate) fn style_count(&self) -> usize {
+        self.styles.len()
+    }
+
+    pub(crate) fn span_count(&self) -> usize {
+        self.byte_cells.len()
     }
 
     /// Exact bytes directly owned by the key.
@@ -124,6 +145,7 @@ impl ShapingCacheKey {
         Self {
             context,
             width,
+            forced_anchor: false,
             text: text.into(),
             styles: vec![ShapingStyleKey {
                 bytes_start: 0,

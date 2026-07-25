@@ -3,6 +3,7 @@
 // rendered by glyphon. All rendering is per-frame from WorkspaceScene.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,7 +26,7 @@ use winit::window::Window;
 use crate::row_run::{
     LayoutGlyphFacts, LayoutRunFacts, NativeTextGeometry, ResolvedGlyphStyle, RowRun,
     RowRunAdmission, RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, admit_layout,
-    anchored_fallback_runs, build_row_runs, split_at_span,
+    anchored_fallback_runs, build_row_runs, partition_around_cluster, slice_run, split_at_span,
 };
 use crate::shaping_cache::{ShapingCache, ShapingCacheContext, ShapingCacheKey};
 
@@ -697,21 +698,12 @@ fn raster_clip_runs(program: &CellProgram, layer: u16) -> Vec<SceneRect> {
     clips
 }
 
+/// The text-buffer budget is enforced once, on the single row-run plan built
+/// by `prepare_cell_program`; building a throwaway plan here only to count it
+/// doubled the per-frame planning cost.
 fn validate_compiled_program(program: &CellProgram) -> Result<(), SceneCompileError> {
     let instructions = program.cells().count();
-    enforce_resource_limit("cell instructions", instructions, MAX_GPU_CELL_INSTRUCTIONS)?;
-
-    let text_buffers = build_row_runs(program, |cell| ResolvedGlyphStyle {
-        foreground: [0, 0, 0, 255],
-        bold: cell.style.bold,
-        italic: cell.style.italic,
-        underline: cell.style.underline,
-        strikethrough: cell.style.strikethrough,
-    })
-    .map_err(text_program_error)?
-    .runs
-    .len();
-    enforce_resource_limit("text buffers", text_buffers, MAX_GPU_TEXT_BUFFERS)
+    enforce_resource_limit("cell instructions", instructions, MAX_GPU_CELL_INSTRUCTIONS)
 }
 
 fn text_program_error(error: RowRunBuildError) -> SceneCompileError {
@@ -1304,33 +1296,20 @@ fn prepare_cell_program(
     theme: &Theme,
     presentation_plan: &NativePresentationPlan,
 ) -> Result<PreparedCellProgram, SceneCompileError> {
-    let mut topmost = BTreeMap::new();
-    for (x, y, cell, scope) in program.scoped_cells() {
-        topmost.insert(
-            (y, x),
+    // `program.scoped_cells()` already yields final topmost cells in row-major
+    // order, so there is nothing left to resolve by coordinate here.
+    let cells = program
+        .scoped_cells()
+        .map(|(x, y, cell, scope)| {
             (
+                x,
+                y,
                 resolve_program_cell(cell, theme),
                 should_paint_legacy_background(scene, x, y, cell, scope.kind),
                 scope.kind,
                 cell.cursor,
-            ),
-        );
-    }
-
-    let cells = topmost
-        .iter()
-        .map(
-            |(&(y, x), (cell, background_visible, scope, cursor))| {
-                (
-                    x,
-                    y,
-                    cell.clone(),
-                    *background_visible,
-                    *scope,
-                    *cursor,
-                )
-            },
-        )
+            )
+        })
         .collect::<Vec<_>>();
     let mut plan = build_row_runs(program, |cell| resolved_glyph_style(cell, theme))
         .map_err(text_program_error)?;
@@ -1663,10 +1642,30 @@ struct FontObservation {
     sample: String,
 }
 
+/// One retained shaping outcome.
+///
+/// Anchored buffers and fallback decompositions are cached alongside admitted
+/// buffers: a permanently inadmissible run (a fallback face whose advance can
+/// never match the cell) otherwise re-shaped and re-split on every frame, and
+/// a braille spinner alone drives ~10 redraws a second.
 #[derive(Clone, Debug)]
-struct CachedShaping {
-    buffer: Arc<Buffer>,
-    observations: Arc<[FontObservation]>,
+enum CachedShaping {
+    Shaped {
+        buffer: Arc<Buffer>,
+        observations: Arc<[FontObservation]>,
+    },
+    /// The final decomposition a fallback cascade produced for this run,
+    /// stored under the original parent's key so later frames materialize the
+    /// sub-runs directly instead of re-running the cascade.
+    Decomposed(Arc<[CachedDecompositionPart]>),
+}
+
+/// One leaf of a cached decomposition, positioned by span interval so the
+/// entry stays independent of where the parent run lands on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CachedDecompositionPart {
+    spans: Range<usize>,
+    forced_anchor: bool,
 }
 
 #[derive(Debug)]
@@ -1697,13 +1696,21 @@ fn row_shaping_profile(
             metric_slot: 0,
         };
     };
+    // Cosmic-text snaps every monospace advance to `round(font_size)` em
+    // widths, so a fractional physical size (theme Body is 12.5pt) shapes
+    // narrower than the derived advance and fails admission on every row.
+    // Round to whole physical pixels exactly like the terminal path, and
+    // derive the advance from that same rounded size so shaping, admission,
+    // and text-area geometry all agree. Line height stays unrounded: the
+    // native line box must keep matching the planner's logical rect.
+    let font_size = (f32::from(identity.style.point_size_x64) / 64.0 * scale).round();
     let metrics = Metrics::new(
-        f32::from(identity.style.point_size_x64) / 64.0 * scale,
+        font_size,
         identity.style.line_height_units as f32 / 64.0 * scale,
     );
     RowShapingProfile {
         metrics,
-        cell_advance: terminal_cell_advance * (metrics.font_size / terminal_metrics.font_size),
+        cell_advance: terminal_cell_advance * (font_size / terminal_metrics.font_size),
         metric_generation: identity.generation,
         metric_slot: identity.role as u8,
     }
@@ -1805,36 +1812,41 @@ enum ShapedBuffer {
     RowPool(usize),
 }
 
-/// Conservative retained-byte charge for one shaped buffer.
+/// Conservative retained-byte charge for one cached shaping outcome.
 ///
 /// Cosmic-text deliberately hides allocation capacities inside `Buffer`.
 /// Charge every directly retained key/output byte, a fixed buffer floor, and
 /// conservative per-input/per-glyph/per-style expansion. This is an explicit
 /// resource-accounting contract rather than an allocator-specific heap probe.
-fn shaping_cache_accounted_bytes(
-    key: &ShapingCacheKey,
-    run: &RowRun,
-    observations: &[FontObservation],
-) -> usize {
+/// A decomposition retains no buffer, so it is charged for its key and its
+/// leaf list only.
+fn shaping_cache_accounted_bytes(key: &ShapingCacheKey, value: &CachedShaping) -> usize {
     const BUFFER_FLOOR: usize = 1_024;
     const BYTES_PER_INPUT_BYTE: usize = 16;
     const BYTES_PER_GLYPH: usize = 512;
     const BYTES_PER_STYLE_RANGE: usize = 256;
     const BYTES_PER_CELL_SPAN: usize = 128;
 
-    observations.iter().fold(
-        key.owned_bytes()
-            .saturating_add(BUFFER_FLOOR)
-            .saturating_add(run.text.len().saturating_mul(BYTES_PER_INPUT_BYTE))
-            .saturating_add(observations.len().saturating_mul(BYTES_PER_GLYPH))
-            .saturating_add(run.style_ranges.len().saturating_mul(BYTES_PER_STYLE_RANGE))
-            .saturating_add(run.byte_cells.len().saturating_mul(BYTES_PER_CELL_SPAN)),
-        |bytes, observation| {
-            bytes
-                .saturating_add(std::mem::size_of::<FontObservation>())
-                .saturating_add(observation.sample.len())
-        },
-    )
+    match value {
+        CachedShaping::Shaped { observations, .. } => observations.iter().fold(
+            key.owned_bytes()
+                .saturating_add(BUFFER_FLOOR)
+                .saturating_add(key.text_len().saturating_mul(BYTES_PER_INPUT_BYTE))
+                .saturating_add(observations.len().saturating_mul(BYTES_PER_GLYPH))
+                .saturating_add(key.style_count().saturating_mul(BYTES_PER_STYLE_RANGE))
+                .saturating_add(key.span_count().saturating_mul(BYTES_PER_CELL_SPAN)),
+            |bytes, observation| {
+                bytes
+                    .saturating_add(std::mem::size_of::<FontObservation>())
+                    .saturating_add(observation.sample.len())
+            },
+        ),
+        CachedShaping::Decomposed(parts) => key.owned_bytes().saturating_add(
+            parts
+                .len()
+                .saturating_mul(std::mem::size_of::<CachedDecompositionPart>()),
+        ),
+    }
 }
 
 fn shape_row_buffer(
@@ -1848,6 +1860,10 @@ fn shape_row_buffer(
 ) {
     buffer.set_metrics(metrics);
     buffer.set_wrap(Wrap::None);
+    // Quantizes advances to a `cell_width / font_size` grid, which is far finer
+    // than a cell and so does not force whole cells. Proportional fallback
+    // picks — Apple Braille for spinners, Webdings, the STIX faces — still fail
+    // admission, which is what the anchored decomposition handles.
     buffer.set_monospace_width(Some(cell_width));
     buffer.set_size(
         Some((f32::from(row.width) * cell_width).max(1.0)),
@@ -1914,6 +1930,313 @@ fn layout_facts_and_observations(
 
 fn bounded_sample(value: &str) -> String {
     value.chars().take(32).collect()
+}
+
+fn record_row_run_diagnostic(diagnostics: &mut BTreeSet<String>, message: String) {
+    const MAX_ROW_RUN_DIAGNOSTICS: usize = 16;
+    if diagnostics.len() >= MAX_ROW_RUN_DIAGNOSTICS || !diagnostics.insert(message.clone()) {
+        return;
+    }
+    eprintln!("mandatum-native-renderer: {message}");
+}
+
+/// One shaping candidate waiting in a fallback cascade.
+#[derive(Debug)]
+struct PendingRun {
+    run: RowRun,
+    forced_anchor: bool,
+    /// Span interval this piece occupies inside the top-level run whose
+    /// decomposition is being recorded.
+    spans: Range<usize>,
+}
+
+/// Borrowed text-stack state for one row-run shaping pass.
+///
+/// Split out of `GpuText` so the fallback/split protocol and its cache
+/// bookkeeping stay exercisable without a GPU device.
+struct RowShapingPass<'a> {
+    font_system: &'a mut FontSystem,
+    row_buffers: &'a mut RowBufferPool,
+    shaping_cache: &'a mut ShapingCache<CachedShaping>,
+    fallback_report: &'a mut FallbackReport,
+    diagnostics: &'a mut BTreeSet<String>,
+    font_profile: &'a ResolvedFontProfile,
+    font_family: &'a str,
+    cache_enabled: bool,
+    terminal_metrics: Metrics,
+    cell_advance: f32,
+    cell_height: f32,
+    scale: f32,
+    scale_generation: u64,
+}
+
+impl RowShapingPass<'_> {
+    fn row_profile(&self, run: &RowRun) -> RowShapingProfile {
+        row_shaping_profile(run, self.terminal_metrics, self.cell_advance, self.scale)
+    }
+
+    fn cache_context(&self, profile: RowShapingProfile) -> ShapingCacheContext {
+        ShapingCacheContext {
+            font_generation: self.font_profile.generation(),
+            scale_generation: self.scale_generation,
+            metric_generation: profile.metric_generation,
+            metric_slot: profile.metric_slot,
+            renderer_config_generation: SHAPING_POLICY_GENERATION,
+            font_size_bits: profile.metrics.font_size.to_bits(),
+            line_height_bits: profile.metrics.line_height.to_bits(),
+            cell_width_bits: profile.cell_advance.to_bits(),
+            cell_height_bits: self.cell_height.to_bits(),
+        }
+    }
+
+    fn observe_font_output(&mut self, run_text: &str, observations: &[FontObservation]) {
+        if observations.is_empty() && self.fallback_report.observe_missing_glyph(run_text) {
+            self.emit_new_fallback_record();
+        }
+        for observation in observations {
+            if observation.glyph_id == 0
+                && self
+                    .fallback_report
+                    .observe_missing_glyph(&observation.sample)
+            {
+                self.emit_new_fallback_record();
+            }
+            if self.fallback_report.observe_face(
+                self.font_profile,
+                observation.font_id,
+                &observation.sample,
+            ) {
+                self.emit_new_fallback_record();
+            }
+        }
+    }
+
+    fn emit_new_fallback_record(&self) {
+        let Some(record) = self.fallback_report.records().last() else {
+            return;
+        };
+        match record {
+            FallbackRecord::Face {
+                family,
+                postscript_name,
+                sample,
+                ..
+            } => eprintln!(
+                "mandatum-native-renderer: font fallback family={family:?} postscript={postscript_name:?} sample={sample:?}"
+            ),
+            FallbackRecord::MissingGlyph { sample } => {
+                eprintln!("mandatum-native-renderer: missing glyph sample={sample:?}")
+            }
+        }
+    }
+
+    /// Shape every row run, cascading rejected runs into admissible pieces.
+    ///
+    /// Each top-level run owns one cascade, so the leaves it ends up with are
+    /// exactly the decomposition retained under its own cache key.
+    fn run(&mut self, initial: Vec<RowRun>) -> Result<Vec<ShapedRow>, GpuRenderError> {
+        let mut accepted: Vec<ShapedRow> = Vec::new();
+        let mut pending: VecDeque<PendingRun> = VecDeque::new();
+        let mut queued = initial.len();
+
+        for top in initial {
+            queued = queued.saturating_sub(1);
+            let top_spans = top.byte_cells.len();
+            let top_key = shaping_cache_key_for_candidate(
+                self.cache_enabled,
+                false,
+                &top,
+                self.cache_context(self.row_profile(&top)),
+            );
+            let mut leaves: Vec<CachedDecompositionPart> = Vec::new();
+            let mut decomposed = false;
+            let mut reused_decomposition = false;
+            let mut next_is_top = true;
+
+            pending.push_back(PendingRun {
+                run: top,
+                forced_anchor: false,
+                spans: 0..top_spans,
+            });
+            while let Some(PendingRun {
+                run,
+                forced_anchor,
+                spans,
+            }) = pending.pop_front()
+            {
+                enforce_text_buffer_work_limit(accepted.len(), queued + pending.len(), 1)?;
+                let is_top = std::mem::replace(&mut next_is_top, false);
+                let profile = self.row_profile(&run);
+                let metrics = profile.metrics;
+                let cache_key = shaping_cache_key_for_candidate(
+                    self.cache_enabled,
+                    forced_anchor,
+                    &run,
+                    self.cache_context(profile),
+                );
+
+                if let Some(cached) = cache_key
+                    .as_ref()
+                    .and_then(|key| self.shaping_cache.get_cloned(key))
+                {
+                    match cached {
+                        CachedShaping::Shaped {
+                            buffer,
+                            observations,
+                        } => {
+                            self.observe_font_output(&run.text, &observations);
+                            leaves.push(CachedDecompositionPart {
+                                spans,
+                                forced_anchor,
+                            });
+                            accepted.push(ShapedRow {
+                                row: run,
+                                buffer: ShapedBuffer::Shared(buffer),
+                            });
+                        }
+                        CachedShaping::Decomposed(parts) => {
+                            // A reused decomposition still pays the buffer
+                            // budget for everything it materializes.
+                            enforce_text_buffer_work_limit(
+                                accepted.len(),
+                                queued + pending.len(),
+                                parts.len(),
+                            )?;
+                            decomposed = true;
+                            reused_decomposition |= is_top;
+                            for part in parts.iter().rev() {
+                                let piece = slice_run(&run, part.spans.clone())
+                                    .map_err(text_program_error)?;
+                                pending.push_front(PendingRun {
+                                    run: piece,
+                                    forced_anchor: part.forced_anchor,
+                                    spans: spans.start + part.spans.start
+                                        ..spans.start + part.spans.end,
+                                });
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let buffer_index = accepted.len();
+                self.row_buffers
+                    .ensure_len(buffer_index + 1, self.font_system, metrics);
+                let (layout, observations) = {
+                    let buffer = &mut self.row_buffers.rows[buffer_index];
+                    let buffer_height = if run.native_metrics.is_some() {
+                        metrics.line_height
+                    } else {
+                        self.cell_height
+                    };
+                    shape_row_buffer(
+                        buffer,
+                        &run,
+                        self.font_system,
+                        metrics,
+                        profile.cell_advance,
+                        buffer_height,
+                        self.font_family,
+                    );
+                    layout_facts_and_observations(buffer, &run)
+                };
+
+                self.observe_font_output(&run.text, &observations);
+
+                let admission = if forced_anchor {
+                    RowRunAdmission::Accepted
+                } else {
+                    // Font metrics are already scaled to physical pixels and
+                    // TextArea uses scale 1.0, so layout facts are physical here.
+                    admit_layout(&run, &layout, profile.cell_advance, 1.0)
+                };
+                match admission {
+                    RowRunAdmission::Accepted => {
+                        leaves.push(CachedDecompositionPart {
+                            spans,
+                            forced_anchor,
+                        });
+                        // Anchored buffers are cached too: they are what the
+                        // live cascade would rebuild verbatim next frame.
+                        let buffer = if let Some(key) = cache_key {
+                            let replacement = Buffer::new(self.font_system, metrics);
+                            let buffer = Arc::new(std::mem::replace(
+                                &mut self.row_buffers.rows[buffer_index],
+                                replacement,
+                            ));
+                            let value = CachedShaping::Shaped {
+                                buffer: buffer.clone(),
+                                observations: Arc::<[FontObservation]>::from(observations),
+                            };
+                            let accounted_bytes = shaping_cache_accounted_bytes(&key, &value);
+                            self.shaping_cache.insert(key, value, accounted_bytes);
+                            ShapedBuffer::Shared(buffer)
+                        } else {
+                            ShapedBuffer::RowPool(buffer_index)
+                        };
+                        accepted.push(ShapedRow { row: run, buffer });
+                    }
+                    RowRunAdmission::Fallback { reason, action } => {
+                        decomposed = true;
+                        record_row_run_diagnostic(
+                            self.diagnostics,
+                            format!(
+                                "row-run fallback {reason:?} for {:?}",
+                                bounded_sample(&run.text)
+                            ),
+                        );
+                        match action {
+                            RowRunFallbackAction::SplitAroundCluster { cluster } => {
+                                let pieces = partition_around_cluster(&run, cluster)
+                                    .map_err(text_program_error)?;
+                                enforce_text_buffer_work_limit(
+                                    accepted.len(),
+                                    queued + pending.len(),
+                                    pieces.len(),
+                                )?;
+                                for piece in pieces.into_iter().rev() {
+                                    pending.push_front(PendingRun {
+                                        run: piece.run,
+                                        forced_anchor: piece.forced_anchor,
+                                        spans: spans.start + piece.spans.start
+                                            ..spans.start + piece.spans.end,
+                                    });
+                                }
+                            }
+                            RowRunFallbackAction::AnchorAll => {
+                                let anchored = anchored_fallback_runs_within_budget(
+                                    &run,
+                                    accepted.len(),
+                                    queued + pending.len(),
+                                )?;
+                                for (index, part) in anchored.into_iter().enumerate().rev() {
+                                    pending.push_front(PendingRun {
+                                        run: part,
+                                        forced_anchor: true,
+                                        spans: spans.start + index..spans.start + index + 1,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // An admitted top-level run is already retained under its own key;
+            // only a decomposition needs recording, or a permanently
+            // inadmissible run re-shapes and re-splits on every frame.
+            if decomposed
+                && !reused_decomposition
+                && let Some(key) = top_key
+            {
+                let value = CachedShaping::Decomposed(Arc::from(leaves));
+                let accounted_bytes = shaping_cache_accounted_bytes(&key, &value);
+                self.shaping_cache.insert(key, value, accounted_bytes);
+            }
+        }
+
+        Ok(accepted)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2881,35 +3204,6 @@ impl GpuText {
         self.raster_cache_bytes_high_water = self.raster_cache_bytes_high_water.max(cached_bytes);
     }
 
-    fn record_row_run_diagnostic(&mut self, message: String) {
-        const MAX_ROW_RUN_DIAGNOSTICS: usize = 16;
-        if self.row_run_diagnostics.len() >= MAX_ROW_RUN_DIAGNOSTICS
-            || !self.row_run_diagnostics.insert(message.clone())
-        {
-            return;
-        }
-        eprintln!("mandatum-native-renderer: {message}");
-    }
-
-    fn emit_new_fallback_record(&self) {
-        let Some(record) = self.fallback_report.records().last() else {
-            return;
-        };
-        match record {
-            FallbackRecord::Face {
-                family,
-                postscript_name,
-                sample,
-                ..
-            } => eprintln!(
-                "mandatum-native-renderer: font fallback family={family:?} postscript={postscript_name:?} sample={sample:?}"
-            ),
-            FallbackRecord::MissingGlyph { sample } => {
-                eprintln!("mandatum-native-renderer: missing glyph sample={sample:?}")
-            }
-        }
-    }
-
     fn sync_shaping_cache_palette(&mut self, palette: TerminalPalette) {
         if self
             .shaping_cache_palette
@@ -2920,164 +3214,27 @@ impl GpuText {
         self.shaping_cache_palette = Some(palette);
     }
 
-    fn shaping_cache_context(&self, profile: RowShapingProfile) -> ShapingCacheContext {
-        ShapingCacheContext {
-            font_generation: self.font_profile.generation(),
-            scale_generation: self.scale_generation,
-            metric_generation: profile.metric_generation,
-            metric_slot: profile.metric_slot,
-            renderer_config_generation: SHAPING_POLICY_GENERATION,
-            font_size_bits: profile.metrics.font_size.to_bits(),
-            line_height_bits: profile.metrics.line_height.to_bits(),
-            cell_width_bits: profile.cell_advance.to_bits(),
-            cell_height_bits: self.cell_h.to_bits(),
-        }
-    }
-
-    fn observe_font_output(&mut self, run_text: &str, observations: &[FontObservation]) {
-        if observations.is_empty() && self.fallback_report.observe_missing_glyph(run_text) {
-            self.emit_new_fallback_record();
-        }
-        for observation in observations {
-            if observation.glyph_id == 0
-                && self
-                    .fallback_report
-                    .observe_missing_glyph(&observation.sample)
-            {
-                self.emit_new_fallback_record();
-            }
-            if self.fallback_report.observe_face(
-                &self.font_profile,
-                observation.font_id,
-                &observation.sample,
-            ) {
-                self.emit_new_fallback_record();
-            }
-        }
-    }
-
     fn shape_row_runs(
         &mut self,
         initial: Vec<RowRun>,
         terminal_metrics: Metrics,
     ) -> Result<Vec<ShapedRow>, GpuRenderError> {
-        let mut pending = initial
-            .into_iter()
-            .map(|run| (run, false))
-            .collect::<VecDeque<_>>();
-        let mut accepted = Vec::new();
-
-        while let Some((run, forced_anchor)) = pending.pop_front() {
-            enforce_text_buffer_work_limit(accepted.len(), pending.len(), 1)?;
-            let profile =
-                row_shaping_profile(&run, terminal_metrics, self.cell_w, self.scale);
-            let metrics = profile.metrics;
-            let cache_context = self.shaping_cache_context(profile);
-
-            let cache_key = shaping_cache_key_for_candidate(
-                self.shaping_cache_enabled,
-                forced_anchor,
-                &run,
-                cache_context,
-            );
-            if let Some(cached) = cache_key
-                .as_ref()
-                .and_then(|key| self.shaping_cache.get_cloned(key))
-            {
-                self.observe_font_output(&run.text, &cached.observations);
-                accepted.push(ShapedRow {
-                    row: run,
-                    buffer: ShapedBuffer::Shared(cached.buffer),
-                });
-                continue;
-            }
-
-            let buffer_index = accepted.len();
-            self.row_buffers
-                .ensure_len(buffer_index + 1, &mut self.font_system, metrics);
-            let (layout, observations) = {
-                let buffer = &mut self.row_buffers.rows[buffer_index];
-                let buffer_height = if run.native_metrics.is_some() {
-                    metrics.line_height
-                } else {
-                    self.cell_h
-                };
-                shape_row_buffer(
-                    buffer,
-                    &run,
-                    &mut self.font_system,
-                    metrics,
-                    profile.cell_advance,
-                    buffer_height,
-                    &self.font_family,
-                );
-                layout_facts_and_observations(buffer, &run)
-            };
-
-            self.observe_font_output(&run.text, &observations);
-
-            let admission = if forced_anchor {
-                RowRunAdmission::Accepted
-            } else {
-                // Font metrics are already scaled to physical pixels and
-                // TextArea uses scale 1.0, so layout facts are physical here.
-                admit_layout(&run, &layout, profile.cell_advance, 1.0)
-            };
-            match admission {
-                RowRunAdmission::Accepted => {
-                    if let Some(key) = cache_key {
-                        let replacement = Buffer::new(&mut self.font_system, metrics);
-                        let buffer = Arc::new(std::mem::replace(
-                            &mut self.row_buffers.rows[buffer_index],
-                            replacement,
-                        ));
-                        let observations = Arc::<[FontObservation]>::from(observations);
-                        let value = CachedShaping {
-                            buffer: buffer.clone(),
-                            observations: observations.clone(),
-                        };
-                        let accounted_bytes =
-                            shaping_cache_accounted_bytes(&key, &run, &observations);
-                        self.shaping_cache.insert(key, value, accounted_bytes);
-                        accepted.push(ShapedRow {
-                            row: run,
-                            buffer: ShapedBuffer::Shared(buffer),
-                        });
-                    } else {
-                        accepted.push(ShapedRow {
-                            row: run,
-                            buffer: ShapedBuffer::RowPool(buffer_index),
-                        });
-                    }
-                }
-                RowRunAdmission::Fallback { reason, action } => {
-                    self.record_row_run_diagnostic(format!(
-                        "row-run fallback {reason:?} for {:?}",
-                        bounded_sample(&run.text)
-                    ));
-                    match action {
-                        RowRunFallbackAction::SplitAtSpan(boundary) => {
-                            let (left, right) =
-                                split_at_span(&run, boundary).map_err(text_program_error)?;
-                            pending.push_front((right, false));
-                            pending.push_front((left, false));
-                        }
-                        RowRunFallbackAction::AnchorAll => {
-                            let anchored = anchored_fallback_runs_within_budget(
-                                &run,
-                                accepted.len(),
-                                pending.len(),
-                            )?;
-                            for part in anchored.into_iter().rev() {
-                                pending.push_front((part, true));
-                            }
-                        }
-                    }
-                }
-            }
+        RowShapingPass {
+            font_system: &mut self.font_system,
+            row_buffers: &mut self.row_buffers,
+            shaping_cache: &mut self.shaping_cache,
+            fallback_report: &mut self.fallback_report,
+            diagnostics: &mut self.row_run_diagnostics,
+            font_profile: &self.font_profile,
+            font_family: &self.font_family,
+            cache_enabled: self.shaping_cache_enabled,
+            terminal_metrics,
+            cell_advance: self.cell_w,
+            cell_height: self.cell_h,
+            scale: self.scale,
+            scale_generation: self.scale_generation,
         }
-
-        Ok(accepted)
+        .run(initial)
     }
 
     /// Render one frame from a `WorkspaceScene`. Consumes only scene types: the
@@ -3152,7 +3309,10 @@ impl GpuText {
         self.sync_shaping_cache_palette(theme.terminal_palette);
         let metrics = Metrics::new(self.font_size, self.cell_h);
         for issue in &program.issues {
-            self.record_row_run_diagnostic(format!("row-run build issue: {issue:?}"));
+            record_row_run_diagnostic(
+                &mut self.row_run_diagnostics,
+                format!("row-run build issue: {issue:?}"),
+            );
         }
         let shaping_started = Instant::now();
         let rows = self.shape_row_runs(program.rows, metrics)?;
@@ -3515,13 +3675,18 @@ impl GpuText {
     }
 }
 
+/// Identify one shaping candidate for retention.
+///
+/// Anchored candidates are cacheable, but only inside their own key
+/// namespace: an anchored buffer was never admitted, so it must never satisfy
+/// an ordinary lookup.
 fn shaping_cache_key_for_candidate(
     cache_enabled: bool,
     forced_anchor: bool,
     run: &RowRun,
     context: ShapingCacheContext,
 ) -> Option<ShapingCacheKey> {
-    (cache_enabled && !forced_anchor).then(|| ShapingCacheKey::from_run(run, context))
+    cache_enabled.then(|| ShapingCacheKey::from_run(run, context, forced_anchor))
 }
 
 /// Map a scene color onto RGB, using the given default for
@@ -5333,6 +5498,89 @@ mod tests {
     }
 
     #[test]
+    fn fractional_native_ui_point_sizes_still_admit_shaped_rows() {
+        let surface = TerminalSurface {
+            rows: vec![
+                "letters"
+                    .chars()
+                    .map(|character| {
+                        SceneCell::grapheme(
+                            character.to_string(),
+                            mandatum_scene::SceneCellStyle::default(),
+                        )
+                    })
+                    .collect(),
+            ],
+            ..TerminalSurface::default()
+        };
+        let scene = scene(vec![pane(
+            PaneSceneKind::Terminal,
+            PaneContent::Terminal(surface),
+        )]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+        )
+        .unwrap();
+        let base = translated
+            .rows
+            .iter()
+            .find(|row| row.text == "letters")
+            .expect("adjacent same-style cells form one row run");
+
+        let font_profile = ResolvedFontProfile::resolve(FontRequest::default()).unwrap();
+        let mut font_system = font_profile.create_font_system();
+        let metric_set = crate::NativeTextMetricSet::from_theme(&theme, 1);
+
+        // Body is 12.5pt and every role lands on a fractional physical size at
+        // fractional display scales.
+        for (scale, role) in [
+            (1.0, crate::NativeTextMetricRole::Body),
+            (1.25, crate::NativeTextMetricRole::Title),
+            (1.5, crate::NativeTextMetricRole::Body),
+            (1.75, crate::NativeTextMetricRole::Metadata),
+        ] {
+            let mut row = base.clone();
+            row.native_metrics = Some(metric_set.identity(role));
+
+            let terminal_font_size = (font_profile.size() * scale).round();
+            let terminal_metrics =
+                Metrics::new(terminal_font_size, (terminal_font_size * 1.3).round());
+            let terminal_advance =
+                measure_cell_width(&mut font_system, terminal_metrics, font_profile.family());
+            let profile =
+                row_shaping_profile(&row, terminal_metrics, terminal_advance, scale);
+            assert_eq!(
+                profile.metrics.font_size,
+                profile.metrics.font_size.round(),
+                "native UI text must shape at whole physical pixels ({role:?} at {scale})"
+            );
+
+            let mut buffer = Buffer::new(&mut font_system, profile.metrics);
+            shape_row_buffer(
+                &mut buffer,
+                &row,
+                &mut font_system,
+                profile.metrics,
+                profile.cell_advance,
+                profile.metrics.line_height,
+                font_profile.family(),
+            );
+            let (facts, _) = layout_facts_and_observations(&buffer, &row);
+
+            assert_eq!(
+                admit_layout(&row, &facts, profile.cell_advance, 1.0),
+                RowRunAdmission::Accepted,
+                "{role:?} at scale {scale} must not cascade into anchored fallback"
+            );
+        }
+    }
+
+    #[test]
     fn bundled_row_run_shapes_a_real_multicell_ligature_and_passes_admission() {
         let surface = TerminalSurface {
             rows: vec![vec![
@@ -5425,9 +5673,11 @@ mod tests {
         };
         let key = shaping_cache_key_for_candidate(true, false, row, context)
             .expect("normally admitted shaping units are cache candidates");
-        assert!(
-            shaping_cache_key_for_candidate(true, true, row, context).is_none(),
-            "forced-anchor fallback must bypass lookup and insertion"
+        let anchored_key = shaping_cache_key_for_candidate(true, true, row, context)
+            .expect("anchored buffers are cached in their own namespace");
+        assert_ne!(
+            key, anchored_key,
+            "an anchored buffer was never admitted and must not share the admitted key"
         );
         assert!(
             shaping_cache_key_for_candidate(false, false, row, context).is_none(),
@@ -5436,24 +5686,331 @@ mod tests {
 
         let cached_buffer = Arc::new(buffer);
         let cached_observations = Arc::<[FontObservation]>::from(observations);
-        let value = CachedShaping {
+        let value = CachedShaping::Shaped {
             buffer: cached_buffer.clone(),
             observations: cached_observations.clone(),
         };
-        let accounted = shaping_cache_accounted_bytes(&key, row, &cached_observations);
+        let accounted = shaping_cache_accounted_bytes(&key, &value);
         let mut cache = ShapingCache::new();
-        assert!(cache.insert(key.clone(), value, accounted));
-        let hit = cache.get_cloned(&key).expect("admitted shaping cache hit");
-        assert!(Arc::ptr_eq(&hit.buffer, &cached_buffer));
-        assert_eq!(hit.observations.len(), cached_observations.len());
+        assert!(cache.insert(key.clone(), value.clone(), accounted));
+        let Some(CachedShaping::Shaped {
+            buffer: hit_buffer,
+            observations: hit_observations,
+        }) = cache.get_cloned(&key)
+        else {
+            panic!("admitted shaping cache hit");
+        };
+        assert!(Arc::ptr_eq(&hit_buffer, &cached_buffer));
+        assert_eq!(hit_observations.len(), cached_observations.len());
         assert!(
-            hit.observations
+            hit_observations
                 .iter()
                 .zip(cached_observations.iter())
                 .all(|(hit, expected)| hit.font_id == expected.font_id
                     && hit.glyph_id == expected.glyph_id
                     && hit.sample == expected.sample)
         );
+
+        // Namespace separation, in both directions: an anchored entry never
+        // satisfies an ordinary lookup, and an admitted entry never satisfies
+        // an anchored one.
+        let mut namespaced = ShapingCache::new();
+        assert!(namespaced.insert(anchored_key.clone(), value.clone(), accounted));
+        assert!(namespaced.get_cloned(&key).is_none());
+        assert!(namespaced.get_cloned(&anchored_key).is_some());
+        assert!(namespaced.insert(key.clone(), value, accounted));
+        assert!(namespaced.get_cloned(&key).is_some());
+        assert_eq!(namespaced.len(), 2);
+    }
+
+    #[test]
+    fn a_repeat_frame_of_permanently_inadmissible_rows_reshapes_nothing() {
+        use crate::row_run::ByteCellSpan;
+
+        let surface = TerminalSurface {
+            rows: vec![
+                "abcd"
+                    .chars()
+                    .map(|character| {
+                        SceneCell::grapheme(
+                            character.to_string(),
+                            mandatum_scene::SceneCellStyle::default(),
+                        )
+                    })
+                    .collect(),
+            ],
+            ..TerminalSurface::default()
+        };
+        let scene = scene(vec![pane(
+            PaneSceneKind::Terminal,
+            PaneContent::Terminal(surface),
+        )]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+        )
+        .unwrap();
+        let mut row = translated
+            .rows
+            .iter()
+            .find(|row| row.text == "abcd")
+            .expect("same-style graphemes share one row run")
+            .clone();
+        // Declare two cells per grapheme. No monospace advance can satisfy
+        // that, so every cluster of every sub-run fails admission forever —
+        // the shape of a braille spinner or a nerd icon whose fallback face
+        // cannot match the cell.
+        row.width = 8;
+        row.byte_cells = (0..4)
+            .map(|index| ByteCellSpan {
+                bytes: index..index + 1,
+                cells: index as u16 * 2..index as u16 * 2 + 2,
+            })
+            .collect();
+
+        let font_profile = ResolvedFontProfile::resolve(FontRequest::default()).unwrap();
+        let mut font_system = font_profile.create_font_system();
+        let line_height = (font_profile.size() * 1.3).round();
+        let metrics = Metrics::new(font_profile.size(), line_height);
+        let cell_advance = measure_cell_width(&mut font_system, metrics, font_profile.family());
+        let family = font_profile.family().to_owned();
+        let mut row_buffers = RowBufferPool::new();
+        let mut shaping_cache = ShapingCache::new();
+        let mut fallback_report = FallbackReport::new(font_profile.generation());
+        let mut diagnostics = BTreeSet::new();
+        let pass = |font_system: &mut FontSystem,
+                        row_buffers: &mut RowBufferPool,
+                        shaping_cache: &mut ShapingCache<CachedShaping>,
+                        fallback_report: &mut FallbackReport,
+                        diagnostics: &mut BTreeSet<String>| {
+            RowShapingPass {
+                font_system,
+                row_buffers,
+                shaping_cache,
+                fallback_report,
+                diagnostics,
+                font_profile: &font_profile,
+                font_family: &family,
+                cache_enabled: true,
+                terminal_metrics: metrics,
+                cell_advance,
+                cell_height: line_height,
+                scale: 1.0,
+                scale_generation: 1,
+            }
+            .run(vec![row.clone()])
+            .unwrap()
+        };
+
+        let placement = |rows: &[ShapedRow]| {
+            rows.iter()
+                .map(|shaped| (shaped.row.text.clone(), shaped.row.x, shaped.row.width))
+                .collect::<Vec<_>>()
+        };
+        let first = pass(
+            &mut font_system,
+            &mut row_buffers,
+            &mut shaping_cache,
+            &mut fallback_report,
+            &mut diagnostics,
+        );
+        let first_stats = shaping_cache.stats();
+
+        assert_eq!(
+            placement(&first),
+            "abcd"
+                .chars()
+                .enumerate()
+                .map(|(index, character)| (
+                    character.to_string(),
+                    row.x + index as u16 * 2,
+                    2
+                ))
+                .collect::<Vec<_>>()
+        );
+        // One shaping attempt per surviving suffix plus one per anchored leaf.
+        // The one-grapheme peel needed a doomed solo admission per grapheme on
+        // top of that, and repeated all of it on every frame.
+        assert_eq!(first_stats.misses, 8);
+        assert_eq!(first_stats.hits, 0);
+        assert_eq!(row_buffers.len(), 4);
+        // Four anchored leaves plus the parent decomposition.
+        assert_eq!(shaping_cache.len(), 5);
+
+        let second = pass(
+            &mut font_system,
+            &mut row_buffers,
+            &mut shaping_cache,
+            &mut fallback_report,
+            &mut diagnostics,
+        );
+        let second_stats = shaping_cache.stats();
+
+        assert_eq!(placement(&second), placement(&first));
+        assert_eq!(
+            second_stats.misses, first_stats.misses,
+            "a repeat frame must not shape anything: every miss is a shaping call"
+        );
+        assert_eq!(second_stats.hits, 5);
+        assert_eq!(row_buffers.len(), 4);
+        assert_eq!(shaping_cache.len(), 5);
+    }
+
+    #[test]
+    fn one_inadmissible_glyph_anchors_alone_and_survives_in_the_cache() {
+        // U+F0E7 renders from the bundled family at an advance the cell cannot
+        // match, so it reproduces the icon/spinner fallback flood exactly.
+        let surface = TerminalSurface {
+            rows: vec![
+                "ab\u{f0e7}cd"
+                    .chars()
+                    .map(|character| {
+                        SceneCell::grapheme(
+                            character.to_string(),
+                            mandatum_scene::SceneCellStyle::default(),
+                        )
+                    })
+                    .collect(),
+            ],
+            ..TerminalSurface::default()
+        };
+        let scene = scene(vec![pane(
+            PaneSceneKind::Terminal,
+            PaneContent::Terminal(surface),
+        )]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+        )
+        .unwrap();
+        let row = translated
+            .rows
+            .iter()
+            .find(|row| row.text == "ab\u{f0e7}cd")
+            .expect("same-style graphemes share one row run")
+            .clone();
+
+        let font_profile = ResolvedFontProfile::resolve(FontRequest::default()).unwrap();
+        let mut font_system = font_profile.create_font_system();
+        let line_height = (font_profile.size() * 1.3).round();
+        let metrics = Metrics::new(font_profile.size(), line_height);
+        let cell_advance = measure_cell_width(&mut font_system, metrics, font_profile.family());
+        let family = font_profile.family().to_owned();
+        let mut row_buffers = RowBufferPool::new();
+        let mut shaping_cache = ShapingCache::new();
+        let mut fallback_report = FallbackReport::new(font_profile.generation());
+        let mut diagnostics = BTreeSet::new();
+        let pass = |font_system: &mut FontSystem,
+                    row_buffers: &mut RowBufferPool,
+                    shaping_cache: &mut ShapingCache<CachedShaping>,
+                    fallback_report: &mut FallbackReport,
+                    diagnostics: &mut BTreeSet<String>| {
+            RowShapingPass {
+                font_system,
+                row_buffers,
+                shaping_cache,
+                fallback_report,
+                diagnostics,
+                font_profile: &font_profile,
+                font_family: &family,
+                cache_enabled: true,
+                terminal_metrics: metrics,
+                cell_advance,
+                cell_height: line_height,
+                scale: 1.0,
+                scale_generation: 1,
+            }
+            .run(vec![row.clone()])
+            .unwrap()
+        };
+
+        let first = pass(
+            &mut font_system,
+            &mut row_buffers,
+            &mut shaping_cache,
+            &mut fallback_report,
+            &mut diagnostics,
+        );
+        let first_stats = shaping_cache.stats();
+
+        // The offending cluster is retired on its own; the validated prefix
+        // and the untested tail keep contextual shaping.
+        assert_eq!(
+            first
+                .iter()
+                .map(|shaped| (shaped.row.text.as_str(), shaped.row.x))
+                .collect::<Vec<_>>(),
+            vec![("ab", row.x), ("\u{f0e7}", row.x + 2), ("cd", row.x + 3)]
+        );
+        assert_eq!(first_stats.misses, 4);
+        assert_eq!(shaping_cache.len(), 4);
+
+        // Anchored entries retain their observations, so fallback and
+        // missing-glyph reporting still sees them on a cache hit.
+        let context = ShapingCacheContext {
+            font_generation: font_profile.generation(),
+            scale_generation: 1,
+            metric_generation: 0,
+            metric_slot: 0,
+            renderer_config_generation: SHAPING_POLICY_GENERATION,
+            font_size_bits: metrics.font_size.to_bits(),
+            line_height_bits: metrics.line_height.to_bits(),
+            cell_width_bits: cell_advance.to_bits(),
+            cell_height_bits: line_height.to_bits(),
+        };
+        let anchored = slice_run(&row, 2..3).unwrap();
+        let anchored_key = shaping_cache_key_for_candidate(true, true, &anchored, context)
+            .expect("anchored candidates are cacheable");
+        let Some(CachedShaping::Shaped { observations, .. }) =
+            shaping_cache.get_cloned(&anchored_key)
+        else {
+            panic!("the anchored icon must be retained under its anchored key");
+        };
+        assert!(!observations.is_empty());
+        assert!(
+            shaping_cache
+                .get_cloned(
+                    &shaping_cache_key_for_candidate(true, false, &anchored, context).unwrap()
+                )
+                .is_none(),
+            "an unadmitted buffer must never satisfy an ordinary lookup"
+        );
+
+        // The probes above are themselves lookups, so the repeat frame is
+        // measured from here.
+        let probed_stats = shaping_cache.stats();
+        let second = pass(
+            &mut font_system,
+            &mut row_buffers,
+            &mut shaping_cache,
+            &mut fallback_report,
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            second
+                .iter()
+                .map(|shaped| (shaped.row.text.clone(), shaped.row.x))
+                .collect::<Vec<_>>(),
+            first
+                .iter()
+                .map(|shaped| (shaped.row.text.clone(), shaped.row.x))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            shaping_cache.stats().misses,
+            probed_stats.misses,
+            "the repeat frame must not shape anything"
+        );
+        assert_eq!(shaping_cache.stats().hits, probed_stats.hits + 4);
     }
 
     #[test]
@@ -5667,8 +6224,19 @@ mod tests {
         dense.header.area = SceneRect::new(0, 0, 512, 1);
         dense.status.area = SceneRect::new(0, 69, 512, 1);
         dense.panes[0].area = SceneRect::new(0, 1, 512, 68);
+        let theme = Theme::default();
+        // The budget is enforced on the one row-run plan the render path
+        // builds, so the rejection now lands in `prepare_cell_program`.
+        let prepared = prepare_scene(&dense, &theme)
+            .expect("the cell program itself stays inside the instruction budget");
         assert!(matches!(
-            prepare_scene(&dense, &Theme::default()).unwrap_err(),
+            prepare_cell_program(
+                prepared.cell_program(),
+                &dense,
+                &theme,
+                prepared.presentation_plan(),
+            )
+            .unwrap_err(),
             SceneCompileError::ResourceLimit {
                 resource: "text buffers",
                 actual,
