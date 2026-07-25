@@ -501,20 +501,20 @@ mod tests {
             cwd_label: "/tmp/project".to_owned(),
             recipe_label: Some("test".to_owned()),
             status_label: Some("failed: exit 101".to_owned()),
+            status_role: mandatum_scene::TaskStatusRole::Failed,
             rerun_hint: Some("ctrl+p r".to_owned()),
             output: Some(text_surface(&["FAIL"])),
         }));
-        // Tall enough for the 6 detail rows (rerun affordance included)
+        // Tall enough for the typed detail rows plus the output surface.
         // plus the output surface.
         task.area = SceneRect::new(0, 1, 40, 11);
         let rows = buffer_rows(&draw(&scene(vec![task])));
         let all = rows.join("\n");
 
-        assert!(all.contains("command: cargo test"));
+        assert!(all.contains("failed: exit 101 · cargo test"));
         assert!(all.contains("cwd: /tmp/project"));
         assert!(all.contains("recipe: test"));
-        assert!(all.contains("runtime status: failed: exit 101"));
-        assert!(all.contains("rerun: ctrl+p r · right-click menu"));
+        assert!(all.contains("failure:"), "{all}");
         assert!(all.contains("FAIL"));
     }
 
@@ -528,6 +528,7 @@ mod tests {
             cwd_label: "/tmp/project".to_owned(),
             recipe_label: Some("checks".to_owned()),
             status_label: Some("failed: exit 3".to_owned()),
+            status_role: mandatum_scene::TaskStatusRole::Failed,
             rerun_hint: Some("ctrl+p r".to_owned()),
             output: None,
         }));
@@ -581,6 +582,7 @@ mod tests {
             cwd_label: "/tmp".to_owned(),
             recipe_label: Some("test".to_owned()),
             status_label: Some("running".to_owned()),
+            status_role: mandatum_scene::TaskStatusRole::Running,
             rerun_hint: None,
             output: None,
         }));
@@ -655,7 +657,7 @@ mod tests {
             .find(|y| rows[usize::from(*y)].contains("approval required"))
             .expect("approval line rendered");
         let cell = buffer.cell((2u16, approval_row)).unwrap();
-        assert_eq!(cell.fg, Color::Red);
+        assert_eq!(cell.fg, Color::Yellow);
         assert!(cell.modifier.contains(Modifier::BOLD));
     }
 
@@ -706,7 +708,7 @@ mod tests {
                 .find(|y| rows[usize::from(*y)].contains("approval required"))
                 .expect("approval line rendered");
             let cell = buffer.cell((2u16, approval_row)).unwrap();
-            assert_eq!(cell.fg, Color::Red, "the color never moves");
+            assert_eq!(cell.fg, Color::Yellow, "the color never moves");
             assert_eq!(
                 cell.modifier.contains(Modifier::BOLD),
                 expect_bold,
@@ -748,7 +750,7 @@ mod tests {
                     revision: 4,
                     rgba8: Arc::from([255, 0, 0, 255, 0, 255, 0, 255]),
                 }),
-                "preview: ready · 2x1 RGBA8 sRGB",
+                "preview: ready",
                 "ready artifact fallback",
             ),
             (

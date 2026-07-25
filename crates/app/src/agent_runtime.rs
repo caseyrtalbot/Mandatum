@@ -29,6 +29,9 @@ use crate::events::{AppEvent, AppEventSender};
 
 /// How many trailing output lines the live view retains per agent pane.
 pub(crate) const AGENT_OUTPUT_TAIL_LINES: usize = 200;
+/// Maximum UTF-8 bytes retained for one live agent output line.
+pub(crate) const AGENT_OUTPUT_LINE_BYTES: usize = 16 * 1024;
+const AGENT_OUTPUT_TRUNCATION_MARKER: &str = " … [truncated]";
 
 /// An agent session event stamped with the runtime identity it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,7 +141,7 @@ impl AgentPaneRuntime {
             if self.output_tail.len() == AGENT_OUTPUT_TAIL_LINES {
                 self.output_tail.pop_front();
             }
-            self.output_tail.push_back(line.to_owned());
+            self.output_tail.push_back(bounded_output_line(line));
         }
     }
 
@@ -148,6 +151,22 @@ impl AgentPaneRuntime {
             let _ = handle.join();
         }
     }
+}
+
+fn bounded_output_line(line: &str) -> String {
+    if line.len() <= AGENT_OUTPUT_LINE_BYTES {
+        return line.to_owned();
+    }
+    let content_limit =
+        AGENT_OUTPUT_LINE_BYTES.saturating_sub(AGENT_OUTPUT_TRUNCATION_MARKER.len());
+    let mut boundary = content_limit.min(line.len());
+    while boundary > 0 && !line.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let mut bounded = String::with_capacity(AGENT_OUTPUT_LINE_BYTES);
+    bounded.push_str(&line[..boundary]);
+    bounded.push_str(AGENT_OUTPUT_TRUNCATION_MARKER);
+    bounded
 }
 
 /// Activate a launched session for a pane: spawn its forwarder thread and
@@ -255,5 +274,16 @@ mod tests {
     fn every_configured_connector_kind_is_wired() {
         assert!(connector_for_kind(AgentConnectorKind::Fake).is_some());
         assert!(connector_for_kind(AgentConnectorKind::Claude).is_some());
+    }
+
+    #[test]
+    fn live_output_lines_are_bounded_before_they_enter_runtime_state() {
+        let long = "界".repeat(AGENT_OUTPUT_LINE_BYTES);
+        let bounded = bounded_output_line(&long);
+
+        assert!(bounded.len() <= AGENT_OUTPUT_LINE_BYTES);
+        assert!(bounded.ends_with(AGENT_OUTPUT_TRUNCATION_MARKER));
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert_eq!(bounded_output_line("short"), "short");
     }
 }

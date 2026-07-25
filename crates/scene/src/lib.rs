@@ -34,7 +34,8 @@ pub use geometry::{
 };
 pub use pane::{
     AgentApprovalPrompt, AgentContent, ArtifactContent, ArtifactState, EmptyContent, PaneBadgeKind,
-    PaneContent, PaneScene, PaneSceneKind, TaskContent,
+    PaneContent, PaneScene, PaneSceneKind, TaskContent, TaskStatusRole, WorkflowNodePart,
+    WorkflowRow, WorkflowRowRole, WorkflowStatusBadge,
 };
 pub use style::{SceneCellStyle, SceneColor};
 pub use surface::{RasterSurface, SceneCell, SurfacePosition, TerminalSurface};

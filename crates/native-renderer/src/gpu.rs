@@ -16,8 +16,9 @@ use glyphon::{
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
     ArtifactState, CellOccupancy, CellProgram, CellSelection, LogicalRect, OverlayScene,
-    PaneContent, ProgramCell, RasterSurface, SceneColor, SceneRect, TerminalPalette,
-    TextPaintScopeKind, Theme, UiColor, WorkspaceScene, compile_cell_program, layout,
+    PaneContent, PaneNodePart, PresentationNodeId, PresentationNodeRole, ProgramCell,
+    RasterSurface, SceneColor, SceneRect, TerminalPalette, TextPaintScopeKind, Theme, UiColor,
+    WorkflowNodePart, WorkspaceScene, compile_cell_program, layout,
 };
 use winit::window::Window;
 
@@ -393,7 +394,7 @@ pub fn prepare_scene(
     validate_scene_structure(scene)?;
     let cell_program = compile_cell_program(scene, theme);
     validate_compiled_program(&cell_program)?;
-    let artifacts = prepare_artifacts(scene, &cell_program);
+    let artifacts = prepare_artifacts(scene, &cell_program)?;
     let presentation_plan =
         prepare_native_presentation(scene, theme).map_err(SceneCompileError::NativePresentation)?;
     Ok(PreparedScene {
@@ -570,43 +571,105 @@ fn validate_raster_surface(
     Ok(expected)
 }
 
-fn prepare_artifacts(scene: &WorkspaceScene, program: &CellProgram) -> Vec<PreparedArtifact> {
-    scene
-        .panes
-        .iter()
-        .enumerate()
-        .filter_map(|(draw_index, pane)| {
-            let layer = u16::try_from(draw_index).ok()?;
-            let PaneContent::Artifact(artifact) = &pane.content else {
-                return None;
-            };
-            let ArtifactState::Ready(surface) = &artifact.state else {
-                return None;
-            };
-            let visible_clips = raster_clip_runs(program, layer);
-            if visible_clips.is_empty() {
-                return None;
-            }
-            let inner = layout::pane_inner_rect(pane.area);
-            let detail_rows = u16::try_from(pane.detail_lines().len()).unwrap_or(u16::MAX);
-            let body_y = inner.y.saturating_add(detail_rows).min(inner.bottom());
-            let body = SceneRect::new(
-                inner.x,
-                body_y,
-                inner.width,
-                inner.bottom().saturating_sub(body_y),
+fn prepare_artifacts(
+    scene: &WorkspaceScene,
+    program: &CellProgram,
+) -> Result<Vec<PreparedArtifact>, SceneCompileError> {
+    let mut prepared = Vec::new();
+    for (draw_index, pane) in scene.panes.iter().enumerate() {
+        let PaneContent::Artifact(artifact) = &pane.content else {
+            continue;
+        };
+        let ArtifactState::Ready(surface) = &artifact.state else {
+            continue;
+        };
+        let layer = u16::try_from(draw_index).map_err(|_| SceneCompileError::ResourceLimit {
+            resource: "panes",
+            actual: scene.panes.len(),
+            maximum: MAX_GPU_PANES,
+        })?;
+        let expected = expected_artifact_canvas(pane);
+        let body = if scene.presentation.nodes.is_empty() {
+            expected
+        } else {
+            let canvas_id = PresentationNodeId::pane(
+                pane.id.clone(),
+                PaneNodePart::Workflow(WorkflowNodePart::ArtifactCanvas),
             );
-            Some(PreparedArtifact {
-                layer,
-                body,
-                visible_clips,
-                width: surface.width,
-                height: surface.height,
-                revision: surface.revision,
-                rgba8: surface.rgba8.clone(),
-            })
-        })
-        .collect()
+            let node = scene
+                .presentation
+                .nodes
+                .iter()
+                .find(|node| node.id == canvas_id)
+                .ok_or(SceneCompileError::InvalidGeometry(
+                    "ready artifact is missing its typed canvas",
+                ))?;
+            if node.role != PresentationNodeRole::ArtifactCanvas {
+                return Err(SceneCompileError::InvalidGeometry(
+                    "ready artifact canvas has the wrong semantic role",
+                ));
+            }
+            if expected.is_empty() {
+                if !node.state.hidden || node.cell_rect.is_some() {
+                    return Err(SceneCompileError::InvalidGeometry(
+                        "hidden artifact canvas does not match empty geometry",
+                    ));
+                }
+                continue;
+            }
+            if node.state.hidden || node.cell_rect != Some(expected) {
+                return Err(SceneCompileError::InvalidGeometry(
+                    "ready artifact canvas does not match typed geometry",
+                ));
+            }
+            expected
+        };
+
+        if body.is_empty() {
+            continue;
+        }
+        let visible_clips = raster_clip_runs(program, layer);
+        if visible_clips
+            .iter()
+            .any(|clip| !rect_contains(body, *clip))
+        {
+            return Err(SceneCompileError::InvalidGeometry(
+                "artifact raster clip lies outside its typed canvas",
+            ));
+        }
+        if visible_clips.is_empty() {
+            continue;
+        }
+        prepared.push(PreparedArtifact {
+            layer,
+            body,
+            visible_clips,
+            width: surface.width,
+            height: surface.height,
+            revision: surface.revision,
+            rgba8: surface.rgba8.clone(),
+        });
+    }
+    Ok(prepared)
+}
+
+fn expected_artifact_canvas(pane: &mandatum_scene::PaneScene) -> SceneRect {
+    let inner = layout::pane_inner_rect(pane.area);
+    let rows = u16::try_from(pane.terminal_fallback_row_count()).unwrap_or(u16::MAX);
+    let y = inner.y.saturating_add(rows).min(inner.bottom());
+    SceneRect::new(
+        inner.x,
+        y,
+        inner.width,
+        inner.bottom().saturating_sub(y),
+    )
+}
+
+fn rect_contains(outer: SceneRect, inner: SceneRect) -> bool {
+    inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.right() <= outer.right()
+        && inner.bottom() <= outer.bottom()
 }
 
 fn raster_clip_runs(program: &CellProgram, layer: u16) -> Vec<SceneRect> {
@@ -4164,16 +4227,61 @@ mod tests {
             panic!("ready artifact did not reach the headless GPU plan");
         };
         assert_eq!(artifact.layer(), 0);
-        assert_eq!(artifact.body(), SceneRect::new(1, 5, 78, 17));
+        assert_eq!(artifact.body(), SceneRect::new(1, 7, 78, 15));
         assert_eq!((artifact.width(), artifact.height()), (4, 2));
         assert_eq!(artifact.revision(), 7);
         assert_eq!(artifact.rgba8().as_ptr(), source_ptr);
-        assert_eq!(artifact.visible_clips().len(), 17);
+        assert_eq!(artifact.visible_clips().len(), 15);
         assert!(
             artifact
                 .visible_clips()
                 .iter()
                 .all(|clip| clip.width == 78 && clip.height == 1)
+        );
+    }
+
+    #[test]
+    fn ready_raster_requires_the_exact_typed_canvas_in_product_scenes() {
+        let mut missing = scene(vec![pane(
+            PaneSceneKind::Artifact,
+            ready_artifact(4, 2, 7),
+        )]);
+        missing.presentation.nodes.push(PresentationNode {
+            id: PresentationNodeId::workspace(WorkspaceNodePart::Surface),
+            parent: None,
+            role: PresentationNodeRole::Pane,
+            state: PresentationNodeState::default(),
+            logical_rect: LogicalRect::from_units(0, 0, 64, 64),
+            cell_rect: Some(SceneRect::new(0, 0, 1, 1)),
+            terminal_projection: TerminalProjection::CellRegions(Vec::new()),
+        });
+        assert_eq!(
+            prepare_scene(&missing, &Theme::default()).unwrap_err(),
+            SceneCompileError::InvalidGeometry("ready artifact is missing its typed canvas")
+        );
+
+        let mut mismatched = scene(vec![pane(
+            PaneSceneKind::Artifact,
+            ready_artifact(4, 2, 7),
+        )]);
+        let pane_id = mismatched.panes[0].id.clone();
+        mismatched.presentation.nodes.push(PresentationNode {
+            id: PresentationNodeId::pane(
+                pane_id,
+                PaneNodePart::Workflow(WorkflowNodePart::ArtifactCanvas),
+            ),
+            parent: None,
+            role: PresentationNodeRole::ArtifactCanvas,
+            state: PresentationNodeState::default(),
+            logical_rect: LogicalRect::from_units(64, 8 * 64, 78 * 64, 14 * 64),
+            cell_rect: Some(SceneRect::new(1, 8, 78, 14)),
+            terminal_projection: TerminalProjection::CellRegions(Vec::new()),
+        });
+        assert_eq!(
+            prepare_scene(&mismatched, &Theme::default()).unwrap_err(),
+            SceneCompileError::InvalidGeometry(
+                "ready artifact canvas does not match typed geometry"
+            )
         );
     }
 

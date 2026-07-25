@@ -10,10 +10,13 @@ use mandatum_app::{
     AppConfig, FrameSnapshot, FrontendEffect, FrontendHost, VisualScenarioId,
     prepare_visual_scenario,
 };
-use mandatum_native_renderer::{PreparedScene, prepare_scene};
+use mandatum_native_renderer::{
+    NativeMaterialRole, NativePlanCommand, PreparedScene, prepare_scene,
+};
 use mandatum_scene::{
     AgentStatus, ArtifactState, CellOccupancy, CellSelection, HitTargetKind, OverlayScene,
-    PaneContent, SceneRect, SceneSize, WorkspaceScene,
+    PaneContent, PresentationNodeRole, PresentationTone, SceneRect, SceneSize, WorkflowRowRole,
+    WorkspaceScene,
     input::{
         CompositionEvent, InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent,
         PointerKind, TextRange,
@@ -1312,8 +1315,21 @@ fn real_host_task_pane_reaches_the_gpu_render_plan() {
         .find(|pane| matches!(pane.content, PaneContent::Task(_)))
         .expect("real task pane disappeared before cell-program assertions");
     let body = layout::pane_inner_rect(pane.area);
-    assert_cell_program_contains(&prepared, body, "command: printf TASK_PLAN_OK");
-    let output_row = body.y.saturating_add(pane.detail_lines().len() as u16);
+    assert_cell_program_contains(&prepared, body, "printf TASK_PLAN_OK");
+    assert!(
+        prepared
+            .presentation_plan()
+            .commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                NativePlanCommand::Material(material)
+                    if material.role == NativeMaterialRole::WorkflowConsole
+            ))
+    );
+    let output_row = body
+        .y
+        .saturating_add(u16::try_from(pane.terminal_fallback_row_count()).unwrap_or(u16::MAX));
     assert_cell_program_contains(
         &prepared,
         SceneRect::new(body.x, output_row, body.width, 1),
@@ -1593,6 +1609,18 @@ fn every_visual_scenario_reaches_its_typed_state_and_gpu_render_plan() {
         let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
             .unwrap_or_else(|error| panic!("{id}: GPU render-plan preparation failed: {error}"));
         assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+        let has_material = |role| {
+            prepared
+                .presentation_plan()
+                .commands()
+                .iter()
+                .any(|command| {
+                    matches!(
+                        command,
+                        NativePlanCommand::Material(material) if material.role == role
+                    )
+                })
+        };
 
         match id {
             VisualScenarioId::Typography => {
@@ -1655,6 +1683,22 @@ fn every_visual_scenario_reaches_its_typed_state_and_gpu_render_plan() {
                     )
                 }));
                 assert_eq!(prepared.artifacts().len(), 1);
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::WorkflowStatusBadge && !node.state.hidden
+                }));
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::Workflow(WorkflowRowRole::Console)
+                }));
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::Workflow(WorkflowRowRole::ArtifactInspector)
+                }));
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::ArtifactCanvas && !node.state.hidden
+                }));
+                assert!(has_material(NativeMaterialRole::Badge));
+                assert!(has_material(NativeMaterialRole::WorkflowConsole));
+                assert!(has_material(NativeMaterialRole::ArtifactInspector));
+                assert!(has_material(NativeMaterialRole::ArtifactCanvas));
             }
             VisualScenarioId::Attention => {
                 assert!(snapshot.scene.panes.iter().any(|pane| {
@@ -1672,6 +1716,22 @@ fn every_visual_scenario_reaches_its_typed_state_and_gpu_render_plan() {
                     )
                 }));
                 assert!(snapshot.scene.header.attention.len() >= 2);
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::Workflow(WorkflowRowRole::Callout)
+                        && node.state.tone == PresentationTone::Failure
+                        && node.state.attention
+                }));
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::Workflow(WorkflowRowRole::Callout)
+                        && node.state.tone == PresentationTone::Waiting
+                        && node.state.attention
+                }));
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::WorkflowStatusBadge
+                        && node.state.tone == PresentationTone::Waiting
+                }));
+                assert!(has_material(NativeMaterialRole::WorkflowCallout));
+                assert!(has_material(NativeMaterialRole::Badge));
             }
             VisualScenarioId::Palette => {
                 let Some(OverlayScene::Palette(palette)) = &snapshot.scene.overlay else {
@@ -1734,6 +1794,20 @@ fn every_visual_scenario_reaches_its_typed_state_and_gpu_render_plan() {
                     snapshot.scene.overlay,
                     Some(OverlayScene::ContextMenu(_))
                 ));
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::Workflow(WorkflowRowRole::ArtifactInspector)
+                }));
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::ArtifactCanvas && !node.state.hidden
+                }));
+                assert!(snapshot.scene.presentation.nodes.iter().any(|node| {
+                    node.role == PresentationNodeRole::Workflow(WorkflowRowRole::Callout)
+                        && node.state.tone == PresentationTone::Failure
+                        && node.state.attention
+                }));
+                assert!(has_material(NativeMaterialRole::ArtifactInspector));
+                assert!(has_material(NativeMaterialRole::ArtifactCanvas));
+                assert!(has_material(NativeMaterialRole::WorkflowCallout));
             }
             VisualScenarioId::Narrow => {
                 assert_eq!(snapshot.scene.panes.len(), 5);

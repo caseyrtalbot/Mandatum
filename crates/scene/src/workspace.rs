@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geometry::{LogicalPoint, LogicalRect, SceneRect, SceneSize, ViewportMetrics};
 use crate::input::TextRange;
-use crate::pane::{PaneBadgeKind, PaneScene};
+use crate::pane::{PaneBadgeKind, PaneScene, WorkflowNodePart, WorkflowRowRole};
 use crate::style::SceneCellStyle;
 use crate::theme::UiDensity;
 
@@ -140,6 +140,7 @@ pub enum PaneNodePart {
     FocusIndicator,
     Body,
     Output,
+    Workflow(WorkflowNodePart),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -203,6 +204,9 @@ pub enum PresentationNodeRole {
     PaneBody,
     TerminalOutput,
     TaskOutput,
+    Workflow(WorkflowRowRole),
+    WorkflowStatusBadge,
+    ArtifactCanvas,
     Overlay,
     OverlayTitle,
     OverlayFooter,
@@ -261,6 +265,8 @@ pub struct PresentationNodeState {
     pub floating: bool,
     pub hovered: bool,
     pub dragging: bool,
+    #[serde(default)]
+    pub hidden: bool,
     pub tone: PresentationTone,
     pub overlay_kind: Option<OverlayPresentationKind>,
 }

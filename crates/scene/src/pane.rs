@@ -2,9 +2,11 @@
 
 use mandatum_core::{AgentStatus, ArtifactFit, PaneId};
 use serde::{Deserialize, Serialize};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::geometry::SceneRect;
 use crate::surface::{RasterSurface, TerminalSurface};
+use crate::workspace::PresentationTone;
 
 /// One pane ready to draw: durable identity plus resolved geometry, chrome
 /// flags, and content.
@@ -120,135 +122,168 @@ impl PaneScene {
     /// kind, and title are deliberately absent — the border chrome already
     /// states them, and repeating them here read as debug output.
     pub fn detail_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        match &self.content {
-            PaneContent::Terminal(_) => return Vec::new(),
-            PaneContent::Task(task) => {
-                lines.push(format!("command: {}", task.command));
-                lines.push(format!("cwd: {}", task.cwd_label));
-                // "recipe:" is reserved for a real recipe name; ad-hoc runs
-                // simply omit the row.
-                if let Some(recipe) = &task.recipe_label {
-                    lines.push(format!("recipe: {recipe}"));
-                }
-                match &task.status_label {
-                    Some(status) => {
-                        lines.push(format!("runtime status: {status}"));
-                        // A failed task states its way back on the same
-                        // rows that state the failure: the failing command
-                        // is already above, the exit status is on the
-                        // status line, and this line names the rerun route.
-                        if status.contains("failed") {
-                            let hint = task
-                                .rerun_hint
-                                .as_deref()
-                                .filter(|hint| !hint.is_empty())
-                                .map(|hint| format!("rerun: {hint} · right-click menu"))
-                                .unwrap_or_else(|| "rerun: right-click menu".to_owned());
-                            lines.push(hint);
-                        }
-                        if task.output.is_some() {
-                            lines.push("output:".to_owned());
-                        } else {
-                            lines.push("output: no live grid attached".to_owned());
-                        }
-                    }
-                    None => {
-                        lines.push("runtime status: unavailable".to_owned());
-                        lines.push("output: no live runtime attached".to_owned());
-                    }
-                }
-            }
-            PaneContent::Agent(agent) => {
-                lines.push(format!("objective: {}", agent.objective));
-                lines.push(format!("status: {}", agent.status_label));
-                // A failed agent keeps its failure reason and the way back
-                // on screen, not just in a transient status line.
-                if agent.status_role == AgentStatus::Failed {
-                    if let Some(error) = &agent.last_error {
-                        lines.push(format!("error: {error}"));
-                    }
-                    if let Some(hint) = agent
-                        .relaunch_hint
-                        .as_deref()
-                        .filter(|hint| !hint.is_empty())
-                    {
-                        lines.push(format!("relaunch: {hint} · right-click menu"));
-                    }
-                }
-                lines.push(format!(
-                    "action: {}",
-                    agent.current_action.as_deref().unwrap_or("idle")
-                ));
-                lines.push(format!(
-                    "summary: {}",
-                    agent.latest_summary.as_deref().unwrap_or("none")
-                ));
-                match &agent.pending_approval {
-                    Some(prompt) => {
-                        lines.push(format!("approval required: {}", prompt.command));
-                        match &prompt.affected_path {
-                            Some(path) => {
-                                lines.push(format!("scope: {} -> {}", prompt.cwd, path));
-                            }
-                            None => lines.push(format!("scope: {}", prompt.cwd)),
-                        }
-                        lines.push(format!(
-                            "risk: {} ({})",
-                            prompt.risk_label, prompt.risk_basis
-                        ));
-                        lines.push(format!("keys: {}", prompt.key_hint));
-                    }
-                    None => {
-                        lines.push(format!("pending approvals: {}", agent.pending_approvals));
-                    }
-                }
-                if agent.changed_files.is_empty() {
-                    lines.push("changed files: none".to_owned());
-                } else {
-                    lines.push(format!("changed files ({}):", agent.changed_file_count));
-                    for path in &agent.changed_files {
-                        lines.push(format!("  {path}"));
-                    }
-                }
-                if !agent.output_tail.is_empty() {
-                    lines.push("output:".to_owned());
-                    for (index, line) in agent.output_tail.iter().enumerate() {
-                        lines.push(format!("  {line}"));
-                        // A command with nothing after it says so, instead
-                        // of leaving a bare "$ cmd" that reads as pending.
-                        let next_is_output = agent
-                            .output_tail
-                            .get(index + 1)
-                            .is_some_and(|next| !next.starts_with("$ "));
-                        if line.starts_with("$ ") && !next_is_output {
-                            lines.push("    (no output)".to_owned());
-                        }
-                    }
-                }
-            }
-            PaneContent::Artifact(artifact) => {
-                lines.push(format!("source: {}", artifact.source_label));
-                lines.push(format!("alt: {}", artifact.alt_text));
-                match &artifact.state {
-                    ArtifactState::Loading => lines.push("preview: loading".to_owned()),
-                    ArtifactState::Ready(surface) => lines.push(format!(
-                        "preview: ready · {}x{} RGBA8 sRGB",
-                        surface.width, surface.height
-                    )),
-                    ArtifactState::Failed { message } => {
-                        lines.push(format!("preview: failed · {message}"));
-                    }
-                }
-            }
-            PaneContent::Empty(empty) => {
-                lines.push(format!("cwd: {}", empty.cwd_label));
-                lines.push(format!("restart generation: {}", empty.restart_generation));
-                lines.push("no live PTY grid is attached to this pane".to_owned());
-            }
-        }
-        lines
+        self.workflow_rows()
+            .into_iter()
+            .map(|row| row.text)
+            .collect()
     }
+
+    /// Typed workflow projection used by both the terminal fallback and the
+    /// richer native presentation. Renderers style these roles directly;
+    /// they never parse labels or string prefixes to rediscover meaning.
+    pub fn workflow_rows(&self) -> Vec<WorkflowRow> {
+        match &self.content {
+            PaneContent::Terminal(_) => Vec::new(),
+            PaneContent::Task(task) => task.workflow_rows(),
+            PaneContent::Agent(agent) => agent.workflow_rows(),
+            PaneContent::Artifact(artifact) => artifact.workflow_rows(),
+            PaneContent::Empty(empty) => vec![
+                WorkflowRow::new(
+                    WorkflowNodePart::Metadata,
+                    WorkflowRowRole::Metadata,
+                    PresentationTone::Neutral,
+                    format!("cwd: {}", bounded_workflow_fragment(&empty.cwd_label)),
+                ),
+                WorkflowRow::new(
+                    WorkflowNodePart::Metadata,
+                    WorkflowRowRole::Metadata,
+                    PresentationTone::Neutral,
+                    format!("restart generation: {}", empty.restart_generation),
+                ),
+                WorkflowRow::new(
+                    WorkflowNodePart::Status,
+                    WorkflowRowRole::Status,
+                    PresentationTone::Neutral,
+                    "no live PTY grid is attached to this pane",
+                ),
+            ],
+        }
+    }
+
+    /// Exact terminal-fallback metadata budget above an embedded task console
+    /// or artifact canvas. Layout and paint share this one typed projection.
+    pub fn terminal_fallback_row_count(&self) -> usize {
+        self.workflow_rows().len()
+    }
+
+    /// Compact native badge projected over the matching fallback row.
+    pub fn workflow_status_badge(&self) -> Option<WorkflowStatusBadge> {
+        match &self.content {
+            PaneContent::Task(task) => Some(WorkflowStatusBadge {
+                row: 0,
+                label: task
+                    .status_label
+                    .as_deref()
+                    .map(bounded_workflow_fragment)
+                    .unwrap_or_else(|| "unavailable".to_owned()),
+                tone: task.status_role.tone(),
+            }),
+            PaneContent::Agent(agent) => Some(WorkflowStatusBadge {
+                row: 1,
+                label: format!("status: {}", bounded_workflow_fragment(&agent.status_label)),
+                tone: agent_status_tone(&agent.status_role),
+            }),
+            PaneContent::Artifact(artifact) => match &artifact.state {
+                ArtifactState::Loading => Some(WorkflowStatusBadge {
+                    row: 4,
+                    label: "preview: loading".to_owned(),
+                    tone: PresentationTone::Running,
+                }),
+                ArtifactState::Ready(_) => Some(WorkflowStatusBadge {
+                    row: 4,
+                    label: "preview: ready".to_owned(),
+                    tone: PresentationTone::Complete,
+                }),
+                ArtifactState::Failed { .. } => None,
+            },
+            PaneContent::Terminal(_) | PaneContent::Empty(_) => None,
+        }
+    }
+}
+
+/// Stable semantic part for one workflow region inside a pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorkflowNodePart {
+    Heading,
+    Status,
+    StatusText,
+    Metadata,
+    Failure,
+    Action,
+    Summary,
+    Approval,
+    ChangedFiles,
+    Console,
+    ArtifactInspector,
+    ArtifactState,
+    ArtifactCanvas,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowStatusBadge {
+    pub row: usize,
+    pub label: String,
+    pub tone: PresentationTone,
+}
+
+/// Renderer-neutral visual role for one workflow row or region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowRowRole {
+    Heading,
+    Status,
+    Metadata,
+    Callout,
+    List,
+    Console,
+    ArtifactInspector,
+}
+
+/// One complete terminal-fallback row with typed native meaning.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRow {
+    pub part: WorkflowNodePart,
+    pub role: WorkflowRowRole,
+    pub tone: PresentationTone,
+    pub text: String,
+}
+
+impl WorkflowRow {
+    fn new(
+        part: WorkflowNodePart,
+        role: WorkflowRowRole,
+        tone: PresentationTone,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            part,
+            role,
+            tone,
+            text: bounded_workflow_text(text.into()),
+        }
+    }
+}
+
+const MAX_WORKFLOW_ROW_GRAPHEMES: usize = 1_024;
+
+fn bounded_workflow_text(text: String) -> String {
+    let mut graphemes = text.graphemes(true);
+    let bounded = graphemes
+        .by_ref()
+        .take(MAX_WORKFLOW_ROW_GRAPHEMES)
+        .collect::<String>();
+    if graphemes.next().is_some() {
+        format!("{bounded} … [truncated]")
+    } else {
+        bounded
+    }
+}
+
+fn bounded_workflow_fragment(text: &str) -> String {
+    bounded_workflow_text(
+        text.graphemes(true)
+            .take(MAX_WORKFLOW_ROW_GRAPHEMES + 1)
+            .collect(),
+    )
 }
 
 /// The durable pane kind, re-expressed for frontends.
@@ -292,6 +327,67 @@ pub struct ArtifactContent {
     pub state: ArtifactState,
 }
 
+impl ArtifactContent {
+    fn workflow_rows(&self) -> Vec<WorkflowRow> {
+        let (tone, state, dimensions, revision) = match &self.state {
+            ArtifactState::Loading => (
+                PresentationTone::Running,
+                "loading".to_owned(),
+                "unavailable".to_owned(),
+                "pending".to_owned(),
+            ),
+            ArtifactState::Ready(surface) => (
+                PresentationTone::Complete,
+                "ready".to_owned(),
+                format!("{}x{} RGBA8 sRGB", surface.width, surface.height),
+                surface.revision.to_string(),
+            ),
+            ArtifactState::Failed { message } => (
+                PresentationTone::Failure,
+                format!("failed · {}", bounded_workflow_fragment(message)),
+                "unavailable".to_owned(),
+                "unavailable".to_owned(),
+            ),
+        };
+        vec![
+            WorkflowRow::new(
+                WorkflowNodePart::ArtifactInspector,
+                WorkflowRowRole::ArtifactInspector,
+                PresentationTone::Neutral,
+                format!("source: {}", bounded_workflow_fragment(&self.source_label)),
+            ),
+            WorkflowRow::new(
+                WorkflowNodePart::ArtifactInspector,
+                WorkflowRowRole::ArtifactInspector,
+                PresentationTone::Neutral,
+                format!("alt: {}", bounded_workflow_fragment(&self.alt_text)),
+            ),
+            WorkflowRow::new(
+                WorkflowNodePart::ArtifactInspector,
+                WorkflowRowRole::ArtifactInspector,
+                PresentationTone::Neutral,
+                format!("dimensions: {dimensions}"),
+            ),
+            WorkflowRow::new(
+                WorkflowNodePart::ArtifactInspector,
+                WorkflowRowRole::ArtifactInspector,
+                PresentationTone::Neutral,
+                format!("revision: {revision}"),
+            ),
+            WorkflowRow::new(
+                WorkflowNodePart::ArtifactState,
+                if tone == PresentationTone::Failure {
+                    WorkflowRowRole::Callout
+                } else {
+                    WorkflowRowRole::Metadata
+                },
+                tone,
+                format!("preview: {state}"),
+            ),
+        ]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArtifactState {
     Loading,
@@ -311,10 +407,97 @@ pub struct TaskContent {
     pub recipe_label: Option<String>,
     /// Live runtime status; `None` when no runtime view exists for the pane.
     pub status_label: Option<String>,
+    /// Typed status used by presentation adapters. The label remains the
+    /// exact user-facing terminal fallback.
+    pub status_role: TaskStatusRole,
     /// The keyboard route to Rerun task (composed from the live keymap),
     /// shown on failed tasks next to the right-click route.
     pub rerun_hint: Option<String>,
     pub output: Option<TerminalSurface>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskStatusRole {
+    Detached,
+    Waiting,
+    Running,
+    Succeeded,
+    Diagnostic,
+    Failed,
+}
+
+impl TaskStatusRole {
+    pub const fn tone(self) -> PresentationTone {
+        match self {
+            Self::Detached => PresentationTone::Neutral,
+            Self::Waiting | Self::Diagnostic => PresentationTone::Waiting,
+            Self::Running => PresentationTone::Running,
+            Self::Succeeded => PresentationTone::Complete,
+            Self::Failed => PresentationTone::Failure,
+        }
+    }
+}
+
+impl TaskContent {
+    fn workflow_rows(&self) -> Vec<WorkflowRow> {
+        let status = self.status_label.as_deref().unwrap_or("unavailable");
+        let mut rows = vec![
+            WorkflowRow::new(
+                WorkflowNodePart::Heading,
+                WorkflowRowRole::Heading,
+                self.status_role.tone(),
+                format!(
+                    "{} · {}",
+                    bounded_workflow_fragment(status),
+                    bounded_workflow_fragment(&self.command)
+                ),
+            ),
+            WorkflowRow::new(
+                WorkflowNodePart::Metadata,
+                WorkflowRowRole::Metadata,
+                PresentationTone::Neutral,
+                format!("cwd: {}", bounded_workflow_fragment(&self.cwd_label)),
+            ),
+        ];
+        if let Some(recipe) = &self.recipe_label {
+            rows.push(WorkflowRow::new(
+                WorkflowNodePart::Metadata,
+                WorkflowRowRole::Metadata,
+                PresentationTone::Neutral,
+                format!("recipe: {}", bounded_workflow_fragment(recipe)),
+            ));
+        }
+        if self.status_role == TaskStatusRole::Failed {
+            let route = self
+                .rerun_hint
+                .as_deref()
+                .filter(|hint| !hint.is_empty())
+                .map(|hint| format!("{} · right-click menu", bounded_workflow_fragment(hint)))
+                .unwrap_or_else(|| "right-click menu".to_owned());
+            rows.push(WorkflowRow::new(
+                WorkflowNodePart::Failure,
+                WorkflowRowRole::Callout,
+                PresentationTone::Failure,
+                format!(
+                    "failure: {} · rerun: {route}",
+                    bounded_workflow_fragment(status)
+                ),
+            ));
+        }
+        rows.push(WorkflowRow::new(
+            WorkflowNodePart::Console,
+            WorkflowRowRole::Console,
+            PresentationTone::Neutral,
+            if self.output.is_some() {
+                "output:".to_owned()
+            } else if self.status_label.is_some() {
+                "output: no live grid attached".to_owned()
+            } else {
+                "output: no live runtime attached".to_owned()
+            },
+        ));
+        rows
+    }
 }
 
 /// Agent pane content: the durable intent summary plus the live session
@@ -345,6 +528,179 @@ pub struct AgentContent {
     pub pending_approval: Option<AgentApprovalPrompt>,
     /// Trailing raw output lines (live only; the builder caps the tail).
     pub output_tail: Vec<String>,
+}
+
+impl AgentContent {
+    fn workflow_rows(&self) -> Vec<WorkflowRow> {
+        let status_tone = agent_status_tone(&self.status_role);
+        let mut rows = vec![
+            WorkflowRow::new(
+                WorkflowNodePart::Heading,
+                WorkflowRowRole::Heading,
+                PresentationTone::AgentIdentity,
+                format!("objective: {}", bounded_workflow_fragment(&self.objective)),
+            ),
+            WorkflowRow::new(
+                WorkflowNodePart::StatusText,
+                WorkflowRowRole::Metadata,
+                status_tone,
+                format!("status: {}", bounded_workflow_fragment(&self.status_label)),
+            ),
+        ];
+        if self.status_role == AgentStatus::Failed {
+            if let Some(error) = &self.last_error {
+                rows.push(WorkflowRow::new(
+                    WorkflowNodePart::Failure,
+                    WorkflowRowRole::Callout,
+                    PresentationTone::Failure,
+                    format!("error: {}", bounded_workflow_fragment(error)),
+                ));
+            }
+            if let Some(hint) = self
+                .relaunch_hint
+                .as_deref()
+                .filter(|hint| !hint.is_empty())
+            {
+                rows.push(WorkflowRow::new(
+                    WorkflowNodePart::Failure,
+                    WorkflowRowRole::Callout,
+                    PresentationTone::Failure,
+                    format!(
+                        "relaunch: {} · right-click menu",
+                        bounded_workflow_fragment(hint)
+                    ),
+                ));
+            }
+        }
+        rows.extend([
+            WorkflowRow::new(
+                WorkflowNodePart::Action,
+                WorkflowRowRole::Metadata,
+                PresentationTone::Neutral,
+                format!(
+                    "action: {}",
+                    bounded_workflow_fragment(self.current_action.as_deref().unwrap_or("idle"))
+                ),
+            ),
+            WorkflowRow::new(
+                WorkflowNodePart::Summary,
+                WorkflowRowRole::Metadata,
+                PresentationTone::Neutral,
+                format!(
+                    "summary: {}",
+                    bounded_workflow_fragment(self.latest_summary.as_deref().unwrap_or("none"))
+                ),
+            ),
+        ]);
+        match &self.pending_approval {
+            Some(prompt) => {
+                rows.push(WorkflowRow::new(
+                    WorkflowNodePart::Approval,
+                    WorkflowRowRole::Callout,
+                    PresentationTone::Waiting,
+                    format!(
+                        "approval required: {}",
+                        bounded_workflow_fragment(&prompt.command)
+                    ),
+                ));
+                rows.push(WorkflowRow::new(
+                    WorkflowNodePart::Approval,
+                    WorkflowRowRole::Callout,
+                    PresentationTone::Waiting,
+                    match &prompt.affected_path {
+                        Some(path) => format!(
+                            "scope: {} -> {}",
+                            bounded_workflow_fragment(&prompt.cwd),
+                            bounded_workflow_fragment(path)
+                        ),
+                        None => format!("scope: {}", bounded_workflow_fragment(&prompt.cwd)),
+                    },
+                ));
+                rows.push(WorkflowRow::new(
+                    WorkflowNodePart::Approval,
+                    WorkflowRowRole::Callout,
+                    PresentationTone::Waiting,
+                    format!(
+                        "risk: {} ({})",
+                        bounded_workflow_fragment(&prompt.risk_label),
+                        bounded_workflow_fragment(&prompt.risk_basis)
+                    ),
+                ));
+                rows.push(WorkflowRow::new(
+                    WorkflowNodePart::Approval,
+                    WorkflowRowRole::Callout,
+                    PresentationTone::Waiting,
+                    format!("keys: {}", bounded_workflow_fragment(&prompt.key_hint)),
+                ));
+            }
+            None => rows.push(WorkflowRow::new(
+                WorkflowNodePart::Approval,
+                WorkflowRowRole::Metadata,
+                PresentationTone::Neutral,
+                format!("pending approvals: {}", self.pending_approvals),
+            )),
+        }
+        if self.changed_files.is_empty() {
+            rows.push(WorkflowRow::new(
+                WorkflowNodePart::ChangedFiles,
+                WorkflowRowRole::List,
+                PresentationTone::Neutral,
+                "changed files: none",
+            ));
+        } else {
+            rows.push(WorkflowRow::new(
+                WorkflowNodePart::ChangedFiles,
+                WorkflowRowRole::List,
+                PresentationTone::Neutral,
+                format!("changed files ({}):", self.changed_file_count),
+            ));
+            rows.extend(self.changed_files.iter().map(|path| {
+                WorkflowRow::new(
+                    WorkflowNodePart::ChangedFiles,
+                    WorkflowRowRole::List,
+                    PresentationTone::Neutral,
+                    format!("  {}", bounded_workflow_fragment(path)),
+                )
+            }));
+        }
+        if !self.output_tail.is_empty() {
+            rows.push(WorkflowRow::new(
+                WorkflowNodePart::Console,
+                WorkflowRowRole::Console,
+                PresentationTone::Neutral,
+                "output:",
+            ));
+            const MAX_OUTPUT_ROWS: usize = 64;
+            let skipped = self.output_tail.len().saturating_sub(MAX_OUTPUT_ROWS);
+            if skipped > 0 {
+                rows.push(WorkflowRow::new(
+                    WorkflowNodePart::Console,
+                    WorkflowRowRole::Console,
+                    PresentationTone::Neutral,
+                    format!("  … {skipped} earlier output lines omitted"),
+                ));
+            }
+            for line in self.output_tail.iter().skip(skipped) {
+                rows.push(WorkflowRow::new(
+                    WorkflowNodePart::Console,
+                    WorkflowRowRole::Console,
+                    PresentationTone::Neutral,
+                    format!("  {}", bounded_workflow_fragment(line)),
+                ));
+            }
+        }
+        rows
+    }
+}
+
+fn agent_status_tone(status: &AgentStatus) -> PresentationTone {
+    match status {
+        AgentStatus::Running => PresentationTone::Running,
+        AgentStatus::WaitingForApproval | AgentStatus::Blocked => PresentationTone::Waiting,
+        AgentStatus::Failed => PresentationTone::Failure,
+        AgentStatus::Complete => PresentationTone::Complete,
+        AgentStatus::Draft | AgentStatus::Unknown => PresentationTone::Neutral,
+    }
 }
 
 /// A gated action awaiting a user verdict, re-expressed for frontends.
@@ -396,11 +752,18 @@ mod tests {
     }
 
     fn task_content(status_label: Option<String>, output: Option<TerminalSurface>) -> TaskContent {
+        let status_role = match status_label.as_deref() {
+            Some(status) if status.starts_with("failed") => TaskStatusRole::Failed,
+            Some(status) if status.starts_with("succeeded") => TaskStatusRole::Succeeded,
+            Some(_) => TaskStatusRole::Running,
+            None => TaskStatusRole::Detached,
+        };
         TaskContent {
             command: "cargo test".to_owned(),
             cwd_label: "/tmp/project".to_owned(),
             recipe_label: Some("test".to_owned()),
             status_label,
+            status_role,
             rerun_hint: Some("ctrl+p r".to_owned()),
             output,
         }
@@ -419,11 +782,10 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "command: cargo test",
+                "failed: exit 101 · cargo test",
                 "cwd: /tmp/project",
                 "recipe: test",
-                "runtime status: failed: exit 101",
-                "rerun: ctrl+p r · right-click menu",
+                "failure: failed: exit 101 · rerun: ctrl+p r · right-click menu",
                 "output:",
             ]
         );
@@ -466,7 +828,7 @@ mod tests {
                 || line.starts_with("recipe:")),
             "{lines:?}"
         );
-        assert_eq!(lines[0], "command: cargo test");
+        assert_eq!(lines[0], "running · cargo test");
     }
 
     // A failed task states its way back: the failing command, the exit
@@ -478,15 +840,18 @@ mod tests {
             PaneSceneKind::Task,
         );
         let lines = failed.detail_lines();
-        assert!(lines.contains(&"command: cargo test".to_owned()));
-        assert!(lines.contains(&"runtime status: failed: exit 3".to_owned()));
-        assert!(lines.contains(&"rerun: ctrl+p r · right-click menu".to_owned()));
+        assert!(lines.contains(&"failed: exit 3 · cargo test".to_owned()));
+        assert!(
+            lines.contains(
+                &"failure: failed: exit 3 · rerun: ctrl+p r · right-click menu".to_owned()
+            )
+        );
 
         // Without a composed key hint the right-click route still shows.
         let mut content = task_content(Some("failed: exit 3".to_owned()), None);
         content.rerun_hint = None;
         let lines = pane(PaneContent::Task(content), PaneSceneKind::Task).detail_lines();
-        assert!(lines.contains(&"rerun: right-click menu".to_owned()));
+        assert!(lines.contains(&"failure: failed: exit 3 · rerun: right-click menu".to_owned()));
 
         // A healthy task never shows the rerun row.
         let running = pane(
@@ -497,12 +862,12 @@ mod tests {
             !running
                 .detail_lines()
                 .iter()
-                .any(|line| line.starts_with("rerun:"))
+                .any(|line| line.starts_with("failure:"))
         );
     }
 
     #[test]
-    fn task_detail_line_count_is_stable_across_runtime_states() {
+    fn task_detail_line_count_is_stable_across_runtime_attachment() {
         // The scene builder windows a task's output surface to the space left
         // after these lines, so the count must not depend on whether the
         // output surface is attached yet.
@@ -521,13 +886,13 @@ mod tests {
             PaneContent::Task(task_content(None, None)),
             PaneSceneKind::Task,
         );
-        assert_eq!(with_output.detail_lines().len(), 5);
-        assert_eq!(without_output.detail_lines().len(), 5);
-        assert_eq!(unavailable.detail_lines().len(), 5);
+        assert_eq!(with_output.detail_lines().len(), 4);
+        assert_eq!(without_output.detail_lines().len(), 4);
+        assert_eq!(unavailable.detail_lines().len(), 4);
         assert!(
             unavailable
                 .detail_lines()
-                .contains(&"runtime status: unavailable".to_owned())
+                .contains(&"unavailable · cargo test".to_owned())
         );
         assert!(
             unavailable
@@ -657,10 +1022,8 @@ mod tests {
         assert!(!lines.iter().any(|line| line.starts_with("relaunch:")));
     }
 
-    // A bare "$ cmd" with nothing after it reads as pending; the tail says
-    // "(no output)" explicitly for commands that produced none.
     #[test]
-    fn output_tail_marks_commands_without_output() {
+    fn output_tail_preserves_raw_lines_without_prompt_inference() {
         let mut content = agent_content(AgentStatus::Complete, "complete");
         content.output_tail = vec![
             "$ cat .flip".to_owned(),
@@ -675,11 +1038,9 @@ mod tests {
             &[
                 "output:",
                 "  $ cat .flip",
-                "    (no output)",
                 "  $ rm .flip",
                 "  removed",
                 "  $ true",
-                "    (no output)",
             ]
         );
     }
@@ -691,5 +1052,69 @@ mod tests {
             PaneSceneKind::Terminal,
         );
         assert!(terminal.detail_lines().is_empty());
+    }
+
+    #[test]
+    fn typed_workflow_rows_are_bounded_and_never_infer_failure_from_text() {
+        let mut content = task_content(Some("running".to_owned()), None);
+        content.command = format!("printf failed:{}", "x".repeat(2_000));
+        let pane = pane(PaneContent::Task(content), PaneSceneKind::Task);
+        let rows = pane.workflow_rows();
+
+        assert_eq!(rows[0].part, WorkflowNodePart::Heading);
+        assert_eq!(rows[0].role, WorkflowRowRole::Heading);
+        assert_eq!(
+            pane.workflow_status_badge().unwrap().tone,
+            PresentationTone::Running
+        );
+        assert!(
+            rows.iter().all(|row| row.part != WorkflowNodePart::Failure),
+            "command text cannot manufacture failure presentation"
+        );
+        assert!(rows[0].text.ends_with(" … [truncated]"));
+        assert!(
+            rows[0].text.graphemes(true).count() <= MAX_WORKFLOW_ROW_GRAPHEMES + 15,
+            "bounded rows may add only the explicit truncation marker"
+        );
+        assert_eq!(
+            pane.detail_lines(),
+            rows.into_iter().map(|row| row.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn agent_projection_caps_rows_and_bounds_every_external_fragment() {
+        let long = "界".repeat(2_000);
+        let mut content = agent_content(AgentStatus::WaitingForApproval, &long);
+        content.objective = long.clone();
+        content.current_action = Some(long.clone());
+        content.latest_summary = Some(long.clone());
+        content.changed_file_count = 1;
+        content.changed_files = vec![long.clone()];
+        content.pending_approval = Some(AgentApprovalPrompt {
+            command: long.clone(),
+            cwd: long.clone(),
+            affected_path: Some(long.clone()),
+            risk_label: long.clone(),
+            risk_basis: long.clone(),
+            key_hint: long.clone(),
+            pulse_on: false,
+        });
+        content.output_tail = (0..100).map(|index| format!("{index}: {long}")).collect();
+        let rows = pane(PaneContent::Agent(content), PaneSceneKind::Agent).workflow_rows();
+
+        assert!(
+            rows.iter()
+                .all(|row| { row.text.graphemes(true).count() <= MAX_WORKFLOW_ROW_GRAPHEMES + 15 })
+        );
+        assert!(rows.iter().any(|row| row.text.ends_with(" … [truncated]")));
+        let console = rows
+            .iter()
+            .filter(|row| row.role == WorkflowRowRole::Console)
+            .collect::<Vec<_>>();
+        assert_eq!(console.len(), 66);
+        assert_eq!(console[1].text, "  … 36 earlier output lines omitted");
+        assert!(console.last().unwrap().text.starts_with("  99: "));
+        assert!(console.last().unwrap().text.ends_with(" … [truncated]"));
     }
 }

@@ -1,8 +1,8 @@
 use super::TextPaintScopeKind;
 use super::{CellOccupancy, CellSelection, Compiler, ProgramCell};
 use crate::{
-    AgentStatus, ArtifactState, PaneContent, PaneScene, SceneCellStyle, SceneColor, SceneRect,
-    TerminalSurface, Theme,
+    ArtifactState, PaneContent, PaneScene, PresentationTone, SceneCellStyle, SceneColor, SceneRect,
+    TerminalSurface, Theme, WorkflowNodePart, WorkflowRow, WorkflowRowRole,
 };
 
 use super::primitives::{bordered_inner_rect, bounded_grapheme, display_width, foreground};
@@ -47,80 +47,57 @@ impl Compiler {
         match &pane.content {
             PaneContent::Terminal(surface) => self.paint_surface(inner, 0, surface),
             PaneContent::Task(task) => {
-                let lines = pane.detail_lines();
-                for (row, text) in lines.iter().enumerate() {
-                    let line_style =
-                        if text.starts_with("runtime status:") && text.contains("failed") {
-                            SceneCellStyle {
-                                foreground: theme.attention,
-                                bold: true,
-                                ..SceneCellStyle::default()
-                            }
-                        } else {
-                            SceneCellStyle::default()
-                        };
-                    self.paint_text_row(inner, row, &fit_line(text, inner.width), line_style);
+                let rows = pane.workflow_rows();
+                for (row, workflow) in rows.iter().enumerate() {
+                    self.paint_text_row(
+                        inner,
+                        row,
+                        &fit_line(&workflow.text, inner.width),
+                        workflow_row_style(workflow, theme, false),
+                    );
                 }
                 if let Some(output) = &task.output {
-                    self.paint_surface(inner, lines.len(), output);
+                    self.paint_surface(inner, rows.len(), output);
                 }
             }
             PaneContent::Agent(agent) => {
-                let approval = foreground(theme.attention);
-                let approval_header = SceneCellStyle {
-                    bold: agent
-                        .pending_approval
-                        .as_ref()
-                        .is_some_and(|prompt| prompt.pulse_on),
-                    ..approval
-                };
-                let status = SceneCellStyle {
-                    foreground: agent_status_color(&agent.status_role, theme),
-                    bold: true,
-                    ..SceneCellStyle::default()
-                };
-                let lines = pane
-                    .detail_lines()
-                    .into_iter()
-                    .map(|text| {
-                        let line_style = if text.starts_with("status: ") {
-                            status
-                        } else if text.starts_with("error: ") || text.starts_with("relaunch: ") {
-                            foreground(theme.agent_failed)
-                        } else if agent.pending_approval.is_some()
-                            && text.starts_with("approval required: ")
-                        {
-                            approval_header
-                        } else if agent.pending_approval.is_some()
-                            && (text.starts_with("scope: ")
-                                || text.starts_with("risk: ")
-                                || text.starts_with("keys: "))
-                        {
-                            approval
-                        } else {
-                            SceneCellStyle::default()
-                        };
-                        (text, line_style)
+                let rows = pane.workflow_rows();
+                let lines = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| {
+                        let first_approval_row = row.part == WorkflowNodePart::Approval
+                            && index
+                                .checked_sub(1)
+                                .and_then(|previous| rows.get(previous))
+                                .is_none_or(|previous| previous.part != WorkflowNodePart::Approval);
+                        let pulse = first_approval_row
+                            && agent
+                                .pending_approval
+                                .as_ref()
+                                .is_some_and(|prompt| prompt.pulse_on);
+                        let style = workflow_row_style(row, theme, pulse);
+                        (row.text.clone(), style)
                     })
                     .collect::<Vec<_>>();
-                self.paint_wrapped_lines(inner, &lines);
+                for (row, (text, style)) in lines.iter().enumerate() {
+                    self.paint_text_row(inner, row, &fit_line(text, inner.width), *style);
+                }
             }
             PaneContent::Artifact(artifact) => {
-                let lines = pane.detail_lines();
-                for (row, text) in lines.iter().enumerate() {
-                    let line_style = if matches!(artifact.state, ArtifactState::Failed { .. })
-                        && text.starts_with("preview: failed")
-                    {
-                        foreground(theme.attention)
-                    } else {
-                        SceneCellStyle::default()
-                    };
-                    self.paint_text_row(inner, row, &fit_line(text, inner.width), line_style);
+                let rows = pane.workflow_rows();
+                for (row, workflow) in rows.iter().enumerate() {
+                    self.paint_text_row(
+                        inner,
+                        row,
+                        &fit_line(&workflow.text, inner.width),
+                        workflow_row_style(workflow, theme, false),
+                    );
                 }
                 if matches!(artifact.state, ArtifactState::Ready(_))
                     && let Some(raster_layer) = raster_layer
                 {
-                    self.paint_raster_body(inner, lines.len(), raster_layer);
+                    self.paint_raster_body(inner, rows.len(), raster_layer);
                 }
             }
             PaneContent::Empty(_) => {
@@ -222,13 +199,23 @@ impl Compiler {
     }
 }
 
-fn agent_status_color(status: &AgentStatus, theme: &Theme) -> SceneColor {
-    match status {
-        AgentStatus::Running => theme.agent_running,
-        AgentStatus::WaitingForApproval => theme.agent_waiting,
-        AgentStatus::Failed => theme.agent_failed,
-        AgentStatus::Complete => theme.agent_complete,
-        AgentStatus::Draft | AgentStatus::Blocked | AgentStatus::Unknown => theme.agent_idle,
+fn workflow_row_style(row: &WorkflowRow, theme: &Theme, pulse: bool) -> SceneCellStyle {
+    let foreground = match row.tone {
+        PresentationTone::Neutral => SceneColor::Default,
+        PresentationTone::Focus => theme.focus_title,
+        PresentationTone::Running => theme.agent_running,
+        PresentationTone::Waiting => theme.agent_waiting,
+        PresentationTone::Failure => theme.agent_failed,
+        PresentationTone::Complete => theme.agent_complete,
+        PresentationTone::AgentIdentity => theme.pane_title,
+    };
+    SceneCellStyle {
+        foreground,
+        bold: pulse
+            || matches!(row.role, WorkflowRowRole::Heading | WorkflowRowRole::Status)
+            || row.part == WorkflowNodePart::StatusText
+            || (row.role == WorkflowRowRole::Callout && row.tone == PresentationTone::Failure),
+        ..SceneCellStyle::default()
     }
 }
 

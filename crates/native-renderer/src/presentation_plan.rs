@@ -30,6 +30,10 @@ pub enum NativeMaterialRole {
     SelectionIndicator,
     Attention,
     Badge,
+    WorkflowCallout,
+    WorkflowConsole,
+    ArtifactInspector,
+    ArtifactCanvas,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,6 +455,9 @@ fn materials_for_node(
     theme: &Theme,
     viewport_rect: LogicalRect,
 ) -> Vec<NativeMaterialSpec> {
+    if node.state.hidden {
+        return Vec::new();
+    }
     let palette = theme.ui.palette;
     if node.role == PresentationNodeRole::Item && node.state.selected {
         let mut selection =
@@ -562,9 +569,49 @@ fn materials_for_node(
             NativeMaterialRole::Focus,
             palette.focus,
         )),
-        PresentationNodeRole::TerminalOutput
-        | PresentationNodeRole::TaskOutput
-        | PresentationNodeRole::Item => None,
+        PresentationNodeRole::TerminalOutput | PresentationNodeRole::Item => None,
+        PresentationNodeRole::TaskOutput => Some(NativeMaterialSpec::flat(
+            NativeMaterialRole::WorkflowConsole,
+            palette.canvas,
+        )),
+        PresentationNodeRole::Workflow(role) => match role {
+            mandatum_scene::WorkflowRowRole::Heading
+            | mandatum_scene::WorkflowRowRole::Metadata
+            | mandatum_scene::WorkflowRowRole::Status => None,
+            mandatum_scene::WorkflowRowRole::Callout => {
+                let mut spec = NativeMaterialSpec::flat(
+                    NativeMaterialRole::WorkflowCallout,
+                    palette.chrome_surface,
+                );
+                spec.corner_radius_units = u64::from(theme.ui.spacing.space_1) * 64;
+                spec.boundary = Some(NativeBoundary {
+                    width_units: u64::from(theme.ui.spacing.tiled_separator.max(1)) * 64,
+                    color: tone_color(node.state.tone, theme),
+                });
+                Some(spec)
+            }
+            mandatum_scene::WorkflowRowRole::List => Some(NativeMaterialSpec::flat(
+                NativeMaterialRole::ArtifactInspector,
+                palette.pane_surface,
+            )),
+            mandatum_scene::WorkflowRowRole::Console => Some(NativeMaterialSpec::flat(
+                NativeMaterialRole::WorkflowConsole,
+                palette.canvas,
+            )),
+            mandatum_scene::WorkflowRowRole::ArtifactInspector => Some(NativeMaterialSpec::flat(
+                NativeMaterialRole::ArtifactInspector,
+                palette.chrome_surface,
+            )),
+        },
+        PresentationNodeRole::WorkflowStatusBadge => Some(semantic_chip_material(
+            NativeMaterialRole::Badge,
+            node.state.tone,
+            theme,
+        )),
+        PresentationNodeRole::ArtifactCanvas => Some(NativeMaterialSpec::flat(
+            NativeMaterialRole::ArtifactCanvas,
+            palette.canvas,
+        )),
     };
     material.into_iter().collect()
 }
@@ -573,6 +620,9 @@ fn text_for_node(
     node: &PresentationNode,
     theme: &Theme,
 ) -> Option<(NativeTextMetricRole, UiColor)> {
+    if node.state.hidden {
+        return None;
+    }
     let palette = theme.ui.palette;
     let color = if node.state.disabled {
         palette.text_muted
@@ -601,6 +651,34 @@ fn text_for_node(
         PresentationNodeRole::TaskOutput => Some((NativeTextMetricRole::Body, color)),
         PresentationNodeRole::TextInput => Some((NativeTextMetricRole::Body, color)),
         PresentationNodeRole::Item => Some((NativeTextMetricRole::Body, color)),
+        PresentationNodeRole::Workflow(role) => Some(match role {
+            mandatum_scene::WorkflowRowRole::Heading => (
+                NativeTextMetricRole::Title,
+                tone_color(node.state.tone, theme),
+            ),
+            mandatum_scene::WorkflowRowRole::Status => (
+                NativeTextMetricRole::Metadata,
+                tone_color(node.state.tone, theme),
+            ),
+            mandatum_scene::WorkflowRowRole::Metadata
+            | mandatum_scene::WorkflowRowRole::ArtifactInspector => {
+                (NativeTextMetricRole::Metadata, palette.text_secondary)
+            }
+            mandatum_scene::WorkflowRowRole::Callout => (
+                NativeTextMetricRole::Body,
+                tone_color(node.state.tone, theme),
+            ),
+            mandatum_scene::WorkflowRowRole::List => {
+                (NativeTextMetricRole::Metadata, palette.text_secondary)
+            }
+            mandatum_scene::WorkflowRowRole::Console => {
+                (NativeTextMetricRole::Terminal, palette.text_primary)
+            }
+        }),
+        PresentationNodeRole::WorkflowStatusBadge => Some((
+            NativeTextMetricRole::Metadata,
+            tone_color(node.state.tone, theme),
+        )),
         PresentationNodeRole::OverlayTitle => {
             Some((NativeTextMetricRole::Title, palette.text_primary))
         }
@@ -615,6 +693,7 @@ fn text_for_node(
         | PresentationNodeRole::Pane
         | PresentationNodeRole::PaneBody
         | PresentationNodeRole::Overlay
+        | PresentationNodeRole::ArtifactCanvas
         | PresentationNodeRole::FocusIndicator
         | PresentationNodeRole::Separator => None,
     }
@@ -629,7 +708,9 @@ fn native_text_color_projection(node: &PresentationNode) -> Option<SceneRect> {
         | PresentationNodeRole::Attention
         | PresentationNodeRole::OverlayTitle
         | PresentationNodeRole::OverlayFooter
-        | PresentationNodeRole::TextInput => node.cell_rect,
+        | PresentationNodeRole::TextInput
+        | PresentationNodeRole::Workflow(_)
+        | PresentationNodeRole::WorkflowStatusBadge => node.cell_rect,
         PresentationNodeRole::TerminalOutput
         | PresentationNodeRole::TaskOutput
         | PresentationNodeRole::Item
@@ -637,6 +718,7 @@ fn native_text_color_projection(node: &PresentationNode) -> Option<SceneRect> {
         | PresentationNodeRole::Pane
         | PresentationNodeRole::PaneBody
         | PresentationNodeRole::Overlay
+        | PresentationNodeRole::ArtifactCanvas
         | PresentationNodeRole::FocusIndicator
         | PresentationNodeRole::Separator => None,
     }

@@ -9,7 +9,8 @@ use mandatum_scene::{
     PaneScene, PaneSceneKind, PhysicalSize, PresentationNode, PresentationNodeId,
     PresentationNodeRole, PresentationNodeState, PresentationTone, ScenePresentation, SceneRect,
     SceneSize, SemanticKey, StatusScene, TerminalProjection, Theme, TransitionProperty,
-    TransitionTarget, ViewportMetrics, WorkspaceNodePart, WorkspaceScene, compile_cell_program,
+    TransitionTarget, ViewportMetrics, WorkflowNodePart, WorkflowRowRole, WorkspaceNodePart,
+    WorkspaceScene, compile_cell_program,
 };
 
 fn scene(nodes: Vec<PresentationNode>, transitions: Vec<TransitionTarget>) -> WorkspaceScene {
@@ -118,7 +119,7 @@ fn plan_retains_exact_semantic_order_bounds_clips_state_and_typed_transition() {
             ),
             node(
                 title_id.clone(),
-                Some(pane_id),
+                Some(pane_id.clone()),
                 PresentationNodeRole::PaneTitle,
                 PresentationNodeState {
                     focused: true,
@@ -663,6 +664,172 @@ fn phase_four_overlay_family() {
         )));
     }
     assert_eq!(theme.ui.radii.context_menu, 8);
+}
+
+#[test]
+fn phase_five_workflow_family_maps_typed_regions_without_parsing_text() {
+    let theme = Theme::default();
+    let workspace_id = PresentationNodeId::workspace(WorkspaceNodePart::Surface);
+    let pane_id = PresentationNodeId::pane(PaneId::new("pane-a"), PaneNodePart::Surface);
+    let failure_id = PresentationNodeId::pane(
+        PaneId::new("pane-a"),
+        PaneNodePart::Workflow(WorkflowNodePart::Failure),
+    );
+    let approval_id = PresentationNodeId::pane(
+        PaneId::new("pane-a"),
+        PaneNodePart::Workflow(WorkflowNodePart::Approval),
+    );
+    let status_badge_id = PresentationNodeId::pane(
+        PaneId::new("pane-a"),
+        PaneNodePart::Workflow(WorkflowNodePart::Status),
+    );
+    let console_id = PresentationNodeId::pane(
+        PaneId::new("pane-a"),
+        PaneNodePart::Workflow(WorkflowNodePart::Console),
+    );
+    let canvas_id = PresentationNodeId::pane(
+        PaneId::new("pane-a"),
+        PaneNodePart::Workflow(WorkflowNodePart::ArtifactCanvas),
+    );
+    let workspace = scene(
+        vec![
+            node(
+                workspace_id.clone(),
+                None,
+                PresentationNodeRole::Workspace,
+                PresentationNodeState::default(),
+                LogicalRect::from_units(0, 0, 800 * 64, 600 * 64),
+                SceneRect::new(0, 0, 100, 30),
+            ),
+            node(
+                pane_id.clone(),
+                Some(workspace_id),
+                PresentationNodeRole::Pane,
+                PresentationNodeState::default(),
+                LogicalRect::from_units(0, 20 * 64, 800 * 64, 560 * 64),
+                SceneRect::new(0, 1, 100, 28),
+            ),
+            node(
+                failure_id.clone(),
+                Some(pane_id.clone()),
+                PresentationNodeRole::Workflow(WorkflowRowRole::Callout),
+                PresentationNodeState {
+                    attention: true,
+                    tone: PresentationTone::Failure,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(8 * 64, 60 * 64, 400 * 64, 20 * 64),
+                SceneRect::new(1, 3, 50, 1),
+            ),
+            node(
+                approval_id.clone(),
+                Some(pane_id.clone()),
+                PresentationNodeRole::Workflow(WorkflowRowRole::Callout),
+                PresentationNodeState {
+                    attention: true,
+                    tone: PresentationTone::Waiting,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(8 * 64, 80 * 64, 400 * 64, 80 * 64),
+                SceneRect::new(1, 4, 50, 4),
+            ),
+            node(
+                status_badge_id.clone(),
+                Some(pane_id.clone()),
+                PresentationNodeRole::WorkflowStatusBadge,
+                PresentationNodeState {
+                    tone: PresentationTone::Waiting,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(8 * 64, 40 * 64, 120 * 64, 20 * 64),
+                SceneRect::new(1, 2, 15, 1),
+            ),
+            node(
+                console_id.clone(),
+                Some(pane_id.clone()),
+                PresentationNodeRole::Workflow(WorkflowRowRole::Console),
+                PresentationNodeState::default(),
+                LogicalRect::from_units(8 * 64, 160 * 64, 784 * 64, 20 * 64),
+                SceneRect::new(1, 8, 98, 1),
+            ),
+            node(
+                canvas_id.clone(),
+                Some(pane_id.clone()),
+                PresentationNodeRole::ArtifactCanvas,
+                PresentationNodeState::default(),
+                LogicalRect::from_units(8 * 64, 180 * 64, 784 * 64, 380 * 64),
+                SceneRect::new(1, 9, 98, 19),
+            ),
+        ],
+        Vec::new(),
+    );
+    let plan = prepare_native_presentation(&workspace, &theme).unwrap();
+    let material = |id: &PresentationNodeId| {
+        plan.commands()
+            .iter()
+            .find_map(|command| match command {
+                NativePlanCommand::Material(material) if &material.node_id == id => Some(material),
+                _ => None,
+            })
+            .expect("typed region material")
+    };
+    let text = |id: &PresentationNodeId| {
+        plan.commands()
+            .iter()
+            .find_map(|command| match command {
+                NativePlanCommand::Text(text) if &text.node_id == id => Some(text),
+                _ => None,
+            })
+            .expect("typed region text")
+    };
+
+    assert_eq!(
+        material(&failure_id).role,
+        NativeMaterialRole::WorkflowCallout
+    );
+    assert_eq!(
+        material(&failure_id).boundary.unwrap().color,
+        theme.ui.palette.failure
+    );
+    assert_eq!(
+        material(&approval_id).boundary.unwrap().color,
+        theme.ui.palette.waiting
+    );
+    assert_eq!(material(&status_badge_id).role, NativeMaterialRole::Badge);
+    assert_eq!(
+        material(&status_badge_id).logical_rect.size.width_units(),
+        120 * 64
+    );
+    assert_eq!(
+        material(&status_badge_id).boundary.unwrap().color,
+        theme.ui.palette.waiting
+    );
+    assert_eq!(
+        material(&console_id).role,
+        NativeMaterialRole::WorkflowConsole
+    );
+    assert_eq!(
+        text(&console_id).metrics.role,
+        NativeTextMetricRole::Terminal
+    );
+    assert_eq!(
+        material(&canvas_id).role,
+        NativeMaterialRole::ArtifactCanvas
+    );
+    assert!(
+        plan.commands()
+            .iter()
+            .filter_map(|command| match command {
+                NativePlanCommand::Material(material) => Some(material),
+                _ => None,
+            })
+            .all(|material| {
+                material.node_id != pane_id
+                    || (material.color != theme.ui.palette.failure
+                        && material.color != theme.ui.palette.waiting)
+            }),
+        "failure and approval never tint the whole pane"
+    );
 }
 
 #[test]

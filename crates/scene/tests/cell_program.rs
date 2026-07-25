@@ -159,6 +159,7 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
                     cwd_label: "/project".to_owned(),
                     recipe_label: Some("checks".to_owned()),
                     status_label: Some("failed: exit 3".to_owned()),
+                    status_role: mandatum_scene::TaskStatusRole::Failed,
                     rerun_hint: Some("ctrl+p r".to_owned()),
                     output: None,
                 }),
@@ -268,9 +269,9 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
     let failed_status = program.cell_at(1, 5).expect("failed task status row");
     assert_eq!(
         failed_status.occupancy,
-        CellOccupancy::Grapheme('r'.to_string())
+        CellOccupancy::Grapheme('f'.to_string())
     );
-    assert_eq!(failed_status.style.foreground, theme.attention);
+    assert_eq!(failed_status.style.foreground, theme.agent_failed);
     assert!(failed_status.style.bold);
 
     let agent_status = program.cell_at(41, 3).expect("agent status row");
@@ -286,7 +287,7 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
         approval_header.occupancy,
         CellOccupancy::Grapheme('a'.to_string())
     );
-    assert_eq!(approval_header.style.foreground, theme.attention);
+    assert_eq!(approval_header.style.foreground, theme.agent_waiting);
     assert!(approval_header.style.bold, "pulse-on emphasizes the header");
 
     let approval_scope = program.cell_at(41, 7).expect("approval scope row");
@@ -294,7 +295,7 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
         approval_scope.occupancy,
         CellOccupancy::Grapheme('s'.to_string())
     );
-    assert_eq!(approval_scope.style.foreground, theme.attention);
+    assert_eq!(approval_scope.style.foreground, theme.agent_waiting);
     assert!(
         !approval_scope.style.bold,
         "only the pulsing header is bold"
@@ -1195,7 +1196,7 @@ fn ready_artifact_marks_only_its_final_visible_body_cells() {
     let program = compile_cell_program(&scene, &Theme::default());
 
     assert_eq!(
-        program.cell_at(2, 5).and_then(|cell| cell.raster_layer),
+        program.cell_at(8, 7).and_then(|cell| cell.raster_layer),
         Some(0),
         "ready body cells carry the artifact pane draw index"
     );

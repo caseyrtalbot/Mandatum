@@ -14,8 +14,9 @@ use mandatum_scene::{
     PaneSceneKind, PreeditScene, PresentationAxis, PresentationNode, PresentationNodeId,
     PresentationNodeRole, PresentationNodeState, PresentationTone, SceneCell, SceneCellStyle,
     SceneColor, ScenePresentation, SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent,
-    TerminalProjection, TerminalSurface, TerminalViewportMapping, TextInputKind, TextInputScene,
-    TransitionProperty, TransitionTarget, ViewportMetrics, WorkspaceNodePart, WorkspaceScene,
+    TaskStatusRole, TerminalProjection, TerminalSurface, TerminalViewportMapping, TextInputKind,
+    TextInputScene, TransitionProperty, TransitionTarget, ViewportMetrics, WorkflowNodePart,
+    WorkspaceNodePart, WorkspaceScene,
     cell_program::display_width,
     layout::{self, PaneLayout},
 };
@@ -608,6 +609,8 @@ fn push_pane_presentation(
         property: TransitionProperty::Geometry,
     });
 
+    push_workflow_presentation(pane, viewport, &pane_id, nodes);
+
     if let Some(mapping) = terminal_viewport_mapping(state, pane, viewport) {
         let role = match pane.content {
             PaneContent::Task(_) => PresentationNodeRole::TaskOutput,
@@ -626,6 +629,152 @@ fn push_pane_presentation(
             viewport,
         ));
         terminal_viewports.push(mapping);
+    }
+}
+
+fn push_workflow_presentation(
+    pane: &PaneScene,
+    viewport: ViewportMetrics,
+    pane_id: &PresentationNodeId,
+    nodes: &mut Vec<PresentationNode>,
+) {
+    let inner = layout::pane_inner_rect(pane.area);
+    let rows = pane.workflow_rows();
+    if pane.area.is_empty() {
+        return;
+    }
+    let hidden_anchor = SceneRect::new(pane.area.x, pane.area.y, 1, 1);
+    let mut start = 0usize;
+    while start < rows.len() {
+        let seed = &rows[start];
+        let mut end = start + 1;
+        while end < rows.len()
+            && rows[end].part == seed.part
+            && rows[end].role == seed.role
+            && rows[end].tone == seed.tone
+        {
+            end += 1;
+        }
+        let visible = start < usize::from(inner.height) && !inner.is_empty();
+        let id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Workflow(seed.part));
+        let state = PresentationNodeState {
+            attention: seed.role == mandatum_scene::WorkflowRowRole::Callout
+                && matches!(
+                    seed.tone,
+                    PresentationTone::Failure | PresentationTone::Waiting
+                ),
+            tone: seed.tone,
+            hidden: !visible,
+            ..PresentationNodeState::default()
+        };
+        if visible {
+            let remaining = usize::from(inner.height).saturating_sub(start);
+            let height = u16::try_from((end - start).min(remaining)).unwrap_or(u16::MAX);
+            nodes.push(presentation_node(
+                id,
+                Some(pane_id.clone()),
+                PresentationNodeRole::Workflow(seed.role),
+                state,
+                SceneRect::new(
+                    inner.x,
+                    inner.y.saturating_add(start as u16),
+                    inner.width,
+                    height,
+                ),
+                viewport,
+            ));
+        } else {
+            nodes.push(presentation_logical_node(
+                id,
+                Some(pane_id.clone()),
+                PresentationNodeRole::Workflow(seed.role),
+                state,
+                viewport.logical_rect_for_cells(hidden_anchor),
+                TerminalProjection::CellRegions(Vec::new()),
+            ));
+        }
+        start = end;
+    }
+
+    if let Some(badge) = pane.workflow_status_badge() {
+        let visible = badge.row < usize::from(inner.height) && !inner.is_empty();
+        let id = PresentationNodeId::pane(
+            pane.id.clone(),
+            PaneNodePart::Workflow(WorkflowNodePart::Status),
+        );
+        let state = PresentationNodeState {
+            tone: badge.tone,
+            hidden: !visible,
+            ..PresentationNodeState::default()
+        };
+        if visible {
+            let width = u16::try_from(display_width(&badge.label))
+                .unwrap_or(u16::MAX)
+                .saturating_add(2)
+                .min(inner.width);
+            nodes.push(presentation_node(
+                id,
+                Some(pane_id.clone()),
+                PresentationNodeRole::WorkflowStatusBadge,
+                state,
+                SceneRect::new(
+                    inner.x,
+                    inner.y.saturating_add(badge.row as u16),
+                    width.max(1),
+                    1,
+                ),
+                viewport,
+            ));
+        } else {
+            nodes.push(presentation_logical_node(
+                id,
+                Some(pane_id.clone()),
+                PresentationNodeRole::WorkflowStatusBadge,
+                state,
+                viewport.logical_rect_for_cells(hidden_anchor),
+                TerminalProjection::CellRegions(Vec::new()),
+            ));
+        }
+    }
+
+    if matches!(pane.content, PaneContent::Artifact(_)) {
+        let canvas_y = inner
+            .y
+            .saturating_add(u16::try_from(rows.len()).unwrap_or(u16::MAX));
+        let canvas = SceneRect::new(
+            inner.x,
+            canvas_y.min(inner.bottom()),
+            inner.width,
+            inner.bottom().saturating_sub(canvas_y),
+        );
+        if canvas.is_empty() {
+            nodes.push(presentation_logical_node(
+                PresentationNodeId::pane(
+                    pane.id.clone(),
+                    PaneNodePart::Workflow(WorkflowNodePart::ArtifactCanvas),
+                ),
+                Some(pane_id.clone()),
+                PresentationNodeRole::ArtifactCanvas,
+                PresentationNodeState {
+                    hidden: true,
+                    ..PresentationNodeState::default()
+                },
+                viewport.logical_rect_for_cells(hidden_anchor),
+                TerminalProjection::CellRegions(Vec::new()),
+            ));
+        } else {
+            nodes.push(presentation_node(
+                PresentationNodeId::pane(
+                    pane.id.clone(),
+                    PaneNodePart::Workflow(WorkflowNodePart::ArtifactCanvas),
+                ),
+                Some(pane_id.clone()),
+                PresentationNodeRole::ArtifactCanvas,
+                PresentationNodeState::default(),
+                canvas,
+                viewport,
+            ));
+        }
     }
 }
 
@@ -775,7 +924,7 @@ fn terminal_viewport_mapping(
             let output = task.output.as_ref()?;
             let (_, grid) = state.task_view(&pane.id)?;
             let grid = grid?;
-            let detail_rows = pane.detail_lines().len() as u16;
+            let detail_rows = u16::try_from(pane.terminal_fallback_row_count()).unwrap_or(u16::MAX);
             (
                 SceneSize::new(grid.size().columns(), grid.size().rows()),
                 SceneRect::new(
@@ -1321,7 +1470,7 @@ fn pane_scene(
     // The detail line count is stable whether or not the output surface is
     // attached (the "output:" marker replaces "output: no live grid
     // attached"), so measuring before attaching is exact.
-    let detail_rows = scene.detail_lines().len() as u16;
+    let detail_rows = u16::try_from(scene.terminal_fallback_row_count()).unwrap_or(u16::MAX);
     if let PaneContent::Task(task) = &mut scene.content
         && let Some((_, Some(grid))) = state.task_view(&scene.id)
     {
@@ -1372,6 +1521,8 @@ fn task_output_surface(grid: &TerminalGrid, max_width: u16, max_height: u16) -> 
 }
 
 fn task_content(state: &AppState, pane: &PaneSpec, intent: &TaskPaneIntent) -> TaskContent {
+    let task_view = state.task_view(pane.id());
+    let status_label = task_view.map(|(status, _)| status.to_owned());
     TaskContent {
         command: intent.command.clone(),
         // The directory the command actually runs in — the same resolution
@@ -1380,14 +1531,35 @@ fn task_content(state: &AppState, pane: &PaneSpec, intent: &TaskPaneIntent) -> T
             .display()
             .to_string(),
         recipe_label: intent.recipe_id.clone(),
-        status_label: state
-            .task_view(pane.id())
-            .map(|(status, _)| status.to_owned()),
+        status_role: task_status_role(
+            status_label.as_deref(),
+            state.task_failure_status(pane.id()).is_some(),
+            task_view.is_some_and(|(_, grid)| grid.is_some()),
+        ),
+        status_label,
         // The live keyboard route to Rerun task; the scene shows it on
         // failed tasks next to the right-click route.
         rerun_hint: Some(state.command_key_hint(mandatum_commands::CommandId::RerunTask))
             .filter(|hint| !hint.is_empty()),
         output: None,
+    }
+}
+
+fn task_status_role(
+    status: Option<&str>,
+    has_task_failure: bool,
+    has_live_grid: bool,
+) -> TaskStatusRole {
+    if has_task_failure {
+        return TaskStatusRole::Failed;
+    }
+    match status {
+        Some(status) if status.starts_with("succeeded:") => TaskStatusRole::Succeeded,
+        Some("running") => TaskStatusRole::Running,
+        Some("pending launch: waiting for visible pane size")
+        | Some("pending rerun: waiting for visible pane size") => TaskStatusRole::Waiting,
+        Some(_) if has_live_grid => TaskStatusRole::Diagnostic,
+        Some(_) | None => TaskStatusRole::Detached,
     }
 }
 
@@ -1712,6 +1884,7 @@ fn hit_targets(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use mandatum_commands::CommandId;
@@ -1720,7 +1893,7 @@ mod tests {
         InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind,
     };
     use mandatum_scene::{
-        AccessibilityRole, BackingScale, LogicalPoint, LogicalSize, PhysicalSize,
+        AccessibilityRole, ArtifactState, BackingScale, LogicalPoint, LogicalSize, PhysicalSize,
         PresentationNodeRole, compile_cell_program,
     };
     use mandatum_terminal_vt::{TerminalParser, TerminalSize};
@@ -3044,6 +3217,23 @@ mod tests {
         assert_eq!(prompt.risk_label, "high");
         assert_eq!(prompt.risk_basis, "removes files (rm)");
         assert_eq!(prompt.key_hint, "y approve / n reject");
+        let approval_node = scene
+            .presentation
+            .nodes
+            .iter()
+            .find(|node| {
+                node.id
+                    == PresentationNodeId::pane(
+                        pane_id.clone(),
+                        PaneNodePart::Workflow(WorkflowNodePart::Approval),
+                    )
+            })
+            .expect("approval must have one stable typed callout");
+        assert_eq!(
+            approval_node.role,
+            PresentationNodeRole::Workflow(mandatum_scene::WorkflowRowRole::Callout)
+        );
+        assert_eq!(approval_node.state.tone, PresentationTone::Waiting);
 
         // The waiting pane surfaces globally in the attention strip, with a
         // clickable jump target.
@@ -3170,14 +3360,177 @@ mod tests {
         let pane = scene_pane(&scene, pane_id.as_str());
         let lines = pane.detail_lines();
         assert!(
-            lines.iter().any(|line| line.starts_with("command: ")),
+            lines
+                .iter()
+                .any(|line| line.starts_with("failed: exit 3 · ")),
             "{lines:?}"
         );
-        assert!(lines.contains(&"runtime status: failed: exit 3".to_owned()));
         assert!(
-            lines.contains(&"rerun: ctrl+p r · right-click menu".to_owned()),
+            lines.contains(
+                &"failure: failed: exit 3 · rerun: ctrl+p r · right-click menu".to_owned()
+            ),
             "{lines:?}"
         );
+        let failure = scene
+            .presentation
+            .nodes
+            .iter()
+            .find(|node| {
+                node.id
+                    == PresentationNodeId::pane(
+                        pane_id.clone(),
+                        PaneNodePart::Workflow(WorkflowNodePart::Failure),
+                    )
+            })
+            .expect("failed task must have one stable typed callout");
+        assert_eq!(
+            failure.role,
+            PresentationNodeRole::Workflow(mandatum_scene::WorkflowRowRole::Callout)
+        );
+        assert_eq!(failure.state.tone, PresentationTone::Failure);
+    }
+
+    #[test]
+    fn task_status_semantics_distinguish_waiting_runtime_and_diagnostics() {
+        assert_eq!(
+            task_status_role(
+                Some("pending launch: waiting for visible pane size"),
+                false,
+                false,
+            ),
+            TaskStatusRole::Waiting
+        );
+        assert_eq!(
+            task_status_role(Some("reader closed unexpectedly"), false, true),
+            TaskStatusRole::Diagnostic
+        );
+        assert_eq!(
+            task_status_role(Some("reader closed unexpectedly"), true, true),
+            TaskStatusRole::Failed
+        );
+        assert_eq!(
+            task_status_role(Some("running"), false, true),
+            TaskStatusRole::Running
+        );
+    }
+
+    #[test]
+    fn artifact_canvas_geometry_is_stable_across_loading_ready_and_failed_states() {
+        let states = [
+            ArtifactState::Loading,
+            ArtifactState::Ready(mandatum_scene::RasterSurface {
+                width: 2,
+                height: 1,
+                revision: 7,
+                rgba8: Arc::from([255, 0, 0, 255, 0, 255, 0, 255]),
+            }),
+            ArtifactState::Failed {
+                message: "missing".to_owned(),
+            },
+        ];
+        let viewport = ViewportMetrics::from_scene_size(SceneSize::new(80, 24));
+        let pane_id = PaneId::new("artifact");
+        let parent = PresentationNodeId::pane(pane_id.clone(), PaneNodePart::Surface);
+        let mut canvases = Vec::new();
+        for state in states {
+            let pane = PaneScene {
+                id: pane_id.clone(),
+                title: "artifact".to_owned(),
+                kind: PaneSceneKind::Artifact,
+                area: SceneRect::new(0, 1, 80, 22),
+                focused: true,
+                floating: false,
+                stacked: false,
+                zoomed: false,
+                content: PaneContent::Artifact(mandatum_scene::ArtifactContent {
+                    source_label: "shot.png".to_owned(),
+                    alt_text: "shot".to_owned(),
+                    fit: mandatum_core::ArtifactFit::Contain,
+                    state,
+                }),
+            };
+            let mut nodes = Vec::new();
+            push_workflow_presentation(&pane, viewport, &parent, &mut nodes);
+            let canvas = nodes
+                .iter()
+                .find(|node| node.role == PresentationNodeRole::ArtifactCanvas)
+                .expect("every artifact state retains its canvas");
+            canvases.push((canvas.id.clone(), canvas.cell_rect, canvas.logical_rect));
+            assert!(nodes.iter().any(|node| {
+                node.id
+                    == PresentationNodeId::pane(
+                        pane_id.clone(),
+                        PaneNodePart::Workflow(WorkflowNodePart::ArtifactInspector),
+                    )
+            }));
+        }
+        assert!(canvases.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn workflow_ids_survive_resize_and_status_badges_stay_compact() {
+        let pane_id = PaneId::new("agent");
+        let parent = PresentationNodeId::pane(pane_id.clone(), PaneNodePart::Surface);
+        let content = PaneContent::Agent(mandatum_scene::AgentContent {
+            objective: "review the failing workflow".to_owned(),
+            status_label: "waiting for approval".to_owned(),
+            status_role: AgentStatus::WaitingForApproval,
+            pending_approvals: 1,
+            changed_file_count: 1,
+            changed_files: vec!["src/lib.rs".to_owned()],
+            latest_summary: Some("prepared the repair".to_owned()),
+            current_action: Some("waiting for a decision".to_owned()),
+            last_error: None,
+            relaunch_hint: None,
+            pending_approval: Some(mandatum_scene::AgentApprovalPrompt {
+                command: "cargo test".to_owned(),
+                cwd: "/tmp/project".to_owned(),
+                affected_path: None,
+                risk_label: "low".to_owned(),
+                risk_basis: "test execution".to_owned(),
+                key_hint: "y approve / n reject".to_owned(),
+                pulse_on: false,
+            }),
+            output_tail: vec!["one".to_owned(), "two".to_owned()],
+        });
+        let make_pane = |height| PaneScene {
+            id: pane_id.clone(),
+            title: "agent".to_owned(),
+            kind: PaneSceneKind::Agent,
+            area: SceneRect::new(0, 1, 80, height),
+            focused: true,
+            floating: false,
+            stacked: false,
+            zoomed: false,
+            content: content.clone(),
+        };
+        let mut tall = Vec::new();
+        push_workflow_presentation(
+            &make_pane(22),
+            ViewportMetrics::from_scene_size(SceneSize::new(80, 24)),
+            &parent,
+            &mut tall,
+        );
+        let mut short = Vec::new();
+        push_workflow_presentation(
+            &make_pane(5),
+            ViewportMetrics::from_scene_size(SceneSize::new(80, 7)),
+            &parent,
+            &mut short,
+        );
+
+        assert_eq!(
+            tall.iter().map(|node| &node.id).collect::<Vec<_>>(),
+            short.iter().map(|node| &node.id).collect::<Vec<_>>()
+        );
+        assert!(short.iter().any(|node| node.state.hidden));
+        let badge = tall
+            .iter()
+            .find(|node| node.role == PresentationNodeRole::WorkflowStatusBadge)
+            .expect("agent status badge");
+        assert_eq!(badge.cell_rect.unwrap().height, 1);
+        assert!(badge.cell_rect.unwrap().width < 78);
+        assert_eq!(badge.state.tone, PresentationTone::Waiting);
     }
 
     // A failed agent pane keeps the failure reason from its Failed event
