@@ -107,6 +107,20 @@ impl SelectedFontFaces {
     fn contains(self, id: fontdb::ID) -> bool {
         [self.regular, self.bold, self.italic, self.bold_italic].contains(&id)
     }
+
+    /// Select one of the only four primary faces provisioned by the profile.
+    ///
+    /// Native interface text uses the same closed face set as terminal row
+    /// runs; synthetic styles and unprovisioned primary variants are never
+    /// introduced by the presentation adapter.
+    pub fn for_style(self, bold: bool, italic: bool) -> fontdb::ID {
+        match (bold, italic) {
+            (false, false) => self.regular,
+            (true, false) => self.bold,
+            (false, true) => self.italic,
+            (true, true) => self.bold_italic,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -825,5 +839,17 @@ mod tests {
                     .post_script_name
             );
         }
+    }
+
+    #[test]
+    fn ui_style_selection_is_closed_over_the_four_provisioned_faces() {
+        let profile =
+            resolve_in_database(Database::new(), FontRequest::default()).expect("bundle resolves");
+        let selected = profile.selected_faces();
+
+        assert_eq!(selected.for_style(false, false), selected.regular);
+        assert_eq!(selected.for_style(true, false), selected.bold);
+        assert_eq!(selected.for_style(false, true), selected.italic);
+        assert_eq!(selected.for_style(true, true), selected.bold_italic);
     }
 }

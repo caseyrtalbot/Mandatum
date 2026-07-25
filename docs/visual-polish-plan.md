@@ -1,6 +1,7 @@
 # Native Visual Polish Plan
 
-Status: Phase 1 complete; Phase 2 next (2026-07-24)
+Status: Phase 2 implementation complete; fixed-reference evidence in progress
+(2026-07-24)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -441,6 +442,40 @@ Exit:
 - config compatibility is green; and
 - displayed token sampler and full gate pass.
 
+Implementation status (2026-07-24):
+
+- `Theme` now keeps `TerminalPalette` intact while adding typed UI palette,
+  typography, spacing, radius, elevation, opacity, selection, and motion
+  contracts for dark, light, and high-contrast themes;
+- app config supports validated `[theme.ui]` overrides, compatible aliases,
+  reload/reset behavior, and explicit low-contrast warnings, while resolved
+  built-in contrast tests pass;
+- the native shell supplies one coherent `ViewportMetrics` snapshot and the
+  scene owns deterministic 1/64-logical-pixel geometry, stable opaque node
+  identity, terminal projections, logical hit targets, PTY viewport mappings,
+  transition targets, and dependency-free accessibility semantics;
+- app-built scenes populate that semantic contract without changing
+  `CellProgram`; stable overlay item keys come from product identity rather
+  than label, geometry, filtered position, or vector index;
+- the renderer prepares a pure bounded native presentation plan with ordered
+  materials, clips, text scopes, typed transitions, and exact direct UI-token
+  colors before GPU allocation;
+- multi-metric UI text has typed Regular/Bold/Italic/BoldItalic selection,
+  shared-baseline/clipping checks, and cache identity that includes metric
+  generation and slot;
+- a displayed isolated token sampler showed all 17 direct UI color roles in
+  the real native window without deriving them from terminal ANSI slots;
+- portable scene, app, native-shell, renderer, and excluded-lab tests pass,
+  `./ci/native-frontend.sh` passes, and the synchronized source gate is green;
+  and
+- the scenario harness now normalizes isolated fixture identity in its
+  review-facing snapshot, preventing random temporary paths from making strict
+  comparisons nondeterministic while leaving runtime isolation intact.
+
+The remaining Phase 2 closure step is to capture the normalized scenarios from
+a clean source commit, review the fixed-reference differences, explicitly
+accept only the deterministic fixture-label change, and rerun the final gate.
+
 ### Phase 3 — Workspace Shell, Pane Materials, Density, And Focus
 
 Goal: make the everyday multi-pane workspace feel coherent.
@@ -620,8 +655,9 @@ Defer until the complete system above succeeds without them:
 
 ## Immediate Next Action
 
-Implement Phase 1 only: create the deterministic visual-scenario catalog,
-capture the current fixed-reference native baselines and metadata, and add the
-explicit human baseline-acceptance path. Do not alter production rendering,
-theme values, pane materials, overlay styling, workflow presentation, or
-motion in that slice.
+Close Phase 2's fixed-reference evidence from a clean source commit, then
+implement Phase 3 only: workspace canvas/pane/chrome/separator materials,
+header and status rails, pane titles and badges, compact focus and separator
+interaction states, floating-pane depth, initial/minimum window geometry, and
+the compact/comfortable density contract. Do not pull overlays, workflow
+cards, motion, accessibility projection, or public presentation forward.

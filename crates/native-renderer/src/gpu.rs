@@ -23,8 +23,8 @@ use winit::window::Window;
 
 use crate::row_run::{
     LayoutGlyphFacts, LayoutRunFacts, ResolvedGlyphStyle, RowRun, RowRunAdmission,
-    RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, admit_layout,
-    anchored_fallback_runs, build_row_runs, split_at_span,
+    RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, admit_layout, anchored_fallback_runs,
+    build_row_runs, split_at_span,
 };
 use crate::shaping_cache::{ShapingCache, ShapingCacheContext, ShapingCacheKey};
 
@@ -291,6 +291,7 @@ pub enum SceneCompileError {
         reason: &'static str,
     },
     InvalidTextProgram(&'static str),
+    NativePresentation(NativePresentationPlanError),
 }
 
 impl std::fmt::Display for SceneCompileError {
@@ -311,6 +312,9 @@ impl std::fmt::Display for SceneCompileError {
             }
             Self::InvalidTextProgram(reason) => {
                 write!(f, "invalid compiled text program: {reason}")
+            }
+            Self::NativePresentation(error) => {
+                write!(f, "invalid native presentation plan: {error:?}")
             }
         }
     }
@@ -363,6 +367,7 @@ impl PreparedArtifact {
 pub struct PreparedScene {
     cell_program: CellProgram,
     artifacts: Vec<PreparedArtifact>,
+    presentation_plan: NativePresentationPlan,
 }
 
 impl PreparedScene {
@@ -372,6 +377,10 @@ impl PreparedScene {
 
     pub fn artifacts(&self) -> &[PreparedArtifact] {
         &self.artifacts
+    }
+
+    pub fn presentation_plan(&self) -> &NativePresentationPlan {
+        &self.presentation_plan
     }
 }
 
@@ -385,9 +394,12 @@ pub fn prepare_scene(
     let cell_program = compile_cell_program(scene, theme);
     validate_compiled_program(&cell_program)?;
     let artifacts = prepare_artifacts(scene, &cell_program);
+    let presentation_plan =
+        prepare_native_presentation(scene, theme).map_err(SceneCompileError::NativePresentation)?;
     Ok(PreparedScene {
         cell_program,
         artifacts,
+        presentation_plan,
     })
 }
 
@@ -879,26 +891,14 @@ fn raster_replacement_layers(
 
 fn resolve_program_cell(cell: &ProgramCell, theme: &Theme) -> ResolvedCell {
     let palette = &theme.terminal_palette;
-    let mut foreground = resolve(
-        cell.style.foreground,
-        palette.foreground,
-        palette,
-    );
-    let mut background = resolve(
-        cell.style.background,
-        palette.background,
-        palette,
-    );
+    let mut foreground = resolve(cell.style.foreground, palette.foreground, palette);
+    let mut background = resolve(cell.style.background, palette.background, palette);
     let terminal_selection_reverses = cell.selection == Some(CellSelection::Terminal)
         && theme.selection_highlight == SceneColor::Default;
     if cell.selection == Some(CellSelection::Terminal)
         && theme.selection_highlight != SceneColor::Default
     {
-        background = resolve(
-            theme.selection_highlight,
-            palette.background,
-            palette,
-        );
+        background = resolve(theme.selection_highlight, palette.background, palette);
     }
     // Item selection is already represented by the compiled style. A cursor
     // and fallback terminal selection add the same reverse-video modifier as
@@ -955,8 +955,8 @@ fn prepare_cell_program(
         .iter()
         .map(|(&(y, x), cell)| (x, y, cell.clone()))
         .collect::<Vec<_>>();
-    let plan =
-        build_row_runs(program, |cell| resolved_glyph_style(cell, theme)).map_err(text_program_error)?;
+    let plan = build_row_runs(program, |cell| resolved_glyph_style(cell, theme))
+        .map_err(text_program_error)?;
     enforce_resource_limit("text buffers", plan.runs.len(), MAX_GPU_TEXT_BUFFERS)?;
     Ok(PreparedCellProgram {
         cells,
@@ -1029,33 +1029,19 @@ fn shaping_cache_accounted_bytes(
     const BYTES_PER_STYLE_RANGE: usize = 256;
     const BYTES_PER_CELL_SPAN: usize = 128;
 
-    observations
-        .iter()
-        .fold(
-            key.owned_bytes()
-                .saturating_add(BUFFER_FLOOR)
-                .saturating_add(run.text.len().saturating_mul(BYTES_PER_INPUT_BYTE))
-                .saturating_add(
-                    observations
-                        .len()
-                        .saturating_mul(BYTES_PER_GLYPH),
-                )
-                .saturating_add(
-                    run.style_ranges
-                        .len()
-                        .saturating_mul(BYTES_PER_STYLE_RANGE),
-                )
-                .saturating_add(
-                    run.byte_cells
-                        .len()
-                        .saturating_mul(BYTES_PER_CELL_SPAN),
-                ),
-            |bytes, observation| {
-                bytes
-                    .saturating_add(std::mem::size_of::<FontObservation>())
-                    .saturating_add(observation.sample.len())
-            },
-        )
+    observations.iter().fold(
+        key.owned_bytes()
+            .saturating_add(BUFFER_FLOOR)
+            .saturating_add(run.text.len().saturating_mul(BYTES_PER_INPUT_BYTE))
+            .saturating_add(observations.len().saturating_mul(BYTES_PER_GLYPH))
+            .saturating_add(run.style_ranges.len().saturating_mul(BYTES_PER_STYLE_RANGE))
+            .saturating_add(run.byte_cells.len().saturating_mul(BYTES_PER_CELL_SPAN)),
+        |bytes, observation| {
+            bytes
+                .saturating_add(std::mem::size_of::<FontObservation>())
+                .saturating_add(observation.sample.len())
+        },
+    )
 }
 
 fn shape_row_buffer(
@@ -1362,8 +1348,9 @@ impl GpuText {
         } else {
             FontRequest::installed(text_settings.family, text_settings.font_size)
         };
-        let profile = ResolvedFontProfile::resolve(request)
-            .map_err(|error| startup_error(StartupFailureStage::Configuration, error.to_string()))?;
+        let profile = ResolvedFontProfile::resolve(request).map_err(|error| {
+            startup_error(StartupFailureStage::Configuration, error.to_string())
+        })?;
         Self::new_with_profile(window, profile).await
     }
 
@@ -1869,10 +1856,7 @@ impl GpuText {
         replacement.shaping_cache_enabled = self.shaping_cache_enabled;
         replacement
             .shaping_cache
-            .preserve_stats_after_cold_reset(
-                shaping_cache_stats,
-                shaping_cache_had_entries,
-            );
+            .preserve_stats_after_cold_reset(shaping_cache_stats, shaping_cache_had_entries);
         retire_gpu_generation(&self.device_fault, next_device_generation);
         *self = replacement;
         Ok(())
@@ -1937,10 +1921,7 @@ impl GpuText {
             }
             SurfaceAcquireDirective::Recover(recovery) => {
                 self.recover_surface(recovery)?;
-                Ok(GpuRenderOutcome::SurfaceReconfigured {
-                    recovery,
-                    timings,
-                })
+                Ok(GpuRenderOutcome::SurfaceReconfigured { recovery, timings })
             }
             SurfaceAcquireDirective::FailValidation => Err(GpuRenderError::SurfaceValidation),
         }
@@ -2065,9 +2046,9 @@ impl GpuText {
             } => eprintln!(
                 "mandatum-native-renderer: font fallback family={family:?} postscript={postscript_name:?} sample={sample:?}"
             ),
-            FallbackRecord::MissingGlyph { sample } => eprintln!(
-                "mandatum-native-renderer: missing glyph sample={sample:?}"
-            ),
+            FallbackRecord::MissingGlyph { sample } => {
+                eprintln!("mandatum-native-renderer: missing glyph sample={sample:?}")
+            }
         }
     }
 
@@ -2085,6 +2066,8 @@ impl GpuText {
         ShapingCacheContext {
             font_generation: self.font_profile.generation(),
             scale_generation: self.scale_generation,
+            metric_generation: 0,
+            metric_slot: 0,
             renderer_config_generation: SHAPING_POLICY_GENERATION,
             font_size_bits: metrics.font_size.to_bits(),
             line_height_bits: metrics.line_height.to_bits(),
@@ -2149,11 +2132,8 @@ impl GpuText {
             }
 
             let buffer_index = accepted.len();
-            self.row_buffers.ensure_len(
-                buffer_index + 1,
-                &mut self.font_system,
-                metrics,
-            );
+            self.row_buffers
+                .ensure_len(buffer_index + 1, &mut self.font_system, metrics);
             let (layout, observations) = {
                 let buffer = &mut self.row_buffers.rows[buffer_index];
                 shape_row_buffer(
@@ -2519,11 +2499,7 @@ fn shaping_cache_key_for_candidate(
 /// Map a scene color onto RGB, using the given default for
 /// `SceneColor::Default`, the standard xterm palette for ANSI/indexed colors,
 /// and a passthrough for direct RGB.
-fn resolve(
-    color: SceneColor,
-    default: [u8; 3],
-    terminal_palette: &TerminalPalette,
-) -> [u8; 3] {
+fn resolve(color: SceneColor, default: [u8; 3], terminal_palette: &TerminalPalette) -> [u8; 3] {
     match color {
         SceneColor::Default => default,
         SceneColor::Rgb(r, g, b) => [r, g, b],
@@ -2622,10 +2598,7 @@ fn glyph_text_bounds(
     TextBounds {
         left: pixel_boundary(left, surface_width) as i32,
         top: pixel_boundary(top, surface_height) as i32,
-        right: pixel_boundary(
-            left + f32::from(width.max(1)) * cell_width,
-            surface_width,
-        ) as i32,
+        right: pixel_boundary(left + f32::from(width.max(1)) * cell_width, surface_width) as i32,
         bottom: pixel_boundary(top + cell_height, surface_height) as i32,
     }
 }
@@ -3676,6 +3649,8 @@ mod tests {
         let context = ShapingCacheContext {
             font_generation: profile.generation(),
             scale_generation: 1,
+            metric_generation: 0,
+            metric_slot: 0,
             renderer_config_generation: SHAPING_POLICY_GENERATION,
             font_size_bits: metrics.font_size.to_bits(),
             line_height_bits: metrics.line_height.to_bits(),
@@ -3856,6 +3831,7 @@ mod tests {
             hit_targets: Vec::new(),
             copy_mode: false,
             text_input: None,
+            presentation: mandatum_scene::ScenePresentation::default(),
         }
     }
 
@@ -3940,8 +3916,7 @@ mod tests {
         let pane = pane(PaneSceneKind::Terminal, PaneContent::Terminal(surface));
         let scene = scene(vec![pane]);
         let prepared = prepare_scene(&scene, &Theme::default()).unwrap();
-        let translated =
-            prepare_cell_program(prepared.cell_program(), &Theme::default()).unwrap();
+        let translated = prepare_cell_program(prepared.cell_program(), &Theme::default()).unwrap();
         let row = translated
             .rows
             .iter()
@@ -3990,6 +3965,7 @@ mod tests {
             area: SceneRect::new(13, 5, 56, 14),
             query: String::new(),
             items: Vec::new(),
+            item_keys: Vec::new(),
             selected: None,
             footer: String::new(),
         }));

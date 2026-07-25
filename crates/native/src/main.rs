@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use input::{
     PlatformAction, ime_event_is_accepted, key_for_platform_translation, neutral_button,
-    neutral_modifiers, scene_is_suspended_by_tiled_minimum, scene_size_from_metrics, translate_ime,
-    translate_key,
+    neutral_modifiers, scene_is_suspended_by_tiled_minimum, translate_ime, translate_key,
+    viewport_metrics_from_renderer,
 };
 use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
 use mandatum_native_renderer::{
@@ -20,7 +20,7 @@ use mandatum_native_renderer::{
     GpuStartupErrorKind, GpuText, ResolvedFontProfile,
 };
 use mandatum_scene::{
-    SceneSize, WorkspaceScene,
+    SceneSize, ViewportMetrics, WorkspaceScene,
     input::{CompositionEvent, InputEvent, PointerButton, PointerEvent, PointerKind},
 };
 #[cfg(target_os = "macos")]
@@ -272,9 +272,13 @@ impl App {
     }
 
     fn scene_size(&self) -> Option<SceneSize> {
+        self.viewport_metrics().map(ViewportMetrics::scene_size)
+    }
+
+    fn viewport_metrics(&self) -> Option<ViewportMetrics> {
         let gpu = self.gpu.as_ref()?;
         let (width, height) = gpu.surface_size();
-        scene_size_from_metrics(width, height, gpu.cell_w(), gpu.cell_h())
+        viewport_metrics_from_renderer(width, height, gpu.scale(), gpu.cell_w(), gpu.cell_h())
     }
 
     fn resize_host(&mut self) {
@@ -342,12 +346,12 @@ impl App {
 
     fn render_frame(&mut self) -> Result<(), GpuRenderError> {
         self.scene_presentable = false;
-        let Some(size) = self.scene_size() else {
+        let Some(viewport) = self.viewport_metrics() else {
             self.cancel_and_disable_ime();
             self.host_mut().suspend_scene_interaction();
             return Ok(());
         };
-        let snapshot = self.host_mut().frame(size);
+        let snapshot = self.host_mut().frame_with_viewport(viewport);
         if scene_is_suspended_by_tiled_minimum(&snapshot.scene) {
             self.cancel_and_disable_ime();
             self.host_mut().suspend_scene_interaction();

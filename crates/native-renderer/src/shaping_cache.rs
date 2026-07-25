@@ -22,6 +22,10 @@ pub(crate) const MAX_SHAPING_CACHE_ENTRY_ACCOUNTED_BYTES: usize = 512 * 1024;
 pub(crate) struct ShapingCacheContext {
     pub(crate) font_generation: u64,
     pub(crate) scale_generation: u64,
+    /// Generation of the complete typography metric set.
+    pub(crate) metric_generation: u64,
+    /// Stable slot within that set (terminal, interface, label, caption).
+    pub(crate) metric_slot: u8,
     pub(crate) renderer_config_generation: u64,
     pub(crate) font_size_bits: u32,
     pub(crate) line_height_bits: u32,
@@ -326,6 +330,8 @@ mod tests {
         ShapingCacheContext {
             font_generation: 7,
             scale_generation: generation,
+            metric_generation: 11,
+            metric_slot: 0,
             renderer_config_generation: 1,
             font_size_bits: 15.0_f32.to_bits(),
             line_height_bits: 20.0_f32.to_bits(),
@@ -375,6 +381,14 @@ mod tests {
             },
             ShapingCacheContext {
                 scale_generation: base.scale_generation + 1,
+                ..base
+            },
+            ShapingCacheContext {
+                metric_generation: base.metric_generation + 1,
+                ..base
+            },
+            ShapingCacheContext {
+                metric_slot: base.metric_slot + 1,
                 ..base
             },
             ShapingCacheContext {

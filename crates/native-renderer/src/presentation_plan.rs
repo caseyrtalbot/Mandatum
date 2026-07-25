@@ -1,0 +1,512 @@
+//! Pure, headless translation from scene-owned semantics to native paint work.
+
+use std::collections::HashSet;
+
+use mandatum_scene::{
+    LogicalRect, PresentationNode, PresentationNodeId, PresentationNodeRole, TerminalProjection,
+    Theme, TransitionProperty, UiColor, UiMotionToken, WorkspaceScene,
+};
+
+use crate::text_metrics::{NativeTextMetricIdentity, NativeTextMetricRole, NativeTextMetricSet};
+
+pub const MAX_NATIVE_PLAN_NODES: usize = 8_192;
+pub const MAX_NATIVE_PLAN_COMMANDS: usize = 32_768;
+pub const MAX_NATIVE_PLAN_TEXT_SCOPES: usize = 16_384;
+pub const MAX_NATIVE_PLAN_TRANSITIONS: usize = 4_096;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeMaterialRole {
+    Canvas,
+    PaneSurface,
+    ChromeSurface,
+    OverlaySurface,
+    BorderSubtle,
+    Selection,
+    Attention,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeMaterial {
+    pub node_id: PresentationNodeId,
+    pub role: NativeMaterialRole,
+    pub logical_rect: LogicalRect,
+    pub clip: LogicalRect,
+    pub color: UiColor,
+    pub z_order: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeTextScope {
+    pub node_id: PresentationNodeId,
+    pub logical_rect: LogicalRect,
+    pub clip: LogicalRect,
+    pub color: UiColor,
+    pub metrics: NativeTextMetricIdentity,
+    pub z_order: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeTransition {
+    pub node_id: PresentationNodeId,
+    pub property: TransitionProperty,
+    pub timing: UiMotionToken,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativePlanCommand {
+    BeginClip {
+        node_id: PresentationNodeId,
+        clip: LogicalRect,
+        z_order: u32,
+    },
+    Material(NativeMaterial),
+    Text(NativeTextScope),
+    EndClip {
+        node_id: PresentationNodeId,
+        z_order: u32,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NativePresentationPlan {
+    commands: Vec<NativePlanCommand>,
+    transitions: Vec<NativeTransition>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeTokenColorRole {
+    Canvas,
+    PaneSurface,
+    ChromeSurface,
+    OverlaySurface,
+    BorderSubtle,
+    BorderStrong,
+    TextPrimary,
+    TextSecondary,
+    TextMuted,
+    Focus,
+    Running,
+    Waiting,
+    Failure,
+    Complete,
+    AgentIdentity,
+    SelectionFill,
+    ModalScrim,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeTokenSwatch {
+    pub role: NativeTokenColorRole,
+    pub logical_rect: LogicalRect,
+    pub clip: LogicalRect,
+    pub color: UiColor,
+    pub z_order: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeTokenSamplerPlan {
+    bounds: LogicalRect,
+    swatches: Vec<NativeTokenSwatch>,
+}
+
+impl NativeTokenSamplerPlan {
+    pub fn bounds(&self) -> LogicalRect {
+        self.bounds
+    }
+
+    pub fn swatches(&self) -> &[NativeTokenSwatch] {
+        &self.swatches
+    }
+}
+
+impl NativePresentationPlan {
+    pub fn commands(&self) -> &[NativePlanCommand] {
+        &self.commands
+    }
+
+    pub fn transitions(&self) -> &[NativeTransition] {
+        &self.transitions
+    }
+
+    pub fn material_count(&self) -> usize {
+        self.commands
+            .iter()
+            .filter(|command| matches!(command, NativePlanCommand::Material(_)))
+            .count()
+    }
+
+    pub fn text_scope_count(&self) -> usize {
+        self.commands
+            .iter()
+            .filter(|command| matches!(command, NativePlanCommand::Text(_)))
+            .count()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativePresentationPlanError {
+    ResourceLimit {
+        resource: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    MissingViewport,
+    DuplicateNodeId,
+    ParentMustPrecedeChild,
+    BoundsOutsideViewport,
+    ChildEscapesParentClip,
+    CellProjectionOutsideScene,
+    TransitionReferencesMissingNode,
+    TokenSamplerBoundsTooSmall,
+}
+
+/// Compile the native semantic plan without touching a window, GPU, or font
+/// system. The current cell program remains an independent terminal-parity
+/// projection and is not modified by this translation.
+pub fn prepare_native_presentation(
+    scene: &WorkspaceScene,
+    theme: &Theme,
+) -> Result<NativePresentationPlan, NativePresentationPlanError> {
+    let presentation = &scene.presentation;
+    if presentation.nodes.is_empty() {
+        if presentation.transition_targets.is_empty() {
+            return Ok(NativePresentationPlan::default());
+        }
+        return Err(NativePresentationPlanError::TransitionReferencesMissingNode);
+    }
+    let viewport = presentation
+        .viewport
+        .ok_or(NativePresentationPlanError::MissingViewport)?;
+    enforce_limit(
+        "presentation nodes",
+        presentation.nodes.len(),
+        MAX_NATIVE_PLAN_NODES,
+    )?;
+    enforce_limit(
+        "transitions",
+        presentation.transition_targets.len(),
+        MAX_NATIVE_PLAN_TRANSITIONS,
+    )?;
+
+    let viewport_rect = LogicalRect::from_units(
+        0,
+        0,
+        viewport.logical_size.width_units(),
+        viewport.logical_size.height_units(),
+    );
+    let metric_generation = typography_generation(theme);
+    let metrics = NativeTextMetricSet::from_theme(theme, metric_generation);
+    let mut seen = HashSet::with_capacity(presentation.nodes.len());
+    let mut node_bounds = std::collections::HashMap::with_capacity(presentation.nodes.len());
+    let mut commands = Vec::new();
+    let mut text_scopes = 0usize;
+
+    for (index, node) in presentation.nodes.iter().enumerate() {
+        if !seen.insert(node.id.clone()) {
+            return Err(NativePresentationPlanError::DuplicateNodeId);
+        }
+        if !rect_contains(viewport_rect, node.logical_rect) || node.logical_rect.is_empty() {
+            return Err(NativePresentationPlanError::BoundsOutsideViewport);
+        }
+        if let Some(parent) = &node.parent {
+            if !seen.contains(parent) {
+                return Err(NativePresentationPlanError::ParentMustPrecedeChild);
+            }
+            if !rect_contains(
+                *node_bounds
+                    .get(parent)
+                    .expect("seen parents retain their bounds"),
+                node.logical_rect,
+            ) {
+                return Err(NativePresentationPlanError::ChildEscapesParentClip);
+            }
+        }
+        validate_cell_projection(scene, node)?;
+        node_bounds.insert(node.id.clone(), node.logical_rect);
+
+        let z_base = u32::try_from(index)
+            .unwrap_or(u32::MAX / 4)
+            .saturating_mul(4);
+        commands.push(NativePlanCommand::BeginClip {
+            node_id: node.id.clone(),
+            clip: node.logical_rect,
+            z_order: z_base,
+        });
+        if let Some((role, color)) = material_for_node(node, theme) {
+            commands.push(NativePlanCommand::Material(NativeMaterial {
+                node_id: node.id.clone(),
+                role,
+                logical_rect: node.logical_rect,
+                clip: node.logical_rect,
+                color,
+                z_order: z_base + 1,
+            }));
+        }
+        if let Some((metric_role, color)) = text_for_node(node, theme) {
+            text_scopes = text_scopes.saturating_add(1);
+            enforce_limit("text scopes", text_scopes, MAX_NATIVE_PLAN_TEXT_SCOPES)?;
+            commands.push(NativePlanCommand::Text(NativeTextScope {
+                node_id: node.id.clone(),
+                logical_rect: node.logical_rect,
+                clip: node.logical_rect,
+                color,
+                metrics: metrics.identity(metric_role),
+                z_order: z_base + 2,
+            }));
+        }
+        commands.push(NativePlanCommand::EndClip {
+            node_id: node.id.clone(),
+            z_order: z_base + 3,
+        });
+        enforce_limit("commands", commands.len(), MAX_NATIVE_PLAN_COMMANDS)?;
+    }
+
+    let mut transitions = Vec::with_capacity(presentation.transition_targets.len());
+    for target in &presentation.transition_targets {
+        if !seen.contains(&target.node_id) {
+            return Err(NativePresentationPlanError::TransitionReferencesMissingNode);
+        }
+        transitions.push(NativeTransition {
+            node_id: target.node_id.clone(),
+            property: target.property,
+            timing: match target.property {
+                TransitionProperty::Geometry => theme.ui.motion.pane_change,
+                TransitionProperty::Opacity => theme.ui.motion.overlay_enter,
+                TransitionProperty::Scale => theme.ui.motion.focus_selection,
+            },
+        });
+    }
+
+    Ok(NativePresentationPlan {
+        commands,
+        transitions,
+    })
+}
+
+/// Pure, deterministic color-token sampler for the real native lab.
+///
+/// This diagnostic plan deliberately has its own typed token-role identity.
+/// It does not manufacture product `PresentationNodeId`s or alter the normal
+/// scene/`CellProgram` path.
+pub fn prepare_token_sampler(
+    theme: &Theme,
+    bounds: LogicalRect,
+) -> Result<NativeTokenSamplerPlan, NativePresentationPlanError> {
+    const COLUMNS: u64 = 3;
+    let padding = u64::from(theme.ui.spacing.space_4) * 64;
+    let gap = u64::from(theme.ui.spacing.space_2) * 64;
+    let row_height = u64::from(theme.ui.spacing.min_control_height) * 64;
+    let palette = theme.ui.palette;
+    let colors = [
+        (NativeTokenColorRole::Canvas, palette.canvas),
+        (NativeTokenColorRole::PaneSurface, palette.pane_surface),
+        (NativeTokenColorRole::ChromeSurface, palette.chrome_surface),
+        (
+            NativeTokenColorRole::OverlaySurface,
+            palette.overlay_surface,
+        ),
+        (NativeTokenColorRole::BorderSubtle, palette.border_subtle),
+        (NativeTokenColorRole::BorderStrong, palette.border_strong),
+        (NativeTokenColorRole::TextPrimary, palette.text_primary),
+        (NativeTokenColorRole::TextSecondary, palette.text_secondary),
+        (NativeTokenColorRole::TextMuted, palette.text_muted),
+        (NativeTokenColorRole::Focus, palette.focus),
+        (NativeTokenColorRole::Running, palette.running),
+        (NativeTokenColorRole::Waiting, palette.waiting),
+        (NativeTokenColorRole::Failure, palette.failure),
+        (NativeTokenColorRole::Complete, palette.complete),
+        (NativeTokenColorRole::AgentIdentity, palette.agent_identity),
+        (NativeTokenColorRole::SelectionFill, palette.selection_fill),
+        (NativeTokenColorRole::ModalScrim, palette.modal_scrim),
+    ];
+    let rows = (colors.len() as u64).div_ceil(COLUMNS);
+    let horizontal_fixed = padding
+        .saturating_mul(2)
+        .saturating_add(gap.saturating_mul(COLUMNS - 1));
+    let vertical_fixed = padding
+        .saturating_mul(2)
+        .saturating_add(gap.saturating_mul(rows.saturating_sub(1)));
+    let Some(available_width) = bounds.size.width_units().checked_sub(horizontal_fixed) else {
+        return Err(NativePresentationPlanError::TokenSamplerBoundsTooSmall);
+    };
+    let required_height = vertical_fixed.saturating_add(row_height.saturating_mul(rows));
+    if available_width < COLUMNS || bounds.size.height_units() < required_height {
+        return Err(NativePresentationPlanError::TokenSamplerBoundsTooSmall);
+    }
+    let column_width = available_width / COLUMNS;
+    let mut swatches = Vec::with_capacity(colors.len());
+    for (index, (role, color)) in colors.into_iter().enumerate() {
+        let column = index as u64 % COLUMNS;
+        let row = index as u64 / COLUMNS;
+        let x = bounds
+            .origin
+            .x_units()
+            .checked_add_unsigned(padding + column * (column_width + gap))
+            .ok_or(NativePresentationPlanError::TokenSamplerBoundsTooSmall)?;
+        let y = bounds
+            .origin
+            .y_units()
+            .checked_add_unsigned(padding + row * (row_height + gap))
+            .ok_or(NativePresentationPlanError::TokenSamplerBoundsTooSmall)?;
+        let rect = LogicalRect::from_units(x, y, column_width, row_height);
+        if !rect_contains(bounds, rect) {
+            return Err(NativePresentationPlanError::TokenSamplerBoundsTooSmall);
+        }
+        swatches.push(NativeTokenSwatch {
+            role,
+            logical_rect: rect,
+            clip: rect,
+            color,
+            z_order: u32::try_from(index).unwrap_or(u32::MAX),
+        });
+    }
+    Ok(NativeTokenSamplerPlan { bounds, swatches })
+}
+
+fn validate_cell_projection(
+    scene: &WorkspaceScene,
+    node: &PresentationNode,
+) -> Result<(), NativePresentationPlanError> {
+    if let Some(cell_rect) = node.cell_rect
+        && !cell_rect_within_scene(cell_rect, scene.size)
+    {
+        return Err(NativePresentationPlanError::CellProjectionOutsideScene);
+    }
+    match &node.terminal_projection {
+        TerminalProjection::CellRegions(regions) => {
+            if regions
+                .iter()
+                .any(|region| !cell_rect_within_scene(*region, scene.size))
+            {
+                return Err(NativePresentationPlanError::CellProjectionOutsideScene);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn material_for_node(
+    node: &PresentationNode,
+    theme: &Theme,
+) -> Option<(NativeMaterialRole, UiColor)> {
+    let palette = theme.ui.palette;
+    if node.role == PresentationNodeRole::Item && node.state.selected {
+        return Some((NativeMaterialRole::Selection, palette.selection_fill));
+    }
+    match node.role {
+        PresentationNodeRole::Workspace => Some((NativeMaterialRole::Canvas, palette.canvas)),
+        PresentationNodeRole::Header | PresentationNodeRole::Status => {
+            Some((NativeMaterialRole::ChromeSurface, palette.chrome_surface))
+        }
+        PresentationNodeRole::Pane | PresentationNodeRole::PaneBody => {
+            Some((NativeMaterialRole::PaneSurface, palette.pane_surface))
+        }
+        PresentationNodeRole::Overlay | PresentationNodeRole::TextInput => {
+            Some((NativeMaterialRole::OverlaySurface, palette.overlay_surface))
+        }
+        PresentationNodeRole::Separator => {
+            Some((NativeMaterialRole::BorderSubtle, palette.border_subtle))
+        }
+        PresentationNodeRole::Attention => Some((NativeMaterialRole::Attention, palette.failure)),
+        PresentationNodeRole::PaneTitle
+        | PresentationNodeRole::TerminalOutput
+        | PresentationNodeRole::TaskOutput
+        | PresentationNodeRole::Item => None,
+    }
+}
+
+fn text_for_node(
+    node: &PresentationNode,
+    theme: &Theme,
+) -> Option<(NativeTextMetricRole, UiColor)> {
+    let palette = theme.ui.palette;
+    let color = if node.state.disabled {
+        palette.text_muted
+    } else if node.state.attention {
+        palette.failure
+    } else {
+        palette.text_primary
+    };
+    match node.role {
+        PresentationNodeRole::Header => Some((NativeTextMetricRole::Title, palette.text_primary)),
+        PresentationNodeRole::Status => {
+            Some((NativeTextMetricRole::Metadata, palette.text_secondary))
+        }
+        PresentationNodeRole::PaneTitle => {
+            if node.state.focused {
+                Some((NativeTextMetricRole::PaneTitleFocused, palette.focus))
+            } else {
+                Some((NativeTextMetricRole::PaneTitle, palette.text_secondary))
+            }
+        }
+        PresentationNodeRole::TerminalOutput => Some((NativeTextMetricRole::Terminal, color)),
+        PresentationNodeRole::TaskOutput => Some((NativeTextMetricRole::Body, color)),
+        PresentationNodeRole::TextInput => Some((NativeTextMetricRole::Body, color)),
+        PresentationNodeRole::Item => Some((NativeTextMetricRole::Body, color)),
+        PresentationNodeRole::Attention => Some((NativeTextMetricRole::Metadata, palette.failure)),
+        PresentationNodeRole::Workspace
+        | PresentationNodeRole::Pane
+        | PresentationNodeRole::PaneBody
+        | PresentationNodeRole::Overlay
+        | PresentationNodeRole::Separator => None,
+    }
+}
+
+fn rect_contains(parent: LogicalRect, child: LogicalRect) -> bool {
+    child.origin.x_units() >= parent.origin.x_units()
+        && child.origin.y_units() >= parent.origin.y_units()
+        && child.right_units() <= parent.right_units()
+        && child.bottom_units() <= parent.bottom_units()
+}
+
+fn cell_rect_within_scene(
+    rect: mandatum_scene::SceneRect,
+    size: mandatum_scene::SceneSize,
+) -> bool {
+    rect.width > 0 && rect.height > 0 && rect.right() <= size.width && rect.bottom() <= size.height
+}
+
+fn typography_generation(theme: &Theme) -> u64 {
+    let typography = theme.ui.typography;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for (slot, style) in [
+        typography.terminal,
+        typography.title,
+        typography.pane_title,
+        typography.pane_title_focused,
+        typography.body,
+        typography.metadata,
+        typography.key,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for byte in [
+            slot as u8,
+            (style.point_size_x64 & 0xff) as u8,
+            (style.point_size_x64 >> 8) as u8,
+            (style.line_height & 0xff) as u8,
+            (style.line_height >> 8) as u8,
+            style.face as u8,
+        ] {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    hash
+}
+
+fn enforce_limit(
+    resource: &'static str,
+    actual: usize,
+    maximum: usize,
+) -> Result<(), NativePresentationPlanError> {
+    if actual > maximum {
+        return Err(NativePresentationPlanError::ResourceLimit {
+            resource,
+            actual,
+            maximum,
+        });
+    }
+    Ok(())
+}

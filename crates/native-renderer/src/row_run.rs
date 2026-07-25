@@ -644,6 +644,7 @@ mod tests {
             hit_targets: Vec::new(),
             copy_mode: false,
             text_input: None,
+            presentation: mandatum_scene::ScenePresentation::default(),
         }
     }
 

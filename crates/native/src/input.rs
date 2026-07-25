@@ -1,7 +1,7 @@
 //! Pure winit-to-scene input and geometry translation.
 
 use mandatum_scene::{
-    SceneSize, WorkspaceScene,
+    BackingScale, LogicalSize, PhysicalSize, ViewportMetrics, WorkspaceScene,
     input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, PointerButton, TextRange,
     },
@@ -36,27 +36,61 @@ pub(super) fn neutral_button(button: MouseButton) -> Option<PointerButton> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn scene_size_from_metrics(
     pixel_width: u32,
     pixel_height: u32,
     cell_width: f32,
     cell_height: f32,
-) -> Option<SceneSize> {
+) -> Option<mandatum_scene::SceneSize> {
+    viewport_metrics_from_renderer(pixel_width, pixel_height, 1.0, cell_width, cell_height)
+        .map(ViewportMetrics::scene_size)
+}
+
+/// Freeze one coherent physical/logical/cell snapshot at the native boundary.
+///
+/// Renderer cell metrics are physical pixels because font metrics already
+/// include backing scale. Scene presentation retains their logical-pixel
+/// values so layout identity stays stable across 1x/2x materialization.
+pub(super) fn viewport_metrics_from_renderer(
+    pixel_width: u32,
+    pixel_height: u32,
+    scale: f32,
+    physical_cell_width: f32,
+    physical_cell_height: f32,
+) -> Option<ViewportMetrics> {
     if pixel_width == 0
         || pixel_height == 0
-        || !cell_width.is_finite()
-        || !cell_height.is_finite()
-        || cell_width <= 0.0
-        || cell_height <= 0.0
+        || !scale.is_finite()
+        || scale <= 0.0
+        || !physical_cell_width.is_finite()
+        || !physical_cell_height.is_finite()
+        || physical_cell_width <= 0.0
+        || physical_cell_height <= 0.0
     {
         return None;
     }
-    let width = (pixel_width as f32 / cell_width).floor() as u16;
-    let height = (pixel_height as f32 / cell_height).floor() as u16;
+    let scale = f64::from(scale);
+    let viewport = ViewportMetrics::new(
+        LogicalSize::from_pixels(
+            f64::from(pixel_width) / scale,
+            f64::from(pixel_height) / scale,
+        )
+        .ok()?,
+        PhysicalSize::new(pixel_width, pixel_height),
+        BackingScale::new(scale).ok()?,
+        LogicalSize::from_pixels(
+            f64::from(physical_cell_width) / scale,
+            f64::from(physical_cell_height) / scale,
+        )
+        .ok()?,
+    )
+    .ok()?;
+    let size = viewport.scene_size();
     // One pane needs a 3x3 bordered interior between the one-row header and
     // status strips. Suspend scene production while a minimized/tiny window
     // cannot satisfy that structural contract.
-    (width >= 3 && height >= 5).then(|| SceneSize::new(width, height))
+    (size.width >= 3 && size.height >= 5).then_some(viewport)
 }
 
 pub(super) fn translate_key(key: &Key, modifiers: ModifiersState) -> PlatformAction {
@@ -246,10 +280,10 @@ mod tests {
     use super::{
         PlatformAction, ime_event_is_accepted, key_for_platform_translation,
         pane_geometry_is_suspended, scene_size_from_metrics, shift_meta_character, translate_ime,
-        translate_key,
+        translate_key, viewport_metrics_from_renderer,
     };
     use mandatum_scene::{
-        SceneSize,
+        PhysicalSize, SceneSize,
         input::{CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, TextRange},
     };
     use winit::{
@@ -266,6 +300,20 @@ mod tests {
             scene_size_from_metrics(1280, 720, 8.0, 16.0),
             Some(SceneSize::new(160, 45))
         );
+    }
+
+    #[test]
+    fn viewport_snapshot_preserves_logical_geometry_at_one_and_two_x() {
+        let one_x =
+            viewport_metrics_from_renderer(800, 480, 1.0, 8.0, 16.0).expect("valid 1x metrics");
+        let two_x =
+            viewport_metrics_from_renderer(1600, 960, 2.0, 16.0, 32.0).expect("valid 2x metrics");
+
+        assert_eq!(one_x.logical_size, two_x.logical_size);
+        assert_eq!(one_x.measured_cell_metrics, two_x.measured_cell_metrics);
+        assert_eq!(one_x.scene_size(), SceneSize::new(100, 30));
+        assert_eq!(two_x.scene_size(), SceneSize::new(100, 30));
+        assert_eq!(two_x.physical_size, PhysicalSize::new(1600, 960));
     }
 
     #[test]

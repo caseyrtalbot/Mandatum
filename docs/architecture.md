@@ -174,17 +174,16 @@ It is an engine-side crate (deps: `mandatum-core`, serde, and pure Unicode
 segmentation/width policy only) and never depends on the terminal engine; the
 app's `scene_builder` converts engine grids into scene surfaces.
 
-### Phase 1 Native Presentation Contract Freeze
+### Native Presentation Contract
 
-Phase 1 of native visual polish freezes the following interface and invariants
-for Phase 2. This is a documentation contract only: Phase 1 does not add
-code-level geometry or accessibility wiring, change `FrontendHost::frame`,
-replace cell pointer input, populate a native presentation plan, or change any
-production pixel. `SceneRect`, `SceneSize`, existing hit targets,
-`CellProgram`, and the current native renderer remain the implemented path
-until Phase 2 lands the contract as one capability family.
+Phase 2 implements the following renderer-neutral interface as one capability
+family. `FrontendHost::frame_with_viewport` gives the app one coherent viewport
+snapshot; app-built scenes populate semantic presentation alongside the
+existing `CellProgram`; and `mandatum-native-renderer` validates a pure native
+presentation plan before GPU allocation. The terminal frontend and current
+production cell paint remain unchanged.
 
-The Phase 2 scene interface will add these renderer-neutral value types:
+The scene interface includes these renderer-neutral value types:
 
 ```text
 ViewportMetrics {
@@ -307,15 +306,13 @@ decoration has no accessibility node. Phase 2 defines the dependency-free
 nodes and the neutral actions `Focus`, `Activate`, and `SetText`; the native
 platform projection remains Phase 7 work.
 
-An accessibility adapter sends `AccessibilityActionEvent`, never a command or
-direct mutation. The event includes the `FrameSnapshot` revision from which
-the platform node was projected. `FrontendHost` resolves it only through the
-action map retained for that same last successfully presented scene; a stale
-revision, missing node, or unsupported action is inert. This mirrors exact
-painted-snapshot hit testing while stable node identity preserves platform
-continuity across valid frames. Platform adapters do not own product routing,
-and presentation nodes, mappings, action maps, caches, focus bridges, and
-animation progress remain live state that is never serialized as durable
+The neutral input contract includes `AccessibilityActionEvent`, never a command
+or direct mutation. It carries the `FrameSnapshot` revision, node id, and typed
+action needed for the Phase 7 platform adapter and same-frame action-map
+resolution. Phase 2 deliberately leaves those events inert: it does not create
+an AccessKit/AppKit bridge or let an unprojected platform event mutate product
+state. Presentation nodes, mappings, future action maps, caches, focus bridges,
+and animation progress remain live state that is never serialized as durable
 workspace intent.
 
 ### Frontend Adapters

@@ -751,6 +751,20 @@ developer unfamiliar with the current implementation can identify:
   1.0, zero changed pixels, zero masked pixels, and 1,920,000 compared pixels.
   The LG display was then restored to its 3440 x 1440 default and independently
   reported backing scale 1.0.
+- **2026-07-24:** Phase 2 implemented the native presentation foundation while
+  preserving the terminal cell projection. Focused evidence passed 10 theme
+  tests, 18 config tests, three logical-geometry tests, 16 `CellProgram`
+  parity tests, 296 app tests, 18 native-shell tests, 61 renderer unit tests,
+  three native-plan integration tests, and the excluded lab's 13 library,
+  23 shell, and 28 real-host tests. The isolated native token sampler displayed
+  all 17 direct UI color roles while retaining the independent terminal
+  palette. `./ci/native-frontend.sh` passed and the synchronized
+  source-and-documentation `./ci/gate.sh` run reported `GATE GREEN`.
+  The first fixed-reference comparison also exposed random temporary fixture
+  paths in review-facing scenes; the harness now normalizes those exact
+  isolated identities and proves independently prepared snapshots equal.
+  Fixed-reference capture and explicit acceptance from the clean Phase 2
+  source commit remain pending and are not claimed by this entry.
 
 ## Completion Rule
 

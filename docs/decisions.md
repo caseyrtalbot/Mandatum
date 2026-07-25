@@ -3010,3 +3010,56 @@ clean source commit `ebd7ee4`; explicit acceptance succeeded and every strict
 comparison returned SSIM 1.0 with zero changed or masked pixels. Visual review
 also caught a missing context-menu capture before acceptance; the lab now
 defers scenario driving until initial native geometry settles.
+
+## Native Presentation Meaning And UI Tokens Stay Typed
+
+Status: accepted; Phase 2 implementation complete (2026-07-24)
+
+Decision: native visual presentation is one typed capability family spanning
+`Theme.ui`, coherent viewport input, scene-owned logical geometry and semantic
+nodes, and a pure bounded renderer plan. Terminal ANSI identity remains owned
+by `TerminalPalette` and `CellProgram`; native chrome colors are direct UI
+tokens. The product state machine continues to build both native meaning and
+the honest terminal projection in the same `WorkspaceScene`.
+
+Context: Phase 1 froze the required dual-geometry and semantic identity
+contract, but production scenes still exposed only cell geometry to the
+renderer. Implementing materials directly in `gpu.rs`, deriving item identity
+from labels or positions, or reusing ANSI slots for chrome would create a
+second presentation authority and make resize, scale, transition, pointer, and
+future accessibility behavior disagree.
+
+Rationale: one coherent `ViewportMetrics` value gives scene layout a single
+rounding boundary. Fixed-point logical rectangles and opaque structural ids
+make identity deterministic across scale and geometry changes. A pure
+headless plan lets exact ordering, clipping, transitions, text scopes, token
+selection, and resource ceilings fail before GPU allocation. Keeping
+`CellProgram` unchanged preserves the maintained terminal frontend while
+allowing native presentation to deepen in later phases.
+
+Consequences:
+
+- UI palette, typography, spacing, radius, elevation, opacity, selection, and
+  motion values are typed and independently configurable from terminal color;
+- built-in themes must pass app-owned contrast checks and explicit low-contrast
+  user overrides warn rather than silently changing the user's value;
+- app-built scenes carry stable semantic nodes, terminal projections, logical
+  hit targets, exact PTY viewport mappings, transition targets, and
+  dependency-free accessibility nodes/actions;
+- native presentation preparation enforces exact parent/clip containment and
+  aggregate command, node, text-scope, and transition ceilings;
+- multi-metric text is limited to the four provisioned static faces and its
+  cache identity includes metric generation and slot;
+- Phase 2 defines accessibility events but keeps them inert until Phase 7
+  supplies the native projection and same-frame action map; and
+- isolated visual fixtures normalize random root identity only in the
+  review-facing scene so strict baseline comparison is repeatable.
+
+Verification: built-in contrast, config compatibility, 1.0/2.0 geometry,
+stable presentation identity, unchanged `CellProgram`, exact native-plan
+ordering/clipping/resource limits, multi-metric baseline/cache identity, and
+scenario determinism have focused tests. The displayed native token sampler
+showed every direct UI color role, `./ci/native-frontend.sh` passed, and the
+source-and-documentation repository gate reported `GATE GREEN`. Fixed-reference
+capture and explicit acceptance from the clean Phase 2 source commit are the
+remaining evidence step recorded in `docs/verification.md`.

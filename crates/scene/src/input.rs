@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::SceneSize;
+use crate::workspace::PresentationNodeId;
 
 /// One platform-neutral input event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,8 +18,24 @@ pub enum InputEvent {
     Paste(String),
     Composition(CompositionEvent),
     Resize(SceneSize),
+    Accessibility(AccessibilityActionEvent),
     FocusGained,
     FocusLost,
+}
+
+/// A neutral accessibility action against one successfully presented frame.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityActionEvent {
+    pub scene_revision: u64,
+    pub node_id: PresentationNodeId,
+    pub action: AccessibilityAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccessibilityAction {
+    Focus,
+    Activate,
+    SetText(String),
 }
 
 /// Renderer-neutral IME/dead-key lifecycle.

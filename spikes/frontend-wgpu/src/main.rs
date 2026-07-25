@@ -24,9 +24,11 @@ use mandatum_app::{
 use mandatum_native_renderer::{
     GpuFaultInjection, GpuFaultInjectionResult, GpuFrameSkip, GpuRenderError, GpuRenderOutcome,
     GpuStartupError, GpuStartupErrorKind, GpuSurfaceRecovery, GpuText, NativeTextSettings,
+    prepare_token_sampler,
 };
 use mandatum_scene::{
-    SceneSize, WorkspaceScene,
+    BackingScale, LogicalSize, PaneContent, PhysicalSize as ScenePhysicalSize, SceneCell,
+    SceneCellStyle, SceneColor, SceneSize, Theme, UiColor, ViewportMetrics, WorkspaceScene,
     input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, PointerButton,
         PointerEvent, PointerKind, TextRange,
@@ -115,6 +117,7 @@ struct Config {
     text_settings: NativeTextSettings,
     harness_project_path: Option<String>,
     visual_scenario: Option<VisualScenarioId>,
+    token_sampler: bool,
 }
 
 fn parse_config() -> Result<Config, String> {
@@ -146,6 +149,7 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
         text_settings: defaults,
         harness_project_path: None,
         visual_scenario: None,
+        token_sampler: false,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -229,6 +233,7 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
                         .map_err(|error| error.to_string())?,
                 );
             }
+            "--token-sampler" => config.token_sampler = true,
             "--inject-fault" => {
                 let value = required_value(&mut args, &arg)?;
                 config.fault = Some(match value.as_str() {
@@ -656,6 +661,7 @@ fn print_failure(
         text_settings: fallback,
         harness_project_path: None,
         visual_scenario: None,
+        token_sampler: false,
     };
     let config = config.unwrap_or(&fallback_config);
     let evidence = RunEvidence {
@@ -1011,9 +1017,13 @@ impl App {
     }
 
     fn scene_size(&self) -> Option<SceneSize> {
+        self.viewport_metrics().map(ViewportMetrics::scene_size)
+    }
+
+    fn viewport_metrics(&self) -> Option<ViewportMetrics> {
         let gpu = self.gpu.as_ref()?;
         let (width, height) = gpu.surface_size();
-        scene_size_from_metrics(width, height, gpu.cell_w(), gpu.cell_h())
+        viewport_metrics_from_renderer(width, height, gpu.scale(), gpu.cell_w(), gpu.cell_h())
     }
 
     fn resize_host(&mut self) {
@@ -1086,12 +1096,22 @@ impl App {
 
     fn render_frame(&mut self) -> Result<(), GpuRenderError> {
         self.scene_presentable = false;
-        let Some(size) = self.scene_size() else {
+        let Some(viewport) = self.viewport_metrics() else {
             self.cancel_and_disable_ime();
             self.host_mut().suspend_scene_interaction();
             return Ok(());
         };
-        let snapshot = self.host_mut().frame(size);
+        let mut snapshot = self.host_mut().frame_with_viewport(viewport);
+        if let Some(prepared) = &self.prepared_visual_scenario {
+            prepared
+                .stabilize_snapshot(&mut snapshot)
+                .map_err(|error| GpuRenderError::Internal {
+                    message: format!("visual scenario stabilization failed: {error}"),
+                })?;
+        }
+        if self.config.token_sampler {
+            apply_token_sampler_scene(&mut snapshot.scene, &snapshot.theme);
+        }
         if scene_is_suspended_by_tiled_minimum(&snapshot.scene) {
             self.cancel_and_disable_ime();
             self.host_mut().suspend_scene_interaction();
@@ -1671,8 +1691,9 @@ impl App {
                 );
                 return false;
             };
-            if let Err(error) = prepared.drive(self.host_mut(), scene_size, Duration::from_secs(5))
-            {
+            let drive_result = prepared.drive(self.host_mut(), scene_size, Duration::from_secs(5));
+            self.prepared_visual_scenario = Some(prepared);
+            if let Err(error) = drive_result {
                 self.fail("runtime", "visual_scenario", error.to_string());
                 return false;
             }
@@ -1771,12 +1792,16 @@ impl ApplicationHandler<UserEvent> for App {
         let wake_proxy = self.wake_proxy.clone();
         let startup = start_after_preflight(
             || {
-                let title = self.config.visual_scenario.map_or_else(
-                    || "Mandatum GPU Host Spike".to_owned(),
-                    |scenario| format!("Mandatum Visual {}", scenario.as_str()),
-                );
+                let title = if self.config.token_sampler {
+                    "Mandatum Phase 2 Token Sampler".to_owned()
+                } else {
+                    self.config.visual_scenario.map_or_else(
+                        || "Mandatum GPU Host Spike".to_owned(),
+                        |scenario| format!("Mandatum Visual {}", scenario.as_str()),
+                    )
+                };
                 let mut attributes = Window::default_attributes().with_title(title);
-                if self.config.visual_scenario.is_some() {
+                if self.config.visual_scenario.is_some() || self.config.token_sampler {
                     attributes = attributes
                         .with_inner_size(PhysicalSize::new(1_600_u32, 1_200_u32))
                         .with_decorations(false);
@@ -2125,25 +2150,153 @@ fn neutral_button(button: MouseButton) -> Option<PointerButton> {
     }
 }
 
+#[cfg(test)]
 fn scene_size_from_metrics(
     width: u32,
     height: u32,
     cell_width: f32,
     cell_height: f32,
 ) -> Option<SceneSize> {
-    if !cell_width.is_finite()
-        || !cell_height.is_finite()
-        || cell_width <= 0.0
-        || cell_height <= 0.0
+    viewport_metrics_from_renderer(width, height, 1.0, cell_width, cell_height)
+        .map(ViewportMetrics::scene_size)
+}
+
+fn viewport_metrics_from_renderer(
+    width: u32,
+    height: u32,
+    scale: f32,
+    physical_cell_width: f32,
+    physical_cell_height: f32,
+) -> Option<ViewportMetrics> {
+    if width == 0
+        || height == 0
+        || !scale.is_finite()
+        || scale <= 0.0
+        || !physical_cell_width.is_finite()
+        || !physical_cell_height.is_finite()
+        || physical_cell_width <= 0.0
+        || physical_cell_height <= 0.0
     {
         return None;
     }
-    let columns = (width as f32 / cell_width).floor() as u16;
-    let rows = (height as f32 / cell_height).floor() as u16;
+    let scale = f64::from(scale);
+    let viewport = ViewportMetrics::new(
+        LogicalSize::from_pixels(f64::from(width) / scale, f64::from(height) / scale).ok()?,
+        ScenePhysicalSize::new(width, height),
+        BackingScale::new(scale).ok()?,
+        LogicalSize::from_pixels(
+            f64::from(physical_cell_width) / scale,
+            f64::from(physical_cell_height) / scale,
+        )
+        .ok()?,
+    )
+    .ok()?;
+    let size = viewport.scene_size();
     // One pane needs a 3x3 bordered interior between the one-row header and
     // status strips. Suspend scene production while a minimized/tiny window
     // cannot satisfy that structural contract.
-    (columns >= 3 && rows >= 5).then(|| SceneSize::new(columns, rows))
+    (size.width >= 3 && size.height >= 5).then_some(viewport)
+}
+
+fn apply_token_sampler_scene(scene: &mut WorkspaceScene, theme: &Theme) {
+    let Some(viewport) = scene.presentation.viewport else {
+        return;
+    };
+    let bounds = mandatum_scene::LogicalRect::from_units(
+        0,
+        0,
+        viewport.logical_size.width_units(),
+        viewport.logical_size.height_units(),
+    );
+    let Ok(sampler) = prepare_token_sampler(theme, bounds) else {
+        return;
+    };
+    let Some(pane) = scene.panes.first_mut() else {
+        return;
+    };
+    let inner = mandatum_scene::layout::pane_inner_rect(pane.area);
+    let canvas = theme.ui.palette.canvas;
+    let canvas_style = SceneCellStyle {
+        background: scene_color(canvas),
+        ..SceneCellStyle::default()
+    };
+    let mut rows = vec![
+        vec![SceneCell::grapheme(" ", canvas_style); usize::from(inner.width)];
+        usize::from(inner.height)
+    ];
+
+    for (row, swatch) in sampler
+        .swatches()
+        .iter()
+        .take(usize::from(inner.height))
+        .enumerate()
+    {
+        let display = composite_over(swatch.color, canvas);
+        let foreground = if relative_luminance(display) > 0.42 {
+            UiColor::rgb(0x0b, 0x0d, 0x10)
+        } else {
+            UiColor::rgb(0xe7, 0xea, 0xf0)
+        };
+        let style = SceneCellStyle {
+            foreground: scene_color(foreground),
+            background: scene_color(display),
+            bold: true,
+            ..SceneCellStyle::default()
+        };
+        let label = format!(
+            "{:?}  #{:02X}{:02X}{:02X}{:02X}",
+            swatch.role,
+            swatch.color.red,
+            swatch.color.green,
+            swatch.color.blue,
+            swatch.color.alpha
+        );
+        for (column, character) in label.chars().enumerate() {
+            let Some(cell) = rows[row].get_mut(column) else {
+                break;
+            };
+            *cell = SceneCell::grapheme(character.to_string(), style);
+        }
+        for cell in rows[row].iter_mut().skip(label.chars().count()) {
+            *cell = SceneCell::grapheme(" ", style);
+        }
+    }
+
+    pane.title = "Phase 2 semantic UI token sampler".to_owned();
+    pane.content = PaneContent::Terminal(mandatum_scene::TerminalSurface {
+        rows,
+        ..mandatum_scene::TerminalSurface::default()
+    });
+    scene.header.text = "Mandatum · Phase 2 token and native presentation foundation".to_owned();
+    scene.status.text = "Direct UI RGBA roles · terminal palette remains independent".to_owned();
+}
+
+fn scene_color(color: UiColor) -> SceneColor {
+    SceneColor::Rgb(color.red, color.green, color.blue)
+}
+
+fn composite_over(foreground: UiColor, background: UiColor) -> UiColor {
+    let alpha = u16::from(foreground.alpha);
+    let blend = |front: u8, back: u8| {
+        ((u16::from(front) * alpha + u16::from(back) * (255 - alpha) + 127) / 255) as u8
+    };
+    UiColor::rgb(
+        blend(foreground.red, background.red),
+        blend(foreground.green, background.green),
+        blend(foreground.blue, background.blue),
+    )
+}
+
+fn relative_luminance(color: UiColor) -> f64 {
+    let linear = |component: u8| {
+        let value = f64::from(component) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(color.red) + 0.7152 * linear(color.green) + 0.0722 * linear(color.blue)
 }
 
 fn translate_key(key: &Key, modifiers: ModifiersState) -> PlatformAction {
@@ -2341,6 +2494,7 @@ fn uses_isolated_harness(config: &Config) -> bool {
         || config.stress.is_some()
         || config.fault.is_some()
         || config.visual_scenario.is_some()
+        || config.token_sampler
 }
 
 fn app_config_for_run(config: &mut Config) -> std::io::Result<AppConfig> {
@@ -2469,7 +2623,7 @@ mod tests {
         key_for_platform_translation, pane_geometry_is_suspended, parse_config_from,
         parse_font_family, parse_font_size, parse_ps_rss_kib, parse_scale_delay,
         parse_scale_factor, run_exit_code, scene_size_from_metrics, start_after_preflight,
-        translate_ime, translate_key,
+        translate_ime, translate_key, uses_isolated_harness,
     };
     use mandatum_scene::input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, TextRange,
@@ -2703,6 +2857,14 @@ mod tests {
             visual.visual_scenario,
             Some(VisualScenarioId::DenseWorkspace)
         );
+        let sampler = parse_config_from(
+            ["--token-sampler", "--exit-after", "5"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("native token sampler route");
+        assert!(sampler.token_sampler);
+        assert!(uses_isolated_harness(&sampler));
 
         for invalid in [
             vec!["--resize-count", "0"],

@@ -117,9 +117,12 @@ native presentation only through typed scene contracts.
 Phase 1 of [docs/visual-polish-plan.md](docs/visual-polish-plan.md) established
 the visual acceptance contract, deterministic scenario catalog, fixed-reference
 capture/diff workflow, and accepted current-surface baselines without changing
-production pixels. Phase 2 — Token And Native Presentation Foundation — is the
-next bounded slice. Concrete functional failures found through daily use remain
-valid hardening work at their smallest owning seam.
+production pixels. Phase 2 — Token And Native Presentation Foundation — now
+implements the typed UI-token, logical-geometry, semantic-presentation,
+multi-metric text, and headless native-plan capability family while preserving
+the terminal `CellProgram`. Phase 3 — Workspace Shell, Pane Materials, Density,
+And Focus — is the next bounded slice. Concrete functional failures found
+through daily use remain valid hardening work at their smallest owning seam.
 
 ### Distribution and public presentation — shelved
 

@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use mandatum_commands::{CommandId, command_id_for_name};
-use mandatum_scene::{SceneColor, Theme};
+use mandatum_scene::{SceneColor, Theme, UiColor};
 
 use crate::keymap::{ChordAction, Keymap, format_chord, parse_chord};
 
@@ -106,6 +106,7 @@ pub fn load_config(user_file: Option<&Path>, project_file: &Path) -> LoadedConfi
         apply_file(&mut config, user_file, "user config");
     }
     apply_file(&mut config, project_file, "project config");
+    warn_ui_contrast(&mut config);
     config
 }
 
@@ -317,6 +318,15 @@ fn apply_theme(config: &mut LoadedConfig, mut table: toml::Table, label: &str) {
         }
     }
 
+    if let Some(value) = table.remove("ui") {
+        match value {
+            toml::Value::Table(ui) => apply_ui_palette(config, ui, label),
+            _ => config
+                .warnings
+                .push(format!("{label}: [theme.ui] must be a table")),
+        }
+    }
+
     for (key, value) in table {
         if theme_slot(&mut config.theme, &key).is_none() {
             config
@@ -339,6 +349,69 @@ fn apply_theme(config: &mut LoadedConfig, mut table: toml::Table, label: &str) {
                 .push(format!("{label}: {target}: {problem}")),
         }
     }
+}
+
+fn apply_ui_palette(config: &mut LoadedConfig, table: toml::Table, label: &str) {
+    for (key, value) in table {
+        if ui_palette_slot(&mut config.theme, &key).is_none() {
+            config
+                .warnings
+                .push(format!("{label}: unknown key 'theme.ui.{key}'"));
+            continue;
+        }
+        let target = format!("theme.ui.{key}");
+        let Some(text) = expect_string(config, &target, value, label) else {
+            continue;
+        };
+        match parse_ui_color(&text) {
+            Ok(color) => {
+                if color.alpha != u8::MAX && !ui_color_allows_alpha(&key) {
+                    config.warnings.push(format!(
+                        "{label}: {target}: app-owned text, state, border, and material colors \
+                         must be opaque"
+                    ));
+                    continue;
+                }
+                if let Some(slot) = ui_palette_slot(&mut config.theme, &key) {
+                    *slot = color;
+                }
+            }
+            Err(problem) => config
+                .warnings
+                .push(format!("{label}: {target}: {problem}")),
+        }
+    }
+}
+
+fn ui_color_allows_alpha(key: &str) -> bool {
+    matches!(
+        key,
+        "selection_fill" | "selection-fill" | "modal_scrim" | "modal-scrim"
+    )
+}
+
+fn ui_palette_slot<'a>(theme: &'a mut Theme, key: &str) -> Option<&'a mut UiColor> {
+    let palette = &mut theme.ui.palette;
+    Some(match key {
+        "canvas" => &mut palette.canvas,
+        "pane_surface" | "pane-surface" => &mut palette.pane_surface,
+        "chrome_surface" | "chrome-surface" => &mut palette.chrome_surface,
+        "overlay_surface" | "overlay-surface" => &mut palette.overlay_surface,
+        "border_subtle" | "border-subtle" => &mut palette.border_subtle,
+        "border_strong" | "border-strong" => &mut palette.border_strong,
+        "text_primary" | "text-primary" => &mut palette.text_primary,
+        "text_secondary" | "text-secondary" => &mut palette.text_secondary,
+        "text_muted" | "text-muted" => &mut palette.text_muted,
+        "focus" => &mut palette.focus,
+        "running" => &mut palette.running,
+        "waiting" => &mut palette.waiting,
+        "failure" => &mut palette.failure,
+        "complete" => &mut palette.complete,
+        "agent_identity" | "agent-identity" => &mut palette.agent_identity,
+        "selection_fill" | "selection-fill" => &mut palette.selection_fill,
+        "modal_scrim" | "modal-scrim" => &mut palette.modal_scrim,
+        _ => return None,
+    })
 }
 
 fn apply_terminal_palette(config: &mut LoadedConfig, table: toml::Table, label: &str) {
@@ -580,12 +653,59 @@ fn parse_direct_rgb(text: &str) -> Result<[u8; 3], String> {
     }
 }
 
+fn parse_ui_color(text: &str) -> Result<UiColor, String> {
+    let Some(hex) = text.strip_prefix('#') else {
+        return Err(format!(
+            "'{text}' is not a direct UI color (use #rrggbb or #rrggbbaa)"
+        ));
+    };
+    match hex.len() {
+        6 => {
+            let value = u32::from_str_radix(hex, 16)
+                .map_err(|_| format!("'{text}' is not a #rrggbb color"))?;
+            Ok(UiColor::rgb(
+                (value >> 16) as u8,
+                (value >> 8) as u8,
+                value as u8,
+            ))
+        }
+        8 => {
+            let value = u32::from_str_radix(hex, 16)
+                .map_err(|_| format!("'{text}' is not a #rrggbbaa color"))?;
+            Ok(UiColor::rgba(
+                (value >> 24) as u8,
+                (value >> 16) as u8,
+                (value >> 8) as u8,
+                value as u8,
+            ))
+        }
+        _ => Err(format!(
+            "'{text}' is not a #rrggbb or #rrggbbaa direct UI color"
+        )),
+    }
+}
+
+fn warn_ui_contrast(config: &mut LoadedConfig) {
+    for violation in config.theme.ui_contrast_violations() {
+        config.warnings.push(format!(
+            "configured theme '{}': '{}' contrast is {:.3}:1; expected at least {:.3}:1",
+            config.theme.name,
+            violation.name,
+            violation.actual_ratio_milli as f64 / 1_000.0,
+            violation.minimum_ratio_milli as f64 / 1_000.0,
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use mandatum_scene::input::{Key, KeyCode, Modifiers};
+    use mandatum_scene::{
+        UiColor,
+        input::{Key, KeyCode, Modifiers},
+    };
 
     use super::*;
     use crate::help::{help_route, welcome_entries};
@@ -743,6 +863,82 @@ model = "claude-opus-4-6"
     }
 
     #[test]
+    fn native_ui_palette_overrides_support_compatible_key_aliases_and_alpha() {
+        let dir = TestConfigDir::new();
+        let user = dir.write(
+            "user.toml",
+            r##"
+[theme.ui]
+canvas = "#010203"
+pane-surface = "#040506"
+chrome_surface = "#070809"
+selection-fill = "#78a9ff24"
+modal_scrim = "#05070a8c"
+"##,
+        );
+
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        let palette = config.theme.ui.palette;
+        assert_eq!(palette.canvas, UiColor::rgb(1, 2, 3));
+        assert_eq!(palette.pane_surface, UiColor::rgb(4, 5, 6));
+        assert_eq!(palette.chrome_surface, UiColor::rgb(7, 8, 9));
+        assert_eq!(
+            palette.selection_fill,
+            UiColor::rgba(0x78, 0xa9, 0xff, 0x24)
+        );
+        assert_eq!(palette.modal_scrim, UiColor::rgba(0x05, 0x07, 0x0a, 0x8c));
+    }
+
+    #[test]
+    fn native_ui_palette_validation_warns_without_rejecting_personal_contrast() {
+        let dir = TestConfigDir::new();
+        let user = dir.write(
+            "user.toml",
+            r##"
+[theme.ui]
+text-primary = "#10141a"
+canvas = "#01020380"
+running = "green"
+selection-fill = "#12345"
+chartreuse = "#010203"
+"##,
+        );
+
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+        let warnings = config.warnings.join("\n");
+
+        assert_eq!(
+            config.theme.ui.palette.text_primary,
+            UiColor::rgb(0x10, 0x14, 0x1a),
+            "explicit low-contrast personal choices warn but remain applied"
+        );
+        assert_eq!(
+            config.theme.ui.palette.canvas,
+            Theme::default().ui.palette.canvas,
+            "structurally invalid translucent foundations retain their default"
+        );
+        assert_eq!(
+            config.theme.ui.palette.running,
+            Theme::default().ui.palette.running
+        );
+        assert_eq!(
+            config.theme.ui.palette.selection_fill,
+            Theme::default().ui.palette.selection_fill
+        );
+        assert!(warnings.contains("theme.ui.canvas") && warnings.contains("must be opaque"));
+        assert!(warnings.contains("theme.ui.running") && warnings.contains("direct UI color"));
+        assert!(warnings.contains("theme.ui.selection-fill") && warnings.contains("#12345"));
+        assert!(warnings.contains("unknown key 'theme.ui.chartreuse'"));
+        assert!(
+            warnings.contains("primary text on pane")
+                && warnings.contains("expected at least 4.500:1"),
+            "warnings: {warnings}"
+        );
+    }
+
+    #[test]
     fn legacy_serialized_theme_shape_migrates_to_the_new_roles() {
         let theme = Theme::default();
         let serialized = serde_json::to_value(&theme).unwrap();
@@ -758,6 +954,7 @@ model = "claude-opus-4-6"
         object.remove("overlay_foreground");
         object.remove("overlay_background");
         object.remove("terminal_palette");
+        object.remove("ui");
 
         let migrated: Theme = serde_json::from_value(legacy).unwrap();
         assert_eq!(migrated, Theme::default());
@@ -780,6 +977,45 @@ model = "claude-opus-4-6"
         // Settings the project file does not touch keep the user value.
         assert!(config.reduced_motion);
         assert!(config.warnings.is_empty());
+    }
+
+    #[test]
+    fn native_ui_theme_selection_and_reload_resolve_complete_snapshots() {
+        let dir = TestConfigDir::new();
+        let user = dir.write(
+            "user.toml",
+            r##"
+[theme]
+name = "mandatum-light"
+
+[theme.ui]
+focus = "#112233"
+
+[ui]
+reduced_motion = true
+"##,
+        );
+        let project = dir.write(
+            "project.toml",
+            "[theme]\nname = \"mandatum-high-contrast\"\n",
+        );
+
+        let selected = load_config(Some(&user), &project);
+        assert_eq!(selected.theme.name, "mandatum-high-contrast");
+        assert_eq!(
+            selected.theme.ui,
+            Theme::builtin("mandatum-high-contrast").unwrap().ui,
+            "a later base-theme selection resets earlier per-theme overrides"
+        );
+        assert!(selected.reduced_motion);
+        assert!(selected.warnings.is_empty(), "{:?}", selected.warnings);
+
+        fs::remove_file(&user).unwrap();
+        fs::remove_file(&project).unwrap();
+        let reloaded = load_config(Some(&user), &project);
+        assert_eq!(reloaded, LoadedConfig::default());
+        assert_eq!(reloaded.theme.ui, Theme::default().ui);
+        assert!(!reloaded.reduced_motion);
     }
 
     #[test]

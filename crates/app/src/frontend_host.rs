@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Duration};
 
 use mandatum_commands::CommandId;
 use mandatum_scene::{
-    SceneSize, Theme, WorkspaceScene,
+    SceneSize, Theme, ViewportMetrics, WorkspaceScene,
     input::{InputEvent, Key},
 };
 
@@ -156,11 +156,16 @@ impl FrontendHost {
     /// pointer input resolves against the most recently requested frame rather
     /// than a speculative rebuild.
     pub fn frame(&mut self, size: SceneSize) -> FrameSnapshot {
+        self.frame_with_viewport(ViewportMetrics::from_scene_size(size))
+    }
+
+    /// Build a frame from one coherent logical/physical viewport snapshot.
+    pub fn frame_with_viewport(&mut self, viewport: ViewportMetrics) -> FrameSnapshot {
         let revision = self
             .frame_revision
             .checked_add(1)
             .expect("frontend frame revision overflowed");
-        let scene = self.app.build_scene(size);
+        let scene = self.app.build_scene_with_viewport(viewport);
         let theme = self.app.theme().clone();
         self.frame_revision = revision;
         FrameSnapshot {

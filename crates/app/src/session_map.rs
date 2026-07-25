@@ -4,7 +4,8 @@
 
 use mandatum_core::{AgentStatus, PaneId, PaneKind, SessionId, Workspace};
 use mandatum_scene::{
-    SESSION_MAP_FOCUS_GLYPH, SceneSize, SessionMapOverlay, SessionMapRow, layout::session_map_rect,
+    SESSION_MAP_FOCUS_GLYPH, SceneSize, SemanticKey, SessionMapOverlay, SessionMapRow,
+    layout::session_map_rect,
 };
 
 /// Live overlay state while the session map is open. Runtime presentation
@@ -158,6 +159,18 @@ pub(crate) fn session_map_overlay(
     SessionMapOverlay {
         area: session_map_rect(size),
         rows: rows.iter().map(|model| model.row.clone()).collect(),
+        item_keys: rows
+            .iter()
+            .map(|model| match &model.target {
+                SessionMapTarget::Session(session_id) => {
+                    SemanticKey::new(format!("session:{session_id}"))
+                }
+                SessionMapTarget::Pane {
+                    session_id,
+                    pane_id,
+                } => SemanticKey::new(format!("session:{session_id}:pane:{pane_id}")),
+            })
+            .collect(),
         selected,
         footer,
     }

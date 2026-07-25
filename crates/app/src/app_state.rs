@@ -19,8 +19,8 @@ use mandatum_core::{
 use mandatum_pty::PtySize;
 use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind, PaletteOverlay,
-    PaneSceneKind, PromptOverlay, SceneRect, SceneSize, SearchOverlay, SessionMapOverlay, Theme,
-    TimelineOverlay, WelcomeOverlay, WorkspaceScene,
+    PaneSceneKind, PromptOverlay, SceneRect, SceneSize, SearchOverlay, SemanticKey,
+    SessionMapOverlay, Theme, TimelineOverlay, ViewportMetrics, WelcomeOverlay, WorkspaceScene,
     cell_program::scalar_range_to_columns,
     input::{
         CompositionEvent, InputEvent, Key, KeyCode, PointerButton, PointerEvent, PointerKind,
@@ -367,6 +367,14 @@ impl AppState {
             area,
             query: palette.query.clone(),
             footer: palette_footer(window.start, rows.len().saturating_sub(window.end)),
+            item_keys: rows
+                .iter()
+                .map(|row| {
+                    let name = mandatum_commands::command_for_id(row.command_id)
+                        .map_or("unknown-command", |command| command.name);
+                    SemanticKey::new(format!("command:{name}"))
+                })
+                .collect(),
             items: rows.into_iter().map(|row| row.entry).collect(),
             selected,
         })
@@ -697,9 +705,15 @@ impl AppState {
     /// Build one frame of scene and retain its hit targets, so pointer
     /// events resolve against exactly what was last drawn.
     pub fn build_scene(&mut self, size: SceneSize) -> WorkspaceScene {
+        self.build_scene_with_viewport(ViewportMetrics::from_scene_size(size))
+    }
+
+    /// Build one frame from a coherent logical/physical viewport and retain
+    /// exactly its cell and logical interaction contract.
+    pub fn build_scene_with_viewport(&mut self, viewport: ViewportMetrics) -> WorkspaceScene {
         let sender = self.runtime.event_sender();
         self.artifacts.refresh_active(&self.workspace, &sender);
-        let scene = crate::scene_builder::build_workspace_scene(self, size);
+        let scene = crate::scene_builder::build_workspace_scene_with_viewport(self, viewport);
         self.hit_targets = scene.hit_targets.clone();
         scene
     }
@@ -3199,6 +3213,18 @@ impl AppState {
             .iter()
             .map(|item| ContextMenuEntry::new(item.label.clone(), item.hint.clone()))
             .collect();
+        let item_keys = menu
+            .items
+            .iter()
+            .map(|item| match item.action {
+                ContextMenuAction::Command(command_id) => {
+                    let name = mandatum_commands::command_for_id(command_id)
+                        .map_or("unknown-command", |command| command.name);
+                    SemanticKey::new(format!("command:{name}"))
+                }
+                ContextMenuAction::OpenPalette => SemanticKey::new("control:open-palette"),
+            })
+            .collect();
         let widest = items
             .iter()
             .map(|entry| entry.label.chars().count() + 2 + entry.chord_hint.chars().count())
@@ -3210,6 +3236,7 @@ impl AppState {
         Some(ContextMenuOverlay {
             area,
             items,
+            item_keys,
             selected: menu.selected,
         })
     }

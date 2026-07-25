@@ -7,10 +7,14 @@
 use mandatum_agent_runtime::RiskLevel;
 use mandatum_core::{AgentPaneIntent, PaneId, PaneKind, PaneSpec, Session, TaskPaneIntent};
 use mandatum_scene::{
+    AccessibilityActionKind, AccessibilityNode, AccessibilityRole, AccessibilityState,
     AgentApprovalPrompt, AgentContent, CellOccupancy, EmptyContent, HeaderScene, HitTarget,
-    HitTargetKind, OverlayScene, PaneContent, PaneScene, PaneSceneKind, PreeditScene, SceneCell,
-    SceneCellStyle, SceneColor, SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent,
-    TerminalSurface, TextInputKind, TextInputScene, WorkspaceScene,
+    HitTargetKind, LogicalHitTarget, OverlayKind, OverlayNodePart, OverlayScene, PaneContent,
+    PaneNodePart, PaneScene, PaneSceneKind, PreeditScene, PresentationAxis, PresentationNode,
+    PresentationNodeId, PresentationNodeRole, PresentationNodeState, SceneCell, SceneCellStyle,
+    SceneColor, ScenePresentation, SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent,
+    TerminalProjection, TerminalSurface, TerminalViewportMapping, TextInputKind, TextInputScene,
+    TransitionProperty, TransitionTarget, ViewportMetrics, WorkspaceNodePart, WorkspaceScene,
     cell_program::display_width,
     layout::{self, PaneLayout},
 };
@@ -39,6 +43,15 @@ pub(crate) struct PaneViewState {
 
 /// Build one frame of workspace scene from live app state.
 pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScene {
+    build_workspace_scene_with_viewport(state, ViewportMetrics::from_scene_size(size))
+}
+
+/// Build one frame from a coherent shell-provided logical/physical viewport.
+pub fn build_workspace_scene_with_viewport(
+    state: &AppState,
+    viewport: ViewportMetrics,
+) -> WorkspaceScene {
+    let size = viewport.scene_size();
     let workspace = state.workspace();
     let session = workspace.active_session();
     let area = layout::workspace_scene_area(size);
@@ -78,22 +91,560 @@ pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScen
     // The attention strip: approvals, failed tasks, stuck agents — or calm
     // session facts. Composed here so `&WorkspaceScene` alone paints a frame.
     let header = header_scene(state, layout::header_rect(size));
+    let status = StatusScene {
+        area: layout::status_rect(size),
+        text: status_text(state),
+    };
     let hit_targets = hit_targets(workspace, &panes, &header, size, overlay.as_ref());
     let text_input = text_input_scene(state, &panes, overlay.as_ref());
+    let presentation = scene_presentation(
+        state,
+        viewport,
+        &panes,
+        &header,
+        &status,
+        overlay.as_ref(),
+        &hit_targets,
+    );
 
     WorkspaceScene {
         size,
         header,
         panes,
         overlay,
-        status: StatusScene {
-            area: layout::status_rect(size),
-            text: status_text(state),
-        },
+        status,
         focused_pane: session.focused_pane_id().clone(),
         hit_targets,
         copy_mode: state.copy_mode_active(),
         text_input,
+        presentation,
+    }
+}
+
+fn scene_presentation(
+    state: &AppState,
+    viewport: ViewportMetrics,
+    panes: &[PaneScene],
+    header: &HeaderScene,
+    status: &StatusScene,
+    overlay: Option<&OverlayScene>,
+    hit_targets: &[HitTarget],
+) -> ScenePresentation {
+    let workspace_id = PresentationNodeId::workspace(WorkspaceNodePart::Surface);
+    let mut nodes = vec![presentation_node(
+        workspace_id.clone(),
+        None,
+        PresentationNodeRole::Workspace,
+        PresentationNodeState::default(),
+        SceneRect::new(
+            0,
+            0,
+            viewport.scene_size().width,
+            viewport.scene_size().height,
+        ),
+        viewport,
+    )];
+
+    let header_id = PresentationNodeId::workspace(WorkspaceNodePart::Header);
+    nodes.push(presentation_node(
+        header_id.clone(),
+        Some(workspace_id.clone()),
+        PresentationNodeRole::Header,
+        PresentationNodeState::default(),
+        header.area,
+        viewport,
+    ));
+    let status_id = PresentationNodeId::workspace(WorkspaceNodePart::Status);
+    nodes.push(presentation_node(
+        status_id.clone(),
+        Some(workspace_id.clone()),
+        PresentationNodeRole::Status,
+        PresentationNodeState::default(),
+        status.area,
+        viewport,
+    ));
+
+    let mut terminal_viewports = Vec::new();
+    let mut transition_targets = Vec::new();
+    for pane in panes {
+        let pane_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Surface);
+        nodes.push(presentation_node(
+            pane_id.clone(),
+            Some(workspace_id.clone()),
+            PresentationNodeRole::Pane,
+            PresentationNodeState {
+                focused: pane.focused,
+                ..PresentationNodeState::default()
+            },
+            pane.area,
+            viewport,
+        ));
+        let title_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Title);
+        nodes.push(presentation_node(
+            title_id,
+            Some(pane_id.clone()),
+            PresentationNodeRole::PaneTitle,
+            PresentationNodeState {
+                focused: pane.focused,
+                ..PresentationNodeState::default()
+            },
+            SceneRect::new(pane.area.x, pane.area.y, pane.area.width, 1),
+            viewport,
+        ));
+        let body_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Body);
+        nodes.push(presentation_node(
+            body_id,
+            Some(pane_id.clone()),
+            PresentationNodeRole::PaneBody,
+            PresentationNodeState {
+                focused: pane.focused,
+                ..PresentationNodeState::default()
+            },
+            layout::pane_inner_rect(pane.area),
+            viewport,
+        ));
+        transition_targets.push(TransitionTarget {
+            node_id: pane_id.clone(),
+            property: TransitionProperty::Geometry,
+        });
+
+        if let Some(mapping) = terminal_viewport_mapping(state, pane, viewport) {
+            let role = match pane.content {
+                PaneContent::Task(_) => PresentationNodeRole::TaskOutput,
+                _ => PresentationNodeRole::TerminalOutput,
+            };
+            nodes.push(presentation_node(
+                mapping.node_id.clone(),
+                Some(pane_id),
+                role,
+                PresentationNodeState {
+                    focused: pane.focused,
+                    ..PresentationNodeState::default()
+                },
+                mapping.visible_cell_rect,
+                viewport,
+            ));
+            terminal_viewports.push(mapping);
+        }
+    }
+
+    if let Some(overlay) = overlay {
+        let kind = overlay.kind();
+        let overlay_id = PresentationNodeId::overlay(kind, OverlayNodePart::Surface);
+        nodes.push(presentation_node(
+            overlay_id.clone(),
+            Some(workspace_id.clone()),
+            PresentationNodeRole::Overlay,
+            PresentationNodeState::default(),
+            overlay_area(overlay),
+            viewport,
+        ));
+        transition_targets.extend([
+            TransitionTarget {
+                node_id: overlay_id.clone(),
+                property: TransitionProperty::Opacity,
+            },
+            TransitionTarget {
+                node_id: overlay_id,
+                property: TransitionProperty::Scale,
+            },
+        ]);
+    }
+
+    let mut logical_hit_targets = Vec::new();
+    for target in hit_targets {
+        let Some(node_id) = presentation_id_for_hit_target(target, overlay) else {
+            continue;
+        };
+        if !nodes.iter().any(|node| node.id == node_id) {
+            let parent = if matches!(
+                target.kind,
+                HitTargetKind::PaletteItem(_)
+                    | HitTargetKind::ContextMenuItem(_)
+                    | HitTargetKind::TimelineItem(_)
+                    | HitTargetKind::SessionMapRow(_)
+                    | HitTargetKind::SearchItem(_)
+            ) {
+                overlay.map(|value| {
+                    PresentationNodeId::overlay(value.kind(), OverlayNodePart::Surface)
+                })
+            } else {
+                Some(workspace_id.clone())
+            };
+            nodes.push(presentation_node(
+                node_id.clone(),
+                parent,
+                presentation_role_for_hit_target(&target.kind),
+                presentation_state_for_hit_target(&target.kind, overlay),
+                target.rect,
+                viewport,
+            ));
+        }
+        logical_hit_targets.push(LogicalHitTarget {
+            node_id,
+            logical_rect: viewport.logical_rect_for_cells(target.rect),
+            kind: target.kind.clone(),
+        });
+    }
+
+    let accessibility_nodes = accessibility_nodes(
+        panes,
+        header,
+        status,
+        overlay,
+        &nodes,
+        viewport,
+        &workspace_id,
+    );
+
+    ScenePresentation {
+        viewport: Some(viewport),
+        nodes,
+        logical_hit_targets,
+        terminal_viewports,
+        transition_targets,
+        accessibility_nodes,
+    }
+}
+
+fn presentation_node(
+    id: PresentationNodeId,
+    parent: Option<PresentationNodeId>,
+    role: PresentationNodeRole,
+    state: PresentationNodeState,
+    cell_rect: SceneRect,
+    viewport: ViewportMetrics,
+) -> PresentationNode {
+    PresentationNode {
+        id,
+        parent,
+        role,
+        state,
+        logical_rect: viewport.logical_rect_for_cells(cell_rect),
+        cell_rect: Some(cell_rect),
+        terminal_projection: TerminalProjection::CellRegions(vec![cell_rect]),
+    }
+}
+
+fn terminal_viewport_mapping(
+    state: &AppState,
+    pane: &PaneScene,
+    viewport: ViewportMetrics,
+) -> Option<TerminalViewportMapping> {
+    let inner = layout::pane_inner_rect(pane.area);
+    let (pty_size, visible_cell_rect, first_visible_surface_row) = match &pane.content {
+        PaneContent::Terminal(surface) => {
+            let grid = state.terminal_grid(&pane.id)?;
+            (
+                SceneSize::new(grid.size().columns(), grid.size().rows()),
+                inner,
+                surface.first_row,
+            )
+        }
+        PaneContent::Task(task) => {
+            let output = task.output.as_ref()?;
+            let (_, grid) = state.task_view(&pane.id)?;
+            let grid = grid?;
+            let detail_rows = pane.detail_lines().len() as u16;
+            (
+                SceneSize::new(grid.size().columns(), grid.size().rows()),
+                SceneRect::new(
+                    inner.x,
+                    inner.y.saturating_add(detail_rows),
+                    inner.width,
+                    inner.height.saturating_sub(detail_rows),
+                ),
+                output.first_row,
+            )
+        }
+        _ => return None,
+    };
+    let node_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Output);
+    Some(TerminalViewportMapping {
+        node_id,
+        pane_id: pane.id.clone(),
+        pty_size,
+        visible_cell_rect,
+        logical_rect: viewport.logical_rect_for_cells(visible_cell_rect),
+        first_visible_surface_row,
+    })
+}
+
+fn overlay_area(overlay: &OverlayScene) -> SceneRect {
+    match overlay {
+        OverlayScene::Palette(value) => value.area,
+        OverlayScene::ContextMenu(value) => value.area,
+        OverlayScene::Timeline(value) => value.area,
+        OverlayScene::SessionMap(value) => value.area,
+        OverlayScene::Prompt(value) => value.area,
+        OverlayScene::Search(value) => value.area,
+        OverlayScene::Help(value) => value.area,
+        OverlayScene::Welcome(value) => value.area,
+    }
+}
+
+fn presentation_id_for_hit_target(
+    target: &HitTarget,
+    overlay: Option<&OverlayScene>,
+) -> Option<PresentationNodeId> {
+    Some(match &target.kind {
+        HitTargetKind::PaneBody(pane_id) => {
+            PresentationNodeId::pane(pane_id.clone(), PaneNodePart::Body)
+        }
+        HitTargetKind::PaneTitle(pane_id) => {
+            PresentationNodeId::pane(pane_id.clone(), PaneNodePart::Title)
+        }
+        HitTargetKind::Separator { split_index, axis } => {
+            PresentationNodeId::workspace(WorkspaceNodePart::Separator {
+                split_index: *split_index,
+                axis: PresentationAxis::from(*axis),
+            })
+        }
+        HitTargetKind::StatusStrip => PresentationNodeId::workspace(WorkspaceNodePart::Status),
+        HitTargetKind::AttentionSegment { pane, .. } => {
+            PresentationNodeId::workspace(WorkspaceNodePart::Attention { pane: pane.clone() })
+        }
+        HitTargetKind::PaletteItem(index) => PresentationNodeId::overlay_item(
+            OverlayKind::Palette,
+            overlay_item_key(overlay?, *index)?,
+        ),
+        HitTargetKind::ContextMenuItem(index) => PresentationNodeId::overlay_item(
+            OverlayKind::ContextMenu,
+            overlay_item_key(overlay?, *index)?,
+        ),
+        HitTargetKind::TimelineItem(index) => PresentationNodeId::overlay_item(
+            OverlayKind::Timeline,
+            overlay_item_key(overlay?, *index)?,
+        ),
+        HitTargetKind::SessionMapRow(index) => PresentationNodeId::overlay_item(
+            OverlayKind::SessionMap,
+            overlay_item_key(overlay?, *index)?,
+        ),
+        HitTargetKind::SearchItem(index) => PresentationNodeId::overlay_item(
+            OverlayKind::Search,
+            overlay_item_key(overlay?, *index)?,
+        ),
+    })
+}
+
+fn overlay_item_key(overlay: &OverlayScene, index: usize) -> Option<mandatum_scene::SemanticKey> {
+    match overlay {
+        OverlayScene::Palette(value) => value.item_keys.get(index),
+        OverlayScene::ContextMenu(value) => value.item_keys.get(index),
+        OverlayScene::Timeline(value) => value.item_keys.get(index),
+        OverlayScene::SessionMap(value) => value.item_keys.get(index),
+        OverlayScene::Search(value) => value.item_keys.get(index),
+        OverlayScene::Prompt(_) | OverlayScene::Help(_) | OverlayScene::Welcome(_) => None,
+    }
+    .cloned()
+}
+
+fn presentation_role_for_hit_target(kind: &HitTargetKind) -> PresentationNodeRole {
+    match kind {
+        HitTargetKind::PaneBody(_) => PresentationNodeRole::PaneBody,
+        HitTargetKind::PaneTitle(_) => PresentationNodeRole::PaneTitle,
+        HitTargetKind::Separator { .. } => PresentationNodeRole::Separator,
+        HitTargetKind::StatusStrip => PresentationNodeRole::Status,
+        HitTargetKind::AttentionSegment { .. } => PresentationNodeRole::Attention,
+        HitTargetKind::PaletteItem(_)
+        | HitTargetKind::ContextMenuItem(_)
+        | HitTargetKind::TimelineItem(_)
+        | HitTargetKind::SessionMapRow(_)
+        | HitTargetKind::SearchItem(_) => PresentationNodeRole::Item,
+    }
+}
+
+fn presentation_state_for_hit_target(
+    kind: &HitTargetKind,
+    overlay: Option<&OverlayScene>,
+) -> PresentationNodeState {
+    let (selected, disabled) = match (kind, overlay) {
+        (HitTargetKind::PaletteItem(index), Some(OverlayScene::Palette(value))) => (
+            value.selected == Some(*index),
+            value.items.get(*index).is_some_and(|item| !item.enabled),
+        ),
+        (HitTargetKind::ContextMenuItem(index), Some(OverlayScene::ContextMenu(value))) => {
+            (value.selected == *index, false)
+        }
+        (HitTargetKind::TimelineItem(index), Some(OverlayScene::Timeline(value))) => {
+            (value.selected == Some(*index), false)
+        }
+        (HitTargetKind::SessionMapRow(index), Some(OverlayScene::SessionMap(value))) => {
+            (value.selected == *index, false)
+        }
+        (HitTargetKind::SearchItem(index), Some(OverlayScene::Search(value))) => {
+            (value.selected == Some(*index), false)
+        }
+        _ => (false, false),
+    };
+    PresentationNodeState {
+        selected,
+        disabled,
+        ..PresentationNodeState::default()
+    }
+}
+
+fn accessibility_nodes(
+    panes: &[PaneScene],
+    header: &HeaderScene,
+    status: &StatusScene,
+    overlay: Option<&OverlayScene>,
+    nodes: &[PresentationNode],
+    viewport: ViewportMetrics,
+    workspace_id: &PresentationNodeId,
+) -> Vec<AccessibilityNode> {
+    let mut result = vec![AccessibilityNode {
+        id: workspace_id.clone(),
+        parent: None,
+        role: AccessibilityRole::Workspace,
+        label: "Mandatum workspace".to_owned(),
+        value: None,
+        state: AccessibilityState::default(),
+        logical_rect: viewport.logical_rect_for_cells(SceneRect::new(
+            0,
+            0,
+            viewport.scene_size().width,
+            viewport.scene_size().height,
+        )),
+        supported_actions: Vec::new(),
+    }];
+    result.push(AccessibilityNode {
+        id: PresentationNodeId::workspace(WorkspaceNodePart::Header),
+        parent: Some(workspace_id.clone()),
+        role: AccessibilityRole::Header,
+        label: header.workspace_name.clone(),
+        value: Some(header.text.clone()),
+        state: AccessibilityState::default(),
+        logical_rect: viewport.logical_rect_for_cells(header.area),
+        supported_actions: Vec::new(),
+    });
+    result.push(AccessibilityNode {
+        id: PresentationNodeId::workspace(WorkspaceNodePart::Status),
+        parent: Some(workspace_id.clone()),
+        role: AccessibilityRole::Status,
+        label: "Workspace status".to_owned(),
+        value: Some(status.text.clone()),
+        state: AccessibilityState::default(),
+        logical_rect: viewport.logical_rect_for_cells(status.area),
+        supported_actions: vec![AccessibilityActionKind::Activate],
+    });
+    for pane in panes {
+        result.push(AccessibilityNode {
+            id: PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Surface),
+            parent: Some(workspace_id.clone()),
+            role: match pane.content {
+                PaneContent::Terminal(_) => AccessibilityRole::Terminal,
+                _ => AccessibilityRole::Pane,
+            },
+            label: pane.title.clone(),
+            value: Some(pane.kind.label().to_owned()),
+            state: AccessibilityState {
+                focused: pane.focused,
+                busy: matches!(
+                    &pane.content,
+                    PaneContent::Task(task)
+                        if task.status_label.as_deref().is_some_and(|status| status.contains("running"))
+                ),
+                ..AccessibilityState::default()
+            },
+            logical_rect: viewport.logical_rect_for_cells(pane.area),
+            supported_actions: vec![AccessibilityActionKind::Focus],
+        });
+    }
+    if let Some(overlay) = overlay {
+        let overlay_id = PresentationNodeId::overlay(overlay.kind(), OverlayNodePart::Surface);
+        result.push(AccessibilityNode {
+            id: overlay_id.clone(),
+            parent: Some(workspace_id.clone()),
+            role: AccessibilityRole::Dialog,
+            label: overlay_accessibility_label(overlay).to_owned(),
+            value: None,
+            state: AccessibilityState::default(),
+            logical_rect: viewport.logical_rect_for_cells(overlay_area(overlay)),
+            supported_actions: Vec::new(),
+        });
+        for node in nodes
+            .iter()
+            .filter(|node| node.role == PresentationNodeRole::Item)
+        {
+            result.push(AccessibilityNode {
+                id: node.id.clone(),
+                parent: Some(overlay_id.clone()),
+                role: AccessibilityRole::ListItem,
+                label: overlay_item_label(overlay, &node.id)
+                    .unwrap_or("Item")
+                    .to_owned(),
+                value: None,
+                state: AccessibilityState {
+                    selected: node.state.selected,
+                    disabled: node.state.disabled,
+                    ..AccessibilityState::default()
+                },
+                logical_rect: node.logical_rect,
+                supported_actions: vec![
+                    AccessibilityActionKind::Focus,
+                    AccessibilityActionKind::Activate,
+                ],
+            });
+        }
+    }
+    result
+}
+
+fn overlay_accessibility_label(overlay: &OverlayScene) -> &'static str {
+    match overlay {
+        OverlayScene::Palette(_) => "Command palette",
+        OverlayScene::ContextMenu(_) => "Pane menu",
+        OverlayScene::Timeline(_) => "Timeline",
+        OverlayScene::SessionMap(_) => "Session map",
+        OverlayScene::Prompt(_) => "Text prompt",
+        OverlayScene::Search(_) => "Search",
+        OverlayScene::Help(_) => "Help",
+        OverlayScene::Welcome(_) => "Welcome",
+    }
+}
+
+fn overlay_item_label<'a>(
+    overlay: &'a OverlayScene,
+    node_id: &PresentationNodeId,
+) -> Option<&'a str> {
+    match overlay {
+        OverlayScene::Palette(value) => value
+            .item_keys
+            .iter()
+            .position(|key| {
+                PresentationNodeId::overlay_item(OverlayKind::Palette, key.clone()) == *node_id
+            })
+            .and_then(|index| value.items.get(index).map(|item| item.label.as_str())),
+        OverlayScene::ContextMenu(value) => value
+            .item_keys
+            .iter()
+            .position(|key| {
+                PresentationNodeId::overlay_item(OverlayKind::ContextMenu, key.clone()) == *node_id
+            })
+            .and_then(|index| value.items.get(index).map(|item| item.label.as_str())),
+        OverlayScene::Timeline(value) => value
+            .item_keys
+            .iter()
+            .position(|key| {
+                PresentationNodeId::overlay_item(OverlayKind::Timeline, key.clone()) == *node_id
+            })
+            .and_then(|index| value.items.get(index).map(|item| item.text.as_str())),
+        OverlayScene::SessionMap(value) => value
+            .item_keys
+            .iter()
+            .position(|key| {
+                PresentationNodeId::overlay_item(OverlayKind::SessionMap, key.clone()) == *node_id
+            })
+            .and_then(|index| value.rows.get(index).map(|item| item.label.as_str())),
+        OverlayScene::Search(value) => value
+            .item_keys
+            .iter()
+            .position(|key| {
+                PresentationNodeId::overlay_item(OverlayKind::Search, key.clone()) == *node_id
+            })
+            .and_then(|index| value.items.get(index).map(|item| item.text.as_str())),
+        OverlayScene::Prompt(_) | OverlayScene::Help(_) | OverlayScene::Welcome(_) => None,
     }
 }
 
@@ -638,7 +1189,11 @@ mod tests {
 
     use mandatum_commands::CommandId;
     use mandatum_core::AgentStatus;
-    use mandatum_scene::input::{InputEvent, Key, KeyCode};
+    use mandatum_scene::input::{InputEvent, Key, KeyCode, Modifiers};
+    use mandatum_scene::{
+        AccessibilityRole, BackingScale, LogicalPoint, LogicalSize, PhysicalSize,
+        PresentationNodeRole, compile_cell_program,
+    };
     use mandatum_terminal_vt::{TerminalParser, TerminalSize};
 
     use super::*;
@@ -674,6 +1229,16 @@ mod tests {
 
     fn ctrl(code: char) -> Key {
         Key::ctrl(code)
+    }
+
+    fn viewport(scale: f64) -> ViewportMetrics {
+        ViewportMetrics::new(
+            LogicalSize::from_pixels(960.0, 640.0).unwrap(),
+            PhysicalSize::new((960.0 * scale) as u32, (640.0 * scale) as u32),
+            BackingScale::new(scale).unwrap(),
+            LogicalSize::from_pixels(8.0, 16.0).unwrap(),
+        )
+        .unwrap()
     }
 
     fn pump_until(state: &mut AppState, mut predicate: impl FnMut(&AppState) -> bool) -> bool {
@@ -718,6 +1283,140 @@ mod tests {
         assert_eq!(
             surface.rows[0][0].occupancy,
             CellOccupancy::Grapheme("\u{fffd}".to_owned())
+        );
+    }
+
+    #[test]
+    fn logical_geometry_semantics_and_cell_program_match_at_1x_and_2x() {
+        let mut state = AppState::new(config(false));
+        state.dispatch(CommandId::SplitRight);
+        state.dispatch(CommandId::SplitDown);
+
+        let scene_1x = build_workspace_scene_with_viewport(&state, viewport(1.0));
+        let scene_2x = build_workspace_scene_with_viewport(&state, viewport(2.0));
+
+        assert_eq!(scene_1x.size, SceneSize::new(120, 40));
+        assert_eq!(scene_1x.size, scene_2x.size);
+        assert_eq!(
+            compile_cell_program(&scene_1x, state.theme()),
+            compile_cell_program(&scene_2x, state.theme()),
+            "presentation geometry must not alter CellProgram bytes or topology"
+        );
+        assert_eq!(
+            scene_1x
+                .presentation
+                .nodes
+                .iter()
+                .map(|node| (&node.id, node.role, node.state))
+                .collect::<Vec<_>>(),
+            scene_2x
+                .presentation
+                .nodes
+                .iter()
+                .map(|node| (&node.id, node.role, node.state))
+                .collect::<Vec<_>>(),
+            "semantic identity and state must not include backing scale"
+        );
+        assert_eq!(
+            scene_1x.hit_targets.len(),
+            scene_1x.presentation.logical_hit_targets.len(),
+            "every cell hit target must have a matching logical target"
+        );
+        for cell_target in &scene_1x.hit_targets {
+            let logical_target = scene_1x
+                .presentation
+                .logical_hit_targets
+                .iter()
+                .find(|target| target.kind == cell_target.kind)
+                .expect("matching logical target");
+            assert_eq!(
+                logical_target.logical_rect,
+                viewport(1.0).logical_rect_for_cells(cell_target.rect)
+            );
+        }
+        assert!(
+            scene_1x
+                .presentation
+                .nodes
+                .iter()
+                .any(|node| { node.role == PresentationNodeRole::PaneTitle && node.state.focused }),
+            "focused title state is typed, not inferred from its label"
+        );
+    }
+
+    #[test]
+    fn filtered_palette_items_keep_semantic_identity_when_position_changes() {
+        let mut state = AppState::new(config(false));
+        state.handle_event(InputEvent::Key(Key::ctrl('p')));
+        let first = build_workspace_scene_with_viewport(&state, viewport(1.0));
+        let split_id = first
+            .presentation
+            .accessibility_nodes
+            .iter()
+            .find(|node| node.label == "Split pane right")
+            .expect("split command must be represented")
+            .id
+            .clone();
+
+        state.handle_event(InputEvent::Key(Key::new(
+            KeyCode::Char('s'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        )));
+        for character in ['p', 'l', 'i', 't'] {
+            state.handle_event(InputEvent::Key(Key::plain(KeyCode::Char(character))));
+        }
+        let filtered = build_workspace_scene_with_viewport(&state, viewport(2.0));
+        let filtered_save = filtered
+            .presentation
+            .accessibility_nodes
+            .iter()
+            .find(|node| node.label == "Split pane right")
+            .expect("split command remains represented");
+
+        assert_eq!(split_id, filtered_save.id);
+        assert_eq!(filtered_save.role, AccessibilityRole::ListItem);
+    }
+
+    #[test]
+    fn terminal_viewport_maps_only_its_exact_logical_content_rectangle() {
+        let mut state = AppState::new(config(true));
+        state.handle_event(InputEvent::Resize(SceneSize::new(120, 40)));
+        assert!(
+            pump_until(&mut state, |state| state
+                .terminal_grid(&PaneId::new("pane-1"))
+                .is_some()),
+            "terminal grid should become live"
+        );
+
+        let scene = build_workspace_scene_with_viewport(&state, viewport(2.0));
+        let mapping = scene
+            .presentation
+            .terminal_viewports
+            .iter()
+            .find(|mapping| mapping.pane_id == PaneId::new("pane-1"))
+            .expect("live terminal has an explicit viewport mapping");
+        assert_eq!(
+            mapping.logical_rect,
+            viewport(2.0).logical_rect_for_cells(mapping.visible_cell_rect)
+        );
+        let inside = LogicalPoint::from_units(
+            mapping.logical_rect.origin.x_units(),
+            mapping.logical_rect.origin.y_units(),
+        );
+        assert_eq!(
+            mapping.logical_point_to_child_cell(viewport(2.0), inside),
+            Some((0, 0))
+        );
+        let outside = LogicalPoint::from_units(
+            mapping.logical_rect.right_units(),
+            mapping.logical_rect.origin.y_units(),
+        );
+        assert_eq!(
+            mapping.logical_point_to_child_cell(viewport(2.0), outside),
+            None
         );
     }
 

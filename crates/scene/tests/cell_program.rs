@@ -70,6 +70,7 @@ fn whole_frame_cell_program_preserves_terminal_cell_style_selection_and_copy_cur
         hit_targets: Vec::new(),
         copy_mode: true,
         text_input: None,
+        presentation: Default::default(),
     };
 
     let program = compile_cell_program(&scene, &Theme::default());
@@ -100,6 +101,7 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
     let theme = Theme {
         name: "cell-program-tracer".to_owned(),
         terminal_palette: mandatum_scene::TerminalPalette::default(),
+        ui: Default::default(),
         focus_title: SceneColor::Rgb(10, 11, 12),
         pane_border: SceneColor::Rgb(20, 21, 22),
         pane_title: SceneColor::Rgb(30, 31, 32),
@@ -216,6 +218,7 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
         hit_targets: Vec::new(),
         copy_mode: false,
         text_input: None,
+        presentation: Default::default(),
     };
 
     let program = compile_cell_program(&scene, &theme);
@@ -373,6 +376,7 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
         overlay: Some(OverlayScene::Palette(PaletteOverlay {
             area: overlay_area,
             query: String::new(),
+            item_keys: Vec::new(),
             items: vec![
                 PaletteEntry {
                     label: "Split pane".to_owned(),
@@ -400,6 +404,7 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
         hit_targets: vec![item_target.clone()],
         copy_mode: false,
         text_input: None,
+        presentation: Default::default(),
     };
 
     let program = compile_cell_program(&scene, &theme);
@@ -560,6 +565,7 @@ fn scene_with_overlay(overlay: OverlayScene, hit_targets: Vec<HitTarget>) -> Wor
         hit_targets,
         copy_mode: false,
         text_input: None,
+        presentation: Default::default(),
     }
 }
 
@@ -568,6 +574,7 @@ fn cell_program_assigns_distinct_exact_text_paint_scopes() {
     let overlay_area = SceneRect::new(20, 5, 10, 4);
     let overlay = OverlayScene::ContextMenu(ContextMenuOverlay {
         area: overlay_area,
+        item_keys: Vec::new(),
         items: Vec::new(),
         selected: 0,
     });
@@ -626,12 +633,14 @@ fn every_remaining_overlay_variant_uses_the_shared_opaque_shell() {
     let overlays = vec![
         OverlayScene::ContextMenu(ContextMenuOverlay {
             area,
+            item_keys: Vec::new(),
             items: Vec::new(),
             selected: 0,
         }),
         OverlayScene::Timeline(TimelineOverlay {
             area,
             query: String::new(),
+            item_keys: Vec::new(),
             items: Vec::new(),
             selected: None,
             skipped_malformed: 0,
@@ -640,6 +649,7 @@ fn every_remaining_overlay_variant_uses_the_shared_opaque_shell() {
         OverlayScene::Search(SearchOverlay {
             area,
             query: String::new(),
+            item_keys: Vec::new(),
             items: Vec::new(),
             selected: None,
             overflow: 0,
@@ -647,6 +657,7 @@ fn every_remaining_overlay_variant_uses_the_shared_opaque_shell() {
         }),
         OverlayScene::SessionMap(SessionMapOverlay {
             area,
+            item_keys: Vec::new(),
             rows: Vec::new(),
             selected: 0,
             footer: String::new(),
@@ -697,6 +708,7 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     let context = scene_with_overlay(
         OverlayScene::ContextMenu(ContextMenuOverlay {
             area,
+            item_keys: Vec::new(),
             items: vec![ContextMenuEntry::new("Open", "ctrl+o")],
             selected: 0,
         }),
@@ -721,6 +733,7 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
         OverlayScene::Timeline(TimelineOverlay {
             area,
             query: "build".to_owned(),
+            item_keys: Vec::new(),
             items: vec![TimelineEntry {
                 glyph: "▶".to_owned(),
                 when: "2m ago".to_owned(),
@@ -761,6 +774,7 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
         OverlayScene::Search(SearchOverlay {
             area,
             query: "er".to_owned(),
+            item_keys: Vec::new(),
             items: vec![
                 SearchEntry {
                     source: "shell".to_owned(),
@@ -805,6 +819,7 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     let map = scene_with_overlay(
         OverlayScene::SessionMap(SessionMapOverlay {
             area,
+            item_keys: Vec::new(),
             rows: vec![
                 SessionMapRow {
                     depth: 0,
@@ -1034,6 +1049,7 @@ fn narrow_pane_content_never_overwrites_or_escapes_its_border() {
             hit_targets: Vec::new(),
             copy_mode: false,
             text_input: None,
+            presentation: Default::default(),
         };
 
         let program = compile_cell_program(&scene, &Theme::default());
@@ -1153,6 +1169,7 @@ fn ready_artifact_marks_only_its_final_visible_body_cells() {
         hit_targets: Vec::new(),
         copy_mode: false,
         text_input: None,
+        presentation: Default::default(),
     };
 
     let program = compile_cell_program(&scene, &Theme::default());
@@ -1187,18 +1204,21 @@ fn every_degenerate_overlay_keeps_content_inside_its_true_border() {
             OverlayScene::Palette(PaletteOverlay {
                 area,
                 query: "X".to_owned(),
+                item_keys: Vec::new(),
                 items: Vec::new(),
                 selected: None,
                 footer: "X".to_owned(),
             }),
             OverlayScene::ContextMenu(ContextMenuOverlay {
                 area,
+                item_keys: Vec::new(),
                 items: vec![ContextMenuEntry::new("X", "X")],
                 selected: 0,
             }),
             OverlayScene::Timeline(TimelineOverlay {
                 area,
                 query: "X".to_owned(),
+                item_keys: Vec::new(),
                 items: vec![TimelineEntry {
                     glyph: "X".to_owned(),
                     when: "X".to_owned(),
@@ -1212,6 +1232,7 @@ fn every_degenerate_overlay_keeps_content_inside_its_true_border() {
             OverlayScene::Search(SearchOverlay {
                 area,
                 query: "X".to_owned(),
+                item_keys: Vec::new(),
                 items: vec![SearchEntry {
                     source: "X".to_owned(),
                     text: "X".to_owned(),
@@ -1224,6 +1245,7 @@ fn every_degenerate_overlay_keeps_content_inside_its_true_border() {
             }),
             OverlayScene::SessionMap(SessionMapOverlay {
                 area,
+                item_keys: Vec::new(),
                 rows: vec![SessionMapRow {
                     depth: 0,
                     glyph: "X".to_owned(),
@@ -1360,6 +1382,7 @@ fn advanced_text_terminal_graphemes_keep_wide_marks_and_occlude_atomically() {
         hit_targets: Vec::new(),
         copy_mode: false,
         text_input: None,
+        presentation: Default::default(),
     };
 
     let program = compile_cell_program(&scene, &Theme::default());
@@ -1382,6 +1405,7 @@ fn advanced_text_terminal_graphemes_keep_wide_marks_and_occlude_atomically() {
 
     scene.overlay = Some(OverlayScene::ContextMenu(ContextMenuOverlay {
         area: SceneRect::new(3, 2, 1, 1),
+        item_keys: Vec::new(),
         items: Vec::new(),
         selected: 0,
     }));
@@ -1476,6 +1500,7 @@ fn advanced_text_ime_preedit_compiles_underlined_graphemes_and_cursor() {
 fn terminal_ime_cursor_replaces_pane_content_scope_with_text_input_scope() {
     let overlay = OverlayScene::ContextMenu(ContextMenuOverlay {
         area: SceneRect::new(1, 1, 1, 1),
+        item_keys: Vec::new(),
         items: Vec::new(),
         selected: 0,
     });

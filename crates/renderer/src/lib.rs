@@ -156,6 +156,7 @@ mod tests {
             hit_targets: Vec::new(),
             copy_mode: false,
             text_input: None,
+            presentation: Default::default(),
         }
     }
 
@@ -844,6 +845,7 @@ mod tests {
         with_palette.overlay = Some(OverlayScene::Palette(PaletteOverlay {
             area: layout::palette_overlay_rect(with_palette.size),
             query: query.to_owned(),
+            item_keys: Vec::new(),
             items,
             selected,
             footer: "type to search · enter run · esc close".to_owned(),
@@ -858,6 +860,7 @@ mod tests {
         with_timeline.overlay = Some(OverlayScene::Timeline(TimelineOverlay {
             area: layout::timeline_overlay_rect(with_timeline.size),
             query: "task".to_owned(),
+            item_keys: Vec::new(),
             items: vec![
                 TimelineEntry {
                     glyph: "✗".to_owned(),
@@ -894,6 +897,7 @@ mod tests {
         with_search.overlay = Some(OverlayScene::Search(SearchOverlay {
             area: layout::search_overlay_rect(with_search.size),
             query: "fail".to_owned(),
+            item_keys: Vec::new(),
             items: vec![
                 SearchEntry {
                     source: "shell · pane-1 (terminal)".to_owned(),
@@ -947,6 +951,7 @@ mod tests {
         with_map.size = SceneSize::new(90, 24);
         with_map.overlay = Some(OverlayScene::SessionMap(SessionMapOverlay {
             area: layout::session_map_rect(with_map.size),
+            item_keys: Vec::new(),
             rows: vec![
                 SessionMapRow {
                     depth: 0,
@@ -1002,6 +1007,7 @@ mod tests {
         let mut with_menu = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
         with_menu.overlay = Some(OverlayScene::ContextMenu(ContextMenuOverlay {
             area: SceneRect::new(10, 2, 26, 5),
+            item_keys: Vec::new(),
             items: vec![
                 ContextMenuEntry::new("Zoom pane", "ctrl+p z"),
                 ContextMenuEntry::new("Close pane", "ctrl+p x"),
@@ -1059,6 +1065,7 @@ mod tests {
                 OverlayScene::Palette(PaletteOverlay {
                     area,
                     query: String::new(),
+                    item_keys: Vec::new(),
                     items: Vec::new(),
                     selected: None,
                     footer: "esc close".to_owned(),
@@ -1068,6 +1075,7 @@ mod tests {
                 "context menu",
                 OverlayScene::ContextMenu(ContextMenuOverlay {
                     area,
+                    item_keys: Vec::new(),
                     items: Vec::new(),
                     selected: 0,
                 }),
@@ -1077,6 +1085,7 @@ mod tests {
                 OverlayScene::Timeline(TimelineOverlay {
                     area,
                     query: String::new(),
+                    item_keys: Vec::new(),
                     items: Vec::new(),
                     selected: None,
                     skipped_malformed: 0,
@@ -1088,6 +1097,7 @@ mod tests {
                 OverlayScene::Search(SearchOverlay {
                     area,
                     query: String::new(),
+                    item_keys: Vec::new(),
                     items: Vec::new(),
                     selected: None,
                     overflow: 0,
@@ -1098,6 +1108,7 @@ mod tests {
                 "session map",
                 OverlayScene::SessionMap(SessionMapOverlay {
                     area,
+                    item_keys: Vec::new(),
                     rows: Vec::new(),
                     selected: 0,
                     footer: "esc close".to_owned(),

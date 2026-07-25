@@ -126,8 +126,9 @@ its design ceiling:
 - `WorkspaceScene` and typed scene extensions own product meaning;
 - `CellProgram` remains the exact terminal-parity projection and maintained
   fallback;
-- a pure native presentation plan may translate typed scene surfaces into
-  ordered materials, clips, and scoped text without reconstructing state;
+- the pure native presentation plan translates typed scene surfaces into
+  bounded ordered materials, clips, scoped text, and typed transitions without
+  reconstructing state;
 - the GPU adapter materializes those primitives but never parses
   `detail_lines()` or invents workflow hierarchy;
 - terminal content, child mouse reporting, hit targets, and cell ownership stay
@@ -185,6 +186,16 @@ excluded native lab's `--visual-scenario` route displays those same scenes;
 and `visual-diff` owns read-only comparison plus explicit human acceptance.
 Neither capture nor comparison derives product meaning or changes production
 renderer behavior.
+
+Phase 2 adds the native translation seam without replacing the accepted cell
+paint. App-built scenes carry stable opaque semantic node ids, fixed-point
+logical rectangles, cell projections, PTY mappings, hit targets, transition
+targets, and accessibility meaning. `prepare_native_presentation` validates
+their hierarchy, bounds, clips, ordering, and aggregate resource ceilings
+headlessly. Interface text uses typed metric roles and only the four
+provisioned static faces; shared baselines and clipping fail closed, and metric
+generation plus slot are part of shaping-cache identity. Direct UI colors come
+from `Theme.ui`, never from terminal ANSI identity.
 
 The accepted Phase 1 reference set lives under
 `spikes/frontend-wgpu/visual-baselines/casey-m4pro-metal-scale2/`. Its 11

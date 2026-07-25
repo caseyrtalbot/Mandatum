@@ -253,6 +253,29 @@ impl PreparedVisualScenario {
         self.config.clone()
     }
 
+    /// Remove per-run fixture paths from a catalog frame before pixel capture.
+    ///
+    /// The real host still runs against its isolated temporary project. Only
+    /// review-facing scene strings are normalized, so two runs produce the
+    /// same semantic pixels without weakening runtime isolation.
+    pub fn stabilize_snapshot(
+        &self,
+        snapshot: &mut FrameSnapshot,
+    ) -> Result<(), VisualScenarioError> {
+        let root = self.fixture_root.display().to_string();
+        let basename = self
+            .fixture_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&root);
+        let mut value = serde_json::to_value(&snapshot.scene)
+            .map_err(|error| VisualScenarioError::Workspace(error.to_string()))?;
+        normalize_fixture_strings(&mut value, &root, basename);
+        snapshot.scene = serde_json::from_value(value)
+            .map_err(|error| VisualScenarioError::Workspace(error.to_string()))?;
+        Ok(())
+    }
+
     pub fn drive(
         &self,
         host: &mut FrontendHost,
@@ -417,6 +440,27 @@ impl PreparedVisualScenario {
             }
             VisualScenarioId::Narrow => Ok(initial),
         }
+    }
+}
+
+fn normalize_fixture_strings(value: &mut serde_json::Value, root: &str, basename: &str) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = text
+                .replace(root, "$VISUAL_PROJECT")
+                .replace(basename, "visual-project");
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                normalize_fixture_strings(value, root, basename);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                normalize_fixture_strings(value, root, basename);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
 
@@ -731,6 +775,49 @@ mod tests {
         ));
         host.shutdown();
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_snapshot_normalizes_isolated_fixture_identity() {
+        let first_root = fixture("first");
+        let second_root = fixture("second");
+        let first_prepared =
+            prepare_visual_scenario(VisualScenarioId::Palette, &first_root).unwrap();
+        let second_prepared =
+            prepare_visual_scenario(VisualScenarioId::Palette, &second_root).unwrap();
+        let mut first_host = FrontendHost::new(first_prepared.app_config());
+        let mut second_host = FrontendHost::new(second_prepared.app_config());
+        let mut first = first_prepared
+            .drive(
+                &mut first_host,
+                SceneSize::new(102, 35),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        let mut second = second_prepared
+            .drive(
+                &mut second_host,
+                SceneSize::new(102, 35),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+
+        first_prepared.stabilize_snapshot(&mut first).unwrap();
+        second_prepared.stabilize_snapshot(&mut second).unwrap();
+        assert_eq!(first.scene, second.scene);
+        assert!(first.scene.header.text.contains("visual-project"));
+        assert!(
+            !first
+                .scene
+                .header
+                .text
+                .contains(&first_root.display().to_string())
+        );
+
+        first_host.shutdown();
+        second_host.shutdown();
+        let _ = fs::remove_dir_all(first_root);
+        let _ = fs::remove_dir_all(second_root);
     }
 
     #[test]

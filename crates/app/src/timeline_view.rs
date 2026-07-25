@@ -3,7 +3,7 @@
 //! build. Runtime presentation only; never serialized.
 
 use mandatum_scene::{
-    PaneId, SceneSize, TimelineEntry, TimelineOverlay,
+    PaneId, SceneSize, SemanticKey, TimelineEntry, TimelineOverlay,
     layout::{palette_item_window, pane_inner_rect, timeline_overlay_rect},
 };
 
@@ -120,6 +120,15 @@ pub(crate) fn timeline_overlay(
     size: SceneSize,
     now_ms: u64,
 ) -> TimelineOverlay {
+    let item_keys = view
+        .filtered()
+        .iter()
+        .map(|&index| {
+            let encoded = serde_json::to_string(&view.events[index])
+                .expect("durable timeline event must remain JSON serializable");
+            SemanticKey::new(format!("timeline:{encoded}"))
+        })
+        .collect();
     let items: Vec<TimelineEntry> = view
         .filtered()
         .iter()
@@ -162,6 +171,7 @@ pub(crate) fn timeline_overlay(
         area,
         query: view.query.clone(),
         items,
+        item_keys,
         selected,
         skipped_malformed: view.malformed,
         footer,

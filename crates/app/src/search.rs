@@ -32,7 +32,7 @@ use std::collections::BTreeSet;
 use mandatum_commands::fuzzy::fuzzy_match;
 use mandatum_core::PaneId;
 use mandatum_scene::{
-    SceneSize, SearchEntry, SearchOverlay,
+    SceneSize, SearchEntry, SearchOverlay, SemanticKey,
     layout::{palette_item_window, pane_inner_rect, search_overlay_rect},
 };
 use mandatum_terminal_vt::TerminalGrid;
@@ -370,6 +370,20 @@ pub(crate) fn scroll_offset_for_row(total_rows: usize, view_rows: usize, row: us
 
 /// Build the overlay scene for the current view state.
 pub(crate) fn search_overlay(view: &SearchViewState, size: SceneSize) -> SearchOverlay {
+    let item_keys = view
+        .results
+        .iter()
+        .map(|hit| match &hit.target {
+            SearchHitTarget::PaneRow { pane_id, row, kind } => {
+                SemanticKey::new(format!("pane:{pane_id}:{}:{row}", kind.label()))
+            }
+            SearchHitTarget::Timeline { event } => {
+                let encoded = serde_json::to_string(event)
+                    .expect("durable timeline event must remain JSON serializable");
+                SemanticKey::new(format!("timeline:{encoded}"))
+            }
+        })
+        .collect();
     let items: Vec<SearchEntry> = view
         .results
         .iter()
@@ -407,6 +421,7 @@ pub(crate) fn search_overlay(view: &SearchViewState, size: SceneSize) -> SearchO
         area,
         query: view.query.clone(),
         items,
+        item_keys,
         selected,
         overflow,
         footer,

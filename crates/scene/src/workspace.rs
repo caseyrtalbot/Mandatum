@@ -4,7 +4,7 @@
 use mandatum_core::{PaneId, SplitAxis};
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::{SceneRect, SceneSize};
+use crate::geometry::{LogicalPoint, LogicalRect, SceneRect, SceneSize, ViewportMetrics};
 use crate::input::TextRange;
 use crate::pane::PaneScene;
 use crate::style::SceneCellStyle;
@@ -29,6 +29,277 @@ pub struct WorkspaceScene {
     /// This is live presentation state and is never durable workspace intent.
     #[serde(default)]
     pub text_input: Option<TextInputScene>,
+    /// Native-grade renderer-neutral geometry and semantics. Cell-only
+    /// fixtures may leave this at [`ScenePresentation::default`];
+    /// app-built frames always populate it from one coherent viewport.
+    #[serde(default)]
+    pub presentation: ScenePresentation,
+}
+
+/// One frame's scene-owned logical geometry and semantic projections.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScenePresentation {
+    pub viewport: Option<ViewportMetrics>,
+    pub nodes: Vec<PresentationNode>,
+    pub logical_hit_targets: Vec<LogicalHitTarget>,
+    pub terminal_viewports: Vec<TerminalViewportMapping>,
+    pub transition_targets: Vec<TransitionTarget>,
+    pub accessibility_nodes: Vec<AccessibilityNode>,
+}
+
+/// A stable item identity supplied by the app, independent of labels,
+/// filtering, geometry, and vector position.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SemanticKey(String);
+
+impl SemanticKey {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+/// Opaque structural identity for one semantic presentation node.
+///
+/// Frontends compare this value but use [`PresentationNode::role`] for
+/// meaning; the private representation prevents adapters from parsing it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PresentationNodeId(PresentationIdentity);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+enum PresentationIdentity {
+    Workspace(WorkspaceNodePart),
+    Pane {
+        pane_id: PaneId,
+        part: PaneNodePart,
+    },
+    Overlay {
+        kind: OverlayKind,
+        part: OverlayNodePart,
+    },
+    OverlayItem {
+        kind: OverlayKind,
+        key: SemanticKey,
+    },
+}
+
+impl PresentationNodeId {
+    pub fn workspace(part: WorkspaceNodePart) -> Self {
+        Self(PresentationIdentity::Workspace(part))
+    }
+
+    pub fn pane(pane_id: PaneId, part: PaneNodePart) -> Self {
+        Self(PresentationIdentity::Pane { pane_id, part })
+    }
+
+    pub fn overlay(kind: OverlayKind, part: OverlayNodePart) -> Self {
+        Self(PresentationIdentity::Overlay { kind, part })
+    }
+
+    pub fn overlay_item(kind: OverlayKind, key: SemanticKey) -> Self {
+        Self(PresentationIdentity::OverlayItem { kind, key })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorkspaceNodePart {
+    Surface,
+    Header,
+    Status,
+    Separator {
+        split_index: usize,
+        axis: PresentationAxis,
+    },
+    Attention {
+        pane: Option<PaneId>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PresentationAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl From<SplitAxis> for PresentationAxis {
+    fn from(value: SplitAxis) -> Self {
+        match value {
+            SplitAxis::Horizontal => Self::Horizontal,
+            SplitAxis::Vertical => Self::Vertical,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PaneNodePart {
+    Surface,
+    Title,
+    Body,
+    Output,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OverlayNodePart {
+    Surface,
+    Input,
+    Footer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OverlayKind {
+    Palette,
+    ContextMenu,
+    Timeline,
+    SessionMap,
+    Prompt,
+    Search,
+    Help,
+    Welcome,
+}
+
+impl OverlayScene {
+    pub const fn kind(&self) -> OverlayKind {
+        match self {
+            Self::Palette(_) => OverlayKind::Palette,
+            Self::ContextMenu(_) => OverlayKind::ContextMenu,
+            Self::Timeline(_) => OverlayKind::Timeline,
+            Self::SessionMap(_) => OverlayKind::SessionMap,
+            Self::Prompt(_) => OverlayKind::Prompt,
+            Self::Search(_) => OverlayKind::Search,
+            Self::Help(_) => OverlayKind::Help,
+            Self::Welcome(_) => OverlayKind::Welcome,
+        }
+    }
+}
+
+/// What a semantic node means without requiring a renderer to inspect its id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PresentationNodeRole {
+    Workspace,
+    Header,
+    Status,
+    Pane,
+    PaneTitle,
+    PaneBody,
+    TerminalOutput,
+    TaskOutput,
+    Overlay,
+    TextInput,
+    Item,
+    Separator,
+    Attention,
+}
+
+/// The cell region that communicates the same meaning in `CellProgram`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalProjection {
+    CellRegions(Vec<SceneRect>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresentationNode {
+    pub id: PresentationNodeId,
+    pub parent: Option<PresentationNodeId>,
+    pub role: PresentationNodeRole,
+    pub state: PresentationNodeState,
+    pub logical_rect: LogicalRect,
+    pub cell_rect: Option<SceneRect>,
+    pub terminal_projection: TerminalProjection,
+}
+
+/// Renderer-visible semantic state; frontends never infer these facts from
+/// labels, colors, or node identity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresentationNodeState {
+    pub focused: bool,
+    pub selected: bool,
+    pub disabled: bool,
+    pub attention: bool,
+}
+
+/// Logical-pixel twin of one existing cell hit target.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalHitTarget {
+    pub node_id: PresentationNodeId,
+    pub logical_rect: LogicalRect,
+    pub kind: HitTargetKind,
+}
+
+/// Exact child-grid mapping for one visible terminal/task output surface.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalViewportMapping {
+    pub node_id: PresentationNodeId,
+    pub pane_id: PaneId,
+    pub pty_size: SceneSize,
+    pub visible_cell_rect: SceneRect,
+    pub logical_rect: LogicalRect,
+    pub first_visible_surface_row: usize,
+}
+
+impl TerminalViewportMapping {
+    pub fn logical_point_to_child_cell(
+        &self,
+        viewport: ViewportMetrics,
+        point: LogicalPoint,
+    ) -> Option<(u16, u16)> {
+        viewport.logical_point_to_cell(self.visible_cell_rect, point)
+    }
+}
+
+/// A typed property the native adapter may animate for a stable node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransitionProperty {
+    Geometry,
+    Opacity,
+    Scale,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionTarget {
+    pub node_id: PresentationNodeId,
+    pub property: TransitionProperty,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccessibilityRole {
+    Workspace,
+    Group,
+    Header,
+    Status,
+    Pane,
+    Terminal,
+    Dialog,
+    TextField,
+    List,
+    ListItem,
+    Button,
+    Separator,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityState {
+    pub focused: bool,
+    pub selected: bool,
+    pub disabled: bool,
+    pub busy: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccessibilityActionKind {
+    Focus,
+    Activate,
+    SetText,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityNode {
+    pub id: PresentationNodeId,
+    pub parent: Option<PresentationNodeId>,
+    pub role: AccessibilityRole,
+    pub label: String,
+    pub value: Option<String>,
+    pub state: AccessibilityState,
+    pub logical_rect: LogicalRect,
+    pub supported_actions: Vec<AccessibilityActionKind>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +438,9 @@ pub struct SearchOverlay {
     pub query: String,
     /// Matches for the query, grouped by source, capped by the engine.
     pub items: Vec<SearchEntry>,
+    /// Stable semantic identity parallel to `items`.
+    #[serde(default)]
+    pub item_keys: Vec<SemanticKey>,
     /// Highlighted entry; `None` only when `items` is empty.
     pub selected: Option<usize>,
     /// Matches beyond the display cap ("+N more" honesty).
@@ -199,6 +473,9 @@ pub struct TimelineOverlay {
     pub query: String,
     /// Entries matching the query, newest first.
     pub items: Vec<TimelineEntry>,
+    /// Stable semantic identity parallel to `items`.
+    #[serde(default)]
+    pub item_keys: Vec<SemanticKey>,
     /// Highlighted entry; `None` only when `items` is empty.
     pub selected: Option<usize>,
     /// Malformed log lines skipped while reading (never a crash).
@@ -225,6 +502,9 @@ pub struct TimelineEntry {
 pub struct SessionMapOverlay {
     pub area: SceneRect,
     pub rows: Vec<SessionMapRow>,
+    /// Stable semantic identity parallel to `rows`.
+    #[serde(default)]
+    pub item_keys: Vec<SemanticKey>,
     /// Highlighted row.
     pub selected: usize,
     /// Footer hint line naming the overlay's own keys.
@@ -267,6 +547,9 @@ pub struct PromptOverlay {
 pub struct ContextMenuOverlay {
     pub area: SceneRect,
     pub items: Vec<ContextMenuEntry>,
+    /// Stable semantic identity parallel to `items`.
+    #[serde(default)]
+    pub item_keys: Vec<SemanticKey>,
     /// Highlighted row.
     pub selected: usize,
 }
@@ -297,6 +580,9 @@ pub struct PaletteOverlay {
     pub query: String,
     /// Entries matching the query, best match first.
     pub items: Vec<PaletteEntry>,
+    /// Stable semantic identity parallel to `items`.
+    #[serde(default)]
+    pub item_keys: Vec<SemanticKey>,
     /// Highlighted item; `None` only when `items` is empty.
     pub selected: Option<usize>,
     /// Footer hint line naming the palette's own keys.
