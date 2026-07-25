@@ -45,7 +45,7 @@ use stats::{
 use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
 use winit::{
     application::ApplicationHandler,
-    dpi::{PhysicalPosition, PhysicalSize},
+    dpi::{LogicalSize as WindowLogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
@@ -2491,7 +2491,11 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut attributes = Window::default_attributes().with_title(title);
                 if self.config.visual_scenario.is_some() || self.config.token_sampler {
                     attributes = attributes
-                        .with_inner_size(PhysicalSize::new(1_600_u32, 1_200_u32))
+                        // The fixed catalog contract is 800x600 logical. Use a
+                        // logical request so creating the window while a 1x
+                        // external display is primary cannot double the client
+                        // surface after placement on the 2x reference panel.
+                        .with_inner_size(WindowLogicalSize::new(800_u32, 600_u32))
                         .with_decorations(false);
                 }
                 if let Some(display_name) = self.config.display_name.as_deref() {
