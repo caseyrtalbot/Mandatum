@@ -18,7 +18,9 @@ impl Compiler {
         let chrome_scope = self.begin_text_scope(TextPaintScopeKind::PaneChrome, pane.area);
         // Every pane is opaque in scene order, regardless of layout flags.
         self.paint_rect(pane.area, SceneCellStyle::default());
+        let decoration_scope = self.begin_text_scope(TextPaintScopeKind::PaneDecoration, pane.area);
         self.paint_border(pane.area, foreground(theme.pane_border));
+        self.set_text_scope(chrome_scope);
 
         let title_style = if pane.focused {
             SceneCellStyle {
@@ -36,6 +38,9 @@ impl Compiler {
             pane.area.height.min(1),
         );
         self.paint_text(title_area, &pane_title(pane), title_style);
+        for (kind, rect) in pane.badge_rects() {
+            self.paint_text(rect, &format!(" {} ", kind.label()), title_style);
+        }
 
         let inner = bordered_inner_rect(pane.area);
         self.begin_text_scope(TextPaintScopeKind::PaneContent, inner);
@@ -129,7 +134,7 @@ impl Compiler {
         }
 
         if pane.focused && pane.area.width < 4 && !pane.area.is_empty() {
-            self.set_text_scope(chrome_scope);
+            self.set_text_scope(decoration_scope);
             self.paint_cell(
                 pane.area.x,
                 pane.area.y,
@@ -228,30 +233,8 @@ fn agent_status_color(status: &AgentStatus, theme: &Theme) -> SceneColor {
 }
 
 fn pane_title(pane: &PaneScene) -> String {
-    let mut parts = vec![pane.title.clone()];
-    if pane.focused {
-        parts.push("focused".to_owned());
-    }
-    if pane.floating {
-        parts.push("floating".to_owned());
-    }
-    if pane.stacked {
-        parts.push("stack".to_owned());
-    }
-    if pane.zoomed {
-        parts.push("zoom".to_owned());
-    }
-    if let PaneContent::Terminal(terminal) = &pane.content
-        && terminal.in_copy_mode()
-    {
-        parts.push("copy".to_owned());
-    }
-    if let PaneContent::Agent(agent) = &pane.content
-        && agent.pending_approval.is_some()
-    {
-        parts.push("approval".to_owned());
-    }
-    format!(" {} ", parts.join(" | "))
+    let focus = if pane.focused { " | focused" } else { "" };
+    format!(" {}{focus} ", pane.title)
 }
 
 fn fit_line(text: &str, width: u16) -> String {

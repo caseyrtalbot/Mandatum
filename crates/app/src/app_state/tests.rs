@@ -489,6 +489,168 @@ fn focused(state: &AppState) -> String {
         .to_owned()
 }
 
+fn separator_node(scene: &WorkspaceScene) -> &mandatum_scene::PresentationNode {
+    scene
+        .presentation
+        .nodes
+        .iter()
+        .find(|node| node.role == mandatum_scene::PresentationNodeRole::Separator)
+        .expect("separator presentation node")
+}
+
+#[test]
+fn separator_presentation_tracks_hover_drag_and_focus_loss_without_pane_hover() {
+    let mut state = state();
+    state.dispatch(CommandId::SplitRight);
+    frame(&mut state);
+
+    let separator = state
+        .build_scene(POINTER_FRAME)
+        .hit_targets
+        .into_iter()
+        .find(|target| matches!(target.kind, HitTargetKind::Separator { .. }))
+        .expect("split separator target");
+    send_pointer(
+        &mut state,
+        pointer_event(PointerKind::Move, None, separator.rect.x, separator.rect.y),
+    );
+    let hovered = state.build_scene(POINTER_FRAME);
+    assert!(separator_node(&hovered).state.hovered);
+    assert_eq!(
+        separator_node(&hovered).logical_rect.size.width_units(),
+        64,
+        "visible split rule is one logical pixel"
+    );
+    let logical_target = hovered
+        .presentation
+        .logical_hit_targets
+        .iter()
+        .find(|target| matches!(target.kind, HitTargetKind::Separator { .. }))
+        .expect("logical separator target");
+    assert_eq!(
+        logical_target.logical_rect.size.width_units(),
+        6 * 64,
+        "logical hit target is six pixels while the cell target stays unchanged"
+    );
+    assert_eq!(separator.rect, SceneRect::new(49, 1, 2, 28));
+
+    send_pointer(&mut state, pointer_event(PointerKind::Move, None, 10, 10));
+    let pane_body = state.build_scene(POINTER_FRAME);
+    assert!(!separator_node(&pane_body).state.hovered);
+    assert!(
+        pane_body
+            .presentation
+            .nodes
+            .iter()
+            .filter(|node| node.role == mandatum_scene::PresentationNodeRole::PaneBody)
+            .all(|node| !node.state.hovered),
+        "pane bodies never claim workspace hover"
+    );
+
+    send_pointer(
+        &mut state,
+        pointer_event(PointerKind::Move, None, separator.rect.x, separator.rect.y),
+    );
+    send_pointer(
+        &mut state,
+        left(PointerKind::Down, separator.rect.x, separator.rect.y),
+    );
+    let dragging = state.build_scene(POINTER_FRAME);
+    assert!(separator_node(&dragging).state.hovered);
+    assert!(separator_node(&dragging).state.dragging);
+
+    send_pointer(
+        &mut state,
+        left(
+            PointerKind::Drag,
+            separator.rect.x.saturating_add(5),
+            separator.rect.y,
+        ),
+    );
+    let dragged = state.build_scene(POINTER_FRAME);
+    assert!(separator_node(&dragged).state.dragging);
+
+    send_pointer(
+        &mut state,
+        left(
+            PointerKind::Up,
+            separator.rect.x.saturating_add(5),
+            separator.rect.y,
+        ),
+    );
+    let released = state.build_scene(POINTER_FRAME);
+    assert!(!separator_node(&released).state.dragging);
+
+    state.handle_event(InputEvent::FocusLost);
+    let unfocused = state.build_scene(POINTER_FRAME);
+    assert!(!separator_node(&unfocused).state.hovered);
+    assert!(!separator_node(&unfocused).state.dragging);
+}
+
+#[test]
+fn native_logical_pointer_uses_six_pixel_separator_target_with_cell_terminal_fallback() {
+    let mut state = state();
+    state.dispatch(CommandId::SplitRight);
+    frame(&mut state);
+    let scene = state.build_scene(POINTER_FRAME);
+    let logical_target = scene
+        .presentation
+        .logical_hit_targets
+        .iter()
+        .find(|target| matches!(target.kind, HitTargetKind::Separator { .. }))
+        .expect("logical separator target");
+    let logical_position = mandatum_scene::LogicalPoint::from_units(
+        logical_target.logical_rect.origin.x_units()
+            + (logical_target.logical_rect.size.width_units() / 2) as i64,
+        logical_target.logical_rect.origin.y_units() + 64,
+    );
+
+    send_pointer(&mut state, pointer_event(PointerKind::Move, None, 10, 10));
+    assert_eq!(
+        state.hovered_separator(),
+        None,
+        "the terminal-compatible cell fallback remains outside the split target"
+    );
+    state.handle_pointer_at_logical(
+        pointer_event(PointerKind::Move, None, 10, 10),
+        logical_position,
+    );
+
+    assert_eq!(state.hovered_separator(), Some(0));
+    assert!(
+        !state.pointer_move_needs_redraw(),
+        "separator hover uses identity comparison instead of continuous redraw"
+    );
+}
+
+#[test]
+fn pointer_leave_clears_idle_separator_hover_but_preserves_active_drag() {
+    let mut state = state();
+    state.dispatch(CommandId::SplitRight);
+    frame(&mut state);
+    let separator = state
+        .hit_targets
+        .iter()
+        .find(|target| matches!(target.kind, HitTargetKind::Separator { .. }))
+        .expect("split separator target")
+        .clone();
+
+    send_pointer(
+        &mut state,
+        pointer_event(PointerKind::Move, None, separator.rect.x, separator.rect.y),
+    );
+    assert!(state.pointer_left());
+    assert_eq!(state.hovered_separator(), None);
+    assert!(!state.pointer_move_needs_redraw());
+
+    send_pointer(
+        &mut state,
+        left(PointerKind::Down, separator.rect.x, separator.rect.y),
+    );
+    assert!(!state.pointer_left());
+    assert_eq!(state.hovered_separator(), Some(0));
+}
+
 // Pointer events with no scene built yet (no hit targets) do nothing.
 #[test]
 fn pointer_without_hit_targets_is_inert() {

@@ -118,8 +118,9 @@ The ordered work is:
 5. Make native Casey's local interactive default with an explicit terminal
    escape hatch — complete. Daily use now supplies concrete functional
    hardening work.
-6. Build the production-grade native in-app visual system — next. The ordered
-   capability families live in
+6. Build the production-grade native in-app visual system — active. Phase 3's
+   workspace-shell/material/focus source capability is implemented; displayed
+   and fixed-reference acceptance remains. The ordered capability families live in
    [`docs/visual-polish-plan.md`](visual-polish-plan.md).
 
 The authoritative detail is
@@ -139,7 +140,8 @@ accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
 
 The ordered launcher and shaping-cache gaps are closed. Row damage remains
 unjustified by the measured preparation profile. Native in-app visual polish
-is the next product phase, while concrete failures found through daily use
-remain hardening work at their smallest owning seam. Installer, release,
-rollout, public-GitHub presentation, and public visual materials remain
-shelved for a separate distribution phase.
+is active: Phase 3 source is green and its displayed/fixed-reference completion
+evidence is pending. Concrete failures found through daily use remain hardening
+work at their smallest owning seam. Installer, release, rollout, public-GitHub
+presentation, and public visual materials remain shelved for a separate
+distribution phase.

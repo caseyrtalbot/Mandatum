@@ -3,8 +3,9 @@
 use std::collections::HashSet;
 
 use mandatum_scene::{
-    LogicalRect, PresentationNode, PresentationNodeId, PresentationNodeRole, TerminalProjection,
-    Theme, TransitionProperty, UiColor, UiMotionToken, WorkspaceScene,
+    LogicalRect, PresentationNode, PresentationNodeId, PresentationNodeRole, PresentationTone,
+    SceneRect, TerminalProjection, Theme, TransitionProperty, UiColor, UiMotionToken, UiShadow,
+    WorkspaceScene,
 };
 
 use crate::text_metrics::{NativeTextMetricIdentity, NativeTextMetricRole, NativeTextMetricSet};
@@ -21,8 +22,17 @@ pub enum NativeMaterialRole {
     ChromeSurface,
     OverlaySurface,
     BorderSubtle,
+    BorderStrong,
+    Focus,
     Selection,
     Attention,
+    Badge,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeBoundary {
+    pub width_units: u64,
+    pub color: UiColor,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +42,9 @@ pub struct NativeMaterial {
     pub logical_rect: LogicalRect,
     pub clip: LogicalRect,
     pub color: UiColor,
+    pub corner_radius_units: u64,
+    pub boundary: Option<NativeBoundary>,
+    pub raised_shadows: Option<[UiShadow; 2]>,
     pub z_order: u32,
 }
 
@@ -39,6 +52,9 @@ pub struct NativeMaterial {
 pub struct NativeTextScope {
     pub node_id: PresentationNodeId,
     pub logical_rect: LogicalRect,
+    /// Exact cell projection used to color the already-compiled `CellProgram`
+    /// without reconstructing presentation roles in the GPU adapter.
+    pub cell_rect: Option<SceneRect>,
     pub clip: LogicalRect,
     pub color: UiColor,
     pub metrics: NativeTextMetricIdentity,
@@ -232,13 +248,25 @@ pub fn prepare_native_presentation(
             clip: node.logical_rect,
             z_order: z_base,
         });
-        if let Some((role, color)) = material_for_node(node, theme) {
+        if let Some(spec) = material_for_node(node, theme) {
+            let clip = if spec.raised_shadows.is_some() {
+                node.parent
+                    .as_ref()
+                    .and_then(|parent| node_bounds.get(parent))
+                    .copied()
+                    .unwrap_or(node.logical_rect)
+            } else {
+                node.logical_rect
+            };
             commands.push(NativePlanCommand::Material(NativeMaterial {
                 node_id: node.id.clone(),
-                role,
+                role: spec.role,
                 logical_rect: node.logical_rect,
-                clip: node.logical_rect,
-                color,
+                clip,
+                color: spec.color,
+                corner_radius_units: spec.corner_radius_units,
+                boundary: spec.boundary,
+                raised_shadows: spec.raised_shadows,
                 z_order: z_base + 1,
             }));
         }
@@ -248,6 +276,7 @@ pub fn prepare_native_presentation(
             commands.push(NativePlanCommand::Text(NativeTextScope {
                 node_id: node.id.clone(),
                 logical_rect: node.logical_rect,
+                cell_rect: native_text_color_projection(node),
                 clip: node.logical_rect,
                 color,
                 metrics: metrics.identity(metric_role),
@@ -385,31 +414,101 @@ fn validate_cell_projection(
     Ok(())
 }
 
-fn material_for_node(
-    node: &PresentationNode,
-    theme: &Theme,
-) -> Option<(NativeMaterialRole, UiColor)> {
+#[derive(Clone, Copy)]
+struct NativeMaterialSpec {
+    role: NativeMaterialRole,
+    color: UiColor,
+    corner_radius_units: u64,
+    boundary: Option<NativeBoundary>,
+    raised_shadows: Option<[UiShadow; 2]>,
+}
+
+impl NativeMaterialSpec {
+    fn flat(role: NativeMaterialRole, color: UiColor) -> Self {
+        Self {
+            role,
+            color,
+            corner_radius_units: 0,
+            boundary: None,
+            raised_shadows: None,
+        }
+    }
+}
+
+fn material_for_node(node: &PresentationNode, theme: &Theme) -> Option<NativeMaterialSpec> {
     let palette = theme.ui.palette;
     if node.role == PresentationNodeRole::Item && node.state.selected {
-        return Some((NativeMaterialRole::Selection, palette.selection_fill));
+        return Some(NativeMaterialSpec::flat(
+            NativeMaterialRole::Selection,
+            palette.selection_fill,
+        ));
     }
     match node.role {
-        PresentationNodeRole::Workspace => Some((NativeMaterialRole::Canvas, palette.canvas)),
-        PresentationNodeRole::Header | PresentationNodeRole::Status => {
-            Some((NativeMaterialRole::ChromeSurface, palette.chrome_surface))
+        PresentationNodeRole::Workspace => Some(NativeMaterialSpec::flat(
+            NativeMaterialRole::Canvas,
+            palette.canvas,
+        )),
+        PresentationNodeRole::Header | PresentationNodeRole::Status => Some(
+            NativeMaterialSpec::flat(NativeMaterialRole::ChromeSurface, palette.chrome_surface),
+        ),
+        PresentationNodeRole::Pane => {
+            let mut spec =
+                NativeMaterialSpec::flat(NativeMaterialRole::PaneSurface, palette.pane_surface);
+            if node.state.floating {
+                spec.corner_radius_units = u64::from(theme.ui.radii.floating) * 64;
+                spec.boundary = Some(NativeBoundary {
+                    width_units: u64::from(theme.ui.spacing.tiled_separator.max(1)) * 64,
+                    color: palette.border_strong,
+                });
+                spec.raised_shadows = Some(theme.ui.elevation.raised);
+            }
+            Some(spec)
         }
-        PresentationNodeRole::Pane | PresentationNodeRole::PaneBody => {
-            Some((NativeMaterialRole::PaneSurface, palette.pane_surface))
-        }
-        PresentationNodeRole::Overlay | PresentationNodeRole::TextInput => {
-            Some((NativeMaterialRole::OverlaySurface, palette.overlay_surface))
-        }
+        PresentationNodeRole::PaneBody => Some(NativeMaterialSpec::flat(
+            NativeMaterialRole::PaneSurface,
+            palette.pane_surface,
+        )),
+        PresentationNodeRole::Overlay | PresentationNodeRole::TextInput => Some(
+            NativeMaterialSpec::flat(NativeMaterialRole::OverlaySurface, palette.overlay_surface),
+        ),
         PresentationNodeRole::Separator => {
-            Some((NativeMaterialRole::BorderSubtle, palette.border_subtle))
+            if node.state.dragging {
+                Some(NativeMaterialSpec::flat(
+                    NativeMaterialRole::Focus,
+                    palette.focus,
+                ))
+            } else if node.state.hovered {
+                Some(NativeMaterialSpec::flat(
+                    NativeMaterialRole::BorderStrong,
+                    palette.border_strong,
+                ))
+            } else {
+                Some(NativeMaterialSpec::flat(
+                    NativeMaterialRole::BorderSubtle,
+                    palette.border_subtle,
+                ))
+            }
         }
-        PresentationNodeRole::Attention => Some((NativeMaterialRole::Attention, palette.failure)),
-        PresentationNodeRole::PaneTitle
-        | PresentationNodeRole::TerminalOutput
+        PresentationNodeRole::Attention => Some(semantic_chip_material(
+            NativeMaterialRole::Attention,
+            node.state.tone,
+            theme,
+        )),
+        PresentationNodeRole::PaneTitle if node.state.floating => None,
+        PresentationNodeRole::PaneTitle => Some(NativeMaterialSpec::flat(
+            NativeMaterialRole::ChromeSurface,
+            palette.chrome_surface,
+        )),
+        PresentationNodeRole::PaneBadge(_) => Some(semantic_chip_material(
+            NativeMaterialRole::Badge,
+            node.state.tone,
+            theme,
+        )),
+        PresentationNodeRole::FocusIndicator => Some(NativeMaterialSpec::flat(
+            NativeMaterialRole::Focus,
+            palette.focus,
+        )),
+        PresentationNodeRole::TerminalOutput
         | PresentationNodeRole::TaskOutput
         | PresentationNodeRole::Item => None,
     }
@@ -439,16 +538,71 @@ fn text_for_node(
                 Some((NativeTextMetricRole::PaneTitle, palette.text_secondary))
             }
         }
+        PresentationNodeRole::PaneBadge(_) => Some((
+            NativeTextMetricRole::Metadata,
+            tone_color(node.state.tone, theme),
+        )),
         PresentationNodeRole::TerminalOutput => Some((NativeTextMetricRole::Terminal, color)),
         PresentationNodeRole::TaskOutput => Some((NativeTextMetricRole::Body, color)),
         PresentationNodeRole::TextInput => Some((NativeTextMetricRole::Body, color)),
         PresentationNodeRole::Item => Some((NativeTextMetricRole::Body, color)),
-        PresentationNodeRole::Attention => Some((NativeTextMetricRole::Metadata, palette.failure)),
+        PresentationNodeRole::Attention => Some((
+            NativeTextMetricRole::Metadata,
+            tone_color(node.state.tone, theme),
+        )),
         PresentationNodeRole::Workspace
         | PresentationNodeRole::Pane
         | PresentationNodeRole::PaneBody
         | PresentationNodeRole::Overlay
+        | PresentationNodeRole::FocusIndicator
         | PresentationNodeRole::Separator => None,
+    }
+}
+
+fn native_text_color_projection(node: &PresentationNode) -> Option<SceneRect> {
+    match node.role {
+        PresentationNodeRole::Header
+        | PresentationNodeRole::Status
+        | PresentationNodeRole::PaneTitle
+        | PresentationNodeRole::PaneBadge(_)
+        | PresentationNodeRole::Attention => node.cell_rect,
+        PresentationNodeRole::TerminalOutput
+        | PresentationNodeRole::TaskOutput
+        | PresentationNodeRole::TextInput
+        | PresentationNodeRole::Item
+        | PresentationNodeRole::Workspace
+        | PresentationNodeRole::Pane
+        | PresentationNodeRole::PaneBody
+        | PresentationNodeRole::Overlay
+        | PresentationNodeRole::FocusIndicator
+        | PresentationNodeRole::Separator => None,
+    }
+}
+
+fn semantic_chip_material(
+    role: NativeMaterialRole,
+    tone: PresentationTone,
+    theme: &Theme,
+) -> NativeMaterialSpec {
+    let mut spec = NativeMaterialSpec::flat(role, theme.ui.palette.chrome_surface);
+    spec.corner_radius_units = u64::from(theme.ui.spacing.space_1) * 64;
+    spec.boundary = Some(NativeBoundary {
+        width_units: u64::from(theme.ui.spacing.tiled_separator.max(1)) * 64,
+        color: tone_color(tone, theme),
+    });
+    spec
+}
+
+fn tone_color(tone: PresentationTone, theme: &Theme) -> UiColor {
+    let palette = theme.ui.palette;
+    match tone {
+        PresentationTone::Neutral => palette.text_secondary,
+        PresentationTone::Focus => palette.focus,
+        PresentationTone::Running => palette.running,
+        PresentationTone::Waiting => palette.waiting,
+        PresentationTone::Failure => palette.failure,
+        PresentationTone::Complete => palette.complete,
+        PresentationTone::AgentIdentity => palette.agent_identity,
     }
 }
 

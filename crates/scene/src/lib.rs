@@ -33,25 +33,26 @@ pub use geometry::{
     SceneSize, ViewportMetrics,
 };
 pub use pane::{
-    AgentApprovalPrompt, AgentContent, ArtifactContent, ArtifactState, EmptyContent, PaneContent,
-    PaneScene, PaneSceneKind, TaskContent,
+    AgentApprovalPrompt, AgentContent, ArtifactContent, ArtifactState, EmptyContent, PaneBadgeKind,
+    PaneContent, PaneScene, PaneSceneKind, TaskContent,
 };
 pub use style::{SceneCellStyle, SceneColor};
 pub use surface::{RasterSurface, SceneCell, SurfacePosition, TerminalSurface};
 pub use theme::{
     ResolvedUiContrastPair, TerminalPalette, Theme, UiColor, UiContrastKind, UiCubicBezier,
-    UiElevationTokens, UiFontFace, UiMotionToken, UiMotionTokens, UiOpacity, UiOpacityTokens,
-    UiPalette, UiRadiusTokens, UiSelectionTokens, UiShadow, UiSpacingTokens, UiTextStyle, UiTokens,
-    UiTypographyTokens,
+    UiDensity, UiElevationTokens, UiFontFace, UiMotionToken, UiMotionTokens, UiOpacity,
+    UiOpacityTokens, UiPalette, UiRadiusTokens, UiSelectionTokens, UiShadow, UiSpacingTokens,
+    UiTextStyle, UiTokens, UiTypographyTokens,
 };
 pub use workspace::{
     AccessibilityActionKind, AccessibilityNode, AccessibilityRole, AccessibilityState,
-    AttentionSegment, ContextMenuEntry, ContextMenuOverlay, HeaderScene, HelpEntry, HelpOverlay,
-    HitTarget, HitTargetKind, LogicalHitTarget, OverlayKind, OverlayNodePart, OverlayScene,
-    PaletteEntry, PaletteOverlay, PaneNodePart, PreeditScene, PresentationAxis, PresentationNode,
-    PresentationNodeId, PresentationNodeRole, PresentationNodeState, PromptOverlay,
-    SESSION_MAP_FOCUS_GLYPH, ScenePresentation, SearchEntry, SearchOverlay, SemanticKey,
-    SessionMapOverlay, SessionMapRow, StatusScene, TerminalProjection, TerminalViewportMapping,
-    TextInputKind, TextInputScene, TimelineEntry, TimelineOverlay, TransitionProperty,
-    TransitionTarget, WelcomeEntry, WelcomeOverlay, WorkspaceNodePart, WorkspaceScene,
+    AttentionKind, AttentionSegment, ContextMenuEntry, ContextMenuOverlay, HeaderScene, HelpEntry,
+    HelpOverlay, HitTarget, HitTargetKind, LogicalHitTarget, OverlayKind, OverlayNodePart,
+    OverlayScene, PaletteEntry, PaletteOverlay, PaneNodePart, PreeditScene, PresentationAxis,
+    PresentationNode, PresentationNodeId, PresentationNodeRole, PresentationNodeState,
+    PresentationTone, PromptOverlay, SESSION_MAP_FOCUS_GLYPH, ScenePresentation, SearchEntry,
+    SearchOverlay, SemanticKey, SessionMapOverlay, SessionMapRow, StatusScene, TerminalProjection,
+    TerminalViewportMapping, TextInputKind, TextInputScene, TimelineEntry, TimelineOverlay,
+    TransitionProperty, TransitionTarget, WelcomeEntry, WelcomeOverlay, WorkspaceNodePart,
+    WorkspaceScene,
 };

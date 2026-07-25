@@ -9,8 +9,8 @@ use std::{sync::Arc, time::Duration};
 
 use mandatum_commands::CommandId;
 use mandatum_scene::{
-    SceneSize, Theme, ViewportMetrics, WorkspaceScene,
-    input::{InputEvent, Key},
+    LogicalPoint, SceneSize, Theme, ViewportMetrics, WorkspaceScene,
+    input::{InputEvent, Key, PointerEvent},
 };
 
 use crate::{
@@ -68,6 +68,19 @@ impl FrontendHost {
         }
     }
 
+    /// Apply one native pointer event using the prior frame's logical-pixel
+    /// hit targets while retaining its cell coordinates for terminal input.
+    pub fn handle_pointer_at_logical(
+        &mut self,
+        pointer: PointerEvent,
+        logical_position: LogicalPoint,
+    ) {
+        if !self.shutdown_complete {
+            self.app
+                .handle_pointer_at_logical(pointer, logical_position);
+        }
+    }
+
     /// Cancel any platform-owned pointer gesture before geometry changes.
     pub fn cancel_pointer_gesture(&mut self) {
         if !self.shutdown_complete {
@@ -75,10 +88,25 @@ impl FrontendHost {
         }
     }
 
-    /// Pure pointer motion changes the scene only while a hover-owned overlay
-    /// is open; child any-event reporting wakes through the runtime queue.
-    pub fn pointer_move_needs_redraw(&self) -> bool {
-        !self.shutdown_complete && self.app.pointer_move_needs_redraw()
+    /// Whether the current presentation state makes pure pointer motion
+    /// redraw-sensitive. The native shell compares this before and after
+    /// routing motion so separator enter and leave both repaint. The tuple is
+    /// `(continuous_redraw, hovered_separator_identity)`.
+    pub fn pointer_move_redraw_state(&self) -> (bool, Option<usize>) {
+        if self.shutdown_complete {
+            (false, None)
+        } else {
+            (
+                self.app.pointer_move_needs_redraw(),
+                self.app.hovered_separator(),
+            )
+        }
+    }
+
+    /// Notify the shared state that the platform cursor left the client area.
+    /// Returns whether transient presentation state changed.
+    pub fn pointer_left(&mut self) -> bool {
+        !self.shutdown_complete && self.app.pointer_left()
     }
 
     /// Reject hit targets from a frame the platform could not present.

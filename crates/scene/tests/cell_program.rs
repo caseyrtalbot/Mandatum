@@ -31,6 +31,7 @@ fn whole_frame_cell_program_preserves_terminal_cell_style_selection_and_copy_cur
         header: HeaderScene {
             area: SceneRect::new(0, 0, 6, 1),
             workspace_name: "Mandatum".to_owned(),
+            project_name: "project".to_owned(),
             session_name: "main".to_owned(),
             pane_count: 1,
             focused_pane: pane_id.clone(),
@@ -128,6 +129,7 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
         header: HeaderScene {
             area: SceneRect::new(0, 0, 100, 1),
             workspace_name: "Mandatum".to_owned(),
+            project_name: "project".to_owned(),
             session_name: "main".to_owned(),
             pane_count: 3,
             focused_pane: task_id.clone(),
@@ -135,6 +137,8 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
             connector_label: "fake".to_owned(),
             text: " Mandatum | approval waiting".to_owned(),
             attention: vec![AttentionSegment {
+                kind: mandatum_scene::AttentionKind::ApprovalWaiting,
+                tone: mandatum_scene::PresentationTone::Waiting,
                 rect: SceneRect::new(12, 0, 8, 1),
                 label: "approval".to_owned(),
                 pane: Some(agent_id.clone()),
@@ -337,6 +341,7 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
         header: HeaderScene {
             area: SceneRect::new(0, 0, 60, 1),
             workspace_name: "Mandatum".to_owned(),
+            project_name: "project".to_owned(),
             session_name: "main".to_owned(),
             pane_count: 1,
             focused_pane: pane_id.clone(),
@@ -520,6 +525,7 @@ fn scene_with_overlay(overlay: OverlayScene, hit_targets: Vec<HitTarget>) -> Wor
         header: HeaderScene {
             area: SceneRect::new(0, 0, 60, 1),
             workspace_name: "Mandatum".to_owned(),
+            project_name: "project".to_owned(),
             session_name: "main".to_owned(),
             pane_count: 1,
             focused_pane: pane_id.clone(),
@@ -588,6 +594,7 @@ fn cell_program_assigns_distinct_exact_text_paint_scopes() {
 
     let program = compile_cell_program(&scene, &Theme::default());
     let header = program.paint_scope_at(1, 0).expect("header scope");
+    let first_decoration = program.paint_scope_at(0, 1).expect("first pane decoration");
     let first_chrome = program.paint_scope_at(1, 1).expect("first pane chrome");
     let first_content = program.paint_scope_at(1, 2).expect("first pane content");
     let second_chrome = program.paint_scope_at(31, 1).expect("second pane chrome");
@@ -597,6 +604,8 @@ fn cell_program_assigns_distinct_exact_text_paint_scopes() {
 
     assert_eq!(header.kind, TextPaintScopeKind::Header);
     assert_eq!(header.clip, scene.header.area);
+    assert_eq!(first_decoration.kind, TextPaintScopeKind::PaneDecoration);
+    assert_eq!(first_decoration.clip, scene.panes[0].area);
     assert_eq!(first_chrome.kind, TextPaintScopeKind::PaneChrome);
     assert_eq!(first_chrome.clip, scene.panes[0].area);
     assert_eq!(first_content.kind, TextPaintScopeKind::PaneContent);
@@ -612,6 +621,7 @@ fn cell_program_assigns_distinct_exact_text_paint_scopes() {
 
     let ids = [
         header.id,
+        first_decoration.id,
         first_chrome.id,
         first_content.id,
         second_chrome.id,
@@ -1004,6 +1014,7 @@ fn narrow_pane_content_never_overwrites_or_escapes_its_border() {
             header: HeaderScene {
                 area: SceneRect::new(0, 0, 0, 0),
                 workspace_name: "Mandatum".to_owned(),
+                project_name: "project".to_owned(),
                 session_name: "main".to_owned(),
                 pane_count: 1,
                 focused_pane: pane_id.clone(),
@@ -1110,6 +1121,7 @@ fn ready_artifact_marks_only_its_final_visible_body_cells() {
         header: HeaderScene {
             area: SceneRect::new(0, 0, 20, 1),
             workspace_name: "Mandatum".to_owned(),
+            project_name: "project".to_owned(),
             session_name: "main".to_owned(),
             pane_count: 2,
             focused_pane: artifact_id.clone(),
@@ -1346,6 +1358,7 @@ fn advanced_text_terminal_graphemes_keep_wide_marks_and_occlude_atomically() {
         header: HeaderScene {
             area: SceneRect::new(0, 0, 12, 1),
             workspace_name: "Mandatum".into(),
+            project_name: "project".into(),
             session_name: "main".into(),
             pane_count: 1,
             focused_pane: pane_id.clone(),

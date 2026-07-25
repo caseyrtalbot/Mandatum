@@ -257,6 +257,7 @@ pub struct AppConfig {
     pub restore_on_startup: bool,
     pub keymap: Keymap,
     pub theme: Theme,
+    pub density: mandatum_scene::UiDensity,
     pub reduced_motion: bool,
     /// Surface byte-level PTY diagnostics in the status line (`[ui]
     /// debug_status`). Off by default: diagnostics are noise that would
@@ -287,6 +288,7 @@ impl Default for AppConfig {
             restore_on_startup: false,
             keymap: Keymap::default(),
             theme: Theme::default(),
+            density: mandatum_scene::UiDensity::Compact,
             reduced_motion: false,
             debug_status: false,
             config_warnings: Vec::new(),
@@ -317,6 +319,7 @@ impl AppConfig {
             restore_on_startup: true,
             keymap: loaded.keymap,
             theme: loaded.theme,
+            density: loaded.density,
             reduced_motion: loaded.reduced_motion,
             debug_status: loaded.debug_status,
             config_warnings: loaded.warnings,

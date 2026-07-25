@@ -256,6 +256,12 @@ palette `j`, is the keyboard cycle). When nothing needs attention the
 strip shows calm session facts — workspace name, session name, pane count,
 agent connector kind — never blank, never noisy.
 
+On the native surface the header and status are quiet material rails, and
+attention segments are typed outlined chips with waiting/failure tone. Pane
+title rails carry typed kind/state badges. The focused pane adds a compact
+two-logical-pixel leading tick plus focused title color and bold weight; the
+literal `focused` terminal fallback remains the non-color cue.
+
 The status strip below stays the app's own voice: the last status message
 plus the permanent control hint (palette chord, right-click menu).
 Byte-level PTY diagnostics ("read N byte(s)") never overwrite it — a

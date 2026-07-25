@@ -778,6 +778,17 @@ developer unfamiliar with the current implementation can identify:
   synchronized `./ci/gate.sh` run reported `GATE GREEN`; source commit
   `6979318` and accepted-evidence commit `f300662` were then pushed to
   `origin/main`.
+- **2026-07-24:** Phase 3's source capability reached focused green before
+  displayed work. The run passed 302 app tests, 16 core tests, 44 scene unit
+  plus 16 cell-program and three geometry tests, 31 terminal-renderer tests,
+  65 native-renderer unit plus four presentation-plan tests, 23 native-shell
+  tests, two frontend-parity tests, and the excluded lab's exact
+  `every_visual_scenario_reaches_its_typed_state_and_gpu_render_plan` test.
+  These runs prove typed materials/text, logical separator input, density
+  geometry, focus/badges, floating occlusion, window policy/title, terminal
+  parity, and resource bounds. They do not yet claim the required displayed
+  matrix, performance comparison, fixed-reference review/acceptance, or final
+  repository gate.
 
 ## Completion Rule
 

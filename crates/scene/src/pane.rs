@@ -21,7 +21,97 @@ pub struct PaneScene {
     pub content: PaneContent,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaneBadgeKind {
+    Terminal,
+    Task,
+    Agent,
+    Artifact,
+    Status,
+    Floating,
+    Stacked,
+    Zoomed,
+    Copy,
+    Approval,
+}
+
+impl PaneBadgeKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Task => "task",
+            Self::Agent => "agent",
+            Self::Artifact => "artifact",
+            Self::Status => "status",
+            Self::Floating => "floating",
+            Self::Stacked => "stack",
+            Self::Zoomed => "zoom",
+            Self::Copy => "copy",
+            Self::Approval => "approval",
+        }
+    }
+}
+
 impl PaneScene {
+    /// Typed title-rail badges in stable display order. The scene owns this
+    /// derivation so native adapters never parse title text or pane content.
+    pub fn badge_kinds(&self) -> Vec<PaneBadgeKind> {
+        let mut badges = vec![match self.kind {
+            PaneSceneKind::Terminal => PaneBadgeKind::Terminal,
+            PaneSceneKind::Task => PaneBadgeKind::Task,
+            PaneSceneKind::Agent => PaneBadgeKind::Agent,
+            PaneSceneKind::Artifact => PaneBadgeKind::Artifact,
+            PaneSceneKind::StatusLog => PaneBadgeKind::Status,
+        }];
+        if self.floating {
+            badges.push(PaneBadgeKind::Floating);
+        }
+        if self.stacked {
+            badges.push(PaneBadgeKind::Stacked);
+        }
+        if self.zoomed {
+            badges.push(PaneBadgeKind::Zoomed);
+        }
+        if matches!(&self.content, PaneContent::Terminal(surface) if surface.in_copy_mode()) {
+            badges.push(PaneBadgeKind::Copy);
+        }
+        if matches!(&self.content, PaneContent::Agent(agent) if agent.pending_approval.is_some()) {
+            badges.push(PaneBadgeKind::Approval);
+        }
+        badges
+    }
+
+    /// Visible badge cells in stable display order, right-aligned inside the
+    /// pane's title rail. This is shared by CellProgram and logical
+    /// presentation so material pills never claim blank terminal cells.
+    pub fn badge_rects(&self) -> Vec<(PaneBadgeKind, SceneRect)> {
+        let rail = SceneRect::new(
+            self.area.x.saturating_add(1),
+            self.area.y,
+            self.area.width.saturating_sub(2),
+            self.area.height.min(1),
+        );
+        if rail.is_empty() {
+            return Vec::new();
+        }
+        let mut right = rail.right();
+        let mut placed = Vec::new();
+        for kind in self.badge_kinds().into_iter().rev() {
+            let width = u16::try_from(kind.label().len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(2);
+            if width > right.saturating_sub(rail.x) {
+                continue;
+            }
+            let x = right.saturating_sub(width);
+            placed.push((kind, SceneRect::new(x, rail.y, width, 1)));
+            right = x.saturating_sub(1).max(rail.x);
+        }
+        placed.reverse();
+        placed
+    }
+
     /// The text lines a frontend draws above any embedded output surface.
     ///
     /// Owning these here keeps every frontend's line budget consistent: the
@@ -337,6 +427,30 @@ mod tests {
                 "output:",
             ]
         );
+    }
+
+    #[test]
+    fn pane_badges_are_typed_and_derived_in_stable_display_order() {
+        let terminal = TerminalSurface {
+            copy_cursor: Some(crate::SurfacePosition::new(0, 0)),
+            ..TerminalSurface::default()
+        };
+        let mut pane = pane(PaneContent::Terminal(terminal), PaneSceneKind::Terminal);
+        pane.floating = true;
+        pane.stacked = true;
+        pane.zoomed = true;
+
+        assert_eq!(
+            pane.badge_kinds(),
+            vec![
+                PaneBadgeKind::Terminal,
+                PaneBadgeKind::Floating,
+                PaneBadgeKind::Stacked,
+                PaneBadgeKind::Zoomed,
+                PaneBadgeKind::Copy,
+            ]
+        );
+        assert_eq!(PaneBadgeKind::Floating.label(), "floating");
     }
 
     // The border chrome already names the pane and its title; the body rows

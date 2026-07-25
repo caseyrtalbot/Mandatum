@@ -20,14 +20,14 @@ use mandatum_native_renderer::{
     GpuStartupErrorKind, GpuText, ResolvedFontProfile,
 };
 use mandatum_scene::{
-    SceneSize, ViewportMetrics, WorkspaceScene,
+    LogicalPoint, SceneSize, ViewportMetrics, WorkspaceScene,
     input::{CompositionEvent, InputEvent, PointerButton, PointerEvent, PointerKind},
 };
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
 use winit::{
     application::ApplicationHandler,
-    dpi::{PhysicalPosition, PhysicalSize},
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::ModifiersState,
@@ -37,6 +37,49 @@ use winit::{
 
 const HEARTBEAT: Duration = Duration::from_millis(250);
 const EVENT_DRAIN_BUDGET: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NativeWindowGeometry {
+    initial: LogicalSize<f64>,
+    minimum: LogicalSize<f64>,
+}
+
+fn native_window_geometry() -> NativeWindowGeometry {
+    NativeWindowGeometry {
+        initial: LogicalSize::new(1_200.0, 800.0),
+        minimum: LogicalSize::new(720.0, 480.0),
+    }
+}
+
+fn native_window_title(project_label: &str) -> String {
+    let project_label = project_label.trim();
+    if project_label.is_empty() {
+        "Mandatum".to_owned()
+    } else {
+        format!("Mandatum — {project_label}")
+    }
+}
+
+fn next_native_window_title(current: &str, project_label: &str) -> Option<String> {
+    let next = native_window_title(project_label);
+    (next != current).then_some(next)
+}
+
+fn pointer_input_needs_redraw(
+    kind: PointerKind,
+    before: (bool, Option<usize>),
+    after: (bool, Option<usize>),
+) -> bool {
+    kind != PointerKind::Move || before.0 || after.0 || before.1 != after.1
+}
+
+fn logical_pointer_position(x: f64, y: f64, backing_scale: f32) -> Option<LogicalPoint> {
+    if !backing_scale.is_finite() || backing_scale <= 0.0 {
+        return None;
+    }
+    let backing_scale = f64::from(backing_scale);
+    LogicalPoint::from_pixels(x / backing_scale, y / backing_scale).ok()
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct NativeLaunchOptions {
@@ -196,6 +239,7 @@ struct App {
     wake_proxy: EventLoopProxy<UserEvent>,
     host: Option<FrontendHost>,
     window: Option<std::sync::Arc<Window>>,
+    window_title: String,
     gpu: Option<GpuText>,
     clipboard: Option<arboard::Clipboard>,
     next_heartbeat: Instant,
@@ -204,6 +248,7 @@ struct App {
     consecutive_device_recoveries: u8,
     modifiers: ModifiersState,
     mouse_pixels: Option<(f64, f64)>,
+    mouse_logical: Option<LogicalPoint>,
     mouse_cell: (u16, u16),
     pressed_pointer_buttons: PressedPointerButtons,
     wheel_cell_remainder: (f64, f64),
@@ -224,6 +269,7 @@ impl App {
             wake_proxy: proxy,
             host: None,
             window: None,
+            window_title: "Mandatum".to_owned(),
             gpu: None,
             clipboard: None,
             next_heartbeat: Instant::now() + HEARTBEAT,
@@ -232,6 +278,7 @@ impl App {
             consecutive_device_recoveries: 0,
             modifiers: ModifiersState::empty(),
             mouse_pixels: None,
+            mouse_logical: None,
             mouse_cell: (0, 0),
             pressed_pointer_buttons: PressedPointerButtons::default(),
             wheel_cell_remainder: (0.0, 0.0),
@@ -352,6 +399,7 @@ impl App {
             return Ok(());
         };
         let snapshot = self.host_mut().frame_with_viewport(viewport);
+        self.sync_window_title(&snapshot.scene);
         if scene_is_suspended_by_tiled_minimum(&snapshot.scene) {
             self.cancel_and_disable_ime();
             self.host_mut().suspend_scene_interaction();
@@ -421,8 +469,10 @@ impl App {
     fn update_mouse_cell(&mut self, x: f64, y: f64) {
         self.mouse_pixels = Some((x, y));
         let Some(gpu) = &self.gpu else {
+            self.mouse_logical = None;
             return;
         };
+        self.mouse_logical = logical_pointer_position(x, y, gpu.scale());
         let Some(size) = self.scene_size() else {
             return;
         };
@@ -440,6 +490,17 @@ impl App {
         }
     }
 
+    fn sync_window_title(&mut self, scene: &WorkspaceScene) {
+        let Some(title) = next_native_window_title(&self.window_title, &scene.header.project_name)
+        else {
+            return;
+        };
+        if let Some(window) = &self.window {
+            window.set_title(&title);
+        }
+        self.window_title = title;
+    }
+
     fn pointer_input(&mut self, kind: PointerKind, button: Option<PointerButton>) {
         if !self.scene_presentable || self.scene_size().is_none() {
             return;
@@ -448,19 +509,25 @@ impl App {
     }
 
     fn send_pointer_input(&mut self, kind: PointerKind, button: Option<PointerButton>) {
-        let redraw = kind != PointerKind::Move || self.host().pointer_move_needs_redraw();
+        let redraw_before = self.host().pointer_move_redraw_state();
         let (column, row) = self.mouse_cell;
         let mods = neutral_modifiers(self.modifiers);
-        self.host_mut()
-            .handle_input(InputEvent::Pointer(PointerEvent {
-                kind,
-                button,
-                column,
-                row,
-                mods,
-            }));
+        let pointer = PointerEvent {
+            kind,
+            button,
+            column,
+            row,
+            mods,
+        };
+        if let Some(logical_position) = self.mouse_logical {
+            self.host_mut()
+                .handle_pointer_at_logical(pointer, logical_position);
+        } else {
+            self.host_mut().handle_input(InputEvent::Pointer(pointer));
+        }
+        let redraw_after = self.host().pointer_move_redraw_state();
         self.apply_effects();
-        if redraw {
+        if pointer_input_needs_redraw(kind, redraw_before, redraw_after) {
             self.request_redraw();
         }
     }
@@ -625,8 +692,14 @@ impl ApplicationHandler<UserEvent> for App {
         let wake_proxy = self.wake_proxy.clone();
         let startup = start_after_preflight(
             || {
+                let geometry = native_window_geometry();
                 let window = event_loop
-                    .create_window(Window::default_attributes().with_title("Mandatum"))
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Mandatum")
+                            .with_inner_size(geometry.initial)
+                            .with_min_inner_size(geometry.minimum),
+                    )
                     .map_err(|error| {
                         GpuStartupError::no_display(format!("no window (headless?): {error}"))
                     })?;
@@ -789,6 +862,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.update_mouse_cell(position.x, position.y);
                 self.pointer_motion();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if self.host_mut().pointer_left() {
+                    self.request_redraw();
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(button) = neutral_button(button) {

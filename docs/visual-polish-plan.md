@@ -1,6 +1,6 @@
 # Native Visual Polish Plan
 
-Status: Phase 2 complete; Phase 3 next (2026-07-24)
+Status: Phase 2 complete; Phase 3 source implemented, displayed acceptance pending (2026-07-24)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -516,6 +516,25 @@ Exit:
 - narrow geometry degrades deliberately; and
 - the displayed layout matrix, performance comparison, and full gate pass.
 
+Source status on 2026-07-24:
+
+- the typed scene now distinguishes header/status rails, attention kinds,
+  pane badges, compact focus, separator hover/drag, density, and floating
+  state without parsing labels;
+- the pure native plan maps those semantics to continuous tiled materials,
+  one-logical-pixel separators, typed chips, and raised 10 px floating shells;
+- native input preserves logical pointer coordinates and uses the explicit
+  six-logical-pixel separator target while terminal input retains cell
+  coordinates;
+- compact and comfortable density change native rail breathing room without
+  changing the terminal `CellProgram` or PTY geometry;
+- the native shell owns a 1200 x 800 logical initial size, 720 x 480 minimum,
+  and `Mandatum — <active project>` title; and
+- focused source, parity, scenario-plan, renderer, and native-shell tests pass.
+  Displayed layout/performance evidence, fixed-reference review and explicit
+  acceptance, final documentation synchronization, and the full gate remain
+  required before Phase 3 is complete.
+
 ### Phase 4 — Overlay Family
 
 Goal: make every modal and menu feel like one system.
@@ -671,8 +690,9 @@ Defer until the complete system above succeeds without them:
 
 ## Immediate Next Action
 
-Implement Phase 3 only: workspace canvas/pane/chrome/separator materials,
-header and status rails, pane titles and badges, compact focus and separator
-interaction states, floating-pane depth, initial/minimum window geometry, and
-the compact/comfortable density contract. Do not pull overlays, workflow
-cards, motion, accessibility projection, or public presentation forward.
+Complete Phase 3 only: display and review the one/split/stacked/floating/
+zoomed/tiny/restored family, record the performance comparison, compare every
+fixed-reference scenario, explicitly accept only intended Phase 3 changes,
+then synchronize evidence and run the full gate. Do not pull overlays,
+workflow cards, motion, accessibility projection, or public presentation
+forward.

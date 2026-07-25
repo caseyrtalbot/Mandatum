@@ -297,6 +297,21 @@ cannot claim explicit chrome/overlay targets or interfere with child mouse
 reporting; only `TerminalViewportMapping` converts an admitted pane-body
 logical point to a child cell.
 
+Phase 3 makes this logical contract active in the product shell. Native cursor
+positions cross `FrontendHost` as `LogicalPoint` values for workspace hit
+testing while the same neutral pointer event retains cell coordinates for
+terminal child input and split math. Separator hover and drag resolve against a
+six-logical-pixel target around a one-logical-pixel rule; pointer redraws occur
+only on hover-identity changes or genuinely continuous modal motion.
+
+Native workspace chrome is compiled, not inferred. Typed pane badges,
+attention kinds, focus indicators, density, and floating state become ordered
+native material/text commands. `CellProgram` marks pane decoration with a typed
+paint scope, and the GPU consumes compiled `NativeTextScope` colors rather than
+parsing glyphs or remapping semantic roles. Tiled panes and separators precede
+floating panes in scene order; floating shells own their rounded boundary and
+raised shadows, with later floats occluding earlier shadow fragments.
+
 Accessibility meaning remains dependency-free in `mandatum-scene`.
 `AccessibilityNode` uses scene-owned roles, labels, values, state, bounds, and
 the same `PresentationNodeId`; AccessKit, AppKit, winit, and other platform

@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use mandatum_commands::{CommandId, command_id_for_name};
-use mandatum_scene::{SceneColor, Theme, UiColor};
+use mandatum_scene::{SceneColor, Theme, UiColor, UiDensity};
 
 use crate::keymap::{ChordAction, Keymap, format_chord, parse_chord};
 
@@ -28,6 +28,7 @@ pub enum AgentConnectorKind {
 pub struct LoadedConfig {
     pub keymap: Keymap,
     pub theme: Theme,
+    pub density: UiDensity,
     pub reduced_motion: bool,
     /// Surface byte-level runtime diagnostics ("read N byte(s)") in the
     /// status line. Off by default: they are debugging noise that would
@@ -493,6 +494,21 @@ fn theme_slot<'a>(theme: &'a mut Theme, key: &str) -> Option<&'a mut SceneColor>
 fn apply_ui(config: &mut LoadedConfig, table: toml::Table, label: &str) {
     for (key, value) in table {
         match (key.as_str(), value) {
+            ("density", toml::Value::String(value)) => {
+                config.density = match value.as_str() {
+                    "compact" => UiDensity::Compact,
+                    "comfortable" => UiDensity::Comfortable,
+                    _ => {
+                        config.warnings.push(format!(
+                            "{label}: ui.density must be 'compact' or 'comfortable', got '{value}'"
+                        ));
+                        continue;
+                    }
+                };
+            }
+            ("density", other) => config.warnings.push(format!(
+                "{label}: ui.density must be 'compact' or 'comfortable', got {other}"
+            )),
             ("reduced_motion", toml::Value::Boolean(flag)) => config.reduced_motion = flag,
             ("reduced_motion", other) => config.warnings.push(format!(
                 "{label}: ui.reduced_motion must be true or false, got {other}"
@@ -977,6 +993,19 @@ chartreuse = "#010203"
         // Settings the project file does not touch keep the user value.
         assert!(config.reduced_motion);
         assert!(config.warnings.is_empty());
+    }
+
+    #[test]
+    fn ui_density_is_explicit_with_compact_default_and_comfortable_override() {
+        let dir = TestConfigDir::new();
+        let missing = dir.write("missing.toml", "");
+        let defaults = load_config(None, &missing);
+        assert_eq!(defaults.density, UiDensity::Compact);
+
+        let project = dir.write("project.toml", "[ui]\ndensity = \"comfortable\"\n");
+        let configured = load_config(None, &project);
+        assert_eq!(configured.density, UiDensity::Comfortable);
+        assert!(configured.warnings.is_empty(), "{:?}", configured.warnings);
     }
 
     #[test]

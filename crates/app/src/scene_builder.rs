@@ -9,10 +9,11 @@ use mandatum_core::{AgentPaneIntent, PaneId, PaneKind, PaneSpec, Session, TaskPa
 use mandatum_scene::{
     AccessibilityActionKind, AccessibilityNode, AccessibilityRole, AccessibilityState,
     AgentApprovalPrompt, AgentContent, CellOccupancy, EmptyContent, HeaderScene, HitTarget,
-    HitTargetKind, LogicalHitTarget, OverlayKind, OverlayNodePart, OverlayScene, PaneContent,
-    PaneNodePart, PaneScene, PaneSceneKind, PreeditScene, PresentationAxis, PresentationNode,
-    PresentationNodeId, PresentationNodeRole, PresentationNodeState, SceneCell, SceneCellStyle,
-    SceneColor, ScenePresentation, SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent,
+    HitTargetKind, LogicalHitTarget, LogicalRect, OverlayKind, OverlayNodePart, OverlayScene,
+    PaneBadgeKind, PaneContent, PaneNodePart, PaneScene, PaneSceneKind, PreeditScene,
+    PresentationAxis, PresentationNode, PresentationNodeId, PresentationNodeRole,
+    PresentationNodeState, PresentationTone, SceneCell, SceneCellStyle, SceneColor,
+    ScenePresentation, SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent,
     TerminalProjection, TerminalSurface, TerminalViewportMapping, TextInputKind, TextInputScene,
     TransitionProperty, TransitionTarget, ViewportMetrics, WorkspaceNodePart, WorkspaceScene,
     cell_program::display_width,
@@ -164,68 +165,63 @@ fn scene_presentation(
         viewport,
     ));
 
+    let separators = layout::layout_separators(
+        state.workspace(),
+        layout::workspace_scene_area(viewport.scene_size()),
+    );
     let mut terminal_viewports = Vec::new();
     let mut transition_targets = Vec::new();
-    for pane in panes {
-        let pane_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Surface);
-        nodes.push(presentation_node(
-            pane_id.clone(),
-            Some(workspace_id.clone()),
-            PresentationNodeRole::Pane,
-            PresentationNodeState {
-                focused: pane.focused,
-                ..PresentationNodeState::default()
-            },
-            pane.area,
+    for pane in panes.iter().filter(|pane| !pane.floating) {
+        push_pane_presentation(
+            state,
+            pane,
             viewport,
-        ));
-        let title_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Title);
-        nodes.push(presentation_node(
-            title_id,
-            Some(pane_id.clone()),
-            PresentationNodeRole::PaneTitle,
-            PresentationNodeState {
-                focused: pane.focused,
-                ..PresentationNodeState::default()
-            },
-            SceneRect::new(pane.area.x, pane.area.y, pane.area.width, 1),
-            viewport,
-        ));
-        let body_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Body);
-        nodes.push(presentation_node(
-            body_id,
-            Some(pane_id.clone()),
-            PresentationNodeRole::PaneBody,
-            PresentationNodeState {
-                focused: pane.focused,
-                ..PresentationNodeState::default()
-            },
-            layout::pane_inner_rect(pane.area),
-            viewport,
-        ));
-        transition_targets.push(TransitionTarget {
-            node_id: pane_id.clone(),
-            property: TransitionProperty::Geometry,
-        });
+            &workspace_id,
+            &mut nodes,
+            &mut terminal_viewports,
+            &mut transition_targets,
+        );
+    }
 
-        if let Some(mapping) = terminal_viewport_mapping(state, pane, viewport) {
-            let role = match pane.content {
-                PaneContent::Task(_) => PresentationNodeRole::TaskOutput,
-                _ => PresentationNodeRole::TerminalOutput,
-            };
-            nodes.push(presentation_node(
-                mapping.node_id.clone(),
-                Some(pane_id),
-                role,
-                PresentationNodeState {
-                    focused: pane.focused,
-                    ..PresentationNodeState::default()
+    for separator in &separators {
+        let id = PresentationNodeId::workspace(WorkspaceNodePart::Separator {
+            split_index: separator.split_index,
+            axis: PresentationAxis::from(separator.axis),
+        });
+        let (visible_rect, _) = separator_logical_rects(separator, viewport);
+        let hovered = state.hovered_separator() == Some(separator.split_index);
+        let dragging = state.dragged_separator() == Some(separator.split_index);
+        nodes.push(presentation_logical_node(
+            id,
+            Some(workspace_id.clone()),
+            PresentationNodeRole::Separator,
+            PresentationNodeState {
+                hovered,
+                dragging,
+                tone: if hovered || dragging {
+                    PresentationTone::Focus
+                } else {
+                    PresentationTone::Neutral
                 },
-                mapping.visible_cell_rect,
-                viewport,
-            ));
-            terminal_viewports.push(mapping);
-        }
+                ..PresentationNodeState::default()
+            },
+            visible_rect,
+            TerminalProjection::CellRegions(vec![separator.area]),
+        ));
+    }
+
+    // Floating panes are above the tiled separator plane. Keeping this order
+    // in the typed scene lets every adapter preserve the same occlusion.
+    for pane in panes.iter().filter(|pane| pane.floating) {
+        push_pane_presentation(
+            state,
+            pane,
+            viewport,
+            &workspace_id,
+            &mut nodes,
+            &mut terminal_viewports,
+            &mut transition_targets,
+        );
     }
 
     if let Some(overlay) = overlay {
@@ -282,7 +278,7 @@ fn scene_presentation(
         }
         logical_hit_targets.push(LogicalHitTarget {
             node_id,
-            logical_rect: viewport.logical_rect_for_cells(target.rect),
+            logical_rect: logical_hit_rect(target, &separators, viewport),
             kind: target.kind.clone(),
         });
     }
@@ -299,11 +295,156 @@ fn scene_presentation(
 
     ScenePresentation {
         viewport: Some(viewport),
+        density: state.density(),
         nodes,
         logical_hit_targets,
         terminal_viewports,
         transition_targets,
         accessibility_nodes,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_pane_presentation(
+    state: &AppState,
+    pane: &PaneScene,
+    viewport: ViewportMetrics,
+    workspace_id: &PresentationNodeId,
+    nodes: &mut Vec<PresentationNode>,
+    terminal_viewports: &mut Vec<TerminalViewportMapping>,
+    transition_targets: &mut Vec<TransitionTarget>,
+) {
+    let pane_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Surface);
+    nodes.push(presentation_node(
+        pane_id.clone(),
+        Some(workspace_id.clone()),
+        PresentationNodeRole::Pane,
+        PresentationNodeState {
+            focused: pane.focused,
+            floating: pane.floating,
+            ..PresentationNodeState::default()
+        },
+        pane.area,
+        viewport,
+    ));
+
+    let title_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Title);
+    let title_rect = SceneRect::new(pane.area.x, pane.area.y, pane.area.width, 1);
+    let title_cell_rect = viewport.logical_rect_for_cells(title_rect);
+    // Density changes native rail breathing room while the honest one-cell
+    // terminal projection and PTY geometry remain unchanged.
+    let vertical_inset = match state.density() {
+        mandatum_scene::UiDensity::Compact => 2 * 64,
+        mandatum_scene::UiDensity::Comfortable => 0,
+    };
+    let title_logical_rect = LogicalRect::from_units(
+        title_cell_rect.origin.x_units(),
+        title_cell_rect
+            .origin
+            .y_units()
+            .saturating_add(vertical_inset),
+        title_cell_rect.size.width_units(),
+        title_cell_rect
+            .size
+            .height_units()
+            .saturating_sub((vertical_inset as u64).saturating_mul(2))
+            .max(64),
+    );
+    nodes.push(presentation_cell_logical_node(
+        title_id.clone(),
+        Some(pane_id.clone()),
+        PresentationNodeRole::PaneTitle,
+        PresentationNodeState {
+            focused: pane.focused,
+            floating: pane.floating,
+            tone: if pane.focused {
+                PresentationTone::Focus
+            } else {
+                PresentationTone::Neutral
+            },
+            ..PresentationNodeState::default()
+        },
+        title_rect,
+        title_logical_rect,
+    ));
+    if pane.focused {
+        nodes.push(presentation_logical_node(
+            PresentationNodeId::pane(pane.id.clone(), PaneNodePart::FocusIndicator),
+            Some(title_id.clone()),
+            PresentationNodeRole::FocusIndicator,
+            PresentationNodeState {
+                focused: true,
+                floating: pane.floating,
+                tone: PresentationTone::Focus,
+                ..PresentationNodeState::default()
+            },
+            LogicalRect::from_units(
+                title_logical_rect.origin.x_units(),
+                title_logical_rect.origin.y_units(),
+                2 * 64,
+                title_logical_rect.size.height_units(),
+            ),
+            TerminalProjection::CellRegions(vec![title_rect]),
+        ));
+    }
+    for (kind, cell_rect) in pane.badge_rects() {
+        let badge_cell_rect = viewport.logical_rect_for_cells(cell_rect);
+        nodes.push(presentation_cell_logical_node(
+            PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Badge(kind)),
+            Some(title_id.clone()),
+            PresentationNodeRole::PaneBadge(kind),
+            PresentationNodeState {
+                focused: pane.focused,
+                floating: pane.floating,
+                tone: pane_badge_tone(kind),
+                ..PresentationNodeState::default()
+            },
+            cell_rect,
+            LogicalRect::from_units(
+                badge_cell_rect.origin.x_units(),
+                title_logical_rect.origin.y_units(),
+                badge_cell_rect.size.width_units(),
+                title_logical_rect.size.height_units(),
+            ),
+        ));
+    }
+
+    let body_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Body);
+    nodes.push(presentation_node(
+        body_id,
+        Some(pane_id.clone()),
+        PresentationNodeRole::PaneBody,
+        PresentationNodeState {
+            focused: pane.focused,
+            floating: pane.floating,
+            ..PresentationNodeState::default()
+        },
+        layout::pane_inner_rect(pane.area),
+        viewport,
+    ));
+    transition_targets.push(TransitionTarget {
+        node_id: pane_id.clone(),
+        property: TransitionProperty::Geometry,
+    });
+
+    if let Some(mapping) = terminal_viewport_mapping(state, pane, viewport) {
+        let role = match pane.content {
+            PaneContent::Task(_) => PresentationNodeRole::TaskOutput,
+            _ => PresentationNodeRole::TerminalOutput,
+        };
+        nodes.push(presentation_node(
+            mapping.node_id.clone(),
+            Some(pane_id),
+            role,
+            PresentationNodeState {
+                focused: pane.focused,
+                floating: pane.floating,
+                ..PresentationNodeState::default()
+            },
+            mapping.visible_cell_rect,
+            viewport,
+        ));
+        terminal_viewports.push(mapping);
     }
 }
 
@@ -324,6 +465,114 @@ fn presentation_node(
         cell_rect: Some(cell_rect),
         terminal_projection: TerminalProjection::CellRegions(vec![cell_rect]),
     }
+}
+
+fn presentation_logical_node(
+    id: PresentationNodeId,
+    parent: Option<PresentationNodeId>,
+    role: PresentationNodeRole,
+    state: PresentationNodeState,
+    logical_rect: LogicalRect,
+    terminal_projection: TerminalProjection,
+) -> PresentationNode {
+    PresentationNode {
+        id,
+        parent,
+        role,
+        state,
+        logical_rect,
+        cell_rect: None,
+        terminal_projection,
+    }
+}
+
+fn presentation_cell_logical_node(
+    id: PresentationNodeId,
+    parent: Option<PresentationNodeId>,
+    role: PresentationNodeRole,
+    state: PresentationNodeState,
+    cell_rect: SceneRect,
+    logical_rect: LogicalRect,
+) -> PresentationNode {
+    PresentationNode {
+        id,
+        parent,
+        role,
+        state,
+        logical_rect,
+        cell_rect: Some(cell_rect),
+        terminal_projection: TerminalProjection::CellRegions(vec![cell_rect]),
+    }
+}
+
+fn pane_badge_tone(kind: PaneBadgeKind) -> PresentationTone {
+    match kind {
+        PaneBadgeKind::Agent => PresentationTone::AgentIdentity,
+        PaneBadgeKind::Approval => PresentationTone::Waiting,
+        _ => PresentationTone::Neutral,
+    }
+}
+
+fn separator_logical_rects(
+    separator: &layout::SeparatorLayout,
+    viewport: ViewportMetrics,
+) -> (LogicalRect, LogicalRect) {
+    const RULE_WIDTH: u64 = 64;
+    const TARGET_WIDTH: u64 = 6 * 64;
+    let split = viewport.logical_rect_for_cells(separator.split_area);
+    match separator.axis {
+        mandatum_core::SplitAxis::Horizontal => {
+            let boundary = i64::from(separator.area.x.saturating_add(1))
+                .saturating_mul(viewport.measured_cell_metrics.width_units() as i64);
+            (
+                LogicalRect::from_units(
+                    boundary.saturating_sub((RULE_WIDTH / 2) as i64),
+                    split.origin.y_units(),
+                    RULE_WIDTH,
+                    split.size.height_units(),
+                ),
+                LogicalRect::from_units(
+                    boundary.saturating_sub((TARGET_WIDTH / 2) as i64),
+                    split.origin.y_units(),
+                    TARGET_WIDTH,
+                    split.size.height_units(),
+                ),
+            )
+        }
+        mandatum_core::SplitAxis::Vertical => {
+            let boundary = i64::from(separator.area.y.saturating_add(1))
+                .saturating_mul(viewport.measured_cell_metrics.height_units() as i64);
+            (
+                LogicalRect::from_units(
+                    split.origin.x_units(),
+                    boundary.saturating_sub((RULE_WIDTH / 2) as i64),
+                    split.size.width_units(),
+                    RULE_WIDTH,
+                ),
+                LogicalRect::from_units(
+                    split.origin.x_units(),
+                    boundary.saturating_sub((TARGET_WIDTH / 2) as i64),
+                    split.size.width_units(),
+                    TARGET_WIDTH,
+                ),
+            )
+        }
+    }
+}
+
+fn logical_hit_rect(
+    target: &HitTarget,
+    separators: &[layout::SeparatorLayout],
+    viewport: ViewportMetrics,
+) -> LogicalRect {
+    if let HitTargetKind::Separator { split_index, .. } = target.kind
+        && let Some(separator) = separators
+            .iter()
+            .find(|separator| separator.split_index == split_index)
+    {
+        return separator_logical_rects(separator, viewport).1;
+    }
+    viewport.logical_rect_for_cells(target.rect)
 }
 
 fn terminal_viewport_mapping(
@@ -401,8 +650,11 @@ fn presentation_id_for_hit_target(
             })
         }
         HitTargetKind::StatusStrip => PresentationNodeId::workspace(WorkspaceNodePart::Status),
-        HitTargetKind::AttentionSegment { pane, .. } => {
-            PresentationNodeId::workspace(WorkspaceNodePart::Attention { pane: pane.clone() })
+        HitTargetKind::AttentionSegment { pane, kind, .. } => {
+            PresentationNodeId::workspace(WorkspaceNodePart::Attention {
+                pane: pane.clone(),
+                kind: *kind,
+            })
         }
         HitTargetKind::PaletteItem(index) => PresentationNodeId::overlay_item(
             OverlayKind::Palette,
@@ -477,9 +729,19 @@ fn presentation_state_for_hit_target(
         }
         _ => (false, false),
     };
+    let (attention, tone) = match kind {
+        HitTargetKind::AttentionSegment {
+            kind: mandatum_scene::AttentionKind::ApprovalWaiting,
+            ..
+        } => (true, mandatum_scene::PresentationTone::Waiting),
+        HitTargetKind::AttentionSegment { .. } => (true, mandatum_scene::PresentationTone::Failure),
+        _ => (false, mandatum_scene::PresentationTone::Neutral),
+    };
     PresentationNodeState {
         selected,
         disabled,
+        attention,
+        tone,
         ..PresentationNodeState::default()
     }
 }
@@ -1080,6 +1342,7 @@ fn hit_targets(
             kind: HitTargetKind::AttentionSegment {
                 index,
                 pane: segment.pane.clone(),
+                kind: segment.kind,
             },
         });
     }
@@ -1329,10 +1592,20 @@ mod tests {
                 .iter()
                 .find(|target| target.kind == cell_target.kind)
                 .expect("matching logical target");
-            assert_eq!(
-                logical_target.logical_rect,
-                viewport(1.0).logical_rect_for_cells(cell_target.rect)
-            );
+            match cell_target.kind {
+                HitTargetKind::Separator {
+                    axis: mandatum_core::SplitAxis::Horizontal,
+                    ..
+                } => assert_eq!(logical_target.logical_rect.size.width_units(), 6 * 64),
+                HitTargetKind::Separator {
+                    axis: mandatum_core::SplitAxis::Vertical,
+                    ..
+                } => assert_eq!(logical_target.logical_rect.size.height_units(), 6 * 64),
+                _ => assert_eq!(
+                    logical_target.logical_rect,
+                    viewport(1.0).logical_rect_for_cells(cell_target.rect)
+                ),
+            }
         }
         assert!(
             scene_1x
@@ -1342,6 +1615,120 @@ mod tests {
                 .any(|node| { node.role == PresentationNodeRole::PaneTitle && node.state.focused }),
             "focused title state is typed, not inferred from its label"
         );
+    }
+
+    #[test]
+    fn configured_density_changes_native_rail_geometry_without_changing_cell_projection() {
+        let compact = AppState::new(config(false));
+        let compact_scene = build_workspace_scene_with_viewport(&compact, viewport(1.0));
+        assert_eq!(
+            compact_scene.presentation.density,
+            mandatum_scene::UiDensity::Compact
+        );
+
+        let comfortable = AppState::new(AppConfig {
+            density: mandatum_scene::UiDensity::Comfortable,
+            ..config(false)
+        });
+        let comfortable_scene = build_workspace_scene_with_viewport(&comfortable, viewport(1.0));
+        assert_eq!(
+            comfortable_scene.presentation.density,
+            mandatum_scene::UiDensity::Comfortable
+        );
+        let title_height = |scene: &WorkspaceScene| {
+            scene
+                .presentation
+                .nodes
+                .iter()
+                .find(|node| node.role == PresentationNodeRole::PaneTitle)
+                .expect("pane title")
+                .logical_rect
+                .size
+                .height_units()
+        };
+        assert!(
+            title_height(&compact_scene) < title_height(&comfortable_scene),
+            "compact rails must consume less native vertical material"
+        );
+        assert_eq!(
+            compile_cell_program(&compact_scene, compact.theme()),
+            compile_cell_program(&comfortable_scene, comfortable.theme()),
+            "density is native presentation policy and cannot change PTY/cell geometry"
+        );
+    }
+
+    #[test]
+    fn pane_chrome_projects_typed_badges_and_a_two_pixel_focus_cue() {
+        let mut state = AppState::new(config(false));
+        state.dispatch(CommandId::SplitRight);
+        state.dispatch(CommandId::NewTerminal);
+
+        let scene = build_workspace_scene_with_viewport(&state, viewport(1.0));
+        let program = compile_cell_program(&scene, state.theme());
+        for pane in &scene.panes {
+            let badges = pane
+                .badge_kinds()
+                .into_iter()
+                .filter_map(|kind| {
+                    scene.presentation.nodes.iter().find_map(|node| {
+                        (node.id
+                            == PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Badge(kind)))
+                        .then_some(node.role)
+                    })
+                })
+                .filter_map(|role| match role {
+                    PresentationNodeRole::PaneBadge(kind) => Some(kind),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(badges, pane.badge_kinds());
+            for (kind, rect) in pane.badge_rects() {
+                let node = scene
+                    .presentation
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.id
+                            == PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Badge(kind))
+                    })
+                    .expect("typed badge node");
+                assert_eq!(node.cell_rect, Some(rect));
+                let projected = viewport(1.0).logical_rect_for_cells(rect);
+                assert!(
+                    node.logical_rect.origin.y_units() >= projected.origin.y_units()
+                        && node.logical_rect.bottom_units() <= projected.bottom_units(),
+                    "native density may inset a badge vertically but cannot escape its cell projection"
+                );
+                let text = (rect.x..rect.right())
+                    .filter_map(|x| program.cell_at(x, rect.y))
+                    .filter_map(|cell| match &cell.occupancy {
+                        CellOccupancy::Grapheme(grapheme) => Some(grapheme.as_str()),
+                        CellOccupancy::WideContinuation => None,
+                    })
+                    .collect::<String>();
+                assert_eq!(text, format!(" {} ", kind.label()));
+            }
+
+            let pane_node = scene
+                .presentation
+                .nodes
+                .iter()
+                .find(|node| {
+                    node.id == PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Surface)
+                })
+                .expect("pane node");
+            assert_eq!(pane_node.state.floating, pane.floating);
+        }
+
+        let focus = scene
+            .presentation
+            .nodes
+            .iter()
+            .find(|node| node.role == PresentationNodeRole::FocusIndicator)
+            .expect("focused pane has an explicit non-color cue");
+        assert_eq!(focus.logical_rect.size.width_units(), 2 * 64);
+        assert_eq!(focus.state.tone, mandatum_scene::PresentationTone::Focus);
+        assert_eq!(focus.cell_rect, None);
     }
 
     #[test]
@@ -1431,6 +1818,10 @@ mod tests {
         assert_eq!(
             scene.header.session_name,
             state.workspace().active_session().name()
+        );
+        assert_eq!(
+            scene.header.project_name,
+            state.workspace().active_project_name()
         );
         assert_eq!(scene.header.pane_count, 2);
         assert_eq!(scene.header.focused_pane, PaneId::new("pane-2"));
@@ -1552,6 +1943,23 @@ mod tests {
         // beat separators beat tiled panes.
         assert!(tiled_body < separator);
         assert!(separator < float_body);
+
+        let separator_node = scene
+            .presentation
+            .nodes
+            .iter()
+            .position(|node| node.role == PresentationNodeRole::Separator)
+            .expect("separator presentation node");
+        let floating_node = scene
+            .presentation
+            .nodes
+            .iter()
+            .position(|node| node.role == PresentationNodeRole::Pane && node.state.floating)
+            .expect("floating pane presentation node");
+        assert!(
+            separator_node < floating_node,
+            "floating materials must occlude the tiled separator plane"
+        );
     }
 
     #[test]
@@ -2286,7 +2694,7 @@ mod tests {
             scene.hit_targets.iter().any(|target| {
                 matches!(
                     &target.kind,
-                    HitTargetKind::AttentionSegment { index: 0, pane: Some(pane) } if pane == &pane_id
+                    HitTargetKind::AttentionSegment { index: 0, pane: Some(pane), .. } if pane == &pane_id
                 ) && target.rect == segment.rect
             }),
             "the attention segment must be clickable"
@@ -2337,6 +2745,28 @@ mod tests {
                 "1 approval waiting · agent",
                 "1 task failed · task",
                 "2 agents blocked/failed",
+            ]
+        );
+        assert_eq!(
+            scene
+                .header
+                .attention
+                .iter()
+                .map(|segment| (segment.kind, segment.tone))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    mandatum_scene::AttentionKind::ApprovalWaiting,
+                    mandatum_scene::PresentationTone::Waiting,
+                ),
+                (
+                    mandatum_scene::AttentionKind::TaskFailed,
+                    mandatum_scene::PresentationTone::Failure,
+                ),
+                (
+                    mandatum_scene::AttentionKind::AgentBlockedOrFailed,
+                    mandatum_scene::PresentationTone::Failure,
+                ),
             ]
         );
         assert_eq!(

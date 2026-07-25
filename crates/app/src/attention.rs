@@ -5,12 +5,17 @@
 //! session facts — never blank, never noisy.
 
 use mandatum_core::{AgentStatus, PaneId, PaneKind, Session};
-use mandatum_scene::{AttentionSegment, HeaderScene, SceneRect, cell_program::display_width};
+use mandatum_scene::{
+    AttentionKind, AttentionSegment, HeaderScene, PresentationTone, SceneRect,
+    cell_program::display_width,
+};
 
 use crate::app_state::AppState;
 
 /// One aggregated attention condition before rect resolution.
 struct AttentionItem {
+    kind: AttentionKind,
+    tone: PresentationTone,
     label: String,
     pane: Option<PaneId>,
 }
@@ -49,6 +54,8 @@ fn attention_items(state: &AppState, session: &Session) -> Vec<AttentionItem> {
             "approvals"
         };
         items.push(AttentionItem {
+            kind: AttentionKind::ApprovalWaiting,
+            tone: PresentationTone::Waiting,
             label: format!(
                 "{} {noun} waiting · {}",
                 waiting.len(),
@@ -74,6 +81,8 @@ fn attention_items(state: &AppState, session: &Session) -> Vec<AttentionItem> {
             "tasks"
         };
         items.push(AttentionItem {
+            kind: AttentionKind::TaskFailed,
+            tone: PresentationTone::Failure,
             label: format!(
                 "{} {noun} failed · {}",
                 failed_tasks.len(),
@@ -97,6 +106,8 @@ fn attention_items(state: &AppState, session: &Session) -> Vec<AttentionItem> {
     if stuck_agents > 0 {
         let noun = if stuck_agents == 1 { "agent" } else { "agents" };
         items.push(AttentionItem {
+            kind: AttentionKind::AgentBlockedOrFailed,
+            tone: PresentationTone::Failure,
             label: format!("{stuck_agents} {noun} blocked/failed"),
             pane: None,
         });
@@ -110,6 +121,7 @@ fn attention_items(state: &AppState, session: &Session) -> Vec<AttentionItem> {
 /// text and restyle the segments without recomputing anything.
 pub(crate) fn header_scene(state: &AppState, area: SceneRect) -> HeaderScene {
     let session = state.workspace().active_session();
+    let project_name = state.workspace().active_project_name().to_owned();
     let zoomed = session.layout().zoomed().is_some();
     let items = attention_items(state, session);
 
@@ -134,6 +146,8 @@ pub(crate) fn header_scene(state: &AppState, area: SceneRect) -> HeaderScene {
             let x = area.x.saturating_add(start);
             let clamped_width = width.min(area.right().saturating_sub(x));
             attention.push(AttentionSegment {
+                kind: item.kind,
+                tone: item.tone,
                 rect: SceneRect::new(x, area.y, clamped_width, area.height.min(1)),
                 label: item.label,
                 pane: item.pane,
@@ -147,6 +161,7 @@ pub(crate) fn header_scene(state: &AppState, area: SceneRect) -> HeaderScene {
     HeaderScene {
         area,
         workspace_name: state.workspace().name().to_owned(),
+        project_name,
         session_name: session.name().to_owned(),
         pane_count: session.panes().len(),
         focused_pane: session.focused_pane_id().clone(),

@@ -240,6 +240,7 @@ mod tests {
             workspace.active_project_path(),
             PathBuf::from("/tmp/project")
         );
+        assert_eq!(workspace.active_project_name(), "project");
         assert_eq!(workspace.active_session().panes().len(), 1);
     }
 

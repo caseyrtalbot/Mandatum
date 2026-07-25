@@ -15,10 +15,10 @@ pub use font::{
 };
 pub use presentation_plan::{
     MAX_NATIVE_PLAN_COMMANDS, MAX_NATIVE_PLAN_NODES, MAX_NATIVE_PLAN_TEXT_SCOPES,
-    MAX_NATIVE_PLAN_TRANSITIONS, NativeMaterial, NativeMaterialRole, NativePlanCommand,
-    NativePresentationPlan, NativePresentationPlanError, NativeTextScope, NativeTokenColorRole,
-    NativeTokenSamplerPlan, NativeTokenSwatch, NativeTransition, prepare_native_presentation,
-    prepare_token_sampler,
+    MAX_NATIVE_PLAN_TRANSITIONS, NativeBoundary, NativeMaterial, NativeMaterialRole,
+    NativePlanCommand, NativePresentationPlan, NativePresentationPlanError, NativeTextScope,
+    NativeTokenColorRole, NativeTokenSamplerPlan, NativeTokenSwatch, NativeTransition,
+    prepare_native_presentation, prepare_token_sampler,
 };
 pub use text_metrics::{
     NativeFontFace, NativeTextMetricError, NativeTextMetricIdentity, NativeTextMetricRole,

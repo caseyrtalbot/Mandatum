@@ -27,8 +27,9 @@ use mandatum_native_renderer::{
     prepare_token_sampler,
 };
 use mandatum_scene::{
-    BackingScale, LogicalSize, PaneContent, PhysicalSize as ScenePhysicalSize, SceneCell,
-    SceneCellStyle, SceneColor, SceneSize, Theme, UiColor, ViewportMetrics, WorkspaceScene,
+    BackingScale, LogicalPoint, LogicalSize, PaneContent, PhysicalSize as ScenePhysicalSize,
+    SceneCell, SceneCellStyle, SceneColor, SceneSize, Theme, UiColor, ViewportMetrics,
+    WorkspaceScene,
     input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, PointerButton,
         PointerEvent, PointerKind, TextRange,
@@ -848,6 +849,7 @@ struct App {
     inject_letter: u8,
     modifiers: ModifiersState,
     mouse_pixels: Option<(f64, f64)>,
+    mouse_logical: Option<LogicalPoint>,
     mouse_cell: (u16, u16),
     pressed_pointer_buttons: PressedPointerButtons,
     wheel_cell_remainder: (f64, f64),
@@ -912,6 +914,7 @@ impl App {
             inject_letter: b'a',
             modifiers: ModifiersState::empty(),
             mouse_pixels: None,
+            mouse_logical: None,
             mouse_cell: (0, 0),
             pressed_pointer_buttons: PressedPointerButtons::default(),
             wheel_cell_remainder: (0.0, 0.0),
@@ -1506,8 +1509,13 @@ impl App {
     fn update_mouse_cell(&mut self, x: f64, y: f64) {
         self.mouse_pixels = Some((x, y));
         let Some(gpu) = &self.gpu else {
+            self.mouse_logical = None;
             return;
         };
+        let scale = f64::from(gpu.scale());
+        self.mouse_logical = (scale.is_finite() && scale > 0.0)
+            .then(|| LogicalPoint::from_pixels(x / scale, y / scale).ok())
+            .flatten();
         let Some(size) = self.scene_size() else {
             return;
         };
@@ -1533,18 +1541,28 @@ impl App {
     }
 
     fn send_pointer_input(&mut self, kind: PointerKind, button: Option<PointerButton>) {
-        let redraw = kind != PointerKind::Move || self.host().pointer_move_needs_redraw();
+        let redraw_before = self.host().pointer_move_redraw_state();
         let (column, row) = self.mouse_cell;
-        let input = InputEvent::Pointer(PointerEvent {
+        let pointer = PointerEvent {
             kind,
             button,
             column,
             row,
             mods: neutral_modifiers(self.modifiers),
-        });
-        self.host_mut().handle_input(input);
+        };
+        if let Some(logical_position) = self.mouse_logical {
+            self.host_mut()
+                .handle_pointer_at_logical(pointer, logical_position);
+        } else {
+            self.host_mut().handle_input(InputEvent::Pointer(pointer));
+        }
+        let redraw_after = self.host().pointer_move_redraw_state();
         self.apply_effects();
-        if redraw {
+        if kind != PointerKind::Move
+            || redraw_before.0
+            || redraw_after.0
+            || redraw_before.1 != redraw_after.1
+        {
             self.request_redraw();
         }
     }
@@ -2091,6 +2109,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.update_mouse_cell(position.x, position.y);
                 self.pointer_motion();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if self.host_mut().pointer_left() {
+                    self.request_redraw();
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(button) = neutral_button(button) {

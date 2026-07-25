@@ -1,11 +1,92 @@
 use std::cell::RefCell;
 
-use mandatum_scene::input::PointerButton;
+use mandatum_scene::input::{PointerButton, PointerKind};
 
 use super::{
     FontPreflightOutcome, PressedPointerButtons, apply_renderer_scale_transition,
-    launch_after_font_preflight, parse_launch_options, start_after_preflight,
+    launch_after_font_preflight, logical_pointer_position, native_window_geometry,
+    native_window_title, next_native_window_title, parse_launch_options,
+    pointer_input_needs_redraw, start_after_preflight,
 };
+
+#[test]
+fn native_window_geometry_has_intentional_initial_and_minimum_logical_sizes() {
+    let geometry = native_window_geometry();
+
+    assert_eq!(
+        (geometry.initial.width, geometry.initial.height),
+        (1_200.0, 800.0)
+    );
+    assert_eq!(
+        (geometry.minimum.width, geometry.minimum.height),
+        (720.0, 480.0)
+    );
+}
+
+#[test]
+fn native_window_title_uses_trimmed_scene_project_label_with_blank_fallback() {
+    assert_eq!(native_window_title("mandatum"), "Mandatum — mandatum");
+    assert_eq!(
+        native_window_title("  active project  "),
+        "Mandatum — active project"
+    );
+    assert_eq!(native_window_title(" \t\n"), "Mandatum");
+}
+
+#[test]
+fn native_window_title_updates_only_when_scene_project_label_changes() {
+    assert_eq!(
+        next_native_window_title("Mandatum", "mandatum"),
+        Some("Mandatum — mandatum".to_owned())
+    );
+    assert_eq!(
+        next_native_window_title("Mandatum — mandatum", "mandatum"),
+        None
+    );
+}
+
+#[test]
+fn pointer_move_redraw_policy_tracks_host_owned_separator_hover() {
+    let quiet = (false, None);
+    let first_separator = (false, Some(0));
+    let second_separator = (false, Some(1));
+    let continuous = (true, None);
+
+    assert!(!pointer_input_needs_redraw(PointerKind::Move, quiet, quiet));
+    assert!(pointer_input_needs_redraw(
+        PointerKind::Move,
+        quiet,
+        first_separator
+    ));
+    assert!(pointer_input_needs_redraw(
+        PointerKind::Move,
+        first_separator,
+        quiet
+    ));
+    assert!(
+        !pointer_input_needs_redraw(PointerKind::Move, first_separator, first_separator),
+        "motion within the same separator hover target stays quiet"
+    );
+    assert!(pointer_input_needs_redraw(
+        PointerKind::Move,
+        first_separator,
+        second_separator
+    ));
+    assert!(pointer_input_needs_redraw(
+        PointerKind::Move,
+        continuous,
+        continuous
+    ));
+    assert!(pointer_input_needs_redraw(PointerKind::Drag, quiet, quiet));
+    assert!(pointer_input_needs_redraw(PointerKind::Down, quiet, quiet));
+}
+
+#[test]
+fn physical_cursor_position_is_preserved_as_logical_pixels_at_backing_scale() {
+    let logical = logical_pointer_position(1_000.0, 600.0, 2.0).expect("valid 2x position");
+    assert_eq!((logical.x_pixels(), logical.y_pixels()), (500.0, 300.0));
+    assert!(logical_pointer_position(1.0, 1.0, 0.0).is_none());
+}
 
 #[test]
 fn startup_constructs_host_only_after_window_and_gpu() {

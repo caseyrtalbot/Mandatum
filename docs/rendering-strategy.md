@@ -197,6 +197,17 @@ provisioned static faces; shared baselines and clipping fail closed, and metric
 generation plus slot are part of shaping-cache identity. Direct UI colors come
 from `Theme.ui`, never from terminal ANSI identity.
 
+Phase 3 materializes the everyday workspace through that seam. Canvas,
+tiled-pane, header/status, title, badge, attention, separator, focus, and
+floating-shell primitives come from typed plan commands. Modern app-owned
+chrome/default pane backgrounds no longer repaint those materials through the
+legacy cell path; explicit terminal backgrounds, cursor, selection, raster, and
+overlay behavior remain authoritative. Pane decoration suppression is a typed
+`CellProgram` scope, native text color comes from bounded plan projections, and
+floating shadow fragments are bounded and clipped around later raised panes.
+Compact/comfortable density changes native rail geometry only; terminal cell
+and PTY geometry remain exact.
+
 The current accepted Phase 2 reference set lives under
 `spikes/frontend-wgpu/visual-baselines/casey-m4pro-metal-scale2/`. Its 11
 baseline/metadata pairs record the normalized native surface from clean source

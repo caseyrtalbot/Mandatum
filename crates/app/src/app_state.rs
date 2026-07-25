@@ -18,9 +18,10 @@ use mandatum_core::{
 };
 use mandatum_pty::PtySize;
 use mandatum_scene::{
-    ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind, PaletteOverlay,
-    PaneSceneKind, PromptOverlay, SceneRect, SceneSize, SearchOverlay, SemanticKey,
-    SessionMapOverlay, Theme, TimelineOverlay, ViewportMetrics, WelcomeOverlay, WorkspaceScene,
+    ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind, LogicalHitTarget,
+    LogicalPoint, PaletteOverlay, PaneSceneKind, PromptOverlay, SceneRect, SceneSize,
+    SearchOverlay, SemanticKey, SessionMapOverlay, Theme, TimelineOverlay, ViewportMetrics,
+    WelcomeOverlay, WorkspaceScene,
     cell_program::scalar_range_to_columns,
     input::{
         CompositionEvent, InputEvent, Key, KeyCode, PointerButton, PointerEvent, PointerKind,
@@ -141,6 +142,7 @@ pub struct AppState {
     reject_next_composition_commit: bool,
     keymap: Keymap,
     theme: Theme,
+    density: mandatum_scene::UiDensity,
     reduced_motion: bool,
     /// Surface byte-level PTY diagnostics in the status line. Off by
     /// default: they are noise that would bury meaningful status.
@@ -153,8 +155,17 @@ pub struct AppState {
     /// Hit targets of the last built scene; pointer events resolve against
     /// them in reverse (topmost target wins).
     hit_targets: Vec<HitTarget>,
+    /// Logical-pixel twins of the last built scene's hit targets. Native
+    /// frontends resolve workspace chrome against these while preserving
+    /// the cell event for terminal child coordinates.
+    logical_hit_targets: Vec<LogicalHitTarget>,
+    /// Present only while routing one native logical-pixel pointer event.
+    active_logical_pointer: Option<LogicalPoint>,
     /// The in-flight workspace drag, armed on a button press over a target.
     pointer_drag: Option<PointerDrag>,
+    /// Split boundary currently under an unbuttoned pointer. Pane bodies do
+    /// not participate in workspace hover state.
+    separator_hover: Option<usize>,
     /// While a mouse-capturing child owns the pointer: the pane its button
     /// press was forwarded to (and its inner rect for coordinates), so drags
     /// and the release reach the same child ([L5-GATE]).
@@ -222,6 +233,7 @@ impl AppState {
             reject_next_composition_commit: false,
             keymap: config.keymap,
             theme: config.theme,
+            density: config.density,
             reduced_motion: config.reduced_motion,
             debug_status: config.debug_status,
             user_config_file: config.user_config_file,
@@ -229,7 +241,10 @@ impl AppState {
             frontend_effects: Vec::new(),
             last_copied: None,
             hit_targets: Vec::new(),
+            logical_hit_targets: Vec::new(),
+            active_logical_pointer: None,
             pointer_drag: None,
+            separator_hover: None,
             pointer_forward: None,
             pointer_view: None,
             context_menu: None,
@@ -341,6 +356,10 @@ impl AppState {
     /// frontends must consult this before they ever do.
     pub fn reduced_motion(&self) -> bool {
         self.reduced_motion
+    }
+
+    pub fn density(&self) -> mandatum_scene::UiDensity {
+        self.density
     }
 
     /// The palette overlay scene for the current frame, `None` while the
@@ -715,6 +734,7 @@ impl AppState {
         self.artifacts.refresh_active(&self.workspace, &sender);
         let scene = crate::scene_builder::build_workspace_scene_with_viewport(self, viewport);
         self.hit_targets = scene.hit_targets.clone();
+        self.logical_hit_targets = scene.presentation.logical_hit_targets.clone();
         scene
     }
 
@@ -1198,6 +1218,7 @@ impl AppState {
         let runtime = effective_runtime_settings(&loaded);
         self.keymap = loaded.keymap;
         self.theme = loaded.theme;
+        self.density = loaded.density;
         self.reduced_motion = loaded.reduced_motion;
         self.debug_status = loaded.debug_status;
         self.shell_program = runtime.shell_program;
@@ -2315,6 +2336,23 @@ impl AppState {
     /// resolve against the last scene's hit targets, with child mouse
     /// capture honored ahead of workspace behaviors ([L5-GATE]).
     fn handle_pointer(&mut self, pointer: PointerEvent) {
+        self.handle_pointer_with_active_position(pointer);
+    }
+
+    /// Route a native pointer event against the exact logical-pixel targets
+    /// retained from the last presented scene. The event's cell coordinates
+    /// remain authoritative for terminal child input and drag math.
+    pub(crate) fn handle_pointer_at_logical(
+        &mut self,
+        pointer: PointerEvent,
+        logical_position: LogicalPoint,
+    ) {
+        self.active_logical_pointer = Some(logical_position);
+        self.handle_pointer_with_active_position(pointer);
+        self.active_logical_pointer = None;
+    }
+
+    fn handle_pointer_with_active_position(&mut self, pointer: PointerEvent) {
         if self.context_menu.is_some() {
             self.handle_context_menu_pointer(pointer);
             self.mark_redraw();
@@ -2366,33 +2404,78 @@ impl AppState {
             }
         }
         self.pointer_drag = None;
+        self.separator_hover = None;
     }
 
     pub(crate) fn pointer_move_needs_redraw(&self) -> bool {
         self.context_menu.is_some()
     }
 
+    /// Clear transient separator hover when the platform cursor leaves the
+    /// client area, unless a gesture still owns the pointer.
+    pub(crate) fn pointer_left(&mut self) -> bool {
+        if self.pointer_drag.is_some() {
+            return false;
+        }
+        self.separator_hover.take().is_some()
+    }
+
+    pub(crate) fn hovered_separator(&self) -> Option<usize> {
+        self.separator_hover
+    }
+
+    pub(crate) fn dragged_separator(&self) -> Option<usize> {
+        match self.pointer_drag {
+            Some(PointerDrag::ResizeSplit { split_index, .. }) => Some(split_index),
+            _ => None,
+        }
+    }
+
     pub(crate) fn suspend_scene_interaction(&mut self) {
         self.cancel_pointer_gesture();
         self.hit_targets.clear();
+        self.logical_hit_targets.clear();
+        self.active_logical_pointer = None;
     }
 
     /// Forward unbuttoned motion only when the child under the pointer asked
     /// for any-event mouse reporting. Otherwise the workspace has no hover
     /// behavior outside its modal context menu.
     fn handle_pointer_move(&mut self, pointer: PointerEvent) -> bool {
-        let Some(target) = self.pointer_target(pointer.column, pointer.row) else {
-            return false;
+        let target = self.pointer_target(pointer.column, pointer.row);
+        let next_hover = target.as_ref().and_then(|target| match target.kind {
+            HitTargetKind::Separator { split_index, .. } => Some(split_index),
+            _ => None,
+        });
+        let hover_changed = self.separator_hover != next_hover;
+        self.separator_hover = next_hover;
+        let forwarded = match target {
+            Some(HitTarget {
+                rect,
+                kind: HitTargetKind::PaneBody(pane_id),
+            }) => self.try_forward_pointer(&pane_id, rect, &pointer),
+            _ => false,
         };
-        let HitTargetKind::PaneBody(pane_id) = target.kind else {
-            return false;
-        };
-        self.try_forward_pointer(&pane_id, target.rect, &pointer)
+        hover_changed || forwarded
     }
 
     /// The topmost hit target of the last built scene under a point: the
     /// builder emits targets bottom-up, so the reverse scan wins overlaps.
     fn pointer_target(&self, column: u16, row: u16) -> Option<HitTarget> {
+        if let Some(point) = self.active_logical_pointer {
+            let logical_kind = self
+                .logical_hit_targets
+                .iter()
+                .rev()
+                .find(|target| target.logical_rect.contains(point))
+                .map(|target| &target.kind)?;
+            return self
+                .hit_targets
+                .iter()
+                .rev()
+                .find(|target| &target.kind == logical_kind)
+                .cloned();
+        }
         self.hit_targets
             .iter()
             .rev()
@@ -2402,6 +2485,10 @@ impl AppState {
 
     fn handle_pointer_down(&mut self, pointer: PointerEvent) {
         let target = self.pointer_target(pointer.column, pointer.row);
+        self.separator_hover = target.as_ref().and_then(|target| match target.kind {
+            HitTargetKind::Separator { split_index, .. } => Some(split_index),
+            _ => None,
+        });
 
         // The palette is modal: its rows are clickable, anywhere else closes
         // it, and the press is consumed either way.
@@ -2659,6 +2746,7 @@ impl AppState {
             axis: separator.axis,
             split_area: separator.split_area,
         });
+        self.separator_hover = Some(split_index);
     }
 
     fn handle_pointer_drag(&mut self, pointer: PointerEvent) {
@@ -2673,7 +2761,10 @@ impl AppState {
                 split_index,
                 axis,
                 split_area,
-            }) => self.drag_split(split_index, axis, split_area, pointer),
+            }) => {
+                self.separator_hover = Some(split_index);
+                self.drag_split(split_index, axis, split_area, pointer);
+            }
             Some(PointerDrag::MoveFloat {
                 pane_id,
                 grab_dx,
@@ -2835,6 +2926,12 @@ impl AppState {
             }
             Some(PointerDrag::ResizeSplit { .. } | PointerDrag::MoveFloat { .. }) | None => {}
         }
+        self.separator_hover =
+            self.pointer_target(pointer.column, pointer.row)
+                .and_then(|target| match target.kind {
+                    HitTargetKind::Separator { split_index, .. } => Some(split_index),
+                    _ => None,
+                });
     }
 
     fn handle_pointer_wheel(&mut self, pointer: PointerEvent) {

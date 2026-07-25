@@ -128,12 +128,12 @@ mod tests {
 
     use mandatum_scene::{
         AgentApprovalPrompt, AgentContent, AgentStatus, ArtifactContent, ArtifactFit,
-        ArtifactState, AttentionSegment, ContextMenuEntry, ContextMenuOverlay, EmptyContent,
-        HeaderScene, HelpOverlay, OverlayScene, PaletteEntry, PaletteOverlay, PaneContent, PaneId,
-        PaneScene, PaneSceneKind, PromptOverlay, RasterSurface, SceneCell, SceneCellStyle,
-        SceneRect, SceneSize, SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow,
-        StatusScene, SurfacePosition, TaskContent, TerminalSurface, TimelineEntry, TimelineOverlay,
-        WelcomeEntry, WelcomeOverlay, layout,
+        ArtifactState, AttentionKind, AttentionSegment, ContextMenuEntry, ContextMenuOverlay,
+        EmptyContent, HeaderScene, HelpOverlay, OverlayScene, PaletteEntry, PaletteOverlay,
+        PaneContent, PaneId, PaneScene, PaneSceneKind, PresentationTone, PromptOverlay,
+        RasterSurface, SceneCell, SceneCellStyle, SceneRect, SceneSize, SearchEntry, SearchOverlay,
+        SessionMapOverlay, SessionMapRow, StatusScene, SurfacePosition, TaskContent,
+        TerminalSurface, TimelineEntry, TimelineOverlay, WelcomeEntry, WelcomeOverlay, layout,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -164,6 +164,7 @@ mod tests {
         HeaderScene {
             area: SceneRect::new(0, 0, 60, 1),
             workspace_name: "Mandatum".to_owned(),
+            project_name: "project".to_owned(),
             session_name: "main".to_owned(),
             pane_count: 1,
             focused_pane: PaneId::new("pane-1"),
@@ -419,6 +420,8 @@ mod tests {
         let start = (text.chars().count() - label.chars().count()) as u16;
         with_attention.header.text = text.to_owned();
         with_attention.header.attention = vec![AttentionSegment {
+            kind: AttentionKind::ApprovalWaiting,
+            tone: PresentationTone::Waiting,
             rect: SceneRect::new(start, 0, label.chars().count() as u16, 1),
             label: label.to_owned(),
             pane: Some(PaneId::new("pane-2")),
@@ -469,7 +472,11 @@ mod tests {
         let rows = buffer_rows(&terminal);
         let buffer = terminal.backend().buffer();
 
-        assert!(rows[1].contains("shell | focused | copy"));
+        assert!(rows[1].contains("shell | focused"));
+        assert!(
+            rows[1].contains("copy"),
+            "typed copy badge remains an honest terminal title-rail projection"
+        );
         assert!(
             buffer
                 .cell((1u16, 2u16))

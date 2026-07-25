@@ -15,16 +15,16 @@ use glyphon::{
 // mandatum-terminal-vt: the real app host converts its grids before the
 // snapshot reaches this crate, so no parser type crosses into paint.
 use mandatum_scene::{
-    ArtifactState, CellOccupancy, CellProgram, CellSelection, OverlayScene, PaneContent,
-    ProgramCell, RasterSurface, SceneColor, SceneRect, TerminalPalette, Theme, WorkspaceScene,
-    compile_cell_program, layout,
+    ArtifactState, CellOccupancy, CellProgram, CellSelection, LogicalRect, OverlayScene,
+    PaneContent, ProgramCell, RasterSurface, SceneColor, SceneRect, TerminalPalette,
+    TextPaintScopeKind, Theme, UiColor, WorkspaceScene, compile_cell_program, layout,
 };
 use winit::window::Window;
 
 use crate::row_run::{
     LayoutGlyphFacts, LayoutRunFacts, ResolvedGlyphStyle, RowRun, RowRunAdmission,
-    RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, admit_layout, anchored_fallback_runs,
-    build_row_runs, split_at_span,
+    RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, RowRunStyleRange, admit_layout,
+    anchored_fallback_runs, build_row_runs, split_at_span,
 };
 use crate::shaping_cache::{ShapingCache, ShapingCacheContext, ShapingCacheKey};
 
@@ -797,7 +797,7 @@ fn native_frame_colors(theme: &Theme) -> NativeFrameColors {
 
 #[derive(Debug)]
 struct PreparedCellProgram {
-    cells: Vec<(u16, u16, ResolvedCell)>,
+    cells: Vec<(u16, u16, ResolvedCell, bool)>,
     rows: Vec<RowRun>,
     issues: Vec<RowRunBuildIssue>,
 }
@@ -808,6 +808,286 @@ struct PixelRect {
     y: f32,
     width: f32,
     height: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MaterialQuad {
+    draw_rect: PixelRect,
+    shape_rect: PixelRect,
+    clip: (u32, u32, u32, u32),
+    fill: [f32; 4],
+    boundary: [f32; 4],
+    corner_radius: f32,
+    boundary_width: f32,
+    blur_radius: f32,
+    shadow: bool,
+}
+
+impl MaterialQuad {
+    const FLOATS: usize = 20;
+
+    fn write_instance(self, output: &mut Vec<f32>) {
+        output.extend_from_slice(&[
+            self.draw_rect.x,
+            self.draw_rect.y,
+            self.draw_rect.width,
+            self.draw_rect.height,
+            self.shape_rect.x,
+            self.shape_rect.y,
+            self.shape_rect.width,
+            self.shape_rect.height,
+            self.fill[0],
+            self.fill[1],
+            self.fill[2],
+            self.fill[3],
+            self.boundary[0],
+            self.boundary[1],
+            self.boundary[2],
+            self.boundary[3],
+            self.corner_radius,
+            self.boundary_width,
+            self.blur_radius,
+            if self.shadow { 1.0 } else { 0.0 },
+        ]);
+    }
+}
+
+fn prepare_material_quads(
+    plan: &NativePresentationPlan,
+    scale: f32,
+    surface_width: u32,
+    surface_height: u32,
+) -> Result<Vec<MaterialQuad>, SceneCompileError> {
+    if !scale.is_finite() || scale <= 0.0 || surface_width == 0 || surface_height == 0 {
+        return Ok(Vec::new());
+    }
+    let mut quads = Vec::new();
+    let materials = plan
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            NativePlanCommand::Material(material) => Some(material),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (material_index, material) in materials.iter().enumerate() {
+        let Some(shape_rect) = logical_rect_to_physical(material.logical_rect, scale) else {
+            continue;
+        };
+        let Some(clip) =
+            logical_clip_to_scissor(material.clip, scale, surface_width, surface_height)
+        else {
+            continue;
+        };
+        if let Some(shadows) = material.raised_shadows {
+            for shadow in shadows {
+                let blur_radius = f32::from(shadow.blur_radius) * scale;
+                let shape_rect = PixelRect {
+                    x: shape_rect.x + f32::from(shadow.offset_x) * scale,
+                    y: shape_rect.y + f32::from(shadow.offset_y) * scale,
+                    ..shape_rect
+                };
+                let draw_rect = PixelRect {
+                    x: shape_rect.x - blur_radius,
+                    y: shape_rect.y - blur_radius,
+                    width: shape_rect.width + blur_radius * 2.0,
+                    height: shape_rect.height + blur_radius * 2.0,
+                };
+                let Some(draw_clip) =
+                    pixel_rect_to_scissor(draw_rect, surface_width, surface_height)
+                        .and_then(|draw| intersect_scissors(clip, draw))
+                else {
+                    continue;
+                };
+                let mut visible_clips = vec![draw_clip];
+                for later in materials.iter().skip(material_index + 1) {
+                    if later.raised_shadows.is_none() {
+                        continue;
+                    }
+                    let Some(later_rect) = logical_rect_to_physical(later.logical_rect, scale)
+                        .and_then(|rect| {
+                            pixel_rect_to_scissor(rect, surface_width, surface_height)
+                        })
+                    else {
+                        continue;
+                    };
+                    let mut next = Vec::with_capacity(visible_clips.len().saturating_mul(2));
+                    for visible in visible_clips {
+                        next.extend(subtract_scissor(visible, later_rect));
+                        enforce_resource_limit(
+                            "native material quad fragments",
+                            quads.len().saturating_add(next.len()),
+                            MAX_GPU_CELL_INSTRUCTIONS,
+                        )?;
+                    }
+                    visible_clips = next;
+                }
+                for visible_clip in visible_clips {
+                    quads.push(MaterialQuad {
+                        draw_rect,
+                        shape_rect,
+                        clip: visible_clip,
+                        fill: ui_color_f32(shadow.color),
+                        boundary: [0.0; 4],
+                        corner_radius: material.corner_radius_units as f32 / 64.0 * scale,
+                        boundary_width: 0.0,
+                        blur_radius,
+                        shadow: true,
+                    });
+                    enforce_resource_limit(
+                        "native material quad fragments",
+                        quads.len(),
+                        MAX_GPU_CELL_INSTRUCTIONS,
+                    )?;
+                }
+            }
+        }
+        quads.push(MaterialQuad {
+            draw_rect: shape_rect,
+            shape_rect,
+            clip,
+            fill: ui_color_f32(material.color),
+            boundary: material
+                .boundary
+                .map(|boundary| ui_color_f32(boundary.color))
+                .unwrap_or([0.0; 4]),
+            corner_radius: material.corner_radius_units as f32 / 64.0 * scale,
+            boundary_width: material
+                .boundary
+                .map(|boundary| boundary.width_units as f32 / 64.0 * scale)
+                .unwrap_or(0.0),
+            blur_radius: 0.0,
+            shadow: false,
+        });
+        enforce_resource_limit(
+            "native material quad fragments",
+            quads.len(),
+            MAX_GPU_CELL_INSTRUCTIONS,
+        )?;
+    }
+    Ok(quads)
+}
+
+fn logical_rect_to_physical(rect: LogicalRect, scale: f32) -> Option<PixelRect> {
+    let unit_scale = scale / 64.0;
+    let x = rect.origin.x_units() as f32 * unit_scale;
+    let y = rect.origin.y_units() as f32 * unit_scale;
+    let width = rect.size.width_units() as f32 * unit_scale;
+    let height = rect.size.height_units() as f32 * unit_scale;
+    (x.is_finite()
+        && y.is_finite()
+        && width.is_finite()
+        && height.is_finite()
+        && width > 0.0
+        && height > 0.0)
+        .then_some(PixelRect {
+            x,
+            y,
+            width,
+            height,
+        })
+}
+
+fn logical_clip_to_scissor(
+    clip: LogicalRect,
+    scale: f32,
+    surface_width: u32,
+    surface_height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let rect = logical_rect_to_physical(clip, scale)?;
+    let left = rect.x.floor().max(0.0).min(surface_width as f32) as u32;
+    let top = rect.y.floor().max(0.0).min(surface_height as f32) as u32;
+    let right = (rect.x + rect.width)
+        .ceil()
+        .max(0.0)
+        .min(surface_width as f32) as u32;
+    let bottom = (rect.y + rect.height)
+        .ceil()
+        .max(0.0)
+        .min(surface_height as f32) as u32;
+    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+}
+
+fn pixel_rect_to_scissor(
+    rect: PixelRect,
+    surface_width: u32,
+    surface_height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let left = rect.x.floor().max(0.0).min(surface_width as f32) as u32;
+    let top = rect.y.floor().max(0.0).min(surface_height as f32) as u32;
+    let right = (rect.x + rect.width)
+        .ceil()
+        .max(0.0)
+        .min(surface_width as f32) as u32;
+    let bottom = (rect.y + rect.height)
+        .ceil()
+        .max(0.0)
+        .min(surface_height as f32) as u32;
+    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+}
+
+fn intersect_scissors(
+    left: (u32, u32, u32, u32),
+    right: (u32, u32, u32, u32),
+) -> Option<(u32, u32, u32, u32)> {
+    let x = left.0.max(right.0);
+    let y = left.1.max(right.1);
+    let right_edge = left
+        .0
+        .saturating_add(left.2)
+        .min(right.0.saturating_add(right.2));
+    let bottom_edge = left
+        .1
+        .saturating_add(left.3)
+        .min(right.1.saturating_add(right.3));
+    (right_edge > x && bottom_edge > y).then_some((x, y, right_edge - x, bottom_edge - y))
+}
+
+fn subtract_scissor(
+    base: (u32, u32, u32, u32),
+    cut: (u32, u32, u32, u32),
+) -> Vec<(u32, u32, u32, u32)> {
+    let Some(overlap) = intersect_scissors(base, cut) else {
+        return vec![base];
+    };
+    let base_right = base.0 + base.2;
+    let base_bottom = base.1 + base.3;
+    let overlap_right = overlap.0 + overlap.2;
+    let overlap_bottom = overlap.1 + overlap.3;
+    let mut pieces = Vec::with_capacity(4);
+    if overlap.1 > base.1 {
+        pieces.push((base.0, base.1, base.2, overlap.1 - base.1));
+    }
+    if overlap_bottom < base_bottom {
+        pieces.push((
+            base.0,
+            overlap_bottom,
+            base.2,
+            base_bottom - overlap_bottom,
+        ));
+    }
+    if overlap.0 > base.0 {
+        pieces.push((base.0, overlap.1, overlap.0 - base.0, overlap.3));
+    }
+    if overlap_right < base_right {
+        pieces.push((
+            overlap_right,
+            overlap.1,
+            base_right - overlap_right,
+            overlap.3,
+        ));
+    }
+    pieces
+}
+
+fn ui_color_f32(color: UiColor) -> [f32; 4] {
+    let [red, green, blue, alpha] = color.to_array();
+    [
+        f32::from(red) / 255.0,
+        f32::from(green) / 255.0,
+        f32::from(blue) / 255.0,
+        f32::from(alpha) / 255.0,
+    ]
 }
 
 fn contain_fit(source_width: u32, source_height: u32, target: PixelRect) -> Option<PixelRect> {
@@ -944,25 +1224,135 @@ fn resolved_glyph_style(cell: &ProgramCell, theme: &Theme) -> ResolvedGlyphStyle
 
 fn prepare_cell_program(
     program: &CellProgram,
+    scene: &WorkspaceScene,
     theme: &Theme,
+    presentation_plan: &NativePresentationPlan,
 ) -> Result<PreparedCellProgram, SceneCompileError> {
     let mut topmost = BTreeMap::new();
-    for (x, y, cell) in program.cells() {
-        topmost.insert((y, x), resolve_program_cell(cell, theme));
+    for (x, y, cell, scope) in program.scoped_cells() {
+        topmost.insert(
+            (y, x),
+            (
+                resolve_program_cell(cell, theme),
+                should_paint_legacy_background(scene, x, y, cell, scope.kind),
+            ),
+        );
     }
 
     let cells = topmost
         .iter()
-        .map(|(&(y, x), cell)| (x, y, cell.clone()))
+        .map(|(&(y, x), (cell, background_visible))| (x, y, cell.clone(), *background_visible))
         .collect::<Vec<_>>();
-    let plan = build_row_runs(program, |cell| resolved_glyph_style(cell, theme))
+    let mut plan = build_row_runs(program, |cell| resolved_glyph_style(cell, theme))
         .map_err(text_program_error)?;
+    plan.runs
+        .retain(|run| run.paint_scope.kind != TextPaintScopeKind::PaneDecoration);
+    apply_native_text_scope_colors(&mut plan.runs, scene, presentation_plan)?;
     enforce_resource_limit("text buffers", plan.runs.len(), MAX_GPU_TEXT_BUFFERS)?;
     Ok(PreparedCellProgram {
         cells,
         rows: plan.runs,
         issues: plan.issues,
     })
+}
+
+fn apply_native_text_scope_colors(
+    rows: &mut [RowRun],
+    scene: &WorkspaceScene,
+    plan: &NativePresentationPlan,
+) -> Result<(), SceneCompileError> {
+    let cell_count = usize::from(scene.size.width)
+        .checked_mul(usize::from(scene.size.height))
+        .unwrap_or(0);
+    let mut colors = vec![None; cell_count];
+    let text_scopes = plan.commands().iter().filter_map(|command| match command {
+        NativePlanCommand::Text(scope) => scope.cell_rect.map(|rect| (rect, scope.color.to_array())),
+        _ => None,
+    });
+    let mut aggregate_cells = 0usize;
+    for (rect, color) in text_scopes {
+        let area = usize::from(rect.width).saturating_mul(usize::from(rect.height));
+        aggregate_cells = aggregate_cells.saturating_add(area);
+        enforce_resource_limit(
+            "native text-scope cell projections",
+            aggregate_cells,
+            MAX_GPU_CELL_INSTRUCTIONS,
+        )?;
+        for y in rect.y..rect.bottom().min(scene.size.height) {
+            let row = usize::from(y) * usize::from(scene.size.width);
+            for x in rect.x..rect.right().min(scene.size.width) {
+                colors[row + usize::from(x)] = Some(color);
+            }
+        }
+    }
+
+    let frame_width = usize::from(scene.size.width);
+    for row in rows {
+        let original = row.style_ranges.clone();
+        let mut ranges: Vec<RowRunStyleRange> = Vec::with_capacity(row.byte_cells.len());
+        for span in &row.byte_cells {
+            let mut style = original
+                .iter()
+                .find(|range| {
+                    range.bytes.start <= span.bytes.start && span.bytes.end <= range.bytes.end
+                })
+                .map(|range| range.style)
+                .unwrap_or(row.glyph_style);
+            let x = row.x.saturating_add(span.cells.start);
+            let index = usize::from(row.y)
+                .checked_mul(frame_width)
+                .and_then(|base| base.checked_add(usize::from(x)));
+            if let Some(color) = index.and_then(|index| colors.get(index)).copied().flatten() {
+                style.foreground = color;
+            }
+            if let Some(previous) = ranges.last_mut()
+                && previous.style == style
+                && previous.bytes.end == span.bytes.start
+            {
+                previous.bytes.end = span.bytes.end;
+            } else {
+                ranges.push(RowRunStyleRange {
+                    bytes: span.bytes.clone(),
+                    style,
+                });
+            }
+        }
+        if !ranges.is_empty() {
+            row.glyph_style = ranges[0].style;
+            row.style_ranges = ranges;
+        }
+    }
+    Ok(())
+}
+
+fn should_paint_legacy_background(
+    scene: &WorkspaceScene,
+    x: u16,
+    y: u16,
+    cell: &ProgramCell,
+    scope: TextPaintScopeKind,
+) -> bool {
+    if scene.presentation == mandatum_scene::ScenePresentation::default() {
+        return true;
+    }
+    if cell.cursor || cell.selection.is_some() || cell.raster_layer.is_some() {
+        return true;
+    }
+    match scope {
+        TextPaintScopeKind::Header
+        | TextPaintScopeKind::Status
+        | TextPaintScopeKind::PaneChrome
+        | TextPaintScopeKind::PaneDecoration => false,
+        TextPaintScopeKind::PaneContent => {
+            cell.style.background != SceneColor::Default
+                || scene
+                    .presentation
+                    .terminal_viewports
+                    .iter()
+                    .any(|mapping| mapping.visible_cell_rect.contains(x, y))
+        }
+        TextPaintScopeKind::Overlay | TextPaintScopeKind::TextInput => true,
+    }
 }
 
 fn glyph_attrs<'a>(style: ResolvedGlyphStyle, family: &'a str) -> Attrs<'a> {
@@ -1295,9 +1685,12 @@ pub struct GpuText {
 
     // Solid-quad pipeline.
     quad_pipeline: wgpu::RenderPipeline,
+    material_pipeline: wgpu::RenderPipeline,
     unit_buf: wgpu::Buffer,
     inst_buf: wgpu::Buffer,
     inst_capacity_floats: usize,
+    material_inst_buf: wgpu::Buffer,
+    material_inst_capacity_floats: usize,
     res_buf: wgpu::Buffer,
     res_bind_group: wgpu::BindGroup,
 
@@ -1462,6 +1855,10 @@ impl GpuText {
             label: Some("quad-shader"),
             source: wgpu::ShaderSource::Wgsl(QUAD_WGSL.into()),
         });
+        let material_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("native-material-shader"),
+            source: wgpu::ShaderSource::Wgsl(MATERIAL_WGSL.into()),
+        });
         let res_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("resolution-uniform"),
             size: 16,
@@ -1519,6 +1916,52 @@ impl GpuText {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        const MATERIAL_INST_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+            1 => Float32x4,
+            2 => Float32x4,
+            3 => Float32x4,
+            4 => Float32x4,
+            5 => Float32x4
+        ];
+        let material_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("native-material-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &material_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 8,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &UNIT_ATTRS,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: (MaterialQuad::FLOATS * 4) as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &MATERIAL_INST_ATTRS,
+                    }),
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &material_shader,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -1637,6 +2080,13 @@ impl GpuText {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let material_inst_capacity_floats = MaterialQuad::FLOATS * 4096;
+        let material_inst_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("native-material-instances"),
+            size: (material_inst_capacity_floats * 4) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let raster_inst_capacity_floats = 4 * MAX_GPU_PANES;
         let raster_inst_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("artifact-raster-instances"),
@@ -1678,9 +2128,12 @@ impl GpuText {
             raster_cache_entries_high_water: 0,
             raster_cache_bytes_high_water: 0,
             quad_pipeline,
+            material_pipeline,
             unit_buf,
             inst_buf,
             inst_capacity_floats,
+            material_inst_buf,
+            material_inst_capacity_floats,
             res_buf,
             res_bind_group,
             raster_pipeline,
@@ -2230,7 +2683,39 @@ impl GpuText {
         }
         let frame_prepare_started = Instant::now();
         let prepared = prepare_scene(scene, theme)?;
-        let program = prepare_cell_program(prepared.cell_program(), theme)?;
+        let program = prepare_cell_program(
+            prepared.cell_program(),
+            scene,
+            theme,
+            prepared.presentation_plan(),
+        )?;
+        let material_quads = prepare_material_quads(
+            prepared.presentation_plan(),
+            self.scale,
+            self.config.width,
+            self.config.height,
+        )?;
+        let mut material_instances =
+            Vec::with_capacity(material_quads.len().saturating_mul(MaterialQuad::FLOATS));
+        for quad in &material_quads {
+            quad.write_instance(&mut material_instances);
+        }
+        if material_instances.len() > self.material_inst_capacity_floats {
+            self.material_inst_capacity_floats = material_instances.len().next_power_of_two();
+            self.material_inst_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("native-material-instances"),
+                size: (self.material_inst_capacity_floats * 4) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !material_instances.is_empty() {
+            self.queue.write_buffer(
+                &self.material_inst_buf,
+                0,
+                bytes_of_slice(&material_instances),
+            );
+        }
         let frame_colors = native_frame_colors(theme);
         self.sync_raster_cache(prepared.artifacts());
         self.sync_shaping_cache_palette(theme.terminal_palette);
@@ -2247,7 +2732,10 @@ impl GpuText {
         // only translates final topmost cells into solid backgrounds and
         // glyphon rows.
         let mut quads = Vec::with_capacity(program.cells.len().saturating_mul(8));
-        for (x, y, cell) in &program.cells {
+        for (x, y, cell, background_visible) in &program.cells {
+            if !background_visible {
+                continue;
+            }
             push_quad(
                 &mut quads,
                 f32::from(*x) * self.cell_w,
@@ -2430,6 +2918,21 @@ impl GpuText {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if !material_quads.is_empty() {
+                pass.set_pipeline(&self.material_pipeline);
+                pass.set_bind_group(0, &self.res_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.unit_buf.slice(..));
+                pass.set_vertex_buffer(1, self.material_inst_buf.slice(..));
+                for (instance, quad) in material_quads.iter().enumerate() {
+                    if quad.shadow {
+                        continue;
+                    }
+                    let (x, y, width, height) = quad.clip;
+                    pass.set_scissor_rect(x, y, width, height);
+                    pass.draw(0..4, instance as u32..instance as u32 + 1);
+                }
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            }
             if instance_count > 0 {
                 pass.set_pipeline(&self.quad_pipeline);
                 pass.set_bind_group(0, &self.res_bind_group, &[]);
@@ -2461,6 +2964,21 @@ impl GpuText {
                         pass.set_scissor_rect(x, y, width, height);
                         pass.draw(0..4, instance as u32..instance as u32 + 1);
                     }
+                }
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            }
+            if material_quads.iter().any(|quad| quad.shadow) {
+                pass.set_pipeline(&self.material_pipeline);
+                pass.set_bind_group(0, &self.res_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.unit_buf.slice(..));
+                pass.set_vertex_buffer(1, self.material_inst_buf.slice(..));
+                for (instance, quad) in material_quads.iter().enumerate() {
+                    if !quad.shadow {
+                        continue;
+                    }
+                    let (x, y, width, height) = quad.clip;
+                    pass.set_scissor_rect(x, y, width, height);
+                    pass.draw(0..4, instance as u32..instance as u32 + 1);
                 }
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             }
@@ -2673,6 +3191,68 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+const MATERIAL_WGSL: &str = r#"
+struct Res { size: vec4<f32> };
+@group(0) @binding(0) var<uniform> res: Res;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) pixel: vec2<f32>,
+    @location(1) shape: vec4<f32>,
+    @location(2) fill: vec4<f32>,
+    @location(3) boundary: vec4<f32>,
+    @location(4) params: vec4<f32>,
+};
+
+@vertex
+fn vs(@location(0) unit: vec2<f32>,
+      @location(1) draw_rect: vec4<f32>,
+      @location(2) shape_rect: vec4<f32>,
+      @location(3) fill: vec4<f32>,
+      @location(4) boundary: vec4<f32>,
+      @location(5) params: vec4<f32>) -> VOut {
+    let px = draw_rect.xy + unit * draw_rect.zw;
+    let ndc = vec2<f32>(px.x / res.size.x * 2.0 - 1.0, 1.0 - px.y / res.size.y * 2.0);
+    var out: VOut;
+    out.pos = vec4<f32>(ndc, 0.0, 1.0);
+    out.pixel = px;
+    out.shape = shape_rect;
+    out.fill = fill;
+    out.boundary = boundary;
+    out.params = params;
+    return out;
+}
+
+fn rounded_box_distance(pixel: vec2<f32>, rect: vec4<f32>, radius: f32) -> f32 {
+    let half_size = rect.zw * 0.5;
+    let center = rect.xy + half_size;
+    let bounded_radius = min(max(radius, 0.0), min(half_size.x, half_size.y));
+    let q = abs(pixel - center) - (half_size - vec2<f32>(bounded_radius));
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - bounded_radius;
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4<f32> {
+    let distance = rounded_box_distance(in.pixel, in.shape, in.params.x);
+    let blur = max(in.params.z, 0.0);
+    if in.params.w > 0.5 {
+        let softness = max(blur, 0.75);
+        let outside = smoothstep(-0.75, 0.75, distance);
+        let alpha = (1.0 - smoothstep(0.0, softness, distance)) * outside;
+        return vec4<f32>(in.fill.rgb, in.fill.a * alpha);
+    }
+
+    let edge_alpha = 1.0 - smoothstep(-0.75, 0.75, distance);
+    let boundary_width = max(in.params.y, 0.0);
+    var color = in.fill;
+    if boundary_width > 0.0 {
+        let boundary_mix = smoothstep(-boundary_width - 0.75, -boundary_width + 0.75, distance);
+        color = mix(in.fill, in.boundary, boundary_mix);
+    }
+    return vec4<f32>(color.rgb, color.a * edge_alpha);
+}
+"#;
+
 const RASTER_WGSL: &str = r#"
 struct Res { size: vec4<f32> };
 @group(0) @binding(0) var<uniform> res: Res;
@@ -2705,10 +3285,355 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 mod tests {
     use super::*;
     use mandatum_scene::{
-        ArtifactContent, ArtifactFit, ArtifactState, EmptyContent, HeaderScene, OverlayScene,
-        PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind, RasterSurface, SceneCell,
-        SceneRect, SceneSize, StatusScene, TerminalSurface,
+        ArtifactContent, ArtifactFit, ArtifactState, BackingScale, EmptyContent, HeaderScene,
+        LogicalSize, OverlayScene, PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind,
+        PhysicalSize, PresentationNode, PresentationNodeId, PresentationNodeRole,
+        PresentationNodeState, RasterSurface, SceneCell, ScenePresentation, SceneRect, SceneSize,
+        StatusScene, TerminalProjection, TerminalSurface, TerminalViewportMapping, ViewportMetrics,
+        WorkspaceNodePart,
     };
+
+    #[test]
+    fn native_material_plan_converts_logical_geometry_to_clipped_physical_quads() {
+        let mut scene = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let logical_rect = LogicalRect::from_units(4 * 64, 6 * 64, 200 * 64, 100 * 64);
+        scene.presentation = ScenePresentation {
+            viewport: Some(
+                ViewportMetrics::new(
+                    LogicalSize::from_units(800 * 64, 600 * 64),
+                    PhysicalSize::new(1_600, 1_200),
+                    BackingScale::new(2.0).unwrap(),
+                    LogicalSize::from_units(8 * 64, 20 * 64),
+                )
+                .unwrap(),
+            ),
+            nodes: vec![PresentationNode {
+                id: PresentationNodeId::workspace(WorkspaceNodePart::Surface),
+                parent: None,
+                role: PresentationNodeRole::Pane,
+                state: PresentationNodeState {
+                    floating: true,
+                    ..PresentationNodeState::default()
+                },
+                logical_rect,
+                cell_rect: Some(SceneRect::new(0, 0, 25, 5)),
+                terminal_projection: TerminalProjection::CellRegions(vec![SceneRect::new(
+                    0, 0, 25, 5,
+                )]),
+            }],
+            ..ScenePresentation::default()
+        };
+
+        let plan = prepare_native_presentation(&scene, &Theme::default()).unwrap();
+        let quads = prepare_material_quads(&plan, 2.0, 1_600, 1_200).unwrap();
+
+        assert_eq!(quads.len(), 3);
+        assert!(quads[0].shadow);
+        assert!(quads[1].shadow);
+        assert!(quads[0].draw_rect.width > quads[0].shape_rect.width);
+        assert!(quads[1].draw_rect.height > quads[1].shape_rect.height);
+        let surface = quads[2];
+        assert!(!surface.shadow);
+        assert_eq!(
+            surface.draw_rect,
+            PixelRect {
+                x: 8.0,
+                y: 12.0,
+                width: 400.0,
+                height: 200.0,
+            }
+        );
+        assert_eq!(surface.shape_rect, surface.draw_rect);
+        assert_eq!(surface.clip, (8, 12, 400, 200));
+        assert_eq!(
+            surface.fill,
+            ui_color_f32(Theme::default().ui.palette.pane_surface)
+        );
+        assert_eq!(surface.corner_radius, 20.0);
+        assert_eq!(surface.boundary_width, 2.0);
+        assert_eq!(surface.blur_radius, 0.0);
+    }
+
+    #[test]
+    fn shadow_scissors_exclude_later_floating_surfaces_without_losing_surrounding_shadow() {
+        let base = (0, 0, 100, 100);
+        let later_floating_surface = (25, 25, 50, 50);
+        let visible = subtract_scissor(base, later_floating_surface);
+
+        assert_eq!(visible.len(), 4);
+        assert!(
+            visible
+                .iter()
+                .all(|piece| intersect_scissors(*piece, later_floating_surface).is_none())
+        );
+        assert_eq!(
+            visible
+                .iter()
+                .map(|(_, _, width, height)| width * height)
+                .sum::<u32>(),
+            7_500
+        );
+    }
+
+    #[test]
+    fn semantic_materials_replace_only_default_nonterminal_backgrounds() {
+        let mut scene = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let pane_id = scene.panes[0].id.clone();
+        scene.presentation.terminal_viewports = vec![TerminalViewportMapping {
+            node_id: PresentationNodeId::pane(
+                pane_id.clone(),
+                mandatum_scene::PaneNodePart::Output,
+            ),
+            pane_id,
+            pty_size: SceneSize::new(2, 1),
+            visible_cell_rect: SceneRect::new(1, 2, 2, 1),
+            logical_rect: LogicalRect::from_units(8 * 64, 40 * 64, 16 * 64, 20 * 64),
+            first_visible_surface_row: 0,
+        }];
+        let default_cell = ProgramCell {
+            occupancy: CellOccupancy::Grapheme(" ".to_owned()),
+            style: mandatum_scene::SceneCellStyle::default(),
+            selection: None,
+            cursor: false,
+            raster_layer: None,
+        };
+
+        assert!(!should_paint_legacy_background(
+            &scene,
+            0,
+            0,
+            &default_cell,
+            TextPaintScopeKind::Header
+        ));
+        assert!(!should_paint_legacy_background(
+            &scene,
+            0,
+            1,
+            &default_cell,
+            TextPaintScopeKind::PaneChrome
+        ));
+        assert!(should_paint_legacy_background(
+            &scene,
+            1,
+            2,
+            &default_cell,
+            TextPaintScopeKind::PaneContent
+        ));
+        assert!(!should_paint_legacy_background(
+            &scene,
+            4,
+            2,
+            &default_cell,
+            TextPaintScopeKind::PaneContent
+        ));
+
+        let cursor_cell = ProgramCell {
+            cursor: true,
+            ..default_cell.clone()
+        };
+        assert!(should_paint_legacy_background(
+            &scene,
+            4,
+            2,
+            &cursor_cell,
+            TextPaintScopeKind::PaneContent
+        ));
+        let custom_background = ProgramCell {
+            style: mandatum_scene::SceneCellStyle {
+                background: SceneColor::Rgb(12, 34, 56),
+                ..mandatum_scene::SceneCellStyle::default()
+            },
+            ..default_cell
+        };
+        assert!(should_paint_legacy_background(
+            &scene,
+            4,
+            2,
+            &custom_background,
+            TextPaintScopeKind::PaneContent
+        ));
+        assert!(
+            !should_paint_legacy_background(
+                &scene,
+                0,
+                0,
+                &custom_background,
+                TextPaintScopeKind::Header
+            ),
+            "native chrome material owns even explicitly colored legacy header cells"
+        );
+
+        let mut modern_without_terminal_projection = scene.clone();
+        modern_without_terminal_projection
+            .presentation
+            .terminal_viewports
+            .clear();
+        modern_without_terminal_projection.presentation.viewport = Some(
+            ViewportMetrics::new(
+                LogicalSize::from_units(640 * 64, 480 * 64),
+                PhysicalSize::new(1_280, 960),
+                BackingScale::new(2.0).unwrap(),
+                LogicalSize::from_units(8 * 64, 20 * 64),
+            )
+            .unwrap(),
+        );
+        assert!(!should_paint_legacy_background(
+            &modern_without_terminal_projection,
+            1,
+            2,
+            &ProgramCell {
+                occupancy: CellOccupancy::Grapheme(" ".to_owned()),
+                style: mandatum_scene::SceneCellStyle::default(),
+                selection: None,
+                cursor: false,
+                raster_layer: None,
+            },
+            TextPaintScopeKind::PaneContent
+        ));
+
+        let mut legacy_fixture = modern_without_terminal_projection;
+        legacy_fixture.presentation = mandatum_scene::ScenePresentation::default();
+        assert!(should_paint_legacy_background(
+            &legacy_fixture,
+            1,
+            2,
+            &ProgramCell {
+                occupancy: CellOccupancy::Grapheme(" ".to_owned()),
+                style: mandatum_scene::SceneCellStyle::default(),
+                selection: None,
+                cursor: false,
+                raster_layer: None,
+            },
+            TextPaintScopeKind::PaneContent
+        ));
+    }
+
+    #[test]
+    fn app_owned_chrome_glyphs_use_ui_palette_and_typed_tones_without_label_parsing() {
+        let mut scene = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let pane_id = scene.panes[0].id.clone();
+        let badge_rect = scene.panes[0]
+            .badge_rects()
+            .into_iter()
+            .find(|(kind, _)| *kind == mandatum_scene::PaneBadgeKind::Terminal)
+            .expect("terminal badge rect")
+            .1;
+        let make_node = |id: PresentationNodeId,
+                         role: PresentationNodeRole,
+                         state: PresentationNodeState,
+                         rect: SceneRect| PresentationNode {
+            id,
+            parent: None,
+            role,
+            state,
+            logical_rect: LogicalRect::from_units(
+                i64::from(rect.x) * 8 * 64,
+                i64::from(rect.y) * 20 * 64,
+                u64::from(rect.width) * 8 * 64,
+                u64::from(rect.height) * 20 * 64,
+            ),
+            cell_rect: Some(rect),
+            terminal_projection: TerminalProjection::CellRegions(vec![rect]),
+        };
+        scene.presentation.nodes = vec![
+            make_node(
+                PresentationNodeId::workspace(WorkspaceNodePart::Header),
+                PresentationNodeRole::Header,
+                PresentationNodeState::default(),
+                scene.header.area,
+            ),
+            make_node(
+                PresentationNodeId::workspace(WorkspaceNodePart::Status),
+                PresentationNodeRole::Status,
+                PresentationNodeState::default(),
+                scene.status.area,
+            ),
+            make_node(
+                PresentationNodeId::pane(pane_id.clone(), mandatum_scene::PaneNodePart::Title),
+                PresentationNodeRole::PaneTitle,
+                PresentationNodeState {
+                    focused: true,
+                    ..PresentationNodeState::default()
+                },
+                SceneRect::new(0, 1, 80, 1),
+            ),
+            make_node(
+                PresentationNodeId::pane(
+                    pane_id,
+                    mandatum_scene::PaneNodePart::Badge(mandatum_scene::PaneBadgeKind::Terminal),
+                ),
+                PresentationNodeRole::PaneBadge(mandatum_scene::PaneBadgeKind::Terminal),
+                PresentationNodeState {
+                    tone: mandatum_scene::PresentationTone::AgentIdentity,
+                    ..PresentationNodeState::default()
+                },
+                badge_rect,
+            ),
+        ];
+        scene.presentation.viewport = Some(
+            ViewportMetrics::new(
+                LogicalSize::from_units(640 * 64, 480 * 64),
+                PhysicalSize::new(1_280, 960),
+                BackingScale::new(2.0).unwrap(),
+                LogicalSize::from_units(8 * 64, 20 * 64),
+            )
+            .unwrap(),
+        );
+        let theme = Theme::default();
+        let program = compile_cell_program(&scene, &theme);
+        let presentation_plan = prepare_native_presentation(&scene, &theme).unwrap();
+        let translated =
+            prepare_cell_program(&program, &scene, &theme, &presentation_plan).unwrap();
+        assert!(
+            translated
+                .rows
+                .iter()
+                .all(|run| run.paint_scope.kind != TextPaintScopeKind::PaneDecoration),
+            "typed terminal-parity pane decoration never reaches native shaping"
+        );
+        let header = translated
+            .rows
+            .iter()
+            .find(|run| run.paint_scope.kind == TextPaintScopeKind::Header)
+            .expect("header row");
+        let status = translated
+            .rows
+            .iter()
+            .find(|run| run.paint_scope.kind == TextPaintScopeKind::Status)
+            .expect("status row");
+        let title = translated
+            .rows
+            .iter()
+            .find(|run| run.paint_scope.kind == TextPaintScopeKind::PaneChrome)
+            .expect("pane title row");
+        let badge = translated
+            .rows
+            .iter()
+            .find(|run| {
+                run.paint_scope.kind == TextPaintScopeKind::PaneChrome
+                    && run.x >= badge_rect.x
+                    && run.x < badge_rect.right()
+            })
+            .expect("aligned badge glyph row");
+
+        assert_eq!(
+            header.style_ranges[0].style.foreground,
+            theme.ui.palette.text_primary.to_array()
+        );
+        assert_eq!(
+            status.style_ranges[0].style.foreground,
+            theme.ui.palette.text_secondary.to_array()
+        );
+        assert_eq!(
+            title.style_ranges[0].style.foreground,
+            theme.ui.palette.focus.to_array()
+        );
+        assert_eq!(
+            badge.style_ranges[0].style.foreground,
+            theme.ui.palette.agent_identity.to_array(),
+            "the aligned badge cell rect must override the title rail glyph tone"
+        );
+    }
 
     #[test]
     fn row_buffer_pool_grows_to_the_program_and_retains_high_water_capacity() {
@@ -3503,11 +4428,17 @@ mod tests {
         let theme = Theme::default();
         let prepared = prepare_scene(&scene, &theme).unwrap();
 
-        let translated = prepare_cell_program(prepared.cell_program(), &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+        )
+        .unwrap();
         let final_cells = translated
             .cells
             .iter()
-            .filter(|(x, y, _)| (*x, *y) == (3, 6))
+            .filter(|(x, y, _, _)| (*x, *y) == (3, 6))
             .collect::<Vec<_>>();
 
         assert_eq!(final_cells.len(), 1);
@@ -3545,7 +4476,13 @@ mod tests {
         let scene = scene(vec![pane]);
         let theme = Theme::default();
         let prepared = prepare_scene(&scene, &theme).unwrap();
-        let translated = prepare_cell_program(prepared.cell_program(), &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+        )
+        .unwrap();
         let inner = layout::pane_inner_rect(scene.panes[0].area);
         let runs = translated
             .rows
@@ -3585,7 +4522,13 @@ mod tests {
         let scene = scene(vec![pane]);
         let theme = Theme::default();
         let prepared = prepare_scene(&scene, &theme).unwrap();
-        let translated = prepare_cell_program(prepared.cell_program(), &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+        )
+        .unwrap();
         let row = translated
             .rows
             .iter()
@@ -3712,7 +4655,13 @@ mod tests {
         )]);
         let theme = Theme::default();
         let prepared = prepare_scene(&scene, &theme).unwrap();
-        let translated = prepare_cell_program(prepared.cell_program(), &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+        )
+        .unwrap();
         let profile = ResolvedFontProfile::resolve(FontRequest::default()).unwrap();
         let selected = profile.selected_faces();
         let expected = [
@@ -3813,6 +4762,7 @@ mod tests {
             header: HeaderScene {
                 area: SceneRect::new(0, 0, 80, 1),
                 workspace_name: "test".to_owned(),
+                project_name: "project".to_owned(),
                 session_name: "session".to_owned(),
                 pane_count: panes.len(),
                 focused_pane: focused_pane.clone(),
@@ -3916,7 +4866,13 @@ mod tests {
         let pane = pane(PaneSceneKind::Terminal, PaneContent::Terminal(surface));
         let scene = scene(vec![pane]);
         let prepared = prepare_scene(&scene, &Theme::default()).unwrap();
-        let translated = prepare_cell_program(prepared.cell_program(), &Theme::default()).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &Theme::default(),
+            prepared.presentation_plan(),
+        )
+        .unwrap();
         let row = translated
             .rows
             .iter()

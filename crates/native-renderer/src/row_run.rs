@@ -616,6 +616,7 @@ mod tests {
             header: HeaderScene {
                 area: SceneRect::new(0, 0, width, 1),
                 workspace_name: "test".to_owned(),
+                project_name: "project".to_owned(),
                 session_name: "test".to_owned(),
                 pane_count: 1,
                 focused_pane: pane_id.clone(),

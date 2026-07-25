@@ -5,7 +5,8 @@ production shell and renderer into the workspace. Work 3 completed with a
 negative typography verdict. The accepted typography foundation is now
 implemented, displayed, and backed by the bounded Work 4 shaping cache. Work 5
 made native Casey's local default. Production-grade native in-app visual polish
-is the next product phase.
+is active: visual Phase 3 has a focused-green source implementation and awaits
+displayed/fixed-reference acceptance.
 
 ## Product Direction
 
@@ -406,11 +407,13 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Execute Phase 1 of
-[`docs/visual-polish-plan.md`](visual-polish-plan.md): establish and verify the
-visual acceptance contract and representative scenario matrix before changing
-pixels. Continue daily-driving the native launcher; if another concrete
-functional failure appears, reproduce it, fix the smallest owning product seam,
-and add a regression. Do not pull the installer, updater, release workflow,
-archives, rollout, public-GitHub presentation, or public visual materials into
-the native visual-polish phase.
+Complete Phase 3 of
+[`docs/visual-polish-plan.md`](visual-polish-plan.md): display the layout family,
+record the performance comparison, compare every fixed-reference scenario, and
+explicitly accept only intended workspace-shell/material/focus changes before
+the final synchronized gate. Continue daily-driving the native launcher; if
+another concrete functional failure appears, reproduce it, fix the smallest
+owning product seam, and add a regression. Do not pull overlays, workflow
+cards, motion, accessibility projection, installer, updater, release workflow,
+archives, rollout, public-GitHub presentation, or public visual materials
+forward.

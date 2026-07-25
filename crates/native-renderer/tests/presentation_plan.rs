@@ -4,11 +4,12 @@ use mandatum_native_renderer::{
     prepare_native_presentation, prepare_scene, prepare_token_sampler,
 };
 use mandatum_scene::{
-    BackingScale, EmptyContent, HeaderScene, LogicalRect, LogicalSize, PaneContent, PaneId,
-    PaneNodePart, PaneScene, PaneSceneKind, PhysicalSize, PresentationNode, PresentationNodeId,
-    PresentationNodeRole, PresentationNodeState, ScenePresentation, SceneRect, SceneSize,
-    StatusScene, TerminalProjection, Theme, TransitionProperty, TransitionTarget, ViewportMetrics,
-    WorkspaceNodePart, WorkspaceScene, compile_cell_program,
+    AttentionKind, BackingScale, EmptyContent, HeaderScene, LogicalRect, LogicalSize,
+    PaneBadgeKind, PaneContent, PaneId, PaneNodePart, PaneScene, PaneSceneKind, PhysicalSize,
+    PresentationNode, PresentationNodeId, PresentationNodeRole, PresentationNodeState,
+    PresentationTone, ScenePresentation, SceneRect, SceneSize, StatusScene, TerminalProjection,
+    Theme, TransitionProperty, TransitionTarget, ViewportMetrics, WorkspaceNodePart,
+    WorkspaceScene, compile_cell_program,
 };
 
 fn scene(nodes: Vec<PresentationNode>, transitions: Vec<TransitionTarget>) -> WorkspaceScene {
@@ -18,6 +19,7 @@ fn scene(nodes: Vec<PresentationNode>, transitions: Vec<TransitionTarget>) -> Wo
         header: HeaderScene {
             area: SceneRect::new(0, 0, 100, 1),
             workspace_name: "test".into(),
+            project_name: "project".into(),
             session_name: "session".into(),
             pane_count: 1,
             focused_pane: pane_id.clone(),
@@ -134,7 +136,7 @@ fn plan_retains_exact_semantic_order_bounds_clips_state_and_typed_transition() {
 
     let theme = Theme::default();
     let plan = prepare_native_presentation(&scene, &theme).unwrap();
-    assert_eq!(plan.material_count(), 2);
+    assert_eq!(plan.material_count(), 3);
     assert_eq!(plan.text_scope_count(), 1);
 
     let z_orders = plan
@@ -179,6 +181,19 @@ fn plan_retains_exact_semantic_order_bounds_clips_state_and_typed_transition() {
     assert_eq!(title.metrics.role, NativeTextMetricRole::PaneTitleFocused);
     assert_eq!(title.metrics.style.face, NativeFontFace::Bold);
     assert_eq!(title.color, theme.ui.palette.focus);
+    let title_material = plan
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            NativePlanCommand::Material(material) if material.node_id == title_id => Some(material),
+            _ => None,
+        })
+        .expect("pane title rail receives native chrome material");
+    assert_eq!(title_material.role, NativeMaterialRole::ChromeSurface);
+    assert_eq!(title_material.color, theme.ui.palette.chrome_surface);
+    assert_eq!(title_material.corner_radius_units, 0);
+    assert_eq!(title_material.boundary, None);
+    assert_eq!(title_material.raised_shadows, None);
 
     assert_eq!(plan.transitions().len(), 1);
     assert_eq!(plan.transitions()[0].node_id, title_id);
@@ -192,6 +207,238 @@ fn plan_retains_exact_semantic_order_bounds_clips_state_and_typed_transition() {
         &compile_cell_program(&scene, &theme),
         "native planning must not rewrite the terminal-parity projection"
     );
+}
+
+#[test]
+fn phase_three_material_family_maps_tiled_floating_focus_separator_and_tone_state() {
+    let workspace_id = PresentationNodeId::workspace(WorkspaceNodePart::Surface);
+    let tiled_id = PresentationNodeId::pane(PaneId::new("tiled"), PaneNodePart::Surface);
+    let floating_id = PresentationNodeId::pane(PaneId::new("floating"), PaneNodePart::Surface);
+    let floating_title_id = PresentationNodeId::pane(PaneId::new("floating"), PaneNodePart::Title);
+    let badge_id = PresentationNodeId::pane(
+        PaneId::new("floating"),
+        PaneNodePart::Badge(PaneBadgeKind::Agent),
+    );
+    let focus_id = PresentationNodeId::pane(PaneId::new("floating"), PaneNodePart::FocusIndicator);
+    let separator_idle_id = PresentationNodeId::workspace(WorkspaceNodePart::Separator {
+        split_index: 0,
+        axis: mandatum_scene::PresentationAxis::Horizontal,
+    });
+    let separator_hover_id = PresentationNodeId::workspace(WorkspaceNodePart::Separator {
+        split_index: 1,
+        axis: mandatum_scene::PresentationAxis::Horizontal,
+    });
+    let separator_drag_id = PresentationNodeId::workspace(WorkspaceNodePart::Separator {
+        split_index: 2,
+        axis: mandatum_scene::PresentationAxis::Horizontal,
+    });
+    let attention_id = PresentationNodeId::workspace(WorkspaceNodePart::Attention {
+        pane: None,
+        kind: AttentionKind::ApprovalWaiting,
+    });
+    let workspace_rect = LogicalRect::from_units(0, 0, 800 * 64, 600 * 64);
+    let scene = scene(
+        vec![
+            node(
+                workspace_id.clone(),
+                None,
+                PresentationNodeRole::Workspace,
+                PresentationNodeState::default(),
+                workspace_rect,
+                SceneRect::new(0, 0, 100, 30),
+            ),
+            node(
+                tiled_id.clone(),
+                Some(workspace_id.clone()),
+                PresentationNodeRole::Pane,
+                PresentationNodeState::default(),
+                LogicalRect::from_units(0, 20 * 64, 400 * 64, 560 * 64),
+                SceneRect::new(0, 1, 50, 28),
+            ),
+            node(
+                floating_id.clone(),
+                Some(workspace_id.clone()),
+                PresentationNodeRole::Pane,
+                PresentationNodeState {
+                    floating: true,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(120 * 64, 100 * 64, 400 * 64, 300 * 64),
+                SceneRect::new(15, 5, 50, 15),
+            ),
+            node(
+                floating_title_id.clone(),
+                Some(floating_id.clone()),
+                PresentationNodeRole::PaneTitle,
+                PresentationNodeState {
+                    floating: true,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(120 * 64, 100 * 64, 400 * 64, 17 * 64),
+                SceneRect::new(15, 5, 50, 1),
+            ),
+            node(
+                badge_id.clone(),
+                Some(floating_id.clone()),
+                PresentationNodeRole::PaneBadge(PaneBadgeKind::Agent),
+                PresentationNodeState {
+                    tone: PresentationTone::AgentIdentity,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(400 * 64, 104 * 64, 80 * 64, 17 * 64),
+                SceneRect::new(50, 5, 10, 1),
+            ),
+            node(
+                focus_id.clone(),
+                Some(floating_id.clone()),
+                PresentationNodeRole::FocusIndicator,
+                PresentationNodeState {
+                    focused: true,
+                    tone: PresentationTone::Focus,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(120 * 64, 100 * 64, 2 * 64, 17 * 64),
+                SceneRect::new(15, 5, 1, 1),
+            ),
+            node(
+                separator_idle_id.clone(),
+                Some(workspace_id.clone()),
+                PresentationNodeRole::Separator,
+                PresentationNodeState::default(),
+                LogicalRect::from_units(399 * 64, 20 * 64, 64, 560 * 64),
+                SceneRect::new(49, 1, 2, 28),
+            ),
+            node(
+                separator_hover_id.clone(),
+                Some(workspace_id.clone()),
+                PresentationNodeRole::Separator,
+                PresentationNodeState {
+                    hovered: true,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(499 * 64, 20 * 64, 64, 560 * 64),
+                SceneRect::new(62, 1, 2, 28),
+            ),
+            node(
+                separator_drag_id.clone(),
+                Some(workspace_id),
+                PresentationNodeRole::Separator,
+                PresentationNodeState {
+                    hovered: true,
+                    dragging: true,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(599 * 64, 20 * 64, 64, 560 * 64),
+                SceneRect::new(74, 1, 2, 28),
+            ),
+            node(
+                attention_id.clone(),
+                Some(PresentationNodeId::workspace(WorkspaceNodePart::Surface)),
+                PresentationNodeRole::Attention,
+                PresentationNodeState {
+                    attention: true,
+                    tone: PresentationTone::Waiting,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(600 * 64, 0, 160 * 64, 20 * 64),
+                SceneRect::new(75, 0, 20, 1),
+            ),
+        ],
+        Vec::new(),
+    );
+    let theme = Theme::default();
+    let plan = prepare_native_presentation(&scene, &theme).unwrap();
+    let material = |id: &PresentationNodeId| {
+        plan.commands()
+            .iter()
+            .find_map(|command| match command {
+                NativePlanCommand::Material(material) if &material.node_id == id => Some(material),
+                _ => None,
+            })
+            .expect("node has a material")
+    };
+
+    let tiled = material(&tiled_id);
+    assert_eq!(tiled.corner_radius_units, 0);
+    assert_eq!(tiled.boundary, None);
+    assert_eq!(tiled.raised_shadows, None);
+
+    let floating = material(&floating_id);
+    assert_eq!(
+        floating.corner_radius_units,
+        u64::from(theme.ui.radii.floating) * 64
+    );
+    assert_eq!(
+        floating.boundary.unwrap().color,
+        theme.ui.palette.border_strong
+    );
+    assert_eq!(floating.raised_shadows, Some(theme.ui.elevation.raised));
+    assert_eq!(floating.clip, workspace_rect);
+    assert!(
+        plan.commands().iter().all(|command| !matches!(
+            command,
+            NativePlanCommand::Material(material) if material.node_id == floating_title_id
+        )),
+        "a rectangular title fill must not overwrite the floating shell's rounded top corners"
+    );
+    let floating_title_text = plan
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            NativePlanCommand::Text(text) if text.node_id == floating_title_id => Some(text),
+            _ => None,
+        })
+        .expect("floating title keeps its native text scope");
+    assert_eq!(
+        floating_title_text.cell_rect,
+        Some(SceneRect::new(15, 5, 50, 1))
+    );
+
+    assert_eq!(material(&badge_id).role, NativeMaterialRole::Badge);
+    assert_eq!(material(&badge_id).color, theme.ui.palette.chrome_surface);
+    assert_eq!(
+        material(&badge_id).boundary.unwrap().color,
+        theme.ui.palette.agent_identity
+    );
+    let badge_text = plan
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            NativePlanCommand::Text(text) if text.node_id == badge_id => Some(text),
+            _ => None,
+        })
+        .expect("badge receives a typed glyph scope");
+    assert_eq!(badge_text.color, theme.ui.palette.agent_identity);
+    assert_ne!(material(&badge_id).color, badge_text.color);
+    assert_eq!(
+        material(&attention_id).color,
+        theme.ui.palette.chrome_surface
+    );
+    assert_eq!(
+        material(&attention_id).boundary.unwrap().color,
+        theme.ui.palette.waiting
+    );
+    let attention_text = plan
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            NativePlanCommand::Text(text) if text.node_id == attention_id => Some(text),
+            _ => None,
+        })
+        .expect("attention chip receives a typed glyph scope");
+    assert_eq!(attention_text.color, theme.ui.palette.waiting);
+    assert_ne!(material(&attention_id).color, attention_text.color);
+    assert_eq!(material(&focus_id).role, NativeMaterialRole::Focus);
+    assert_eq!(material(&focus_id).color, theme.ui.palette.focus);
+    assert_eq!(
+        material(&separator_idle_id).role,
+        NativeMaterialRole::BorderSubtle
+    );
+    assert_eq!(
+        material(&separator_hover_id).role,
+        NativeMaterialRole::BorderStrong
+    );
+    assert_eq!(material(&separator_drag_id).role, NativeMaterialRole::Focus);
 }
 
 #[test]

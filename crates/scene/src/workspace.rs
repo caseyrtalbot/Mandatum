@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::geometry::{LogicalPoint, LogicalRect, SceneRect, SceneSize, ViewportMetrics};
 use crate::input::TextRange;
-use crate::pane::PaneScene;
+use crate::pane::{PaneBadgeKind, PaneScene};
 use crate::style::SceneCellStyle;
+use crate::theme::UiDensity;
 
 /// One frame of renderable workspace state. `&WorkspaceScene` alone must
 /// suffice to paint a frame: the header and status strips carry their own
@@ -40,6 +41,7 @@ pub struct WorkspaceScene {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScenePresentation {
     pub viewport: Option<ViewportMetrics>,
+    pub density: UiDensity,
     pub nodes: Vec<PresentationNode>,
     pub logical_hit_targets: Vec<LogicalHitTarget>,
     pub terminal_viewports: Vec<TerminalViewportMapping>,
@@ -111,6 +113,7 @@ pub enum WorkspaceNodePart {
     },
     Attention {
         pane: Option<PaneId>,
+        kind: AttentionKind,
     },
 }
 
@@ -133,6 +136,8 @@ impl From<SplitAxis> for PresentationAxis {
 pub enum PaneNodePart {
     Surface,
     Title,
+    Badge(PaneBadgeKind),
+    FocusIndicator,
     Body,
     Output,
 }
@@ -179,6 +184,8 @@ pub enum PresentationNodeRole {
     Status,
     Pane,
     PaneTitle,
+    PaneBadge(PaneBadgeKind),
+    FocusIndicator,
     PaneBody,
     TerminalOutput,
     TaskOutput,
@@ -187,6 +194,27 @@ pub enum PresentationNodeRole {
     Item,
     Separator,
     Attention,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PresentationTone {
+    #[default]
+    Neutral,
+    Focus,
+    Running,
+    Waiting,
+    Failure,
+    Complete,
+    AgentIdentity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AttentionKind {
+    ApprovalWaiting,
+    TaskFailed,
+    AgentBlockedOrFailed,
 }
 
 /// The cell region that communicates the same meaning in `CellProgram`.
@@ -214,6 +242,10 @@ pub struct PresentationNodeState {
     pub selected: bool,
     pub disabled: bool,
     pub attention: bool,
+    pub floating: bool,
+    pub hovered: bool,
+    pub dragging: bool,
+    pub tone: PresentationTone,
 }
 
 /// Logical-pixel twin of one existing cell hit target.
@@ -331,6 +363,10 @@ pub struct PreeditScene {
 pub struct HeaderScene {
     pub area: SceneRect,
     pub workspace_name: String,
+    /// Active project label for platform chrome. Kept distinct from session
+    /// identity so native adapters never parse composed header text.
+    #[serde(default)]
+    pub project_name: String,
     pub session_name: String,
     pub pane_count: usize,
     pub focused_pane: PaneId,
@@ -349,6 +385,8 @@ pub struct HeaderScene {
 /// One clickable attention segment in the header strip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttentionSegment {
+    pub kind: AttentionKind,
+    pub tone: PresentationTone,
     /// Where the segment's label is drawn (and hit-tested).
     pub rect: SceneRect,
     /// e.g. "1 approval · pane-3" or "2 tasks failed · pane-2".
@@ -639,7 +677,11 @@ pub enum HitTargetKind {
     StatusStrip,
     /// One header attention segment, by index into `HeaderScene::attention`,
     /// carrying the pane a click jumps to (self-contained for hit testing).
-    AttentionSegment { index: usize, pane: Option<PaneId> },
+    AttentionSegment {
+        index: usize,
+        pane: Option<PaneId>,
+        kind: AttentionKind,
+    },
     /// One palette row, by item index.
     PaletteItem(usize),
     /// One context-menu row, by item index.

@@ -9,6 +9,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::style::SceneColor;
 
+/// Native workspace density. This is presentation policy, not terminal-cell
+/// geometry: the maintained terminal projection remains unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiDensity {
+    #[default]
+    Compact,
+    Comfortable,
+}
+
 /// Direct RGB colors used when the native pixel surface materializes terminal
 /// defaults and the 16 named ANSI colors.
 ///

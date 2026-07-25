@@ -121,8 +121,13 @@ production pixels. Phase 2 — Token And Native Presentation Foundation — now
 implements the typed UI-token, logical-geometry, semantic-presentation,
 multi-metric text, and headless native-plan capability family while preserving
 the terminal `CellProgram`. Phase 3 — Workspace Shell, Pane Materials, Density,
-And Focus — is the next bounded slice. Concrete functional failures found
-through daily use remain valid hardening work at their smallest owning seam.
+And Focus — now has its source capability family and focused portable tests:
+typed rails/badges/attention, native materials and floating depth, compact
+focus, logical separator interaction, density policy, and native window
+geometry/title. Its displayed matrix, performance comparison, fixed-reference
+review, and final gate remain the active completion work. Concrete functional
+failures found through daily use remain valid hardening work at their smallest
+owning seam.
 
 ### Distribution and public presentation — shelved
 

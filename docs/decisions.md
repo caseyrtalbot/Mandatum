@@ -3066,3 +3066,52 @@ corrected the seven Phase 1 images affected by an external compositor
 color-state transition. After explicit reviewed acceptance, all 11 strict
 comparisons returned SSIM 1.0 with zero changed or masked pixels. The final
 gate and push evidence are recorded in `docs/verification.md`.
+
+## Workspace Chrome Uses Typed Materials And Dual-Coordinate Input
+
+Status: accepted; source implemented, displayed acceptance pending (2026-07-24)
+
+Decision: visual Phase 3 implements the everyday workspace as one typed
+capability family. `WorkspaceScene` owns header/status rails, typed attention
+and pane badges, compact focus, density, separator state, and floating state.
+The pure native plan resolves those semantics into bounded materials and text
+scopes. Native pointer events preserve both logical position for workspace
+chrome and cell coordinates for terminal children. The native window starts at
+1200 x 800 logical pixels, enforces a 720 x 480 minimum, and titles itself from
+the active project.
+
+Context: the first implementation pass exposed three boundary defects during
+aggregate review. Density was plumbed but produced identical output; the native
+shell discarded the six-logical-pixel separator target by collapsing pointer
+input to cells; and GPU compatibility paint could cover new rails/chips or
+composite floating shadows over later panes. A renderer-side glyph-content
+filter also tried to identify legacy border decoration by parsing characters.
+
+Rationale: Phase 2 deliberately established typed dual geometry and a pure
+presentation plan so Phase 3 would not need renderer inference or a second
+layout/input authority. Native polish is trustworthy only if the product route
+actually consumes those contracts. Terminal parity still requires an honest
+cell projection and cell-coordinate child input.
+
+Consequences:
+
+- compact/comfortable density changes native title-rail breathing room without
+  consuming a PTY row or changing `CellProgram`;
+- a one-logical-pixel separator has a six-logical-pixel native hit target, and
+  redraws occur on hover-identity changes rather than every pointer move;
+- typed `PaneDecoration` scope replaces glyph parsing, while compiled
+  `NativeTextScope` projections own app-chrome text color;
+- modern app-owned chrome/default pane backgrounds do not repaint semantic
+  materials, but terminal cursor, selection, raster, and explicit backgrounds
+  remain authoritative;
+- tiled panes and separators precede raised floating panes; later floating
+  surfaces occlude earlier bounded shadow fragments; and
+- the active project name is a typed header field distinct from session and
+  composed header text.
+
+Verification: focused RED/GREEN and aggregate-review corrections are green
+across core, scene/`CellProgram`, app, both renderers, native shell,
+frontend-parity, and the exact canonical-scenario plan test. Displayed layout
+and performance evidence, all 11 fixed-reference comparisons and explicit
+acceptance, the synchronized final gate, and the completion commit remain
+pending; no Phase 4 overlay work is authorized by this decision.

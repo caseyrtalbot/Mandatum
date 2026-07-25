@@ -54,6 +54,9 @@ pub enum TextPaintScopeKind {
     Header,
     Status,
     PaneChrome,
+    /// Terminal-parity pane borders and compact focus marks. Native renderers
+    /// consume typed pane materials instead of shaping these decoration glyphs.
+    PaneDecoration,
     PaneContent,
     Overlay,
     TextInput,
