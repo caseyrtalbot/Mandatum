@@ -1622,6 +1622,9 @@ impl App {
                             .report_platform_error("clipboard write failed: clipboard unavailable");
                     }
                 }
+                // The lab never declares font facts, so the appearance
+                // overlay shows no font rows and this effect cannot fire.
+                FrontendEffect::ApplyFont { .. } => {}
             }
         }
     }
