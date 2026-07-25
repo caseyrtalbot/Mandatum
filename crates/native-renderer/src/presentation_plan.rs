@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use mandatum_scene::{
     LogicalRect, OverlayPresentationKind, PresentationNode, PresentationNodeId,
     PresentationNodeRole, PresentationTone, SceneRect, TerminalProjection, Theme,
-    TransitionProperty, UiColor, UiMotionToken, UiShadow, WorkspaceScene,
+    TransitionProperty, TransitionRole, UiColor, UiMotionToken, UiShadow, WorkspaceScene,
 };
 
 use crate::text_metrics::{NativeTextMetricIdentity, NativeTextMetricRole, NativeTextMetricSet};
@@ -58,6 +58,10 @@ pub struct NativeMaterial {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeTextScope {
     pub node_id: PresentationNodeId,
+    /// Semantic logical geometry for validation and future vector text.
+    ///
+    /// Current cell-owned glyph placement remains direct; presentation
+    /// Geometry and Scale interpolate native materials only.
     pub logical_rect: LogicalRect,
     /// Exact cell projection used to color the already-compiled `CellProgram`
     /// without reconstructing presentation roles in the GPU adapter.
@@ -71,8 +75,11 @@ pub struct NativeTextScope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeTransition {
     pub node_id: PresentationNodeId,
+    pub role: TransitionRole,
     pub property: TransitionProperty,
+    pub sequence: u64,
     pub timing: UiMotionToken,
+    pub exit_timing: UiMotionToken,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +170,16 @@ impl NativePresentationPlan {
             .iter()
             .filter(|command| matches!(command, NativePlanCommand::Text(_)))
             .count()
+    }
+
+    pub(crate) fn from_resolved_commands(
+        commands: Vec<NativePlanCommand>,
+        transitions: Vec<NativeTransition>,
+    ) -> Self {
+        Self {
+            commands,
+            transitions,
+        }
     }
 }
 
@@ -308,11 +325,22 @@ pub fn prepare_native_presentation(
         }
         transitions.push(NativeTransition {
             node_id: target.node_id.clone(),
+            role: target.role,
             property: target.property,
-            timing: match target.property {
-                TransitionProperty::Geometry => theme.ui.motion.pane_change,
-                TransitionProperty::Opacity => theme.ui.motion.overlay_enter,
-                TransitionProperty::Scale => theme.ui.motion.focus_selection,
+            sequence: target.sequence,
+            timing: match target.role {
+                TransitionRole::Focus
+                | TransitionRole::Selection
+                | TransitionRole::ApprovalArrival => theme.ui.motion.focus_selection,
+                TransitionRole::Overlay => theme.ui.motion.overlay_enter,
+                TransitionRole::PaneGeometry => theme.ui.motion.pane_change,
+            },
+            exit_timing: match target.role {
+                TransitionRole::Overlay => theme.ui.motion.overlay_exit,
+                TransitionRole::Focus
+                | TransitionRole::Selection
+                | TransitionRole::ApprovalArrival => theme.ui.motion.focus_selection,
+                TransitionRole::PaneGeometry => theme.ui.motion.pane_change,
             },
         });
     }
@@ -709,11 +737,11 @@ fn native_text_color_projection(node: &PresentationNode) -> Option<SceneRect> {
         | PresentationNodeRole::OverlayTitle
         | PresentationNodeRole::OverlayFooter
         | PresentationNodeRole::TextInput
+        | PresentationNodeRole::Item
         | PresentationNodeRole::Workflow(_)
         | PresentationNodeRole::WorkflowStatusBadge => node.cell_rect,
         PresentationNodeRole::TerminalOutput
         | PresentationNodeRole::TaskOutput
-        | PresentationNodeRole::Item
         | PresentationNodeRole::Workspace
         | PresentationNodeRole::Pane
         | PresentationNodeRole::PaneBody

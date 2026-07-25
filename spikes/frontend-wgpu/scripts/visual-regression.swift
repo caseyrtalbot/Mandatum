@@ -11,9 +11,17 @@ import UniformTypeIdentifiers
 
 private let fixedProfile = "casey-m4pro-metal-scale2"
 private let fixedDisplay = "Built-in Retina Display"
+private let attentionCheckpoints: [String: String] = [
+    "attention-motion-start": "start",
+    "attention-motion-midpoint": "midpoint",
+    "attention-motion-end": "end",
+    "attention-reduced": "reduced",
+]
 private let scenarios: Set<String> = [
     "typography", "calm-terminal", "dense-workspace", "attention", "palette",
     "full-modal", "welcome", "context-menu", "artifacts", "narrow", "restored",
+    "attention-motion-start", "attention-motion-midpoint", "attention-motion-end",
+    "attention-reduced",
 ]
 
 private enum CaptureError: Error, CustomStringConvertible {
@@ -31,6 +39,8 @@ private enum CaptureError: Error, CustomStringConvertible {
 private struct Config {
     let profile: String
     let scenario: String
+    let baseScenario: String
+    let checkpoint: String?
 }
 
 private struct CapturedFrame {
@@ -148,7 +158,13 @@ private func parseConfig() throws -> Config {
             "unknown scenario \(scenario ?? "<missing>")"
         )
     }
-    return Config(profile: fixedProfile, scenario: scenario)
+    let checkpoint = attentionCheckpoints[scenario]
+    return Config(
+        profile: fixedProfile,
+        scenario: scenario,
+        baseScenario: checkpoint == nil ? scenario : "attention",
+        checkpoint: checkpoint
+    )
 }
 
 private func requireFixedReferenceDisplay() throws {
@@ -184,15 +200,19 @@ private func capture(_ config: Config) async throws {
     let title = "Mandatum Visual \(config.scenario)"
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = [
+    var arguments = [
         "cargo", "run", "-q",
         "--manifest-path", manifest.path,
         "--bin", "mandatum-native-lab", "--",
-        "--visual-scenario", config.scenario,
+        "--visual-scenario", config.baseScenario,
         "--font-size", "13",
         "--display", fixedDisplay,
         "--exit-after", "30",
     ]
+    if let checkpoint = config.checkpoint {
+        arguments.append(contentsOf: ["--visual-checkpoint", checkpoint])
+    }
+    process.arguments = arguments
     process.currentDirectoryURL = repo
     let output = Pipe()
     process.standardOutput = output

@@ -1,6 +1,7 @@
 # Native Visual Polish Plan
 
-Status: Phase 5 Typed Workflow Surfaces accepted; Phase 6 next (2026-07-24)
+Status: Phase 6 Motion And Fluid Geometry source implemented; displayed
+evidence and final gate pending (2026-07-24)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -625,6 +626,9 @@ Completion status (2026-07-24):
 
 Goal: clarify change without adding visual noise or input risk.
 
+Status: source implemented; representative displayed motion evidence, explicit
+reference acceptance, and the final synchronized gate remain pending.
+
 Work:
 
 - add typed animation intent and an injectable visual clock;
@@ -643,6 +647,39 @@ Exit:
 - static workspaces produce no animation-driven redraw;
 - frame pacing and idle budgets pass; and
 - the motion matrix and full gate pass.
+
+Implementation status (2026-07-24):
+
+- `ScenePresentation` carries a live `SceneMotionPolicy` and typed transition
+  targets for Focus, Selection, Overlay, PaneGeometry, and ApprovalArrival;
+- the scene builder targets coherent overlay opacity families and
+  material-backed scale/pane-geometry families while cell-owned glyph
+  placement, terminal/task output, and artifact raster placement remain
+  direct;
+- `mandatum-native-renderer` owns deterministic adapter-local interpolation,
+  accepts an injected monotonic instant, applies the configured typed timing
+  tokens, and converges interrupted or reversed motion on current product
+  truth;
+- pointer drag and live resize mark authoritative direct geometry; typing and
+  child output update the stable scene without decorative interpolation;
+- overlay entry moves the complete typed material family; close is direct
+  because scene-owned overlay glyph rows no longer exist and retaining an empty
+  shell would be incoherent;
+- reduced motion omits transition targets, snaps any retained presentation
+  progress, and schedules no transition frames;
+- pending approval remains a stable high-salience semantic callout while each
+  newly arriving request receives a monotonic typed sequence and one brief
+  inward emphasis, including back-to-back requests on the same pane;
+- `FrontendHost` exposes a monotonic scene generation and a heartbeat that
+  reports whether child-exit work changed visible product state;
+- the native shell schedules animation deadlines independently from the
+  250 ms child-exit heartbeat, redraws for active motion or a changed scene
+  generation, and suspends pointer admission while pane or overlay hit-bearing
+  geometry is between stable endpoints; and
+- focused deterministic source tests are part of the implementation, but this
+  document does not claim the displayed motion matrix, final evidence
+  measurements, reference acceptance, or complete repository gate until those
+  runs are recorded in `docs/verification.md`.
 
 ### Phase 7 — Theme And Accessibility Completion
 
@@ -730,8 +767,8 @@ Defer until the complete system above succeeds without them:
 
 ## Immediate Next Action
 
-Execute Phase 6 only: add deterministic typed motion and fluid geometry with
-an injectable visual clock, direct manipulation, complete reduced-motion
-behavior, and redraw scheduling only for active motion or real scene change.
-Do not pull theme/accessibility completion, installer, release, rollout, or
-public presentation work forward.
+Complete Phase 6 only: run and explicitly accept the representative native
+motion matrix on the MacBook Pro built-in Retina display, record the final
+motion/frame/idle evidence, synchronize the handoff, and pass the complete
+repository gate. Begin Phase 7 only after that evidence closes Phase 6. Do not
+pull installer, release, rollout, or public presentation work forward.

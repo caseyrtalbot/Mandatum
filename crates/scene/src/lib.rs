@@ -52,8 +52,9 @@ pub use workspace::{
     OverlayPresentationKind, OverlayScene, PaletteEntry, PaletteOverlay, PaneNodePart,
     PreeditScene, PresentationAxis, PresentationNode, PresentationNodeId, PresentationNodeRole,
     PresentationNodeState, PresentationTone, PromptOverlay, SESSION_MAP_FOCUS_GLYPH,
-    ScenePresentation, SearchEntry, SearchOverlay, SemanticKey, SessionMapOverlay, SessionMapRow,
-    StatusScene, TerminalProjection, TerminalViewportMapping, TextInputKind, TextInputScene,
-    TimelineEntry, TimelineOverlay, TransitionProperty, TransitionTarget, WelcomeEntry,
-    WelcomeOverlay, WorkspaceNodePart, WorkspaceScene,
+    SceneMotionPolicy, ScenePresentation, SearchEntry, SearchOverlay, SemanticKey,
+    SessionMapOverlay, SessionMapRow, StatusScene, TerminalProjection, TerminalViewportMapping,
+    TextInputKind, TextInputScene, TimelineEntry, TimelineOverlay, TransitionProperty,
+    TransitionRole, TransitionTarget, WelcomeEntry, WelcomeOverlay, WorkspaceNodePart,
+    WorkspaceScene,
 };

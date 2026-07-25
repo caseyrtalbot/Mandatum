@@ -38,6 +38,22 @@ use winit::{
 const HEARTBEAT: Duration = Duration::from_millis(250);
 const EVENT_DRAIN_BUDGET: usize = 16;
 
+trait VisualClock {
+    fn now(&self) -> Instant;
+}
+
+struct MonotonicVisualClock;
+
+impl VisualClock for MonotonicVisualClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+fn next_scheduled_deadline(heartbeat: Instant, animation: Option<Instant>) -> Instant {
+    animation.map_or(heartbeat, |animation| animation.min(heartbeat))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct NativeWindowGeometry {
     initial: LogicalSize<f64>,
@@ -241,6 +257,7 @@ struct App {
     window: Option<std::sync::Arc<Window>>,
     window_title: String,
     gpu: Option<GpuText>,
+    visual_clock: Box<dyn VisualClock>,
     clipboard: Option<arboard::Clipboard>,
     next_heartbeat: Instant,
     fatal_error: Option<String>,
@@ -271,6 +288,7 @@ impl App {
             window: None,
             window_title: "Mandatum".to_owned(),
             gpu: None,
+            visual_clock: Box::new(MonotonicVisualClock),
             clipboard: None,
             next_heartbeat: Instant::now() + HEARTBEAT,
             fatal_error: None,
@@ -292,6 +310,10 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    fn visual_now(&self) -> Instant {
+        self.visual_clock.now()
     }
 
     fn host(&self) -> &FrontendHost {
@@ -355,15 +377,21 @@ impl App {
             self.fail(format!("invalid display scale: {error}"));
             return;
         }
+        if let Some(gpu) = &mut self.gpu {
+            gpu.snap_presentation_motion();
+        }
         self.refresh_mouse_cell();
         self.resize_host();
         self.request_redraw();
     }
 
     fn send_input(&mut self, input: InputEvent) {
+        let generation = self.host().scene_generation();
         self.host_mut().handle_input(input);
         self.apply_effects();
-        self.request_redraw();
+        if self.host().scene_generation() != generation {
+            self.request_redraw();
+        }
     }
 
     fn apply_effects(&mut self) {
@@ -385,10 +413,14 @@ impl App {
         }
     }
 
-    fn drain_runtime(&mut self) -> bool {
+    fn drain_runtime(&mut self) -> (bool, bool) {
+        let generation = self.host().scene_generation();
         let drained = self.host_mut().drain_runtime_bounded(EVENT_DRAIN_BUDGET);
         self.apply_effects();
-        drained == EVENT_DRAIN_BUDGET
+        (
+            drained == EVENT_DRAIN_BUDGET,
+            self.host().scene_generation() != generation,
+        )
     }
 
     fn render_frame(&mut self) -> Result<(), GpuRenderError> {
@@ -406,10 +438,11 @@ impl App {
             return Ok(());
         }
         self.sync_ime(&snapshot.scene);
+        let visual_now = self.visual_now();
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(());
         };
-        let outcome = match gpu.render(&snapshot.scene, &snapshot.theme) {
+        let outcome = match gpu.render_at(&snapshot.scene, &snapshot.theme, visual_now) {
             Ok(outcome) => outcome,
             Err(GpuRenderError::DeviceLost { .. }) => {
                 self.consecutive_device_recoveries =
@@ -435,7 +468,13 @@ impl App {
         };
         match outcome {
             GpuRenderOutcome::Presented { .. } => {
-                self.scene_presentable = true;
+                self.scene_presentable = !self
+                    .gpu
+                    .as_ref()
+                    .is_some_and(GpuText::pointer_geometry_is_moving);
+                if !self.scene_presentable {
+                    self.host_mut().suspend_scene_interaction();
+                }
                 self.consecutive_surface_recoveries = 0;
                 self.consecutive_device_recoveries = 0;
             }
@@ -648,10 +687,20 @@ impl App {
         if self.window.is_none() {
             return false;
         }
-        let now = Instant::now();
+        let now = self.visual_now();
         if now >= self.next_heartbeat {
-            self.host_mut().heartbeat();
+            let scene_changed = self.host_mut().heartbeat();
             self.next_heartbeat = now + HEARTBEAT;
+            if scene_changed {
+                self.request_redraw();
+            }
+        }
+        if self
+            .gpu
+            .as_ref()
+            .and_then(GpuText::next_animation_deadline)
+            .is_some_and(|deadline| now >= deadline)
+        {
             self.request_redraw();
         }
         if self.fatal_error.is_some() {
@@ -664,7 +713,11 @@ impl App {
     }
 
     fn schedule_next_wake(&self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_heartbeat));
+        let animation = self.gpu.as_ref().and_then(GpuText::next_animation_deadline);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next_scheduled_deadline(
+            self.next_heartbeat,
+            animation,
+        )));
     }
 
     fn cancel_pointer_gesture(&mut self) {
@@ -743,7 +796,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.service_scheduled_work(event_loop) {
                     return;
                 }
-                let more_pending = self.drain_runtime();
+                let (more_pending, scene_changed) = self.drain_runtime();
                 if self.exit_if_requested(event_loop) {
                     return;
                 }
@@ -753,7 +806,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // than waiting for a successful present or heartbeat.
                     let _ = self.wake_proxy.send_event(UserEvent::Wake);
                 }
-                if self.scene_presentable {
+                if scene_changed {
                     self.request_redraw();
                 }
             }
@@ -771,7 +824,7 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                let more_pending = self.drain_runtime();
+                let (more_pending, _scene_changed) = self.drain_runtime();
                 if self.exit_if_requested(event_loop) {
                     return;
                 }
@@ -784,9 +837,6 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                     return;
                 }
-                if more_pending && self.scene_presentable {
-                    self.request_redraw();
-                }
                 if more_pending {
                     let _ = self.wake_proxy.send_event(UserEvent::Wake);
                 }
@@ -796,6 +846,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cancel_pointer_gesture();
                 self.host_mut().suspend_scene_interaction();
                 if let Some(gpu) = &mut self.gpu {
+                    gpu.snap_presentation_motion();
                     gpu.resize_surface(size.width, size.height);
                 }
                 self.refresh_mouse_cell();

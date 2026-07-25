@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -113,7 +113,10 @@ pub struct AppState {
     terminal_size: Option<(u16, u16)>,
     status: String,
     preserve_status_on_next_resize: bool,
-    last_redraw: Instant,
+    /// Monotonic presentation-dirtiness generation. Frontends compare this
+    /// around input, runtime drains, and heartbeat work rather than treating a
+    /// requested frame number as proof that the scene changed.
+    scene_generation: u64,
     runtime: RuntimeEngine,
     agent_connector: Option<Box<dyn AgentConnector>>,
     agent_connector_label: &'static str,
@@ -144,6 +147,15 @@ pub struct AppState {
     theme: Theme,
     density: mandatum_scene::UiDensity,
     reduced_motion: bool,
+    /// The next built frame contains geometry produced by live resize or
+    /// pointer manipulation and must snap rather than interpolate.
+    direct_geometry_pending: bool,
+    /// Live approval callouts eligible for arrival emphasis. Eligibility
+    /// persists across speculative frame builds and ends with the approval;
+    /// the sequence distinguishes consecutive requests on one stable node.
+    approval_arrivals: BTreeMap<PaneId, u64>,
+    /// Monotonic event identity; zero is reserved for ordinary transitions.
+    next_approval_arrival_sequence: u64,
     /// Surface byte-level PTY diagnostics in the status line. Off by
     /// default: they are noise that would bury meaningful status.
     debug_status: bool,
@@ -216,7 +228,7 @@ impl AppState {
             terminal_size: None,
             status: "ready".to_owned(),
             preserve_status_on_next_resize: false,
-            last_redraw: Instant::now(),
+            scene_generation: 0,
             runtime: match wake {
                 Some(wake) => RuntimeEngine::with_wake_callback(wake),
                 None => RuntimeEngine::new(),
@@ -238,6 +250,9 @@ impl AppState {
             theme: config.theme,
             density: config.density,
             reduced_motion: config.reduced_motion,
+            direct_geometry_pending: false,
+            approval_arrivals: BTreeMap::new(),
+            next_approval_arrival_sequence: 0,
             debug_status: config.debug_status,
             user_config_file: config.user_config_file,
             copy_mode: None,
@@ -360,6 +375,21 @@ impl AppState {
     /// frontends must consult this before they ever do.
     pub fn reduced_motion(&self) -> bool {
         self.reduced_motion
+    }
+
+    pub(crate) fn scene_motion_policy(&self) -> mandatum_scene::SceneMotionPolicy {
+        mandatum_scene::SceneMotionPolicy {
+            reduced_motion: self.reduced_motion,
+            direct_geometry: self.direct_geometry_pending,
+        }
+    }
+
+    pub(crate) fn approval_arrival_sequence(&self, pane_id: &PaneId) -> Option<u64> {
+        self.approval_arrivals.get(pane_id).copied()
+    }
+
+    pub(crate) fn scene_generation(&self) -> u64 {
+        self.scene_generation
     }
 
     pub fn density(&self) -> mandatum_scene::UiDensity {
@@ -551,7 +581,9 @@ impl AppState {
                     && self.context_menu.is_none()
                     && self.session_map.is_none() =>
             {
-                self.write_to_focused_terminal(text.as_bytes())
+                if self.write_to_focused_terminal(text.as_bytes()) {
+                    self.mark_redraw();
+                }
             }
             // [L5-GATE] Pointer events resolve against the last scene's hit
             // targets; when the child under the pointer requested mouse
@@ -609,6 +641,7 @@ impl AppState {
                 self.mark_redraw();
             }
             CompositionEvent::Commit(text) => {
+                let removed_visible_preedit = self.active_composition.is_some();
                 let target = match self.active_composition.take() {
                     Some(active)
                         if self.current_composition_target().as_ref() == Some(&active.target) =>
@@ -627,57 +660,68 @@ impl AppState {
                     }
                 };
                 self.reject_next_composition_commit = false;
+                let mut visible_changed = removed_visible_preedit;
                 if !text.is_empty() {
-                    self.commit_composed_text(&target, &text);
+                    visible_changed |= self.commit_composed_text(&target, &text);
                 }
-                self.mark_redraw();
+                if visible_changed {
+                    self.mark_redraw();
+                }
             }
             CompositionEvent::Cancel => {
                 if self.active_composition.take().is_some() {
                     self.reject_next_composition_commit = true;
+                    self.mark_redraw();
                 }
-                self.mark_redraw();
             }
         }
     }
 
-    fn commit_composed_text(&mut self, target: &CompositionTarget, text: &str) {
+    /// Commit text and report whether app-owned visible presentation changed.
+    /// Successful terminal bytes remain scene-neutral until PTY output arrives.
+    fn commit_composed_text(&mut self, target: &CompositionTarget, text: &str) -> bool {
         match target {
             CompositionTarget::Prompt => {
                 if let Some(prompt) = self.objective_prompt.as_mut() {
                     prompt.input_mut().push_str(text);
+                    return true;
                 }
             }
             CompositionTarget::Timeline => {
                 if let Some(view) = self.timeline_view.as_mut() {
                     view.push_query(text, now_ms());
+                    return true;
                 }
             }
             CompositionTarget::Search => {
                 if let Some(view) = self.search_view.as_mut() {
                     view.query.push_str(text);
                     view.refresh();
+                    return true;
                 }
             }
             CompositionTarget::Palette => {
                 if let Some(palette) = self.palette.as_mut() {
                     palette.query.push_str(text);
                     palette.selected = 0;
+                    return true;
                 }
             }
             CompositionTarget::Help => {
                 if let Some(view) = self.help_view.as_mut() {
                     view.query.push_str(text);
                     view.selected = 0;
+                    return true;
                 }
             }
             CompositionTarget::Terminal(pane_id)
                 if self.workspace.active_session().focused_pane_id() == pane_id =>
             {
-                self.write_to_focused_terminal(text.as_bytes());
+                return self.write_to_focused_terminal(text.as_bytes());
             }
             CompositionTarget::Terminal(_) => {}
         }
+        false
     }
 
     pub(crate) fn current_composition_target(&self) -> Option<CompositionTarget> {
@@ -743,10 +787,12 @@ impl AppState {
             Some(OverlayScene::ContextMenu(menu)) => Some(menu.area),
             _ => None,
         };
+        self.direct_geometry_pending = false;
         scene
     }
 
     pub fn handle_terminal_resize(&mut self, columns: u16, rows: u16) {
+        self.direct_geometry_pending = true;
         self.cancel_pointer_gesture();
         self.terminal_size = Some((columns, rows));
         // Copy-mode coordinates address a specific grid geometry; a resize
@@ -846,13 +892,23 @@ impl AppState {
             RuntimeInput::Quit => {
                 self.should_quit = true;
                 self.status = "quitting".to_owned();
+                self.mark_redraw();
             }
-            RuntimeInput::TogglePalette => self.open_palette(),
-            RuntimeInput::Dispatch(command_id) => self.dispatch(command_id),
-            RuntimeInput::SendToTerminal(bytes) => self.write_to_focused_terminal(&bytes),
+            RuntimeInput::TogglePalette => {
+                self.open_palette();
+                self.mark_redraw();
+            }
+            RuntimeInput::Dispatch(command_id) => {
+                self.dispatch(command_id);
+                self.mark_redraw();
+            }
+            RuntimeInput::SendToTerminal(bytes) => {
+                if self.write_to_focused_terminal(&bytes) {
+                    self.mark_redraw();
+                }
+            }
             RuntimeInput::Noop => {}
         }
-        self.mark_redraw();
     }
 
     /// Whether a neutral key is configured as explicit workspace control.
@@ -1471,7 +1527,11 @@ impl AppState {
         self.context_menu = None;
     }
 
-    fn write_to_focused_terminal(&mut self, bytes: &[u8]) {
+    /// Write child input and report whether the operation changed visible app
+    /// status. Successful ordinary input is intentionally scene-neutral; PTY
+    /// output will dirty the scene when it arrives through the runtime queue.
+    fn write_to_focused_terminal(&mut self, bytes: &[u8]) -> bool {
+        let previous_status = self.status.clone();
         let focused = self.workspace.active_session().focused_pane_id().clone();
         match self.runtime.write_terminal(&focused, bytes) {
             Ok(true) => {
@@ -1487,6 +1547,7 @@ impl AppState {
                 self.status = format!("PTY input failed for {focused}: {error}");
             }
         }
+        self.status != previous_status
     }
 
     fn run_configured_task(&mut self) {
@@ -1768,6 +1829,7 @@ impl AppState {
                     intent.pending_approvals = 0;
                     intent.pending_approval_ids.clear();
                 });
+                self.approval_arrivals.remove(&pane_id);
                 self.timeline.record(TimelineEventKind::AgentStatus {
                     pane: pane_id.to_string(),
                     status: "running".to_owned(),
@@ -1814,6 +1876,7 @@ impl AppState {
         // An interrupted session has no known outcome; terminal states the
         // session already reported stay as they are.
         self.update_agent_intent(&pane_id, AgentPaneIntent::detach_live_session);
+        self.approval_arrivals.remove(&pane_id);
         self.status = format!("agent {pane_id} stopped");
     }
 
@@ -1834,6 +1897,7 @@ impl AppState {
                         approved,
                     });
                 });
+                self.approval_arrivals.remove(&pane_id);
                 let verdict_label = if approved { "approved" } else { "rejected" };
                 self.timeline.record(TimelineEventKind::ApprovalDecided {
                     pane: pane_id.to_string(),
@@ -1896,6 +1960,7 @@ impl AppState {
         // current generation and token before durable intent can change.
         if let Some((pane_id, event)) = self.runtime.accept_agent_event(runtime_event) {
             self.apply_agent_event(pane_id, event);
+            self.mark_redraw();
         }
     }
 
@@ -1962,8 +2027,15 @@ impl AppState {
                     intent.pending_approvals = 1;
                     intent.pending_approval_ids = vec![approval_id];
                 });
+                self.next_approval_arrival_sequence = self
+                    .next_approval_arrival_sequence
+                    .checked_add(1)
+                    .expect("approval arrival sequence overflowed");
+                self.approval_arrivals
+                    .insert(pane_id, self.next_approval_arrival_sequence);
             }
             AgentSessionEvent::Completed { summary } => {
+                self.approval_arrivals.remove(&pane_id);
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Complete;
                     intent.latest_summary = Some(summary);
@@ -1975,6 +2047,7 @@ impl AppState {
                 self.status = format!("agent {pane_id} completed");
             }
             AgentSessionEvent::Failed { error } => {
+                self.approval_arrivals.remove(&pane_id);
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Failed;
                 });
@@ -1985,6 +2058,7 @@ impl AppState {
                 self.status = format!("agent {pane_id} failed: {error}");
             }
             AgentSessionEvent::Closed => {
+                self.approval_arrivals.remove(&pane_id);
                 // A session that closed without reporting an outcome has an
                 // unknown durable state.
                 self.update_agent_intent(&pane_id, AgentPaneIntent::detach_live_session);
@@ -2261,12 +2335,17 @@ impl AppState {
             }
             RuntimePtyEffect::TerminalRead { .. } | RuntimePtyEffect::TaskRead { .. } => {}
         }
+        self.mark_redraw();
     }
 
     /// Heartbeat work: notice exited children. Called from `tick_runtime`
     /// and on the shell's heartbeat cadence rather than per event.
     pub(crate) fn poll_child_exits(&mut self) {
-        for effect in self.runtime.poll_child_exits() {
+        let effects = self.runtime.poll_child_exits();
+        if effects.is_empty() {
+            return;
+        }
+        for effect in effects {
             match effect {
                 RuntimeExitEffect::TerminalExited { pane_id, status } => {
                     self.status = format!(
@@ -2296,6 +2375,7 @@ impl AppState {
                 }
             }
         }
+        self.mark_redraw();
     }
 
     /// The live terminal grid attached to a pane, if any.
@@ -2361,6 +2441,9 @@ impl AppState {
     }
 
     fn handle_pointer_with_active_position(&mut self, pointer: PointerEvent) {
+        if pointer.kind == PointerKind::Drag {
+            self.direct_geometry_pending = true;
+        }
         if self.context_menu.is_some() {
             self.handle_context_menu_pointer(pointer);
             self.mark_redraw();
@@ -4351,7 +4434,10 @@ impl AppState {
     }
 
     fn mark_redraw(&mut self) {
-        self.last_redraw = Instant::now();
+        self.scene_generation = self
+            .scene_generation
+            .checked_add(1)
+            .expect("scene generation overflowed");
     }
 }
 

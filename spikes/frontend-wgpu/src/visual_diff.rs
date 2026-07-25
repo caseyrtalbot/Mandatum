@@ -41,10 +41,14 @@ pub enum ScenarioId {
     Artifacts,
     Narrow,
     Restored,
+    AttentionMotionStart,
+    AttentionMotionMidpoint,
+    AttentionMotionEnd,
+    AttentionReduced,
 }
 
 impl ScenarioId {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 15] = [
         Self::Typography,
         Self::CalmTerminal,
         Self::DenseWorkspace,
@@ -56,6 +60,10 @@ impl ScenarioId {
         Self::Artifacts,
         Self::Narrow,
         Self::Restored,
+        Self::AttentionMotionStart,
+        Self::AttentionMotionMidpoint,
+        Self::AttentionMotionEnd,
+        Self::AttentionReduced,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -71,6 +79,30 @@ impl ScenarioId {
             Self::Artifacts => "artifacts",
             Self::Narrow => "narrow",
             Self::Restored => "restored",
+            Self::AttentionMotionStart => "attention-motion-start",
+            Self::AttentionMotionMidpoint => "attention-motion-midpoint",
+            Self::AttentionMotionEnd => "attention-motion-end",
+            Self::AttentionReduced => "attention-reduced",
+        }
+    }
+
+    pub const fn base_scenario(self) -> &'static str {
+        match self {
+            Self::AttentionMotionStart
+            | Self::AttentionMotionMidpoint
+            | Self::AttentionMotionEnd
+            | Self::AttentionReduced => "attention",
+            _ => self.as_str(),
+        }
+    }
+
+    pub const fn checkpoint(self) -> Option<&'static str> {
+        match self {
+            Self::AttentionMotionStart => Some("start"),
+            Self::AttentionMotionMidpoint => Some("midpoint"),
+            Self::AttentionMotionEnd => Some("end"),
+            Self::AttentionReduced => Some("reduced"),
+            _ => None,
         }
     }
 
@@ -1090,8 +1122,29 @@ mod tests {
                 "artifacts",
                 "narrow",
                 "restored",
+                "attention-motion-start",
+                "attention-motion-midpoint",
+                "attention-motion-end",
+                "attention-reduced",
             ]
         );
+    }
+
+    #[test]
+    fn attention_checkpoint_ids_map_to_the_base_fixture_and_capture_instant() {
+        assert_eq!(
+            ScenarioId::AttentionMotionStart.base_scenario(),
+            "attention"
+        );
+        assert_eq!(ScenarioId::AttentionMotionStart.checkpoint(), Some("start"));
+        assert_eq!(
+            ScenarioId::AttentionMotionMidpoint.checkpoint(),
+            Some("midpoint")
+        );
+        assert_eq!(ScenarioId::AttentionMotionEnd.checkpoint(), Some("end"));
+        assert_eq!(ScenarioId::AttentionReduced.checkpoint(), Some("reduced"));
+        assert_eq!(ScenarioId::Attention.base_scenario(), "attention");
+        assert_eq!(ScenarioId::Attention.checkpoint(), None);
     }
 
     #[test]

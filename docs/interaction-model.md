@@ -329,11 +329,23 @@ approvals; the session map's state column for failed panes), and overlay
 row clicks (Enter). No known gaps: the pointer is a convenience layer,
 never the only door.
 
-**Reduced motion.** `[ui] reduced_motion = true` disables the
-waiting-approval pulse — the only motion in the product — by holding its
-emphasis steady instead of alternating it. Nothing else in the scene is
-time-driven; a scene-equality test pins that adding unguarded motion
-fails the build.
+**Motion and reduced motion.** Focus, native list selection, overlay entry,
+keyboard/programmatic pane geometry, and approval arrival use typed scene
+transition targets. They do not change product state or terminal semantics.
+Pointer drag, live window resize, typing, cursor/output updates, cell-owned
+glyph placement, artifact raster placement, child mouse routing, and overlay
+close remain direct. Overlay text may fade on entry, but only native materials
+scale or interpolate geometry. Closing an overlay cannot leave an empty
+animated shell after the scene-owned overlay text disappears. A pending
+approval keeps a stable amber high-salience callout; only a newly arrived
+request receives one brief inward emphasis instead of perpetual blinking.
+
+`[ui] reduced_motion = true` omits all transition targets, moves directly to
+the stable current state, and schedules no animation frames. The static focus,
+selection, waiting, failure, and approval cues remain visible without motion.
+While programmatic pane geometry or overlay scale is visually between stable
+endpoints, native pointer admission pauses so the user cannot act on geometry
+that differs from the scene-owned hit targets.
 
 **Visible focus.** The focused pane title has its own theme color in all three
 built-in themes (bright blue in mandatum-dark; bright yellow in

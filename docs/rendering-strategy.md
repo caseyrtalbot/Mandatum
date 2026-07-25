@@ -232,6 +232,29 @@ commit `1988b0b` on the MacBook Pro built-in Retina display at backing scale
 2.0. Remaining scenarios keep their historical accepted evidence until their
 own pixels change; all new captures target the built-in display.
 
+Phase 6 resolves typed transition targets through one deterministic
+renderer-local `PresentationMotion` state machine. The scene names Focus,
+Selection, Overlay, PaneGeometry, and ApprovalArrival intent against stable
+nodes; the renderer applies only typed geometry, opacity, or scale properties
+with the configured motion tokens and an injected monotonic instant. Overlay
+opacity covers root/band/item materials and cell-owned text, while scale and
+pane geometry apply only to native material-backed commands. Cell-owned glyph
+placement, child output, and artifact raster placement remain direct. Overlay
+close snaps because the new scene no longer contains its glyph rows; retaining
+only renderer-owned material would show an incoherent empty shell. Equal plans
+do not restart motion; interruption and reversal start from the currently
+sampled presentation and converge on current scene truth.
+
+The GPU exposes its next animation deadline separately from product/runtime
+time. The native shell chooses the earlier of that deadline and the child-exit
+heartbeat, requests redraw for an elapsed motion deadline or changed scene
+generation, and does not repaint a static workspace merely because the
+heartbeat ran. Direct pointer geometry, live resize, typing, and output snap to
+the latest stable scene. Reduced motion also snaps, clears scheduled animation
+work, and retains static semantic emphasis. Pointer routing is suspended while
+pane or overlay hit-bearing geometry is visually between the scene-owned
+endpoint targets.
+
 ## Resize And Rewrap
 
 Lines wrapped at a narrow width stay wrapped after the terminal grows

@@ -42,11 +42,35 @@ pub struct WorkspaceScene {
 pub struct ScenePresentation {
     pub viewport: Option<ViewportMetrics>,
     pub density: UiDensity,
+    /// Whole-frame motion policy selected by the scene owner. Native adapters
+    /// may animate only the typed targets below and must snap all presentation
+    /// changes when `direct_geometry` is true.
+    #[serde(default)]
+    pub motion_policy: SceneMotionPolicy,
     pub nodes: Vec<PresentationNode>,
     pub logical_hit_targets: Vec<LogicalHitTarget>,
     pub terminal_viewports: Vec<TerminalViewportMapping>,
     pub transition_targets: Vec<TransitionTarget>,
     pub accessibility_nodes: Vec<AccessibilityNode>,
+}
+
+/// Whole-frame animation policy. This is live presentation state, never
+/// durable workspace intent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SceneMotionPolicy {
+    /// Jump every transition directly to its stable state and schedule no
+    /// animation frames.
+    pub reduced_motion: bool,
+    /// This frame's presentation change came from direct manipulation
+    /// (pointer drag or live resize), so every transition must snap to the
+    /// authoritative geometry and visibility state.
+    pub direct_geometry: bool,
+}
+
+impl SceneMotionPolicy {
+    pub const fn allows(self, _role: TransitionRole) -> bool {
+        !(self.reduced_motion || self.direct_geometry)
+    }
 }
 
 /// A stable item identity supplied by the app, independent of labels,
@@ -301,6 +325,10 @@ impl TerminalViewportMapping {
 }
 
 /// A typed property the native adapter may animate for a stable node.
+///
+/// Geometry and scale currently apply to renderer-owned materials only.
+/// Cell-positioned glyphs and child/raster pixels remain direct; opacity is
+/// the coherent material-and-glyph property.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransitionProperty {
     Geometry,
@@ -308,10 +336,27 @@ pub enum TransitionProperty {
     Scale,
 }
 
+/// Product-level reason for one native transition. The renderer consumes this
+/// role directly instead of inferring meaning from labels, colors, or timing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransitionRole {
+    Focus,
+    Selection,
+    Overlay,
+    PaneGeometry,
+    ApprovalArrival,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransitionTarget {
     pub node_id: PresentationNodeId,
+    pub role: TransitionRole,
     pub property: TransitionProperty,
+    /// Event identity for repeatable one-shot transitions. Ordinary stable
+    /// transitions use zero; ApprovalArrival advances this value for each
+    /// distinct request, even when node/role/property stay unchanged.
+    #[serde(default)]
+    pub sequence: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

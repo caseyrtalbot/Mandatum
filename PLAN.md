@@ -141,11 +141,28 @@ Phase 5 — Typed Task, Agent, Approval, And Artifact Surfaces — is accepted.
 Task, agent, approval, and artifact panes now expose bounded typed workflow
 rows, compact semantic badges, contained callouts, exact console regions, and
 stable artifact canvas/inspector geometry without native string parsing. The
-terminal fallback remains complete. Phase 6 — Motion And Fluid Geometry — is
-next. Known physical debt remains deliberately bounded: pane title rails and
-overlay rows still inherit one terminal text row rather than their final
-native vertical spacing. Concrete functional failures found through daily use
-remain valid hardening work at their smallest owning seam.
+terminal fallback remains complete.
+
+Phase 6 — Motion And Fluid Geometry — is source-implemented and awaiting its
+representative displayed-motion evidence and final synchronized gate. Scene
+contracts carry typed Focus, Selection, Overlay, PaneGeometry, and
+ApprovalArrival targets plus whole-frame reduced/direct policy. A deterministic
+renderer-local motion engine samples an injected monotonic instant; the native
+shell schedules its deadlines independently from the child-exit heartbeat and
+redraws only for an active deadline or a changed scene generation. Overlay
+opacity covers its cell-owned text family while scale and pane geometry apply
+only to native materials; glyph placement, child output, and raster placement
+remain direct. Pointer admission pauses while hit-bearing material geometry is
+between stable endpoints. Typing, pointer drag, live resize, and overlay close
+also stay direct. Overlay close does not retain an empty material shell after
+its scene-owned text disappears. Reduced motion snaps to product truth and
+schedules no transition frames. Phase 7 remains next only after Phase 6's
+displayed evidence and final gate complete.
+
+Known physical debt remains deliberately bounded: pane title rails and overlay
+rows still inherit one terminal text row rather than their final native
+vertical spacing. Concrete functional failures found through daily use remain
+valid hardening work at their smallest owning seam.
 
 ### Distribution and public presentation — shelved
 

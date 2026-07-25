@@ -4,6 +4,11 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+const MILLIS_PER_SECOND: f64 = 1_000.0;
+const SECONDS_PER_MINUTE: f64 = 60.0;
+const MINUTES_PER_HOUR: f64 = 60.0;
+const HOURS_PER_DAY: f64 = 24.0;
+
 /// A bounded bag of millisecond samples that computes order statistics on
 /// demand. Long soaks must not turn instrumentation into an unbounded memory
 /// leak, so samples after `limit` are counted as misses instead of retained.
@@ -81,6 +86,99 @@ impl Samples {
             p95: populated.then(|| self.percentile(95.0)),
             max: populated.then(|| self.max()),
         }
+    }
+}
+
+/// Parse the cumulative process clock emitted by `ps -o time=`.
+///
+/// Darwin and the common Unix implementations use `[[dd-]hh:]mm:ss[.frac]`.
+/// Keeping the parser here makes idle CPU-window arithmetic deterministic and
+/// independently testable without binding the lab to a platform FFI crate.
+pub fn parse_process_cpu_time(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with('-') {
+        return None;
+    }
+    let (days, clock) = match value.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0_u64, value),
+    };
+    let fields = clock.split(':').collect::<Vec<_>>();
+    let (hours, minutes, seconds) = match fields.as_slice() {
+        [minutes, seconds] => (
+            0_u64,
+            minutes.parse::<u64>().ok()?,
+            seconds.parse::<f64>().ok()?,
+        ),
+        [hours, minutes, seconds] => (
+            hours.parse::<u64>().ok()?,
+            minutes.parse::<u64>().ok()?,
+            seconds.parse::<f64>().ok()?,
+        ),
+        _ => return None,
+    };
+    if minutes >= 60 || !seconds.is_finite() || !(0.0..60.0).contains(&seconds) {
+        return None;
+    }
+    let total_seconds = days as f64 * HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE
+        + hours as f64 * MINUTES_PER_HOUR * SECONDS_PER_MINUTE
+        + minutes as f64 * SECONDS_PER_MINUTE
+        + seconds;
+    let total_millis = (total_seconds * MILLIS_PER_SECOND).round();
+    if !(0.0..=u64::MAX as f64).contains(&total_millis) {
+        return None;
+    }
+    Some(Duration::from_millis(total_millis as u64))
+}
+
+pub fn duration_delta_ms(start: Option<Duration>, end: Option<Duration>) -> Option<u64> {
+    Some(
+        end?.checked_sub(start?)?
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64,
+    )
+}
+
+pub fn one_core_cpu_percent(process_cpu_ms: Option<u64>, duration_ms: u64) -> Option<f64> {
+    let process_cpu_ms = process_cpu_ms?;
+    (duration_ms > 0).then(|| 100.0 * process_cpu_ms as f64 / duration_ms as f64)
+}
+
+pub fn stress_checkpoint_action(expected_actions: u64, percent: u8) -> u64 {
+    if expected_actions == 0 {
+        return 0;
+    }
+    let numerator = u128::from(expected_actions) * u128::from(percent);
+    numerator.div_ceil(100).min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct RefreshIntervalSummary {
+    pub display_period_ms: Option<f64>,
+    pub p95_display_periods: Option<f64>,
+    pub frames_over_two_periods: u64,
+    pub fraction_over_two_periods: Option<f64>,
+}
+
+pub fn refresh_interval_summary(
+    intervals: &MetricSummary,
+    refresh_hz: Option<f64>,
+    frames_over_two_periods: u64,
+) -> RefreshIntervalSummary {
+    let display_period_ms = refresh_hz
+        .filter(|refresh_hz| refresh_hz.is_finite() && *refresh_hz > 0.0)
+        .map(|refresh_hz| MILLIS_PER_SECOND / refresh_hz);
+    let p95_display_periods = intervals
+        .p95
+        .zip(display_period_ms)
+        .map(|(p95, period)| p95 / period);
+    let fraction_over_two_periods = (intervals.sample_count > 0)
+        .then(|| frames_over_two_periods as f64 / intervals.sample_count as f64);
+    RefreshIntervalSummary {
+        display_period_ms,
+        p95_display_periods,
+        frames_over_two_periods,
+        fraction_over_two_periods,
     }
 }
 
@@ -531,7 +629,11 @@ fn duration_mul(duration: Duration, multiplier: u64) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemorySamples, Samples, StressState};
+    use super::{
+        MemorySamples, MetricSummary, Samples, StressState, duration_delta_ms,
+        one_core_cpu_percent, parse_process_cpu_time, refresh_interval_summary,
+        stress_checkpoint_action,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -546,6 +648,67 @@ mod tests {
         assert_eq!(samples.percentile(95.0), 30.0);
         assert_eq!(samples.max(), 30.0);
         assert_eq!(samples.summary().misses, 3);
+    }
+
+    #[test]
+    fn process_cpu_clock_parser_and_idle_arithmetic_are_deterministic() {
+        assert_eq!(
+            parse_process_cpu_time("  1:02.34\n"),
+            Some(Duration::from_millis(62_340))
+        );
+        assert_eq!(
+            parse_process_cpu_time("2:03:04.005"),
+            Some(Duration::from_millis(7_384_005))
+        );
+        assert_eq!(
+            parse_process_cpu_time("1-02:03:04.50"),
+            Some(Duration::from_millis(93_784_500))
+        );
+        for invalid in ["", "-1:00", "1:60", "1:00:60", "1", "not-time"] {
+            assert_eq!(parse_process_cpu_time(invalid), None);
+        }
+
+        assert_eq!(
+            duration_delta_ms(
+                Some(Duration::from_millis(1_000)),
+                Some(Duration::from_millis(1_125))
+            ),
+            Some(125)
+        );
+        assert_eq!(
+            duration_delta_ms(
+                Some(Duration::from_millis(1_125)),
+                Some(Duration::from_millis(1_000))
+            ),
+            None
+        );
+        assert_eq!(one_core_cpu_percent(Some(150), 30_000), Some(0.5));
+        assert_eq!(one_core_cpu_percent(Some(1), 0), None);
+        assert_eq!(one_core_cpu_percent(None, 30_000), None);
+    }
+
+    #[test]
+    fn refresh_relative_summary_and_stress_checkpoints_use_exact_arithmetic() {
+        assert_eq!(stress_checkpoint_action(1_000, 80), 800);
+        assert_eq!(stress_checkpoint_action(3, 80), 3);
+        assert_eq!(stress_checkpoint_action(3, 90), 3);
+        assert_eq!(stress_checkpoint_action(3, 100), 3);
+        assert_eq!(stress_checkpoint_action(0, 80), 0);
+
+        let intervals = MetricSummary {
+            sample_count: 100,
+            p95: Some(10.0),
+            ..MetricSummary::default()
+        };
+        let summary = refresh_interval_summary(&intervals, Some(120.0), 1);
+        assert_eq!(summary.display_period_ms, Some(1_000.0 / 120.0));
+        assert_eq!(summary.p95_display_periods, Some(1.2));
+        assert_eq!(summary.frames_over_two_periods, 1);
+        assert_eq!(summary.fraction_over_two_periods, Some(0.01));
+        assert_eq!(
+            refresh_interval_summary(&MetricSummary::default(), None, 0).fraction_over_two_periods,
+            None
+        );
     }
 
     #[test]

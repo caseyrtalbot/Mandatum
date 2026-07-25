@@ -732,6 +732,11 @@ fn separator_drag_resizes_the_split_live() {
 
     // The next frame draws the moved boundary and its separator.
     let scene = state.build_scene(POINTER_FRAME);
+    assert!(scene.presentation.motion_policy.direct_geometry);
+    assert!(
+        scene.presentation.transition_targets.is_empty(),
+        "live split drag snaps every presentation transition"
+    );
     let pane_1 = scene
         .panes
         .iter()
@@ -1875,6 +1880,107 @@ fn wait_for_shell_ready(state: &mut AppState, pane_id: &PaneId) {
         "shell readiness marker never appeared for {pane_id}; rows:\n{}",
         grid_text(state, pane_id)
     );
+}
+
+#[test]
+fn ordinary_live_terminal_input_waits_for_output_before_dirtying_the_scene() {
+    let mut state = live_state();
+    state.handle_terminal_resize(100, 30);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    let before_input = state.scene_generation();
+
+    state.handle_key(key(KeyCode::Char('x')));
+    assert_eq!(
+        state.scene_generation(),
+        before_input,
+        "successfully written child input is not itself a scene change"
+    );
+
+    state.handle_key(Key::new(
+        KeyCode::Char('x'),
+        Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        },
+    ));
+    assert_eq!(
+        state.scene_generation(),
+        before_input,
+        "an unbound platform chord is a scene-neutral no-op"
+    );
+
+    state.handle_key(ctrl('p'));
+    assert!(
+        state.scene_generation() > before_input,
+        "workspace control still dirties the visible scene"
+    );
+    state.shutdown();
+}
+
+#[test]
+fn terminal_write_failure_dirties_only_when_visible_status_changes() {
+    let mut state = state();
+    let initial = state.scene_generation();
+
+    state.handle_key(key(KeyCode::Char('x')));
+    let after_failure = state.scene_generation();
+    assert!(after_failure > initial);
+    assert!(state.status().contains("has no live PTY"));
+
+    state.handle_key(key(KeyCode::Char('y')));
+    assert_eq!(
+        state.scene_generation(),
+        after_failure,
+        "repeating the same visible write failure does not manufacture dirtiness"
+    );
+}
+
+#[test]
+fn ime_generation_tracks_visible_preedit_not_successful_terminal_bytes_or_noop_cancel() {
+    let mut state = live_state();
+    state.handle_terminal_resize(100, 30);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    let stable = state.scene_generation();
+
+    state.handle_event(InputEvent::Composition(CompositionEvent::Commit(
+        "x".to_owned(),
+    )));
+    assert_eq!(
+        state.scene_generation(),
+        stable,
+        "commit without preedit waits for PTY output before dirtying"
+    );
+    state.handle_event(InputEvent::Composition(CompositionEvent::Cancel));
+    assert_eq!(
+        state.scene_generation(),
+        stable,
+        "cancel without active preedit is presentation-neutral"
+    );
+
+    state.handle_event(InputEvent::Composition(CompositionEvent::Preedit {
+        text: "visible".to_owned(),
+        cursor: None,
+    }));
+    let with_preedit = state.scene_generation();
+    assert!(
+        with_preedit > stable,
+        "creating visible preedit dirties the scene"
+    );
+    state.handle_event(InputEvent::Composition(CompositionEvent::Cancel));
+    let after_cancel = state.scene_generation();
+    assert!(
+        after_cancel > with_preedit,
+        "removing visible preedit dirties the scene"
+    );
+    state.handle_event(InputEvent::Composition(CompositionEvent::Cancel));
+    assert_eq!(
+        state.scene_generation(),
+        after_cancel,
+        "repeated cancel remains presentation-neutral"
+    );
+    state.shutdown();
 }
 
 // A PTY output flood must not overwrite meaningful status with

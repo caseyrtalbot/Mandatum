@@ -3,11 +3,41 @@ use std::cell::RefCell;
 use mandatum_scene::input::{PointerButton, PointerKind};
 
 use super::{
-    FontPreflightOutcome, PressedPointerButtons, apply_renderer_scale_transition,
+    FontPreflightOutcome, PressedPointerButtons, VisualClock, apply_renderer_scale_transition,
     launch_after_font_preflight, logical_pointer_position, native_window_geometry,
-    native_window_title, next_native_window_title, parse_launch_options,
+    native_window_title, next_native_window_title, next_scheduled_deadline, parse_launch_options,
     pointer_input_needs_redraw, start_after_preflight,
 };
+
+struct FixedVisualClock(std::time::Instant);
+
+impl VisualClock for FixedVisualClock {
+    fn now(&self) -> std::time::Instant {
+        self.0
+    }
+}
+
+#[test]
+fn visual_clock_and_scheduler_keep_animation_independent_from_heartbeat() {
+    let now = std::time::Instant::now();
+    let clock = FixedVisualClock(now);
+    assert_eq!(clock.now(), now);
+
+    let heartbeat = now + std::time::Duration::from_millis(250);
+    let animation = now + std::time::Duration::from_millis(8);
+    assert_eq!(
+        next_scheduled_deadline(heartbeat, Some(animation)),
+        animation
+    );
+    assert_eq!(next_scheduled_deadline(heartbeat, None), heartbeat);
+    assert_eq!(
+        next_scheduled_deadline(
+            heartbeat,
+            Some(heartbeat + std::time::Duration::from_millis(10))
+        ),
+        heartbeat
+    );
+}
 
 #[test]
 fn native_window_geometry_has_intentional_initial_and_minimum_logical_sizes() {

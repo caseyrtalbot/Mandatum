@@ -317,12 +317,7 @@ impl PreparedVisualScenario {
                 },
             ),
             VisualScenarioId::Attention => {
-                dispatch_palette_command(host, 'g');
-                let waiting = settle(host, size, timeout, self.id, "waiting approval", |frame| {
-                    frame.scene.panes.iter().any(|pane| {
-                        matches!(&pane.content, PaneContent::Agent(agent) if agent.status_role == AgentStatus::WaitingForApproval)
-                    })
-                })?;
+                let waiting = self.wait_for_attention_arrival(host, size, timeout)?;
                 let task_id = waiting
                     .scene
                     .panes
@@ -440,6 +435,43 @@ impl PreparedVisualScenario {
             }
             VisualScenarioId::Narrow => Ok(initial),
         }
+    }
+
+    /// Drive the attention fixture only through the first scene containing
+    /// the newly eligible `ApprovalArrival` transition target.
+    ///
+    /// Pixel checkpoint capture must render this returned snapshot directly:
+    /// it is the first target-bearing scene relative to the renderer's stable
+    /// pre-drive plan. The target may remain eligible while unresolved; equal
+    /// subsequent plans do not restart renderer-owned motion.
+    pub fn drive_attention_arrival(
+        &self,
+        host: &mut FrontendHost,
+        size: SceneSize,
+        timeout: Duration,
+    ) -> Result<FrameSnapshot, VisualScenarioError> {
+        if self.id != VisualScenarioId::Attention {
+            return Err(VisualScenarioError::Workspace(
+                "approval-arrival checkpoint requires the attention scenario".to_owned(),
+            ));
+        }
+        host.handle_input(InputEvent::Resize(size));
+        let _stable_before_arrival = host.frame(size);
+        self.wait_for_attention_arrival(host, size, timeout)
+    }
+
+    fn wait_for_attention_arrival(
+        &self,
+        host: &mut FrontendHost,
+        size: SceneSize,
+        timeout: Duration,
+    ) -> Result<FrameSnapshot, VisualScenarioError> {
+        dispatch_palette_command(host, 'g');
+        settle(host, size, timeout, self.id, "waiting approval", |frame| {
+            frame.scene.panes.iter().any(|pane| {
+                matches!(&pane.content, PaneContent::Agent(agent) if agent.status_role == AgentStatus::WaitingForApproval)
+            })
+        })
     }
 }
 
@@ -818,6 +850,40 @@ mod tests {
         second_host.shutdown();
         let _ = fs::remove_dir_all(first_root);
         let _ = fs::remove_dir_all(second_root);
+    }
+
+    #[test]
+    fn attention_checkpoint_snapshot_preserves_newly_eligible_approval_target() {
+        let root = fixture("attention-arrival");
+        let prepared = prepare_visual_scenario(VisualScenarioId::Attention, &root).unwrap();
+        let mut host = FrontendHost::new(prepared.app_config());
+        let frame = prepared
+            .drive_attention_arrival(&mut host, SceneSize::new(102, 35), Duration::from_secs(3))
+            .unwrap();
+
+        assert!(
+            frame
+                .scene
+                .presentation
+                .transition_targets
+                .iter()
+                .any(|target| target.role == mandatum_scene::TransitionRole::ApprovalArrival)
+        );
+        assert!(!frame.scene.presentation.motion_policy.direct_geometry);
+        assert!(!frame.scene.presentation.motion_policy.reduced_motion);
+        let following = host.frame(SceneSize::new(102, 35));
+        assert!(
+            following
+                .scene
+                .presentation
+                .transition_targets
+                .iter()
+                .any(|target| target.role == mandatum_scene::TransitionRole::ApprovalArrival),
+            "unresolved approval remains eligible without restarting renderer motion"
+        );
+
+        host.shutdown();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

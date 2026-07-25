@@ -3196,3 +3196,69 @@ geometry. `./ci/native-frontend.sh` passed and the full repository gate ended
 `artifacts` references were visually reviewed and explicitly accepted from
 clean source commit `d17bdd2` on the MacBook Pro built-in Retina display;
 strict comparisons returned SSIM 1.0 with zero changed or masked pixels.
+
+## Motion Intent Is Typed And Runtime Polling Does Not Drive Paint
+
+Status: accepted architecture; displayed evidence and final gate pending
+(2026-07-24)
+
+Decision: Phase 6 adds motion as scene-owned typed eligibility plus
+renderer-local deterministic presentation progress. `SceneMotionPolicy`
+expresses reduced-motion and direct-geometry frames. `TransitionTarget` binds
+stable semantic nodes to Focus, Selection, Overlay, PaneGeometry, or
+ApprovalArrival and to the only permitted properties: geometry, opacity, and
+scale. Approval arrival also carries a monotonic sequence so distinct requests
+on one pane cannot collapse between paints. Overlay opacity covers its
+descendant material and cell-owned text family; scale and pane geometry apply
+only to native material-backed commands. Cell-owned glyph placement, child
+output, and artifact raster placement stay direct. Overlay close snaps because
+the new scene no longer owns its glyph rows and the adapter must not retain an
+empty shell.
+
+The native renderer samples an injected monotonic instant and retains no
+durable product truth. Equal plans do not restart motion. Interruption and
+reversal begin at the current sampled presentation and converge on the newest
+scene. A new approval receives one brief inward emphasis, then its typed amber
+callout remains statically high-salience. Reduced motion and direct
+pointer/resize geometry snap immediately and schedule no transition frames.
+
+Context: the prior waiting-approval treatment changed scene output from a
+wall-clock pulse, and the native loop coupled its periodic heartbeat with
+redraw opportunities. That made product scene equality time-dependent and
+could repaint a static workspace for child-exit polling. Independently moving
+native material also creates input risk whenever rendered geometry lies
+between scene-owned hit-target endpoints.
+
+Rationale: the scene must name why a stable semantic surface may move, while
+the adapter alone owns transient pixels. An injected monotonic clock makes
+start, midpoint, completion, interruption, reversal, and convergence exact in
+tests without putting time in product state. A separate visible-state
+generation lets the platform distinguish real scene change from snapshot
+production or heartbeat cadence. Suspending pointer admission during
+hit-bearing interpolation preserves the exact-painted-frame interaction
+contract.
+
+Consequences:
+
+- `FrameSnapshot` carries both an always-advancing production revision and a
+  scene generation that advances only for visible state change;
+- `FrontendHost::heartbeat` reports whether child-exit work changed that
+  generation rather than implicitly requiring repaint;
+- the native shell schedules the earlier of the renderer animation deadline
+  and the 250 ms heartbeat and redraws only when either active motion or real
+  scene change requires it;
+- typing, output, pointer drag, live resize, and terminal child interaction
+  remain authoritative and uninterpolated;
+- pane and overlay motion cannot admit pointer input against geometry between
+  stable scene endpoints;
+- reduced motion retains static semantic cues while scheduling no transition
+  frames; and
+- animation progress, deadlines, scene generation, and pointer suspension are
+  live presentation/runtime state and are never serialized.
+
+Verification: focused deterministic source tests cover typed target
+construction, stable families, direct and reduced policy, start/mid/end,
+interruption, reversal, convergence, approval arrival, scheduling, redraw, and
+idle heartbeat behavior. Displayed motion evidence, final measured values,
+explicit reference acceptance, and the complete repository gate are not
+claimed here; `docs/verification.md` records them only after they run.

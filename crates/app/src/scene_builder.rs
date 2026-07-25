@@ -4,6 +4,8 @@
 //! the app side: the scene crate never depends on the terminal engine, so no
 //! parser type crosses the frontend seam (L1/L4).
 
+use std::collections::HashSet;
+
 use mandatum_agent_runtime::RiskLevel;
 use mandatum_core::{AgentPaneIntent, PaneId, PaneKind, PaneSpec, Session, TaskPaneIntent};
 use mandatum_scene::{
@@ -13,10 +15,10 @@ use mandatum_scene::{
     OverlayPresentationKind, OverlayScene, PaneBadgeKind, PaneContent, PaneNodePart, PaneScene,
     PaneSceneKind, PreeditScene, PresentationAxis, PresentationNode, PresentationNodeId,
     PresentationNodeRole, PresentationNodeState, PresentationTone, SceneCell, SceneCellStyle,
-    SceneColor, ScenePresentation, SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent,
-    TaskStatusRole, TerminalProjection, TerminalSurface, TerminalViewportMapping, TextInputKind,
-    TextInputScene, TransitionProperty, TransitionTarget, ViewportMetrics, WorkflowNodePart,
-    WorkspaceNodePart, WorkspaceScene,
+    SceneColor, SceneMotionPolicy, ScenePresentation, SceneRect, SceneSize, StatusScene,
+    SurfacePosition, TaskContent, TaskStatusRole, TerminalProjection, TerminalSurface,
+    TerminalViewportMapping, TextInputKind, TextInputScene, TransitionProperty, TransitionRole,
+    TransitionTarget, ViewportMetrics, WorkflowNodePart, WorkspaceNodePart, WorkspaceScene,
     cell_program::display_width,
     layout::{self, PaneLayout},
 };
@@ -135,6 +137,7 @@ fn scene_presentation(
     overlay: Option<&OverlayScene>,
     hit_targets: &[HitTarget],
 ) -> ScenePresentation {
+    let motion_policy = state.scene_motion_policy();
     let workspace_id = PresentationNodeId::workspace(WorkspaceNodePart::Surface);
     let mut nodes = vec![presentation_node(
         workspace_id.clone(),
@@ -184,6 +187,7 @@ fn scene_presentation(
             &mut nodes,
             &mut terminal_viewports,
             &mut transition_targets,
+            motion_policy,
         );
     }
 
@@ -225,6 +229,7 @@ fn scene_presentation(
             &mut nodes,
             &mut terminal_viewports,
             &mut transition_targets,
+            motion_policy,
         );
     }
 
@@ -243,16 +248,6 @@ fn scene_presentation(
             viewport,
         ));
         push_overlay_band_nodes(overlay, viewport, state.theme(), &overlay_id, &mut nodes);
-        transition_targets.extend([
-            TransitionTarget {
-                node_id: overlay_id.clone(),
-                property: TransitionProperty::Opacity,
-            },
-            TransitionTarget {
-                node_id: overlay_id,
-                property: TransitionProperty::Scale,
-            },
-        ]);
     }
 
     let mut logical_hit_targets = Vec::new();
@@ -304,6 +299,88 @@ fn scene_presentation(
         });
     }
 
+    // Independent emphasis and family motion are both semantic eligibility.
+    // The renderer gives presence-changing family transitions precedence and
+    // uses Focus/Selection for stable-surface emphasis changes.
+    if motion_policy.allows(TransitionRole::Selection) {
+        for node in nodes.iter().filter(|node| node.state.selected) {
+            push_unique_transition(
+                &mut transition_targets,
+                node.id.clone(),
+                TransitionRole::Selection,
+                TransitionProperty::Scale,
+            );
+        }
+    }
+    if motion_policy.allows(TransitionRole::ApprovalArrival) {
+        for pane in panes {
+            let Some(sequence) = state.approval_arrival_sequence(&pane.id) else {
+                continue;
+            };
+            let node_id = PresentationNodeId::pane(
+                pane.id.clone(),
+                PaneNodePart::Workflow(WorkflowNodePart::Approval),
+            );
+            if nodes.iter().any(|node| node.id == node_id) {
+                push_unique_transition_with_sequence(
+                    &mut transition_targets,
+                    node_id,
+                    TransitionRole::ApprovalArrival,
+                    TransitionProperty::Scale,
+                    sequence,
+                );
+            }
+        }
+    }
+    if motion_policy.allows(TransitionRole::PaneGeometry) {
+        for pane in panes {
+            let root = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Surface);
+            for node in transition_family_nodes(&nodes, &root)
+                .into_iter()
+                .filter(|node| node_has_material_motion_surface(node))
+            {
+                push_unique_transition(
+                    &mut transition_targets,
+                    node.id.clone(),
+                    TransitionRole::PaneGeometry,
+                    TransitionProperty::Geometry,
+                );
+            }
+        }
+        for node in nodes
+            .iter()
+            .filter(|node| node.role == PresentationNodeRole::Separator)
+        {
+            push_unique_transition(
+                &mut transition_targets,
+                node.id.clone(),
+                TransitionRole::PaneGeometry,
+                TransitionProperty::Geometry,
+            );
+        }
+    }
+    if motion_policy.allows(TransitionRole::Overlay)
+        && let Some(overlay) = overlay
+    {
+        let root = PresentationNodeId::overlay(overlay.kind(), OverlayNodePart::Surface);
+        for node in transition_family_nodes(&nodes, &root) {
+            push_unique_transition(
+                &mut transition_targets,
+                node.id.clone(),
+                TransitionRole::Overlay,
+                TransitionProperty::Opacity,
+            );
+            if node_has_material_motion_surface(node) {
+                push_unique_transition(
+                    &mut transition_targets,
+                    node.id.clone(),
+                    TransitionRole::Overlay,
+                    TransitionProperty::Scale,
+                );
+            }
+        }
+    }
+
     let accessibility_nodes = accessibility_nodes(
         panes,
         header,
@@ -317,11 +394,94 @@ fn scene_presentation(
     ScenePresentation {
         viewport: Some(viewport),
         density: state.density(),
+        motion_policy,
         nodes,
         logical_hit_targets,
         terminal_viewports,
         transition_targets,
         accessibility_nodes,
+    }
+}
+
+fn transition_family_nodes<'a>(
+    nodes: &'a [PresentationNode],
+    root: &PresentationNodeId,
+) -> Vec<&'a PresentationNode> {
+    let mut family = HashSet::new();
+    let mut result = Vec::new();
+    for node in nodes {
+        if &node.id == root
+            || node
+                .parent
+                .as_ref()
+                .is_some_and(|parent| family.contains(parent))
+        {
+            family.insert(node.id.clone());
+            result.push(node);
+        }
+    }
+    result
+}
+
+/// Geometry and scale are material-only until the native text renderer owns
+/// plan-driven glyph transforms. Text scopes, terminal/task output, and
+/// artifact pixels remain cell/raster-positioned directly even when a
+/// material-backed node also advertises motion for its surface.
+fn node_has_material_motion_surface(node: &PresentationNode) -> bool {
+    match node.role {
+        PresentationNodeRole::Pane
+        | PresentationNodeRole::PaneBody
+        | PresentationNodeRole::PaneBadge(_)
+        | PresentationNodeRole::FocusIndicator
+        | PresentationNodeRole::Separator
+        | PresentationNodeRole::WorkflowStatusBadge
+        | PresentationNodeRole::ArtifactCanvas
+        | PresentationNodeRole::Overlay
+        | PresentationNodeRole::OverlayTitle
+        | PresentationNodeRole::OverlayFooter
+        | PresentationNodeRole::TextInput => true,
+        PresentationNodeRole::PaneTitle => !node.state.floating,
+        PresentationNodeRole::Item => node.state.selected,
+        PresentationNodeRole::Workflow(role) => matches!(
+            role,
+            mandatum_scene::WorkflowRowRole::Callout
+                | mandatum_scene::WorkflowRowRole::List
+                | mandatum_scene::WorkflowRowRole::Console
+                | mandatum_scene::WorkflowRowRole::ArtifactInspector
+        ),
+        PresentationNodeRole::Workspace
+        | PresentationNodeRole::Header
+        | PresentationNodeRole::Status
+        | PresentationNodeRole::TerminalOutput
+        | PresentationNodeRole::TaskOutput
+        | PresentationNodeRole::Attention => false,
+    }
+}
+
+fn push_unique_transition(
+    targets: &mut Vec<TransitionTarget>,
+    node_id: PresentationNodeId,
+    role: TransitionRole,
+    property: TransitionProperty,
+) {
+    push_unique_transition_with_sequence(targets, node_id, role, property, 0);
+}
+
+fn push_unique_transition_with_sequence(
+    targets: &mut Vec<TransitionTarget>,
+    node_id: PresentationNodeId,
+    role: TransitionRole,
+    property: TransitionProperty,
+    sequence: u64,
+) {
+    let target = TransitionTarget {
+        node_id,
+        role,
+        property,
+        sequence,
+    };
+    if !targets.contains(&target) {
+        targets.push(target);
     }
 }
 
@@ -495,6 +655,7 @@ fn push_pane_presentation(
     nodes: &mut Vec<PresentationNode>,
     terminal_viewports: &mut Vec<TerminalViewportMapping>,
     transition_targets: &mut Vec<TransitionTarget>,
+    motion_policy: SceneMotionPolicy,
 ) {
     let pane_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Surface);
     nodes.push(presentation_node(
@@ -550,8 +711,9 @@ fn push_pane_presentation(
         title_logical_rect,
     ));
     if pane.focused {
+        let focus_id = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::FocusIndicator);
         nodes.push(presentation_logical_node(
-            PresentationNodeId::pane(pane.id.clone(), PaneNodePart::FocusIndicator),
+            focus_id.clone(),
             Some(title_id.clone()),
             PresentationNodeRole::FocusIndicator,
             PresentationNodeState {
@@ -568,6 +730,14 @@ fn push_pane_presentation(
             ),
             TerminalProjection::CellRegions(vec![title_rect]),
         ));
+        if motion_policy.allows(TransitionRole::Focus) {
+            transition_targets.push(TransitionTarget {
+                node_id: focus_id,
+                role: TransitionRole::Focus,
+                property: TransitionProperty::Scale,
+                sequence: 0,
+            });
+        }
     }
     for (kind, cell_rect) in pane.badge_rects() {
         let badge_cell_rect = viewport.logical_rect_for_cells(cell_rect);
@@ -604,11 +774,6 @@ fn push_pane_presentation(
         layout::pane_inner_rect(pane.area),
         viewport,
     ));
-    transition_targets.push(TransitionTarget {
-        node_id: pane_id.clone(),
-        property: TransitionProperty::Geometry,
-    });
-
     push_workflow_presentation(pane, viewport, &pane_id, nodes);
 
     if let Some(mapping) = terminal_viewport_mapping(state, pane, viewport) {
@@ -1604,11 +1769,10 @@ fn agent_content(state: &AppState, pane_id: &PaneId, intent: &AgentPaneIntent) -
                 risk_label: risk_label(request.risk.level).to_owned(),
                 risk_basis: request.risk.basis.clone(),
                 key_hint: "y approve / n reject".to_owned(),
-                // The product's single motion: the approval header pulses
-                // at ~1 Hz off the wall clock (steady under reduced
-                // motion). The heartbeat repaint keeps it ticking when the
-                // workspace is otherwise idle.
-                pulse_on: approval_pulse_on(crate::timeline::now_ms(), state.reduced_motion()),
+                // Waiting approval stays statically high-salience. A separate
+                // one-shot typed ApprovalArrival target provides brief motion
+                // when permitted; no wall clock leaks into scene content.
+                pulse_on: true,
             }),
         output_tail: live
             .map(|runtime| runtime.output_tail.iter().cloned().collect())
@@ -1622,13 +1786,6 @@ fn risk_label(level: RiskLevel) -> &'static str {
         RiskLevel::Medium => "medium",
         RiskLevel::High => "high",
     }
-}
-
-/// Whether the approval header draws emphasized at this instant: a ~1 Hz
-/// alternation off the wall clock, held steady (always on) under reduced
-/// motion.
-pub(crate) fn approval_pulse_on(now_ms: u64, reduced_motion: bool) -> bool {
-    reduced_motion || (now_ms / 1_000).is_multiple_of(2)
 }
 
 fn empty_content(state: &AppState, pane: &PaneSpec) -> EmptyContent {
@@ -2764,28 +2921,7 @@ mod tests {
     }
 
     #[test]
-    fn reduced_motion_kills_the_pulse_and_no_other_motion_exists() {
-        // The [ui] reduced_motion contract, in two halves.
-        //
-        // (1) The approval pulse — the product's single animation — holds
-        // steady (always emphasized) under reduced motion, at every instant
-        // of its 1 Hz cycle.
-        for now_ms in [0u64, 500, 1_000, 1_500, 2_000, 999_999_999] {
-            assert!(
-                approval_pulse_on(now_ms, true),
-                "reduced motion must hold the pulse steady at t={now_ms}"
-            );
-        }
-        assert!(approval_pulse_on(0, false));
-        assert!(
-            !approval_pulse_on(1_000, false),
-            "without reduced motion the pulse alternates"
-        );
-
-        // (2) No other motion exists: outside the pulse (no live approval
-        // here), the built scene is byte-identical with the flag on and
-        // off, attention strip included — this fails the moment someone
-        // adds motion without gating it on the flag.
+    fn reduced_motion_emits_no_transition_targets() {
         let build = |reduced_motion: bool| {
             let mut state = AppState::new(AppConfig {
                 reduced_motion,
@@ -2802,9 +2938,194 @@ mod tests {
         let plain = build(false);
         let reduced = build(true);
         assert!(!plain.header.attention.is_empty());
-        assert_eq!(
-            plain, reduced,
-            "outside the gated pulse, reduced_motion must have nothing left to disable"
+        assert!(
+            !plain.presentation.transition_targets.is_empty(),
+            "ordinary presentation advertises typed motion"
+        );
+        assert!(
+            reduced.presentation.transition_targets.is_empty(),
+            "reduced motion must snap every typed transition"
+        );
+        assert!(reduced.presentation.motion_policy.reduced_motion);
+    }
+
+    #[test]
+    fn typed_motion_roles_cover_focus_selection_overlay_and_programmatic_geometry() {
+        let mut state = AppState::new(config(false));
+        state.dispatch(CommandId::SplitRight);
+        let first = state.build_scene(SceneSize::new(100, 30));
+        let roles = first
+            .presentation
+            .transition_targets
+            .iter()
+            .map(|target| target.role)
+            .collect::<Vec<_>>();
+        assert!(roles.contains(&TransitionRole::Focus));
+        assert!(roles.contains(&TransitionRole::PaneGeometry));
+        for pane in &first.panes {
+            let root = PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Surface);
+            for node in transition_family_nodes(&first.presentation.nodes, &root) {
+                let has_geometry = first.presentation.transition_targets.iter().any(|target| {
+                    target.node_id == node.id
+                        && target.role == TransitionRole::PaneGeometry
+                        && target.property == TransitionProperty::Geometry
+                });
+                assert_eq!(
+                    has_geometry,
+                    node_has_material_motion_surface(node),
+                    "only material-backed pane-family surfaces may advertise geometry: {:?}",
+                    node.role,
+                );
+            }
+        }
+        for separator in first
+            .presentation
+            .nodes
+            .iter()
+            .filter(|node| node.role == PresentationNodeRole::Separator)
+        {
+            assert!(first.presentation.transition_targets.iter().any(|target| {
+                target.node_id == separator.id
+                    && target.role == TransitionRole::PaneGeometry
+                    && target.property == TransitionProperty::Geometry
+            }));
+        }
+        let focus = first
+            .presentation
+            .nodes
+            .iter()
+            .find(|node| node.role == PresentationNodeRole::FocusIndicator)
+            .expect("focused pane has a focus indicator");
+        assert!(
+            first.presentation.transition_targets.iter().any(|target| {
+                target.node_id == focus.id && target.role == TransitionRole::Focus
+            })
+        );
+        assert!(first.presentation.transition_targets.iter().any(|target| {
+            target.node_id == focus.id && target.role == TransitionRole::PaneGeometry
+        }));
+
+        state.handle_event(InputEvent::Key(ctrl('p')));
+        let overlay = state.build_scene(SceneSize::new(100, 30));
+        let roles = overlay
+            .presentation
+            .transition_targets
+            .iter()
+            .map(|target| target.role)
+            .collect::<Vec<_>>();
+        assert!(roles.contains(&TransitionRole::Overlay));
+        assert!(roles.contains(&TransitionRole::Selection));
+        let overlay_scene = overlay.overlay.as_ref().expect("palette is open");
+        let overlay_root =
+            PresentationNodeId::overlay(overlay_scene.kind(), OverlayNodePart::Surface);
+        for node in transition_family_nodes(&overlay.presentation.nodes, &overlay_root) {
+            assert!(
+                overlay
+                    .presentation
+                    .transition_targets
+                    .iter()
+                    .any(|target| {
+                        target.node_id == node.id
+                            && target.role == TransitionRole::Overlay
+                            && target.property == TransitionProperty::Opacity
+                    }),
+                "every overlay-family node must share opacity: {:?}",
+                node.role
+            );
+            let has_scale = overlay
+                .presentation
+                .transition_targets
+                .iter()
+                .any(|target| {
+                    target.node_id == node.id
+                        && target.role == TransitionRole::Overlay
+                        && target.property == TransitionProperty::Scale
+                });
+            assert_eq!(
+                has_scale,
+                node_has_material_motion_surface(node),
+                "only material-backed overlay surfaces may advertise scale: {:?}",
+                node.role
+            );
+        }
+        let selected = overlay
+            .presentation
+            .nodes
+            .iter()
+            .find(|node| node.state.selected)
+            .expect("palette has a selected item");
+        assert!(
+            overlay
+                .presentation
+                .transition_targets
+                .iter()
+                .any(|target| {
+                    target.node_id == selected.id && target.role == TransitionRole::Selection
+                })
+        );
+        assert!(
+            overlay
+                .presentation
+                .transition_targets
+                .iter()
+                .any(|target| {
+                    target.node_id == selected.id && target.role == TransitionRole::Overlay
+                })
+        );
+        for (index, target) in overlay.presentation.transition_targets.iter().enumerate() {
+            assert_eq!(
+                target.sequence, 0,
+                "ordinary stable transitions carry no event sequence"
+            );
+            assert!(
+                !overlay.presentation.transition_targets[index + 1..].contains(target),
+                "typed transition targets must be unique"
+            );
+        }
+    }
+
+    #[test]
+    fn resize_frame_snaps_pane_geometry_then_restores_programmatic_policy() {
+        let mut state = AppState::new(config(false));
+        let size = SceneSize::new(100, 30);
+        state.build_scene(size);
+        state.handle_event(InputEvent::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            button: Some(PointerButton::Right),
+            column: 5,
+            row: 5,
+            mods: Modifiers::NONE,
+        }));
+        let menu = state.build_scene(size);
+        assert!(matches!(menu.overlay, Some(OverlayScene::ContextMenu(_))));
+        assert!(menu.presentation.transition_targets.iter().any(|target| {
+            matches!(
+                target.role,
+                TransitionRole::Overlay | TransitionRole::Selection
+            )
+        }));
+
+        state.handle_event(InputEvent::Resize(SceneSize::new(120, 40)));
+
+        let direct = state.build_scene(SceneSize::new(120, 40));
+        assert!(direct.presentation.motion_policy.direct_geometry);
+        assert!(
+            direct.overlay.is_none(),
+            "resize removes the geometry-anchored context menu"
+        );
+        assert!(
+            direct.presentation.transition_targets.is_empty(),
+            "a direct resize frame must suppress overlay, selection, focus, and geometry motion"
+        );
+
+        let later = state.build_scene(SceneSize::new(120, 40));
+        assert!(!later.presentation.motion_policy.direct_geometry);
+        assert!(
+            later
+                .presentation
+                .transition_targets
+                .iter()
+                .any(|target| { target.role == TransitionRole::PaneGeometry })
         );
     }
 
@@ -2987,6 +3308,18 @@ mod tests {
         assert!(surface.cursor.is_some());
         assert!(surface.following_live());
         assert!(!surface.in_copy_mode());
+        let output_node = scene
+            .presentation
+            .nodes
+            .iter()
+            .find(|node| node.role == PresentationNodeRole::TerminalOutput)
+            .expect("live terminal has a typed output node");
+        assert!(
+            !scene.presentation.transition_targets.iter().any(|target| {
+                target.node_id == output_node.id && target.role == TransitionRole::PaneGeometry
+            }),
+            "terminal glyph content stays direct during pane geometry motion"
+        );
 
         state.shutdown();
     }
@@ -3063,6 +3396,18 @@ mod tests {
         let inner = layout::pane_inner_rect(pane.area);
         let expected_rows = usize::from(inner.height) - pane.detail_lines().len();
         assert_eq!(task.output.as_ref().unwrap().rows.len(), expected_rows);
+        let output_node = scene
+            .presentation
+            .nodes
+            .iter()
+            .find(|node| node.role == PresentationNodeRole::TaskOutput)
+            .expect("live task has a typed output node");
+        assert!(
+            !scene.presentation.transition_targets.iter().any(|target| {
+                target.node_id == output_node.id && target.role == TransitionRole::PaneGeometry
+            }),
+            "task output stays direct during pane geometry motion"
+        );
 
         state.shutdown();
     }
@@ -3217,6 +3562,10 @@ mod tests {
         assert_eq!(prompt.risk_label, "high");
         assert_eq!(prompt.risk_basis, "removes files (rm)");
         assert_eq!(prompt.key_hint, "y approve / n reject");
+        assert!(
+            prompt.pulse_on,
+            "waiting approval remains emphasized after arrival motion settles"
+        );
         let approval_node = scene
             .presentation
             .nodes
@@ -3234,6 +3583,71 @@ mod tests {
             PresentationNodeRole::Workflow(mandatum_scene::WorkflowRowRole::Callout)
         );
         assert_eq!(approval_node.state.tone, PresentationTone::Waiting);
+        let arrival = scene
+            .presentation
+            .transition_targets
+            .iter()
+            .find(|target| {
+                target.node_id == approval_node.id
+                    && target.role == TransitionRole::ApprovalArrival
+                    && target.property == TransitionProperty::Scale
+            })
+            .expect("visible approval has typed arrival motion");
+        assert!(arrival.sequence > 0);
+        for target in scene
+            .presentation
+            .transition_targets
+            .iter()
+            .filter(|target| {
+                matches!(
+                    target.property,
+                    TransitionProperty::Geometry | TransitionProperty::Scale
+                )
+            })
+        {
+            let node = scene
+                .presentation
+                .nodes
+                .iter()
+                .find(|node| node.id == target.node_id)
+                .expect("transition target references a presentation node");
+            assert!(
+                node_has_material_motion_surface(node),
+                "text/output-only node {:?} must not advertise material motion",
+                node.role
+            );
+        }
+        let compact = state.build_scene(SceneSize::new(100, 8));
+        let compact_approval = compact
+            .presentation
+            .nodes
+            .iter()
+            .find(|node| node.id == approval_node.id)
+            .expect("retained approval identity survives compact layout");
+        assert!(
+            compact_approval.state.hidden,
+            "compact layout retains the workflow identity as hidden"
+        );
+        let compact_arrival = compact
+            .presentation
+            .transition_targets
+            .iter()
+            .find(|target| {
+                target.node_id == compact_approval.id
+                    && target.role == TransitionRole::ApprovalArrival
+            })
+            .expect("hidden retained approval keeps transition identity continuous");
+        assert_eq!(compact_arrival.sequence, arrival.sequence);
+        let visible_again = state.build_scene(size);
+        let visible_arrival = visible_again
+            .presentation
+            .transition_targets
+            .iter()
+            .find(|target| {
+                target.node_id == approval_node.id && target.role == TransitionRole::ApprovalArrival
+            })
+            .expect("layout polling must not consume pending arrival eligibility");
+        assert_eq!(visible_arrival.sequence, arrival.sequence);
 
         // The waiting pane surfaces globally in the attention strip, with a
         // clickable jump target.

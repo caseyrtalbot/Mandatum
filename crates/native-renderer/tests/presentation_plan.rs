@@ -9,8 +9,8 @@ use mandatum_scene::{
     PaneScene, PaneSceneKind, PhysicalSize, PresentationNode, PresentationNodeId,
     PresentationNodeRole, PresentationNodeState, PresentationTone, ScenePresentation, SceneRect,
     SceneSize, SemanticKey, StatusScene, TerminalProjection, Theme, TransitionProperty,
-    TransitionTarget, ViewportMetrics, WorkflowNodePart, WorkflowRowRole, WorkspaceNodePart,
-    WorkspaceScene, compile_cell_program,
+    TransitionRole, TransitionTarget, ViewportMetrics, WorkflowNodePart, WorkflowRowRole,
+    WorkspaceNodePart, WorkspaceScene, compile_cell_program,
 };
 
 fn scene(nodes: Vec<PresentationNode>, transitions: Vec<TransitionTarget>) -> WorkspaceScene {
@@ -131,7 +131,9 @@ fn plan_retains_exact_semantic_order_bounds_clips_state_and_typed_transition() {
         ],
         vec![TransitionTarget {
             node_id: title_id.clone(),
+            role: TransitionRole::Overlay,
             property: TransitionProperty::Opacity,
+            sequence: 0,
         }],
     );
 
@@ -198,8 +200,13 @@ fn plan_retains_exact_semantic_order_bounds_clips_state_and_typed_transition() {
 
     assert_eq!(plan.transitions().len(), 1);
     assert_eq!(plan.transitions()[0].node_id, title_id);
+    assert_eq!(plan.transitions()[0].role, TransitionRole::Overlay);
     assert_eq!(plan.transitions()[0].property, TransitionProperty::Opacity);
     assert_eq!(plan.transitions()[0].timing, theme.ui.motion.overlay_enter);
+    assert_eq!(
+        plan.transitions()[0].exit_timing,
+        theme.ui.motion.overlay_exit
+    );
 
     let prepared = prepare_scene(&scene, &theme).unwrap();
     assert_eq!(prepared.presentation_plan(), &plan);
@@ -621,6 +628,15 @@ fn phase_four_overlay_family() {
     assert_eq!(theme.ui.selection.leading_indicator_width, 2);
     assert_eq!(selected[1].logical_rect.size.width_units(), 2 * 64);
     assert_eq!(selected[1].color, theme.ui.palette.focus);
+    let selected_text = modal_plan
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            NativePlanCommand::Text(text) if text.node_id == selected_id => Some(text),
+            _ => None,
+        })
+        .expect("overlay item has a typed text scope");
+    assert_eq!(selected_text.cell_rect, Some(SceneRect::new(22, 9, 56, 2)));
 
     for (kind, treatment, radius) in [
         (
@@ -873,7 +889,9 @@ fn plan_rejects_clip_escape_unknown_transition_and_resource_overflow() {
         )],
         vec![TransitionTarget {
             node_id: PresentationNodeId::workspace(WorkspaceNodePart::Status),
+            role: TransitionRole::Selection,
             property: TransitionProperty::Scale,
+            sequence: 0,
         }],
     );
     assert_eq!(

@@ -719,9 +719,9 @@ pub struct AgentApprovalPrompt {
     /// The decision keys frontends should surface ("y approve / n reject").
     pub key_hint: String,
     /// Whether the approval header draws emphasized this frame. The app
-    /// alternates it at ~1 Hz off the heartbeat clock (steady `true` under
-    /// reduced motion), giving waiting-approval panes one calm pulse; it is
-    /// the only motion in the product.
+    /// Waiting approvals keep this true as a static non-motion emphasis.
+    /// Native presentation may additionally receive one typed
+    /// `ApprovalArrival` transition target when the request first appears.
     pub pulse_on: bool,
 }
 

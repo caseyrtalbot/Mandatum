@@ -30,6 +30,10 @@ pub struct FrameSnapshot {
     pub scene: WorkspaceScene,
     pub theme: Theme,
     pub revision: u64,
+    /// Monotonic app-owned scene dirtiness at snapshot construction time.
+    /// Unlike `revision`, this does not advance merely because a frame was
+    /// requested.
+    pub scene_generation: u64,
 }
 
 /// The sole owner of app/runtime state for one frontend run.
@@ -172,10 +176,20 @@ impl FrontendHost {
     }
 
     /// Perform child-exit polling; the active platform shell owns its cadence.
-    pub fn heartbeat(&mut self) {
-        if !self.shutdown_complete {
-            self.app.poll_child_exits();
+    pub fn heartbeat(&mut self) -> bool {
+        if self.shutdown_complete {
+            return false;
         }
+        let before = self.app.scene_generation();
+        self.app.poll_child_exits();
+        self.app.scene_generation() != before
+    }
+
+    /// Monotonic scene-dirtiness generation for event-loop redraw decisions.
+    /// Platform shells may compare it before and after input, runtime drains,
+    /// or heartbeat work without manufacturing a speculative frame.
+    pub fn scene_generation(&self) -> u64 {
+        self.app.scene_generation()
     }
 
     /// Build the exact owned scene/theme pair an adapter should paint.
@@ -195,11 +209,13 @@ impl FrontendHost {
             .expect("frontend frame revision overflowed");
         let scene = self.app.build_scene_with_viewport(viewport);
         let theme = self.app.theme().clone();
+        let scene_generation = self.app.scene_generation();
         self.frame_revision = revision;
         FrameSnapshot {
             scene,
             theme,
             revision,
+            scene_generation,
         }
     }
 
@@ -237,6 +253,7 @@ impl Drop for FrontendHost {
 #[cfg(test)]
 mod tests {
     use std::{
+        path::PathBuf,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -245,8 +262,12 @@ mod tests {
         time::Duration,
     };
 
+    use mandatum_agent_runtime::{
+        AgentSessionEvent, ApprovalRequest, ApprovalScope, FakeConnector, FakeStep, RiskAssessment,
+        RiskLevel,
+    };
     use mandatum_scene::{
-        HitTargetKind, SceneSize,
+        HitTargetKind, SceneSize, TransitionRole,
         input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
     };
 
@@ -263,14 +284,187 @@ mod tests {
         let mut host = FrontendHost::new(AppConfig::default());
 
         let first = host.frame(FRAME_SIZE);
+        let first_generation = host.scene_generation();
         host.handle_input(InputEvent::FocusGained);
         let second = host.frame(FRAME_SIZE);
 
         assert_eq!(first.revision, 1);
         assert_eq!(second.revision, 2);
+        assert_eq!(first.scene_generation, first_generation);
+        assert_eq!(second.scene_generation, host.scene_generation());
+        assert!(second.scene_generation > first.scene_generation);
         assert_eq!(first.scene.size, FRAME_SIZE);
         assert_eq!(first.theme.name, "mandatum-dark");
         assert_eq!(first.scene.panes.len(), 1);
+    }
+
+    #[test]
+    fn scene_generation_changes_for_dirty_work_but_not_an_idle_heartbeat() {
+        let mut host = FrontendHost::new(AppConfig::default());
+        let initial = host.scene_generation();
+
+        assert!(!host.heartbeat());
+        assert_eq!(host.scene_generation(), initial);
+
+        host.handle_input(InputEvent::FocusGained);
+        let after_input = host.scene_generation();
+        assert!(after_input > initial);
+
+        let sender = host.event_sender();
+        sender
+            .send(AppEvent::Input(InputEvent::FocusGained))
+            .unwrap();
+        assert_eq!(host.drain_runtime_bounded(1), 1);
+        assert!(host.scene_generation() > after_input);
+
+        host.shutdown();
+        let shutdown_generation = host.scene_generation();
+        assert!(!host.heartbeat());
+        assert_eq!(host.scene_generation(), shutdown_generation);
+    }
+
+    #[test]
+    fn approval_arrival_survives_frame_polling_until_resolution() {
+        let request = ApprovalRequest {
+            approval_id: "frame-poll-approval".to_owned(),
+            command: "rm -rf target".to_owned(),
+            scope: ApprovalScope {
+                cwd: PathBuf::from("/tmp/project"),
+                affected_path: Some(PathBuf::from("target")),
+            },
+            risk: RiskAssessment {
+                level: RiskLevel::High,
+                basis: "removes files (rm)".to_owned(),
+            },
+        };
+        let next_request = ApprovalRequest {
+            approval_id: "frame-poll-approval-2".to_owned(),
+            command: "touch next".to_owned(),
+            scope: ApprovalScope {
+                cwd: PathBuf::from("/tmp/project"),
+                affected_path: Some(PathBuf::from("next")),
+            },
+            risk: RiskAssessment {
+                level: RiskLevel::High,
+                basis: "writes a file".to_owned(),
+            },
+        };
+        let mut host = FrontendHost::new(AppConfig::default());
+        host.app
+            .set_agent_connector(Box::new(FakeConnector::new(vec![
+                FakeStep::Emit(AgentSessionEvent::ApprovalRequested(request)),
+                FakeStep::AwaitApproval {
+                    approval_id: "frame-poll-approval".to_owned(),
+                    then_on_approve: vec![AgentSessionEvent::ApprovalRequested(next_request)],
+                    then_on_reject: vec![],
+                },
+                FakeStep::AwaitApproval {
+                    approval_id: "frame-poll-approval-2".to_owned(),
+                    then_on_approve: vec![],
+                    then_on_reject: vec![],
+                },
+            ])));
+        host.app.dispatch(CommandId::StartAgent);
+        let pane_id = host
+            .app
+            .workspace()
+            .active_session()
+            .focused_pane_id()
+            .clone();
+
+        let mut arrival = None;
+        for _ in 0..300 {
+            host.drain_runtime();
+            let frame = host.frame(FRAME_SIZE);
+            if let Some(target) = frame
+                .scene
+                .presentation
+                .transition_targets
+                .iter()
+                .find(|target| target.role == TransitionRole::ApprovalArrival)
+            {
+                arrival = Some(target.clone());
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        let arrival = arrival.expect("approval arrival must reach a polled host frame");
+        assert!(arrival.sequence > 0);
+
+        for _ in 0..3 {
+            let polled = host.frame(FRAME_SIZE);
+            let matching = polled
+                .scene
+                .presentation
+                .transition_targets
+                .iter()
+                .filter(|target| **target == arrival)
+                .count();
+            assert_eq!(
+                matching, 1,
+                "speculative frame polling must retain one stable arrival eligibility"
+            );
+        }
+
+        for _ in 0..300 {
+            host.app.dispatch(CommandId::ApproveAgentAction);
+            if host.app.status().starts_with("approved") {
+                break;
+            }
+            host.drain_runtime();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            host.app.status().starts_with("approved"),
+            "approval decision was never applied: {}",
+            host.app.status()
+        );
+        for _ in 0..300 {
+            host.drain_runtime();
+            if host
+                .app
+                .approval_arrival_sequence(&pane_id)
+                .is_some_and(|sequence| sequence != arrival.sequence)
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        let next = host.frame(FRAME_SIZE);
+        let next_arrival = next
+            .scene
+            .presentation
+            .transition_targets
+            .iter()
+            .find(|target| target.role == TransitionRole::ApprovalArrival)
+            .expect("second approval must remain eligible without an absent frame");
+        assert_eq!(next_arrival.node_id, arrival.node_id);
+        assert_eq!(next_arrival.role, arrival.role);
+        assert_eq!(next_arrival.property, arrival.property);
+        assert_ne!(
+            next_arrival.sequence, arrival.sequence,
+            "same-pane consecutive arrivals require distinct event identity"
+        );
+
+        for _ in 0..300 {
+            host.app.dispatch(CommandId::ApproveAgentAction);
+            if host.app.approval_arrival_sequence(&pane_id).is_none() {
+                break;
+            }
+            host.drain_runtime();
+            thread::sleep(Duration::from_millis(2));
+        }
+        let resolved = host.frame(FRAME_SIZE);
+        assert!(
+            !resolved
+                .scene
+                .presentation
+                .transition_targets
+                .iter()
+                .any(|target| target.role == TransitionRole::ApprovalArrival),
+            "resolution removes eligibility so a later approval may enter once"
+        );
+        host.shutdown();
     }
 
     #[test]

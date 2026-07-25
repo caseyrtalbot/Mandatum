@@ -18,25 +18,29 @@ use std::{
 };
 
 use mandatum_app::{
-    AppConfig, FrontendEffect, FrontendHost, PreparedVisualScenario, VisualScenarioId,
-    prepare_visual_scenario,
+    AppConfig, FrameSnapshot, FrontendEffect, FrontendHost, PreparedVisualScenario,
+    VisualScenarioId, prepare_visual_scenario,
 };
 use mandatum_native_renderer::{
-    GpuFaultInjection, GpuFaultInjectionResult, GpuFrameSkip, GpuRenderError, GpuRenderOutcome,
-    GpuStartupError, GpuStartupErrorKind, GpuSurfaceRecovery, GpuText, NativeTextSettings,
-    prepare_token_sampler,
+    ActiveTransitionWindow, GpuFaultInjection, GpuFaultInjectionResult, GpuFrameSkip,
+    GpuRenderError, GpuRenderOutcome, GpuStartupError, GpuStartupErrorKind, GpuSurfaceRecovery,
+    GpuText, NativeTextSettings, prepare_token_sampler,
 };
 use mandatum_scene::{
     BackingScale, LogicalPoint, LogicalSize, PaneContent, PhysicalSize as ScenePhysicalSize,
-    SceneCell, SceneCellStyle, SceneColor, SceneSize, Theme, UiColor, ViewportMetrics,
-    WorkspaceScene,
+    SceneCell, SceneCellStyle, SceneColor, SceneSize, Theme, TransitionRole, UiColor,
+    ViewportMetrics, WorkspaceScene,
     input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, PointerButton,
         PointerEvent, PointerKind, TextRange,
     },
 };
 use serde::Serialize;
-use stats::{MemorySamples, MemorySummary, MetricSummary, Samples, StressState, StressSummary};
+use stats::{
+    MemorySamples, MemorySummary, MetricSummary, RefreshIntervalSummary, Samples, StressState,
+    StressSummary, duration_delta_ms, one_core_cpu_percent, parse_process_cpu_time,
+    refresh_interval_summary, stress_checkpoint_action,
+};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
 use winit::{
@@ -60,11 +64,65 @@ const DEFAULT_SOAK_DURATION: Duration = Duration::from_secs(30 * 60);
 // 30-minute soak without defining a schedule the system cannot service.
 const DEFAULT_SOAK_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_MEMORY_INTERVAL: Duration = Duration::from_secs(5);
+const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_IDLE_WARMUP: Duration = Duration::from_secs(5);
+const TRANSITION_ACTION_INTERVAL: Duration = Duration::from_millis(180);
 const MAX_MEASUREMENT_SAMPLES: usize = 200_000;
 const HEARTBEAT: Duration = Duration::from_millis(250);
 const VISUAL_SCENARIO_SETTLE_DELAY: Duration = Duration::from_millis(300);
 const EVENT_DRAIN_BUDGET: usize = 16;
 const IDLE_FRAME_CUTOFF_MS: f64 = 250.0;
+
+fn animation_redraw_is_due(now: Instant, deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| now >= deadline)
+}
+
+fn contiguous_animation_interval(
+    previous: Option<Instant>,
+    present: Instant,
+    was_active: bool,
+    is_active: bool,
+) -> (Option<Duration>, Option<Instant>) {
+    if !was_active && !is_active {
+        return (None, None);
+    }
+    (
+        previous.map(|previous| present.saturating_duration_since(previous)),
+        is_active.then_some(present),
+    )
+}
+
+fn checkpoint_instant(
+    checkpoint: VisualCheckpoint,
+    origin: Instant,
+    window: Option<ActiveTransitionWindow>,
+) -> Result<Instant, GpuRenderError> {
+    match checkpoint {
+        VisualCheckpoint::Reduced => Ok(origin),
+        VisualCheckpoint::Start | VisualCheckpoint::Midpoint | VisualCheckpoint::End => {
+            let window = window.ok_or_else(|| GpuRenderError::Internal {
+                message: format!(
+                    "{} checkpoint did not start an ApprovalArrival transition",
+                    checkpoint.as_str()
+                ),
+            })?;
+            if window.started_at != origin {
+                return Err(GpuRenderError::Internal {
+                    message: format!(
+                        "{} checkpoint ApprovalArrival started at an unexpected instant",
+                        checkpoint.as_str()
+                    ),
+                });
+            }
+            Ok(match checkpoint {
+                VisualCheckpoint::Start => window.started_at,
+                VisualCheckpoint::Midpoint => window.midpoint(),
+                VisualCheckpoint::End => window.finishes_at,
+                VisualCheckpoint::Reduced => unreachable!(),
+            })
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum StressConfig {
@@ -78,6 +136,44 @@ enum FaultConfig {
     SurfaceLost,
     DeviceLost,
     OutOfMemory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisualCheckpoint {
+    Start,
+    Midpoint,
+    End,
+    Reduced,
+}
+
+impl VisualCheckpoint {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Midpoint => "midpoint",
+            Self::End => "end",
+            Self::Reduced => "reduced",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "start" => Some(Self::Start),
+            "midpoint" => Some(Self::Midpoint),
+            "end" => Some(Self::End),
+            "reduced" => Some(Self::Reduced),
+            _ => None,
+        }
+    }
+
+    const fn reference_id(self) -> &'static str {
+        match self {
+            Self::Start => "attention-motion-start",
+            Self::Midpoint => "attention-motion-midpoint",
+            Self::End => "attention-motion-end",
+            Self::Reduced => "attention-reduced",
+        }
+    }
 }
 
 impl FaultConfig {
@@ -120,6 +216,10 @@ struct Config {
     visual_scenario: Option<VisualScenarioId>,
     token_sampler: bool,
     display_name: Option<String>,
+    visual_transition_exercise: Option<Duration>,
+    idle_warmup: Option<Duration>,
+    idle_measure: Option<Duration>,
+    visual_checkpoint: Option<VisualCheckpoint>,
 }
 
 fn parse_config() -> Result<Config, String> {
@@ -157,6 +257,10 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
         visual_scenario: None,
         token_sampler: false,
         display_name: None,
+        visual_transition_exercise: None,
+        idle_warmup: None,
+        idle_measure: None,
+        visual_checkpoint: None,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -247,6 +351,31 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
                     invalid_value(&arg, &value, "1..=128 non-control characters")
                 })?);
             }
+            "--visual-transition-exercise-seconds" => {
+                let value = required_value(&mut args, &arg)?;
+                let seconds = parse_bounded_u64(&value, 1, 3_600)
+                    .ok_or_else(|| invalid_value(&arg, &value, "1..=3600 seconds"))?;
+                config.visual_transition_exercise = Some(Duration::from_secs(seconds));
+            }
+            "--warmup-seconds" => {
+                let value = required_value(&mut args, &arg)?;
+                let seconds = parse_bounded_u64(&value, 0, 3_600)
+                    .ok_or_else(|| invalid_value(&arg, &value, "0..=3600 seconds"))?;
+                config.idle_warmup = Some(Duration::from_secs(seconds));
+            }
+            "--idle-measure-seconds" => {
+                let value = required_value(&mut args, &arg)?;
+                let seconds = parse_bounded_u64(&value, 1, 3_600)
+                    .ok_or_else(|| invalid_value(&arg, &value, "1..=3600 seconds"))?;
+                config.idle_measure = Some(Duration::from_secs(seconds));
+            }
+            "--visual-checkpoint" => {
+                let value = required_value(&mut args, &arg)?;
+                config.visual_checkpoint =
+                    Some(VisualCheckpoint::parse(&value).ok_or_else(|| {
+                        invalid_value(&arg, &value, "start|midpoint|end|reduced")
+                    })?);
+            }
             "--inject-fault" => {
                 let value = required_value(&mut args, &arg)?;
                 config.fault = Some(match value.as_str() {
@@ -326,6 +455,57 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
                 .to_owned(),
         );
     }
+    if config.idle_warmup.is_some() && config.idle_measure.is_none() {
+        return Err("--warmup-seconds requires --idle-measure-seconds".to_owned());
+    }
+    if config.idle_measure.is_some() && config.visual_transition_exercise.is_some() {
+        return Err(
+            "idle measurement and visual transition exercise must run in isolation".to_owned(),
+        );
+    }
+    if (config.idle_measure.is_some() || config.visual_transition_exercise.is_some())
+        && (config.typing_bench
+            || config.flood
+            || config.stress.is_some()
+            || config.fault.is_some()
+            || config.token_sampler
+            || config.scale_after.is_some()
+            || config.exit_after.is_some())
+    {
+        return Err(
+            "visual transition and idle measurements must run in isolation from other workloads and --exit-after"
+                .to_owned(),
+        );
+    }
+    if config.idle_measure.is_some() {
+        if config
+            .visual_scenario
+            .is_some_and(|scenario| scenario != VisualScenarioId::CalmTerminal)
+        {
+            return Err(
+                "--idle-measure-seconds requires the calm-terminal visual scenario".to_owned(),
+            );
+        }
+        config.visual_scenario = Some(VisualScenarioId::CalmTerminal);
+        config.idle_warmup.get_or_insert(DEFAULT_IDLE_WARMUP);
+    }
+    if config.visual_transition_exercise.is_some() && config.visual_scenario.is_none() {
+        config.visual_scenario = Some(VisualScenarioId::DenseWorkspace);
+    }
+    if config.visual_checkpoint.is_some()
+        && config.visual_scenario != Some(VisualScenarioId::Attention)
+    {
+        return Err(
+            "--visual-checkpoint is valid only with --visual-scenario attention".to_owned(),
+        );
+    }
+    if config.visual_checkpoint.is_some()
+        && (config.visual_transition_exercise.is_some() || config.idle_measure.is_some())
+    {
+        return Err(
+            "visual checkpoints must run in isolation from timed visual measurements".to_owned(),
+        );
+    }
     Ok(config)
 }
 
@@ -396,6 +576,14 @@ fn configured_run_timeout(config: &Config) -> Option<Duration> {
     }
     if config.fault.is_some() {
         include(config.fault_after + Duration::from_secs(5));
+    }
+    if let Some(duration) = config.visual_transition_exercise {
+        include(duration + Duration::from_secs(5));
+    }
+    if let Some(duration) = config.idle_measure {
+        include(
+            config.idle_warmup.unwrap_or(DEFAULT_IDLE_WARMUP) + duration + Duration::from_secs(5),
+        );
     }
     match (explicit, automatic) {
         (Some(explicit), Some(automatic)) => Some(explicit.min(automatic)),
@@ -522,6 +710,10 @@ struct WorkloadEvidence {
     font_size: f32,
     harness_project_path: Option<String>,
     window_visibility_policy: &'static str,
+    visual_transition_exercise_ms: Option<u64>,
+    idle_warmup_ms: Option<u64>,
+    idle_measure_ms: Option<u64>,
+    visual_checkpoint: Option<&'static str>,
     elapsed_ms: u64,
 }
 
@@ -539,11 +731,48 @@ struct RunEvidence {
     input_to_present_ms: MetricSummary,
     frame_ms: MetricSummary,
     render_stages: RenderStageEvidence,
+    redraw_count: u64,
+    present_count: u64,
+    visual_transition: Option<VisualTransitionEvidence>,
+    idle_window: Option<IdleWindowEvidence>,
+    resource_samples: Vec<ResourceSample>,
     stress: Option<StressSummary>,
     fault_injection: Option<FaultEvidence>,
     memory: MemorySummary,
     lifecycle: LifecycleEvidence,
     notes: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct VisualTransitionEvidence {
+    duration_ms: u64,
+    redraw_count: u64,
+    present_count: u64,
+    present_interval_ms: MetricSummary,
+    refresh_relative: RefreshIntervalSummary,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct IdleWindowEvidence {
+    duration_ms: u64,
+    process_cpu_ms: Option<u64>,
+    one_core_cpu_percent: Option<f64>,
+    redraw_count: u64,
+    present_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ResourceSample {
+    elapsed_ms: u64,
+    checkpoint: &'static str,
+    stress_progress_percent: Option<u8>,
+    quad_capacity_floats: usize,
+    raster_capacity_floats: usize,
+    text_row_capacity: usize,
+    raster_cache_entries: usize,
+    raster_cache_bytes: usize,
+    shaping_cache_entries: usize,
+    shaping_cache_accounted_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -622,6 +851,16 @@ fn workload_evidence(config: &Config, elapsed: Duration) -> WorkloadEvidence {
         } else {
             "normal"
         },
+        visual_transition_exercise_ms: config
+            .visual_transition_exercise
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64),
+        idle_warmup_ms: config
+            .idle_warmup
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64),
+        idle_measure_ms: config
+            .idle_measure
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64),
+        visual_checkpoint: config.visual_checkpoint.map(VisualCheckpoint::as_str),
         elapsed_ms: elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
     }
 }
@@ -676,10 +915,14 @@ fn print_failure(
         visual_scenario: None,
         token_sampler: false,
         display_name: None,
+        visual_transition_exercise: None,
+        idle_warmup: None,
+        idle_measure: None,
+        visual_checkpoint: None,
     };
     let config = config.unwrap_or(&fallback_config);
     let evidence = RunEvidence {
-        schema_version: 2,
+        schema_version: 3,
         outcome: OutcomeEvidence::failure(phase, kind, message),
         platform: PlatformEvidence {
             os: std::env::consts::OS,
@@ -694,6 +937,11 @@ fn print_failure(
         input_to_present_ms: MetricSummary::default(),
         frame_ms: MetricSummary::default(),
         render_stages: RenderStageEvidence::default(),
+        redraw_count: 0,
+        present_count: 0,
+        visual_transition: None,
+        idle_window: None,
+        resource_samples: Vec::new(),
         stress: None,
         fault_injection: config.fault.map(|fault| FaultEvidence {
             requested: fault.label(),
@@ -727,6 +975,19 @@ fn process_rss_bytes() -> Option<u64> {
     {
         None
     }
+}
+
+fn process_cpu_time() -> Option<Duration> {
+    let output = Command::new("ps")
+        .args(["-o", "time=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then_some(())
+        .and_then(|()| std::str::from_utf8(&output.stdout).ok())
+        .and_then(parse_process_cpu_time)
 }
 
 fn parse_ps_rss_kib(stdout: &[u8]) -> Option<u64> {
@@ -836,6 +1097,26 @@ struct App {
     memory: MemorySamples,
     next_memory_sample: Instant,
     memory_trend_at: Option<Instant>,
+    resource_samples: Vec<ResourceSample>,
+    next_resource_sample: Instant,
+    stress_resource_checkpoints: [bool; 3],
+    redraw_count: u64,
+    present_count: u64,
+    transition_started_at: Option<Instant>,
+    transition_ends_at: Option<Instant>,
+    next_transition_action: Option<Instant>,
+    transition_action_index: u64,
+    transition_counts_start: (u64, u64),
+    transition_intervals: Samples,
+    transition_last_present: Option<Instant>,
+    transition_frames_over_two_periods: u64,
+    visual_transition_evidence: Option<VisualTransitionEvidence>,
+    idle_measure_at: Option<Instant>,
+    idle_started_at: Option<Instant>,
+    idle_ends_at: Option<Instant>,
+    idle_cpu_start: Option<Duration>,
+    idle_counts_start: (u64, u64),
+    idle_window_evidence: Option<IdleWindowEvidence>,
     pending_inputs: VecDeque<Instant>,
     dirty_from_runtime: bool,
     last_present: Option<Instant>,
@@ -873,6 +1154,9 @@ struct App {
     ime_allowed: bool,
     prepared_visual_scenario: Option<PreparedVisualScenario>,
     visual_scenario_at: Option<Instant>,
+    visual_checkpoint_snapshot: Option<FrameSnapshot>,
+    visual_checkpoint_origin: Option<Instant>,
+    visual_checkpoint_frozen_at: Option<Instant>,
 }
 
 impl App {
@@ -903,6 +1187,26 @@ impl App {
             memory: MemorySamples::default(),
             next_memory_sample: now,
             memory_trend_at: None,
+            resource_samples: Vec::new(),
+            next_resource_sample: now,
+            stress_resource_checkpoints: [false; 3],
+            redraw_count: 0,
+            present_count: 0,
+            transition_started_at: None,
+            transition_ends_at: None,
+            next_transition_action: None,
+            transition_action_index: 0,
+            transition_counts_start: (0, 0),
+            transition_intervals: Samples::with_limit(MAX_MEASUREMENT_SAMPLES),
+            transition_last_present: None,
+            transition_frames_over_two_periods: 0,
+            visual_transition_evidence: None,
+            idle_measure_at: None,
+            idle_started_at: None,
+            idle_ends_at: None,
+            idle_cpu_start: None,
+            idle_counts_start: (0, 0),
+            idle_window_evidence: None,
             pending_inputs: VecDeque::new(),
             dirty_from_runtime: false,
             last_present: None,
@@ -938,6 +1242,9 @@ impl App {
             ime_allowed: false,
             prepared_visual_scenario: None,
             visual_scenario_at: None,
+            visual_checkpoint_snapshot: None,
+            visual_checkpoint_origin: None,
+            visual_checkpoint_frozen_at: None,
         }
     }
 
@@ -945,6 +1252,13 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    fn renderer_animation_deadline(&self) -> Option<Instant> {
+        if self.config.visual_checkpoint.is_some() {
+            return None;
+        }
+        self.gpu.as_ref().and_then(GpuText::next_animation_deadline)
     }
 
     fn host(&self) -> &FrontendHost {
@@ -1017,6 +1331,165 @@ impl App {
         self.lifecycle.shaping_cache_evictions = snapshot.shaping_cache_evictions;
         self.lifecycle.shaping_cache_rejections = snapshot.shaping_cache_rejections;
         self.lifecycle.shaping_cache_invalidations = snapshot.shaping_cache_invalidations;
+    }
+
+    fn capture_resource_sample(
+        &mut self,
+        at: Instant,
+        checkpoint: &'static str,
+        stress_progress_percent: Option<u8>,
+    ) {
+        let Some(gpu) = &self.gpu else {
+            return;
+        };
+        let snapshot = gpu.lifecycle_snapshot();
+        self.resource_samples.push(ResourceSample {
+            elapsed_ms: at
+                .saturating_duration_since(self.start)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+            checkpoint,
+            stress_progress_percent,
+            quad_capacity_floats: snapshot.quad_capacity_floats,
+            raster_capacity_floats: snapshot.raster_capacity_floats,
+            text_row_capacity: snapshot.text_row_capacity,
+            raster_cache_entries: snapshot.raster_cache_entries,
+            raster_cache_bytes: snapshot.raster_cache_bytes,
+            shaping_cache_entries: snapshot.shaping_cache_entries,
+            shaping_cache_accounted_bytes: snapshot.shaping_cache_accounted_bytes,
+        });
+    }
+
+    fn capture_due_stress_resource_checkpoints(&mut self, at: Instant) {
+        let Some(stress) = &self.stress else {
+            return;
+        };
+        let summary = stress.summary(at);
+        let checkpoints = [
+            (80_u8, "stress_80_percent"),
+            (90, "stress_90_percent"),
+            (100, "stress_100_percent"),
+        ];
+        let mut due = Vec::new();
+        for (index, (percent, label)) in checkpoints.into_iter().enumerate() {
+            let target = stress_checkpoint_action(summary.expected_actions, percent);
+            if !self.stress_resource_checkpoints[index] && target > 0 && summary.presented >= target
+            {
+                self.stress_resource_checkpoints[index] = true;
+                due.push((label, percent));
+            }
+        }
+        for (label, percent) in due {
+            self.capture_resource_sample(at, label, Some(percent));
+        }
+    }
+
+    fn begin_visual_measurement(&mut self, now: Instant) {
+        if self.config.visual_checkpoint.is_some() {
+            self.visual_checkpoint_origin = Some(now);
+            return;
+        }
+        if let Some(duration) = self.config.visual_transition_exercise {
+            self.transition_started_at = Some(now);
+            self.transition_ends_at = Some(now + duration);
+            self.next_transition_action = Some(now);
+            self.transition_counts_start = (self.redraw_count, self.present_count);
+            self.transition_last_present = None;
+            return;
+        }
+        if self.config.idle_measure.is_some() {
+            self.idle_measure_at =
+                Some(now + self.config.idle_warmup.unwrap_or(DEFAULT_IDLE_WARMUP));
+        }
+    }
+
+    fn service_visual_measurements(&mut self, now: Instant) {
+        if self
+            .idle_measure_at
+            .is_some_and(|measure_at| now >= measure_at)
+        {
+            self.idle_measure_at = None;
+            self.idle_started_at = Some(now);
+            self.idle_ends_at = self.config.idle_measure.map(|duration| now + duration);
+            self.idle_cpu_start = process_cpu_time();
+            self.idle_counts_start = (self.redraw_count, self.present_count);
+        }
+        if self
+            .next_transition_action
+            .is_some_and(|next_action| now >= next_action)
+            && self.transition_ends_at.is_some_and(|end| now < end)
+        {
+            let key = match self.transition_action_index % 4 {
+                0 => InputKey::ctrl('p'),
+                1 => InputKey::plain(KeyCode::Down),
+                2 => InputKey::plain(KeyCode::Up),
+                _ => InputKey::plain(KeyCode::Escape),
+            };
+            self.transition_action_index = self.transition_action_index.saturating_add(1);
+            self.next_transition_action = Some(now + TRANSITION_ACTION_INTERVAL);
+            self.transition_last_present = None;
+            self.send_input(InputEvent::Key(key), false, now);
+        }
+        if self
+            .transition_ends_at
+            .is_some_and(|transition_ends_at| now >= transition_ends_at)
+        {
+            self.finish_visual_transition(now);
+            self.deadline = Some(now);
+        }
+        if self
+            .idle_ends_at
+            .is_some_and(|idle_ends_at| now >= idle_ends_at)
+        {
+            self.finish_idle_window(now);
+            self.deadline = Some(now);
+        }
+    }
+
+    fn finish_visual_transition(&mut self, now: Instant) {
+        let Some(started_at) = self.transition_started_at.take() else {
+            return;
+        };
+        self.transition_ends_at = None;
+        self.next_transition_action = None;
+        let intervals = self.transition_intervals.summary();
+        self.visual_transition_evidence = Some(VisualTransitionEvidence {
+            duration_ms: now
+                .saturating_duration_since(started_at)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+            redraw_count: self
+                .redraw_count
+                .saturating_sub(self.transition_counts_start.0),
+            present_count: self
+                .present_count
+                .saturating_sub(self.transition_counts_start.1),
+            present_interval_ms: intervals,
+            refresh_relative: refresh_interval_summary(
+                &intervals,
+                self.display_refresh_hz,
+                self.transition_frames_over_two_periods,
+            ),
+        });
+    }
+
+    fn finish_idle_window(&mut self, now: Instant) {
+        let Some(started_at) = self.idle_started_at.take() else {
+            return;
+        };
+        self.idle_ends_at = None;
+        let duration_ms = now
+            .saturating_duration_since(started_at)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let process_cpu_ms = duration_delta_ms(self.idle_cpu_start.take(), process_cpu_time());
+        self.idle_window_evidence = Some(IdleWindowEvidence {
+            duration_ms,
+            process_cpu_ms,
+            one_core_cpu_percent: one_core_cpu_percent(process_cpu_ms, duration_ms),
+            redraw_count: self.redraw_count.saturating_sub(self.idle_counts_start.0),
+            present_count: self.present_count.saturating_sub(self.idle_counts_start.1),
+        });
     }
 
     fn render_geometry_evidence(&self) -> Option<RenderGeometryEvidence> {
@@ -1101,13 +1574,15 @@ impl App {
         }
     }
 
-    fn drain_runtime(&mut self) -> bool {
+    fn drain_runtime(&mut self) -> (bool, bool) {
+        let generation_before = self.host().scene_generation();
         let drained = self.host_mut().drain_runtime_bounded(EVENT_DRAIN_BUDGET);
-        if drained > 0 {
+        let scene_changed = self.host().scene_generation() != generation_before;
+        if scene_changed {
             self.dirty_from_runtime = true;
         }
         self.apply_effects();
-        drained == EVENT_DRAIN_BUDGET
+        (drained == EVENT_DRAIN_BUDGET, scene_changed)
     }
 
     fn render_frame(&mut self) -> Result<(), GpuRenderError> {
@@ -1117,7 +1592,15 @@ impl App {
             self.host_mut().suspend_scene_interaction();
             return Ok(());
         };
-        let mut snapshot = self.host_mut().frame_with_viewport(viewport);
+        let mut snapshot = if self.visual_checkpoint_origin.is_some()
+            && self.visual_checkpoint_frozen_at.is_none()
+        {
+            self.visual_checkpoint_snapshot
+                .take()
+                .unwrap_or_else(|| self.host_mut().frame_with_viewport(viewport))
+        } else {
+            self.host_mut().frame_with_viewport(viewport)
+        };
         if let Some(prepared) = &self.prepared_visual_scenario {
             prepared
                 .stabilize_snapshot(&mut snapshot)
@@ -1134,10 +1617,75 @@ impl App {
             return Ok(());
         }
         self.sync_ime(&snapshot.scene);
-        let Some(gpu) = self.gpu.as_mut() else {
-            return Ok(());
+        let checkpoint = self.config.visual_checkpoint;
+        let checkpoint_origin = self.visual_checkpoint_origin;
+        let frozen_at = self.visual_checkpoint_frozen_at;
+        let first_checkpoint_render =
+            checkpoint.is_some() && checkpoint_origin.is_some() && frozen_at.is_none();
+        let visual_now = frozen_at.or(checkpoint_origin).unwrap_or_else(Instant::now);
+        let (render_result, freeze_at, animation_was_active) = {
+            let Some(gpu) = self.gpu.as_mut() else {
+                return Ok(());
+            };
+            let animation_was_active = gpu.animation_is_active();
+            let first = gpu.render_at(&snapshot.scene, &snapshot.theme, visual_now);
+            let result = match (
+                first,
+                checkpoint,
+                checkpoint_origin,
+                first_checkpoint_render,
+            ) {
+                (Ok(outcome), Some(checkpoint), Some(origin), true) => {
+                    if checkpoint == VisualCheckpoint::Reduced
+                        && (gpu.animation_is_active()
+                            || gpu.next_animation_deadline().is_some()
+                            || gpu.pointer_geometry_is_moving())
+                    {
+                        (
+                            Err(GpuRenderError::Internal {
+                                message:
+                                    "reduced-motion checkpoint produced active presentation motion"
+                                        .to_owned(),
+                            }),
+                            None,
+                        )
+                    } else {
+                        let approval_window =
+                            gpu.active_transition_window(TransitionRole::ApprovalArrival);
+                        if checkpoint != VisualCheckpoint::Reduced && approval_window.is_none() {
+                            return Err(GpuRenderError::Internal {
+                                message: format!(
+                                    "{} checkpoint did not start an ApprovalArrival transition",
+                                    checkpoint.as_str()
+                                ),
+                            });
+                        }
+                        let target = checkpoint_instant(checkpoint, origin, approval_window);
+                        match target {
+                            Ok(target)
+                                if matches!(
+                                    checkpoint,
+                                    VisualCheckpoint::Midpoint | VisualCheckpoint::End
+                                ) =>
+                            {
+                                (
+                                    gpu.render_at(&snapshot.scene, &snapshot.theme, target),
+                                    Some(target),
+                                )
+                            }
+                            Ok(target) => (Ok(outcome), Some(target)),
+                            Err(error) => (Err(error), None),
+                        }
+                    }
+                }
+                (result, _, _, _) => (result, None),
+            };
+            (result.0, result.1, animation_was_active)
         };
-        let outcome = match gpu.render(&snapshot.scene, &snapshot.theme) {
+        if let Some(freeze_at) = freeze_at {
+            self.visual_checkpoint_frozen_at = Some(freeze_at);
+        }
+        let outcome = match render_result {
             Ok(outcome) => outcome,
             Err(GpuRenderError::DeviceLost { .. }) => {
                 self.consecutive_device_recoveries =
@@ -1150,7 +1698,13 @@ impl App {
                     );
                     return Ok(());
                 }
-                match pollster::block_on(gpu.recreate_device()) {
+                let recreate_result = {
+                    let Some(gpu) = self.gpu.as_mut() else {
+                        return Ok(());
+                    };
+                    pollster::block_on(gpu.recreate_device())
+                };
+                match recreate_result {
                     Ok(()) => {
                         self.lifecycle.device_recreations =
                             self.lifecycle.device_recreations.saturating_add(1);
@@ -1180,6 +1734,34 @@ impl App {
                 at: present,
                 timings,
             } => {
+                self.present_count = self.present_count.saturating_add(1);
+                if self
+                    .transition_started_at
+                    .is_some_and(|start| present >= start)
+                    && self.transition_ends_at.is_some_and(|end| present <= end)
+                {
+                    let animation_is_active =
+                        self.gpu.as_ref().is_some_and(GpuText::animation_is_active);
+                    let (interval, next_present) = contiguous_animation_interval(
+                        self.transition_last_present,
+                        present,
+                        animation_was_active,
+                        animation_is_active,
+                    );
+                    if let Some(interval) = interval {
+                        let interval_ms = interval.as_secs_f64() * 1_000.0;
+                        self.transition_intervals.push(interval_ms);
+                        if self
+                            .display_refresh_hz
+                            .filter(|refresh_hz| refresh_hz.is_finite() && *refresh_hz > 0.0)
+                            .is_some_and(|refresh_hz| interval_ms > 2_000.0 / refresh_hz)
+                        {
+                            self.transition_frames_over_two_periods =
+                                self.transition_frames_over_two_periods.saturating_add(1);
+                        }
+                    }
+                    self.transition_last_present = next_present;
+                }
                 self.shaping_ms
                     .push(timings.shaping.as_secs_f64() * 1_000.0);
                 self.frame_prepare_ms
@@ -1197,6 +1779,7 @@ impl App {
                 if let Some(stress) = &mut self.stress {
                     stress.presented();
                 }
+                self.capture_due_stress_resource_checkpoints(present);
                 if let Some(last) = self.last_present {
                     let frame_ms = present.duration_since(last).as_secs_f64() * 1000.0;
                     if frame_ms < IDLE_FRAME_CUTOFF_MS {
@@ -1379,7 +1962,9 @@ impl App {
             return;
         }
         self.summary_printed = true;
+        let now = Instant::now();
         self.memory.push(process_rss_bytes());
+        self.capture_resource_sample(now, "final", None);
         self.capture_lifecycle_evidence();
         if let Some(fault) = self.config.fault
             && self.fatal_error.is_none()
@@ -1401,7 +1986,6 @@ impl App {
                 );
             }
         }
-        let now = Instant::now();
         let stress = self.stress.as_mut().map(|stress| stress.finish(now));
         let memory = self.memory.summary();
         if self.fatal_error.is_none()
@@ -1463,6 +2047,26 @@ impl App {
                 "GPU initialized but no usable frame was presented",
             );
         }
+        if self.fatal_error.is_none()
+            && self.config.visual_transition_exercise.is_some()
+            && self.visual_transition_evidence.is_none()
+        {
+            self.fail(
+                "runtime",
+                "visual_transition_incomplete",
+                "visual transition exercise ended before its delimited evidence window completed",
+            );
+        }
+        if self.fatal_error.is_none()
+            && self.config.idle_measure.is_some()
+            && self.idle_window_evidence.is_none()
+        {
+            self.fail(
+                "runtime",
+                "idle_window_incomplete",
+                "idle measurement ended before its delimited evidence window completed",
+            );
+        }
         let outcome = self.fatal_error.as_ref().map_or_else(
             || OutcomeEvidence::success("native shell exited cleanly"),
             |error| {
@@ -1474,7 +2078,7 @@ impl App {
             .misses
             .saturating_add(self.pending_inputs.len() as u64);
         let evidence = RunEvidence {
-            schema_version: 2,
+            schema_version: 3,
             outcome,
             platform: PlatformEvidence {
                 os: std::env::consts::OS,
@@ -1492,6 +2096,11 @@ impl App {
                 shaping_ms: self.shaping_ms.summary(),
                 frame_prepare_ms: self.frame_prepare_ms.summary(),
             },
+            redraw_count: self.redraw_count,
+            present_count: self.present_count,
+            visual_transition: self.visual_transition_evidence,
+            idle_window: self.idle_window_evidence,
+            resource_samples: std::mem::take(&mut self.resource_samples),
             stress,
             fault_injection: self.config.fault.map(|fault| FaultEvidence {
                 requested: fault.label(),
@@ -1722,12 +2331,30 @@ impl App {
                 );
                 return false;
             };
-            let drive_result = prepared.drive(self.host_mut(), scene_size, Duration::from_secs(5));
+            let drive_result = if self.config.visual_checkpoint.is_some() {
+                prepared.drive_attention_arrival(
+                    self.host_mut(),
+                    scene_size,
+                    Duration::from_secs(5),
+                )
+            } else {
+                prepared.drive(self.host_mut(), scene_size, Duration::from_secs(5))
+            };
             self.prepared_visual_scenario = Some(prepared);
-            if let Err(error) = drive_result {
-                self.fail("runtime", "visual_scenario", error.to_string());
-                return false;
+            let driven_snapshot = match drive_result {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.fail("runtime", "visual_scenario", error.to_string());
+                    return false;
+                }
+            };
+            if self.config.visual_checkpoint.is_some() {
+                self.visual_checkpoint_snapshot = Some(driven_snapshot);
             }
+            // Scenario driving is synchronous and may consume most of its
+            // timeout. Measurement windows begin only after the stable fixture
+            // has actually been produced.
+            self.begin_visual_measurement(Instant::now());
             self.request_redraw();
         }
         if self
@@ -1738,6 +2365,16 @@ impl App {
             self.scale_probe_applied = true;
             self.apply_scale_factor(self.config.scale_factor);
         }
+        self.service_visual_measurements(now);
+        // Exercise actions may establish renderer motion, but the lab follows
+        // the production scheduler: no renderer deadline means no extra frame.
+        if animation_redraw_is_due(now, self.renderer_animation_deadline()) {
+            self.request_redraw();
+        }
+        if now >= self.next_resource_sample {
+            self.capture_resource_sample(now, "interval", None);
+            self.next_resource_sample = now + RESOURCE_SAMPLE_INTERVAL;
+        }
         if self.deadline.is_some_and(|deadline| now >= deadline) {
             self.cancel_and_disable_ime();
             self.shutdown_host();
@@ -1746,9 +2383,11 @@ impl App {
             return true;
         }
         if now >= self.next_heartbeat {
-            self.host_mut().heartbeat();
+            let changed = self.host_mut().heartbeat();
             self.next_heartbeat = now + HEARTBEAT;
-            self.request_redraw();
+            if changed {
+                self.request_redraw();
+            }
         }
         if now >= self.next_memory_sample {
             if self.memory_trend_at.is_some_and(|trend_at| now >= trend_at) {
@@ -1777,6 +2416,7 @@ impl App {
             deadline.min(self.next_heartbeat)
         });
         next = next.min(self.next_memory_sample);
+        next = next.min(self.next_resource_sample);
         if let Some(scale_probe_at) = self.scale_probe_at {
             next = next.min(scale_probe_at);
         }
@@ -1785,6 +2425,21 @@ impl App {
         }
         if let Some(visual_scenario_at) = self.visual_scenario_at {
             next = next.min(visual_scenario_at);
+        }
+        if let Some(idle_measure_at) = self.idle_measure_at {
+            next = next.min(idle_measure_at);
+        }
+        if let Some(idle_ends_at) = self.idle_ends_at {
+            next = next.min(idle_ends_at);
+        }
+        if let Some(next_transition_action) = self.next_transition_action {
+            next = next.min(next_transition_action);
+        }
+        if let Some(animation_deadline) = self.renderer_animation_deadline() {
+            next = next.min(animation_deadline);
+        }
+        if let Some(transition_ends_at) = self.transition_ends_at {
+            next = next.min(transition_ends_at);
         }
         if self.config.typing_bench && self.injected < self.config.typing_samples {
             next = next.min(self.next_inject);
@@ -1825,6 +2480,8 @@ impl ApplicationHandler<UserEvent> for App {
             || {
                 let title = if self.config.token_sampler {
                     "Mandatum Phase 2 Token Sampler".to_owned()
+                } else if let Some(checkpoint) = self.config.visual_checkpoint {
+                    format!("Mandatum Visual {}", checkpoint.reference_id())
                 } else {
                     self.config.visual_scenario.map_or_else(
                         || "Mandatum GPU Host Spike".to_owned(),
@@ -1957,6 +2614,7 @@ impl ApplicationHandler<UserEvent> for App {
             .map(|_| ready + VISUAL_SCENARIO_SETTLE_DELAY);
         self.next_heartbeat = ready + HEARTBEAT;
         self.next_memory_sample = ready;
+        self.next_resource_sample = ready;
         self.next_inject = ready + Duration::from_millis(400);
         self.fault_at = self.config.fault.map(|_| ready + self.config.fault_after);
         self.stress = self.config.stress.map(|stress| match stress {
@@ -1991,6 +2649,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.memory.push(process_rss_bytes());
         self.next_memory_sample = ready + self.config.memory_interval;
+        self.capture_resource_sample(ready, "startup", None);
+        self.next_resource_sample = ready + RESOURCE_SAMPLE_INTERVAL;
         self.request_redraw();
     }
 
@@ -2015,14 +2675,14 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.service_scheduled_work(event_loop) {
                     return;
                 }
-                let more_pending = self.drain_runtime();
+                let (more_pending, scene_changed) = self.drain_runtime();
                 if self.exit_if_requested(event_loop) {
                     return;
                 }
                 if more_pending {
                     let _ = self.wake_proxy.send_event(UserEvent::Wake);
                 }
-                if self.scene_presentable {
+                if scene_changed && self.scene_presentable {
                     self.request_redraw();
                 }
             }
@@ -2041,7 +2701,8 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                let more_pending = self.drain_runtime();
+                self.redraw_count = self.redraw_count.saturating_add(1);
+                let (more_pending, _) = self.drain_runtime();
                 if self.exit_if_requested(event_loop) {
                     return;
                 }
@@ -2590,7 +3251,7 @@ fn app_config_for_run(config: &mut Config) -> std::io::Result<AppConfig> {
         // `create_dir` fails on every pre-existing file, directory, or symlink;
         // a harness never reuses stale or attacker-prepared workspace state.
         fs::create_dir(&project_path)?;
-        let app_config = if let Some(scenario) = config.visual_scenario {
+        let mut app_config = if let Some(scenario) = config.visual_scenario {
             prepare_visual_scenario(scenario, &project_path)
                 .map_err(std::io::Error::other)?
                 .app_config()
@@ -2605,6 +3266,15 @@ fn app_config_for_run(config: &mut Config) -> std::io::Result<AppConfig> {
                 ..AppConfig::default()
             }
         };
+        if config.idle_measure.is_some() {
+            // Idle evidence excludes restore work by contract. The fixed
+            // calm-terminal shell/output recipe still comes from the catalog,
+            // but durable workspace restoration is disabled for this process.
+            app_config.restore_on_startup = false;
+        }
+        if config.visual_checkpoint == Some(VisualCheckpoint::Reduced) {
+            app_config.reduced_motion = true;
+        }
         config.harness_project_path = Some(project_path.display().to_string());
         Ok(app_config)
     } else {
@@ -2696,10 +3366,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_MEMORY_INTERVAL, DEFAULT_SOAK_DURATION, FaultConfig, LifecycleEvidence,
-        MemorySummary, MetricSummary, OutcomeEvidence, PlatformAction, PlatformEvidence,
-        PressedPointerButtons, RenderStageEvidence, RunEvidence, StressConfig, VisualScenarioId,
-        WorkloadEvidence, configured_run_timeout, ime_event_is_accepted,
+        DEFAULT_MEMORY_INTERVAL, DEFAULT_SOAK_DURATION, FaultConfig, IdleWindowEvidence,
+        LifecycleEvidence, MemorySummary, MetricSummary, OutcomeEvidence, PlatformAction,
+        PlatformEvidence, PressedPointerButtons, RefreshIntervalSummary, RenderStageEvidence,
+        ResourceSample, RunEvidence, StressConfig, VisualCheckpoint, VisualScenarioId,
+        VisualTransitionEvidence, WorkloadEvidence, animation_redraw_is_due,
+        configured_run_timeout, contiguous_animation_interval, ime_event_is_accepted,
         key_for_platform_translation, pane_geometry_is_suspended, parse_config_from,
         parse_font_family, parse_font_size, parse_ps_rss_kib, parse_scale_delay,
         parse_scale_factor, run_exit_code, scene_size_from_metrics, start_after_preflight,
@@ -2948,6 +3620,34 @@ mod tests {
             visual.display_name.as_deref(),
             Some("Built-in Retina Display")
         );
+        let transition = parse_config_from(
+            ["--visual-transition-exercise-seconds", "5"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("isolated transition exercise");
+        assert_eq!(
+            transition.visual_transition_exercise,
+            Some(std::time::Duration::from_secs(5))
+        );
+        assert_eq!(
+            transition.visual_scenario,
+            Some(VisualScenarioId::DenseWorkspace)
+        );
+        assert_eq!(
+            configured_run_timeout(&transition),
+            Some(std::time::Duration::from_secs(10))
+        );
+        let idle = parse_config_from(
+            ["--idle-measure-seconds", "30"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("isolated calm-terminal idle window");
+        assert_eq!(idle.idle_warmup, Some(std::time::Duration::from_secs(5)));
+        assert_eq!(idle.idle_measure, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(idle.visual_scenario, Some(VisualScenarioId::CalmTerminal));
+        assert!(uses_isolated_harness(&idle));
         let sampler = parse_config_from(
             ["--token-sampler", "--exit-after", "5"]
                 .into_iter()
@@ -2956,6 +3656,31 @@ mod tests {
         .expect("native token sampler route");
         assert!(sampler.token_sampler);
         assert!(uses_isolated_harness(&sampler));
+
+        for (name, checkpoint, reference_id) in [
+            ("start", VisualCheckpoint::Start, "attention-motion-start"),
+            (
+                "midpoint",
+                VisualCheckpoint::Midpoint,
+                "attention-motion-midpoint",
+            ),
+            ("end", VisualCheckpoint::End, "attention-motion-end"),
+            ("reduced", VisualCheckpoint::Reduced, "attention-reduced"),
+        ] {
+            let config = parse_config_from(
+                [
+                    "--visual-scenario",
+                    "attention",
+                    "--visual-checkpoint",
+                    name,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .expect("attention checkpoint config");
+            assert_eq!(config.visual_checkpoint, Some(checkpoint));
+            assert_eq!(checkpoint.reference_id(), reference_id);
+        }
 
         for invalid in [
             vec!["--resize-count", "0"],
@@ -2973,6 +3698,46 @@ mod tests {
             vec!["--typing-bench", "--resize-exercise"],
             vec!["--visual-scenario", "dashboard"],
             vec!["--visual-scenario", "palette", "--resize-exercise"],
+            vec!["--warmup-seconds", "5"],
+            vec![
+                "--visual-transition-exercise-seconds",
+                "5",
+                "--idle-measure-seconds",
+                "30",
+            ],
+            vec![
+                "--visual-transition-exercise-seconds",
+                "5",
+                "--typing-bench",
+            ],
+            vec!["--idle-measure-seconds", "30", "--exit-after", "10"],
+            vec![
+                "--idle-measure-seconds",
+                "30",
+                "--visual-scenario",
+                "attention",
+            ],
+            vec!["--visual-checkpoint", "start"],
+            vec![
+                "--visual-scenario",
+                "calm-terminal",
+                "--visual-checkpoint",
+                "start",
+            ],
+            vec![
+                "--visual-scenario",
+                "attention",
+                "--visual-checkpoint",
+                "eventually",
+            ],
+            vec![
+                "--visual-scenario",
+                "attention",
+                "--visual-checkpoint",
+                "start",
+                "--visual-transition-exercise-seconds",
+                "5",
+            ],
         ] {
             assert!(
                 parse_config_from(invalid.into_iter().map(str::to_owned)).is_err(),
@@ -2984,7 +3749,7 @@ mod tests {
     #[test]
     fn startup_evidence_schema_keeps_unavailable_first_frame_explicitly_null() {
         let evidence = RunEvidence {
-            schema_version: 2,
+            schema_version: 3,
             outcome: OutcomeEvidence::failure("startup", "no_display", "headless"),
             platform: PlatformEvidence {
                 os: "test-os",
@@ -3014,11 +3779,20 @@ mod tests {
                 font_size: 15.0,
                 harness_project_path: None,
                 window_visibility_policy: "normal",
+                visual_transition_exercise_ms: None,
+                idle_warmup_ms: None,
+                idle_measure_ms: None,
+                visual_checkpoint: None,
                 elapsed_ms: 0,
             },
             input_to_present_ms: MetricSummary::default(),
             frame_ms: MetricSummary::default(),
             render_stages: RenderStageEvidence::default(),
+            redraw_count: 0,
+            present_count: 0,
+            visual_transition: None,
+            idle_window: None,
+            resource_samples: Vec::new(),
             stress: None,
             fault_injection: None,
             memory: MemorySummary::default(),
@@ -3030,8 +3804,111 @@ mod tests {
         assert!(json["first_usable_frame_within_1s"].is_null());
         assert!(json["input_to_present_ms"]["p50"].is_null());
         assert!(json["render_stages"]["shaping_ms"]["p50"].is_null());
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
         assert_eq!(json["outcome"]["kind"], "no_display");
+        assert_eq!(json["redraw_count"], 0);
+        assert_eq!(json["present_count"], 0);
+        assert!(json["visual_transition"].is_null());
+        assert!(json["idle_window"].is_null());
+        assert!(json["workload"]["visual_checkpoint"].is_null());
+        assert_eq!(json["resource_samples"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn transition_exercise_only_redraws_for_a_due_renderer_deadline() {
+        let now = std::time::Instant::now();
+        assert!(!animation_redraw_is_due(now, None));
+        assert!(!animation_redraw_is_due(
+            now,
+            Some(now + std::time::Duration::from_millis(1))
+        ));
+        assert!(animation_redraw_is_due(now, Some(now)));
+    }
+
+    #[test]
+    fn transition_intervals_exclude_inactive_gaps_between_actions() {
+        let first = std::time::Instant::now();
+        let active = first + std::time::Duration::from_millis(8);
+        let (interval, previous) = contiguous_animation_interval(Some(first), active, true, true);
+        assert_eq!(interval, Some(std::time::Duration::from_millis(8)));
+        assert_eq!(previous, Some(active));
+
+        let finish = active + std::time::Duration::from_millis(8);
+        let (interval, previous) = contiguous_animation_interval(previous, finish, true, false);
+        assert_eq!(interval, Some(std::time::Duration::from_millis(8)));
+        assert_eq!(previous, None);
+
+        let next_action = finish + std::time::Duration::from_millis(60);
+        let (interval, previous) =
+            contiguous_animation_interval(previous, next_action, false, false);
+        assert_eq!(interval, None);
+        assert_eq!(previous, None);
+    }
+
+    #[test]
+    fn phase_six_measurement_schema_names_every_delimited_field() {
+        let intervals = MetricSummary {
+            sample_count: 10,
+            misses: 0,
+            p50: Some(8.0),
+            p95: Some(9.5),
+            max: Some(12.0),
+        };
+        let transition = serde_json::to_value(VisualTransitionEvidence {
+            duration_ms: 5_000,
+            redraw_count: 600,
+            present_count: 598,
+            present_interval_ms: intervals,
+            refresh_relative: RefreshIntervalSummary {
+                display_period_ms: Some(1_000.0 / 120.0),
+                p95_display_periods: Some(1.14),
+                frames_over_two_periods: 2,
+                fraction_over_two_periods: Some(0.00334),
+            },
+        })
+        .expect("transition evidence serializes");
+        assert_eq!(transition["duration_ms"], 5_000);
+        assert_eq!(transition["redraw_count"], 600);
+        assert_eq!(transition["present_count"], 598);
+        assert_eq!(transition["present_interval_ms"]["sample_count"], 10);
+        assert_eq!(transition["refresh_relative"]["frames_over_two_periods"], 2);
+
+        let idle = serde_json::to_value(IdleWindowEvidence {
+            duration_ms: 30_000,
+            process_cpu_ms: Some(120),
+            one_core_cpu_percent: Some(0.4),
+            redraw_count: 0,
+            present_count: 0,
+        })
+        .expect("idle evidence serializes");
+        assert_eq!(
+            idle,
+            serde_json::json!({
+                "duration_ms": 30_000,
+                "process_cpu_ms": 120,
+                "one_core_cpu_percent": 0.4,
+                "redraw_count": 0,
+                "present_count": 0
+            })
+        );
+
+        let resource = serde_json::to_value(ResourceSample {
+            elapsed_ms: 4_000,
+            checkpoint: "stress_80_percent",
+            stress_progress_percent: Some(80),
+            quad_capacity_floats: 1,
+            raster_capacity_floats: 2,
+            text_row_capacity: 3,
+            raster_cache_entries: 4,
+            raster_cache_bytes: 5,
+            shaping_cache_entries: 6,
+            shaping_cache_accounted_bytes: 7,
+        })
+        .expect("resource sample serializes");
+        assert_eq!(resource["checkpoint"], "stress_80_percent");
+        assert_eq!(resource["stress_progress_percent"], 80);
+        assert_eq!(resource["quad_capacity_floats"], 1);
+        assert_eq!(resource["shaping_cache_accounted_bytes"], 7);
     }
 
     #[test]

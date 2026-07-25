@@ -18,7 +18,7 @@ use mandatum_scene::{
     ArtifactState, CellOccupancy, CellProgram, CellSelection, LogicalRect, OverlayScene,
     PaneContent, PaneNodePart, PresentationNodeId, PresentationNodeRole, ProgramCell,
     RasterSurface, SceneColor, SceneRect, TerminalPalette, TextPaintScopeKind, Theme, UiColor,
-    WorkflowNodePart, WorkspaceScene, compile_cell_program, layout,
+    TransitionRole, WorkflowNodePart, WorkspaceScene, compile_cell_program, layout,
 };
 use winit::window::Window;
 
@@ -1824,6 +1824,7 @@ pub struct GpuText {
     injected_faults: u64,
     raster_cache_entries_high_water: usize,
     raster_cache_bytes_high_water: usize,
+    presentation_motion: crate::PresentationMotion,
 
     // Solid-quad pipeline.
     quad_pipeline: wgpu::RenderPipeline,
@@ -2269,6 +2270,7 @@ impl GpuText {
             injected_faults: 0,
             raster_cache_entries_high_water: 0,
             raster_cache_bytes_high_water: 0,
+            presentation_motion: crate::PresentationMotion::default(),
             quad_pipeline,
             material_pipeline,
             unit_buf,
@@ -2820,19 +2822,37 @@ impl GpuText {
         scene: &WorkspaceScene,
         theme: &Theme,
     ) -> Result<GpuRenderOutcome, GpuRenderError> {
+        self.render_at(scene, theme, Instant::now())
+    }
+
+    /// Render at one caller-supplied monotonic instant.
+    ///
+    /// The product shell injects this time so animation tests and scheduling
+    /// do not depend on hidden wall-clock reads inside presentation logic.
+    pub fn render_at(
+        &mut self,
+        scene: &WorkspaceScene,
+        theme: &Theme,
+        visual_now: Instant,
+    ) -> Result<GpuRenderOutcome, GpuRenderError> {
         if let Some(fault) = take_gpu_fault(&self.device_fault, self.device_generation) {
             return Err(fault);
         }
         let frame_prepare_started = Instant::now();
         let prepared = prepare_scene(scene, theme)?;
+        let presentation_plan = self.presentation_motion.resolve(
+            prepared.presentation_plan().clone(),
+            scene.presentation.motion_policy,
+            visual_now,
+        );
         let program = prepare_cell_program(
             prepared.cell_program(),
             scene,
             theme,
-            prepared.presentation_plan(),
+            &presentation_plan,
         )?;
         let material_quads = prepare_material_quads(
-            prepared.presentation_plan(),
+            &presentation_plan,
             self.scale,
             self.config.width,
             self.config.height,
@@ -3204,6 +3224,29 @@ impl GpuText {
             at: present,
             timings,
         })
+    }
+
+    pub fn next_animation_deadline(&self) -> Option<Instant> {
+        self.presentation_motion.next_deadline()
+    }
+
+    pub fn animation_is_active(&self) -> bool {
+        self.presentation_motion.is_active()
+    }
+
+    pub fn pointer_geometry_is_moving(&self) -> bool {
+        self.presentation_motion.pointer_geometry_is_moving()
+    }
+
+    pub fn active_transition_window(
+        &self,
+        role: TransitionRole,
+    ) -> Option<ActiveTransitionWindow> {
+        self.presentation_motion.active_transition_window(role)
+    }
+
+    pub fn snap_presentation_motion(&mut self) {
+        self.presentation_motion.snap();
     }
 }
 

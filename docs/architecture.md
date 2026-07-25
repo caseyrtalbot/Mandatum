@@ -373,6 +373,14 @@ scene's hit targets in `AppState`, and the terminal requests and renders that
 same snapshot inside its draw callback, so pointer input resolves against the
 most recently painted frame.
 
+`FrameSnapshot::scene_generation` is a separate monotonic visible-state
+generation for redraw scheduling; unlike the frame revision, merely asking for
+another snapshot does not advance it. `FrontendHost::scene_generation` lets a
+platform shell compare state around synchronous input or bounded runtime
+drains, and `heartbeat() -> bool` reports whether child-exit polling advanced
+it. Animation time remains renderer-local and does not manufacture a scene
+generation.
+
 `FrontendHost::new_with_wake_callback` optionally installs a renderer-neutral
 notification callback. Terminal input, PTY readers, restore-preserved input,
 and agent forwarders all use clones of one crate-private `AppEventSender`; no
@@ -485,6 +493,41 @@ resize does not destroy identity. Ready artifact pixels are admitted only when
 the scene carries the exact typed canvas geometry; missing or mismatched
 product presentation fails before GPU allocation. Native materials consume
 roles and tones only and never parse row text.
+
+Phase 6 adds motion without moving product truth into a frontend.
+`ScenePresentation::motion_policy` expresses reduced-motion and direct-geometry
+policy for the whole frame. `TransitionTarget` pairs a stable
+`PresentationNodeId` and typed property (`Geometry`, `Opacity`, or `Scale`) with
+one product role: `Focus`, `Selection`, `Overlay`, `PaneGeometry`, or
+`ApprovalArrival`. Approval targets also carry a monotonic arrival sequence so
+two requests on the same stable callout identity remain distinct even when the
+platform drains them between paints. Scene composition emits opacity targets
+for coherent overlay descendant families and geometry/scale targets only for
+native material-backed nodes. Cell-owned glyph placement, child output, and
+raster placement remain direct.
+
+`mandatum-native-renderer::PresentationMotion` is live adapter state over pure
+native presentation plans. It samples an injected monotonic `Instant`, applies
+only typed timing tokens, preserves the current sampled value across
+interruption or reversal, and converges on the newest stable plan. Reduced
+motion and direct pointer/resize geometry snap immediately and leave no
+animation deadline. Approval arrival is a one-time eligibility transition over
+a callout that remains statically high-salience while pending; it is not a
+clock-driven product-state blink. Hidden callouts retain their sequence without
+scheduling pixels or retriggering when revealed. Overlay entry fades its
+cell-owned text family while scaling the typed native material family. Overlay
+close is authoritative and direct because the current scene no longer owns its
+glyph rows; the adapter does not retain an empty renderer-owned shell.
+
+Motion scheduling and runtime polling are separate concerns. `AppState`
+increments a monotonic scene generation only when accepted input or runtime
+work changes visible product state. `FrontendHost::heartbeat` performs
+child-exit polling and reports whether that generation changed. The native
+shell independently wakes for the renderer's next animation deadline or the
+250 ms heartbeat, and requests a frame only for active motion or real scene
+change. While pane geometry or overlay scale lies between scene-owned stable
+hit-target endpoints, the shell suspends pointer admission until a successful
+stable present.
 
 ### `workflows`
 
