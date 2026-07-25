@@ -3,9 +3,9 @@
 use std::collections::HashSet;
 
 use mandatum_scene::{
-    LogicalRect, PresentationNode, PresentationNodeId, PresentationNodeRole, PresentationTone,
-    SceneRect, TerminalProjection, Theme, TransitionProperty, UiColor, UiMotionToken, UiShadow,
-    WorkspaceScene,
+    LogicalRect, OverlayPresentationKind, PresentationNode, PresentationNodeId,
+    PresentationNodeRole, PresentationTone, SceneRect, TerminalProjection, Theme,
+    TransitionProperty, UiColor, UiMotionToken, UiShadow, WorkspaceScene,
 };
 
 use crate::text_metrics::{NativeTextMetricIdentity, NativeTextMetricRole, NativeTextMetricSet};
@@ -21,10 +21,13 @@ pub enum NativeMaterialRole {
     PaneSurface,
     ChromeSurface,
     OverlaySurface,
+    ModalScrim,
+    OverlayBand,
     BorderSubtle,
     BorderStrong,
     Focus,
     Selection,
+    SelectionIndicator,
     Attention,
     Badge,
 }
@@ -241,33 +244,37 @@ pub fn prepare_native_presentation(
         node_bounds.insert(node.id.clone(), node.logical_rect);
 
         let z_base = u32::try_from(index)
-            .unwrap_or(u32::MAX / 4)
-            .saturating_mul(4);
+            .unwrap_or(u32::MAX / 8)
+            .saturating_mul(8);
         commands.push(NativePlanCommand::BeginClip {
             node_id: node.id.clone(),
             clip: node.logical_rect,
             z_order: z_base,
         });
-        if let Some(spec) = material_for_node(node, theme) {
-            let clip = if spec.raised_shadows.is_some() {
-                node.parent
-                    .as_ref()
-                    .and_then(|parent| node_bounds.get(parent))
-                    .copied()
-                    .unwrap_or(node.logical_rect)
-            } else {
-                node.logical_rect
-            };
+        let material_specs = materials_for_node(node, theme, viewport_rect);
+        for (material_index, spec) in material_specs.into_iter().enumerate() {
+            let logical_rect = spec.logical_rect.unwrap_or(node.logical_rect);
+            let clip = spec.clip.unwrap_or_else(|| {
+                if spec.raised_shadows.is_some() {
+                    node.parent
+                        .as_ref()
+                        .and_then(|parent| node_bounds.get(parent))
+                        .copied()
+                        .unwrap_or(node.logical_rect)
+                } else {
+                    node.logical_rect
+                }
+            });
             commands.push(NativePlanCommand::Material(NativeMaterial {
                 node_id: node.id.clone(),
                 role: spec.role,
-                logical_rect: node.logical_rect,
+                logical_rect,
                 clip,
                 color: spec.color,
                 corner_radius_units: spec.corner_radius_units,
                 boundary: spec.boundary,
                 raised_shadows: spec.raised_shadows,
-                z_order: z_base + 1,
+                z_order: z_base + 1 + material_index as u32,
             }));
         }
         if let Some((metric_role, color)) = text_for_node(node, theme) {
@@ -280,12 +287,12 @@ pub fn prepare_native_presentation(
                 clip: node.logical_rect,
                 color,
                 metrics: metrics.identity(metric_role),
-                z_order: z_base + 2,
+                z_order: z_base + 5,
             }));
         }
         commands.push(NativePlanCommand::EndClip {
             node_id: node.id.clone(),
-            z_order: z_base + 3,
+            z_order: z_base + 7,
         });
         enforce_limit("commands", commands.len(), MAX_NATIVE_PLAN_COMMANDS)?;
     }
@@ -421,6 +428,8 @@ struct NativeMaterialSpec {
     corner_radius_units: u64,
     boundary: Option<NativeBoundary>,
     raised_shadows: Option<[UiShadow; 2]>,
+    logical_rect: Option<LogicalRect>,
+    clip: Option<LogicalRect>,
 }
 
 impl NativeMaterialSpec {
@@ -431,19 +440,36 @@ impl NativeMaterialSpec {
             corner_radius_units: 0,
             boundary: None,
             raised_shadows: None,
+            logical_rect: None,
+            clip: None,
         }
     }
 }
 
-fn material_for_node(node: &PresentationNode, theme: &Theme) -> Option<NativeMaterialSpec> {
+fn materials_for_node(
+    node: &PresentationNode,
+    theme: &Theme,
+    viewport_rect: LogicalRect,
+) -> Vec<NativeMaterialSpec> {
     let palette = theme.ui.palette;
     if node.role == PresentationNodeRole::Item && node.state.selected {
-        return Some(NativeMaterialSpec::flat(
-            NativeMaterialRole::Selection,
-            palette.selection_fill,
+        let mut selection =
+            NativeMaterialSpec::flat(NativeMaterialRole::Selection, palette.selection_fill);
+        selection.corner_radius_units = u64::from(theme.ui.spacing.space_1) * 64;
+        let indicator_width = (u64::from(theme.ui.selection.leading_indicator_width) * 64)
+            .min(node.logical_rect.size.width_units());
+        let mut indicator =
+            NativeMaterialSpec::flat(NativeMaterialRole::SelectionIndicator, palette.focus);
+        indicator.logical_rect = Some(LogicalRect::from_units(
+            node.logical_rect.origin.x_units(),
+            node.logical_rect.origin.y_units(),
+            indicator_width,
+            node.logical_rect.size.height_units(),
         ));
+        indicator.corner_radius_units = indicator_width / 2;
+        return vec![selection, indicator];
     }
-    match node.role {
+    let material = match node.role {
         PresentationNodeRole::Workspace => Some(NativeMaterialSpec::flat(
             NativeMaterialRole::Canvas,
             palette.canvas,
@@ -468,9 +494,37 @@ fn material_for_node(node: &PresentationNode, theme: &Theme) -> Option<NativeMat
             NativeMaterialRole::PaneSurface,
             palette.pane_surface,
         )),
-        PresentationNodeRole::Overlay | PresentationNodeRole::TextInput => Some(
-            NativeMaterialSpec::flat(NativeMaterialRole::OverlaySurface, palette.overlay_surface),
-        ),
+        PresentationNodeRole::Overlay => {
+            let mut surface = NativeMaterialSpec::flat(
+                NativeMaterialRole::OverlaySurface,
+                palette.overlay_surface,
+            );
+            surface.corner_radius_units = match node.state.overlay_kind {
+                Some(OverlayPresentationKind::ContextMenu) => {
+                    u64::from(theme.ui.radii.context_menu) * 64
+                }
+                _ => u64::from(theme.ui.radii.overlay) * 64,
+            };
+            surface.boundary = Some(NativeBoundary {
+                width_units: u64::from(theme.ui.spacing.tiled_separator.max(1)) * 64,
+                color: palette.border_strong,
+            });
+            surface.raised_shadows = Some(theme.ui.elevation.raised);
+            if node.state.overlay_kind == Some(OverlayPresentationKind::Modal) {
+                let mut scrim =
+                    NativeMaterialSpec::flat(NativeMaterialRole::ModalScrim, palette.modal_scrim);
+                scrim.logical_rect = Some(viewport_rect);
+                scrim.clip = Some(viewport_rect);
+                return vec![scrim, surface];
+            }
+            Some(surface)
+        }
+        PresentationNodeRole::OverlayTitle
+        | PresentationNodeRole::OverlayFooter
+        | PresentationNodeRole::TextInput => Some(NativeMaterialSpec::flat(
+            NativeMaterialRole::OverlayBand,
+            palette.chrome_surface,
+        )),
         PresentationNodeRole::Separator => {
             if node.state.dragging {
                 Some(NativeMaterialSpec::flat(
@@ -511,7 +565,8 @@ fn material_for_node(node: &PresentationNode, theme: &Theme) -> Option<NativeMat
         PresentationNodeRole::TerminalOutput
         | PresentationNodeRole::TaskOutput
         | PresentationNodeRole::Item => None,
-    }
+    };
+    material.into_iter().collect()
 }
 
 fn text_for_node(
@@ -546,6 +601,12 @@ fn text_for_node(
         PresentationNodeRole::TaskOutput => Some((NativeTextMetricRole::Body, color)),
         PresentationNodeRole::TextInput => Some((NativeTextMetricRole::Body, color)),
         PresentationNodeRole::Item => Some((NativeTextMetricRole::Body, color)),
+        PresentationNodeRole::OverlayTitle => {
+            Some((NativeTextMetricRole::Title, palette.text_primary))
+        }
+        PresentationNodeRole::OverlayFooter => {
+            Some((NativeTextMetricRole::Metadata, palette.text_muted))
+        }
         PresentationNodeRole::Attention => Some((
             NativeTextMetricRole::Metadata,
             tone_color(node.state.tone, theme),
@@ -565,10 +626,12 @@ fn native_text_color_projection(node: &PresentationNode) -> Option<SceneRect> {
         | PresentationNodeRole::Status
         | PresentationNodeRole::PaneTitle
         | PresentationNodeRole::PaneBadge(_)
-        | PresentationNodeRole::Attention => node.cell_rect,
+        | PresentationNodeRole::Attention
+        | PresentationNodeRole::OverlayTitle
+        | PresentationNodeRole::OverlayFooter
+        | PresentationNodeRole::TextInput => node.cell_rect,
         PresentationNodeRole::TerminalOutput
         | PresentationNodeRole::TaskOutput
-        | PresentationNodeRole::TextInput
         | PresentationNodeRole::Item
         | PresentationNodeRole::Workspace
         | PresentationNodeRole::Pane

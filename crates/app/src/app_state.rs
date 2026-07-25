@@ -19,7 +19,7 @@ use mandatum_core::{
 use mandatum_pty::PtySize;
 use mandatum_scene::{
     ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind, LogicalHitTarget,
-    LogicalPoint, PaletteOverlay, PaneSceneKind, PromptOverlay, SceneRect, SceneSize,
+    LogicalPoint, OverlayScene, PaletteOverlay, PaneSceneKind, PromptOverlay, SceneRect, SceneSize,
     SearchOverlay, SemanticKey, SessionMapOverlay, Theme, TimelineOverlay, ViewportMetrics,
     WelcomeOverlay, WorkspaceScene,
     cell_program::scalar_range_to_columns,
@@ -159,6 +159,9 @@ pub struct AppState {
     /// frontends resolve workspace chrome against these while preserving
     /// the cell event for terminal child coordinates.
     logical_hit_targets: Vec<LogicalHitTarget>,
+    /// Exact Context Menu shell retained from the last presented scene.
+    /// Native overlay constraints may shift it away from its raw anchor.
+    context_menu_scene_area: Option<SceneRect>,
     /// Present only while routing one native logical-pixel pointer event.
     active_logical_pointer: Option<LogicalPoint>,
     /// The in-flight workspace drag, armed on a button press over a target.
@@ -242,6 +245,7 @@ impl AppState {
             last_copied: None,
             hit_targets: Vec::new(),
             logical_hit_targets: Vec::new(),
+            context_menu_scene_area: None,
             active_logical_pointer: None,
             pointer_drag: None,
             separator_hover: None,
@@ -735,6 +739,10 @@ impl AppState {
         let scene = crate::scene_builder::build_workspace_scene_with_viewport(self, viewport);
         self.hit_targets = scene.hit_targets.clone();
         self.logical_hit_targets = scene.presentation.logical_hit_targets.clone();
+        self.context_menu_scene_area = match &scene.overlay {
+            Some(OverlayScene::ContextMenu(menu)) => Some(menu.area),
+            _ => None,
+        };
         scene
     }
 
@@ -3182,6 +3190,7 @@ impl AppState {
             selected: 0,
             anchor: (pointer.column, pointer.row),
         });
+        self.context_menu_scene_area = None;
         self.status = "menu: up/down choose, Enter run, Esc close".to_owned();
     }
 
@@ -3418,6 +3427,9 @@ impl AppState {
 
     /// The open menu's on-screen rect, for chrome-click detection.
     fn context_menu_area(&self) -> Option<SceneRect> {
+        if let Some(area) = self.context_menu_scene_area {
+            return Some(area);
+        }
         let (columns, rows) = self.terminal_size?;
         self.context_menu_overlay(SceneSize::new(columns, rows))
             .map(|overlay| overlay.area)

@@ -797,7 +797,7 @@ fn native_frame_colors(theme: &Theme) -> NativeFrameColors {
 
 #[derive(Debug)]
 struct PreparedCellProgram {
-    cells: Vec<(u16, u16, ResolvedCell, bool)>,
+    cells: Vec<(u16, u16, ResolvedCell, bool, TextPaintScopeKind, bool)>,
     rows: Vec<RowRun>,
     issues: Vec<RowRunBuildIssue>,
 }
@@ -812,6 +812,7 @@ struct PixelRect {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MaterialQuad {
+    role: crate::NativeMaterialRole,
     draw_rect: PixelRect,
     shape_rect: PixelRect,
     clip: (u32, u32, u32, u32),
@@ -924,6 +925,7 @@ fn prepare_material_quads(
                 }
                 for visible_clip in visible_clips {
                     quads.push(MaterialQuad {
+                        role: material.role,
                         draw_rect,
                         shape_rect,
                         clip: visible_clip,
@@ -943,6 +945,7 @@ fn prepare_material_quads(
             }
         }
         quads.push(MaterialQuad {
+            role: material.role,
             draw_rect: shape_rect,
             shape_rect,
             clip,
@@ -966,6 +969,16 @@ fn prepare_material_quads(
         )?;
     }
     Ok(quads)
+}
+
+fn is_overlay_material(role: crate::NativeMaterialRole) -> bool {
+    matches!(
+        role,
+        crate::NativeMaterialRole::OverlaySurface
+            | crate::NativeMaterialRole::OverlayBand
+            | crate::NativeMaterialRole::Selection
+            | crate::NativeMaterialRole::SelectionIndicator
+    )
 }
 
 fn logical_rect_to_physical(rect: LogicalRect, scale: f32) -> Option<PixelRect> {
@@ -1235,19 +1248,38 @@ fn prepare_cell_program(
             (
                 resolve_program_cell(cell, theme),
                 should_paint_legacy_background(scene, x, y, cell, scope.kind),
+                scope.kind,
+                cell.cursor,
             ),
         );
     }
 
     let cells = topmost
         .iter()
-        .map(|(&(y, x), (cell, background_visible))| (x, y, cell.clone(), *background_visible))
+        .map(
+            |(&(y, x), (cell, background_visible, scope, cursor))| {
+                (
+                    x,
+                    y,
+                    cell.clone(),
+                    *background_visible,
+                    *scope,
+                    *cursor,
+                )
+            },
+        )
         .collect::<Vec<_>>();
     let mut plan = build_row_runs(program, |cell| resolved_glyph_style(cell, theme))
         .map_err(text_program_error)?;
     plan.runs
-        .retain(|run| run.paint_scope.kind != TextPaintScopeKind::PaneDecoration);
-    apply_native_text_scope_colors(&mut plan.runs, scene, presentation_plan)?;
+        .retain(|run| {
+            !matches!(
+                run.paint_scope.kind,
+                TextPaintScopeKind::PaneDecoration | TextPaintScopeKind::OverlayDecoration
+            )
+        });
+    apply_native_text_scope_colors(&mut plan.runs, program, scene, presentation_plan)?;
+    apply_modal_scrim_to_base_text(&mut plan.runs, presentation_plan);
     enforce_resource_limit("text buffers", plan.runs.len(), MAX_GPU_TEXT_BUFFERS)?;
     Ok(PreparedCellProgram {
         cells,
@@ -1256,8 +1288,48 @@ fn prepare_cell_program(
     })
 }
 
+fn apply_modal_scrim_to_base_text(rows: &mut [RowRun], plan: &NativePresentationPlan) {
+    let scrim = plan.commands().iter().find_map(|command| match command {
+        NativePlanCommand::Material(material)
+            if material.role == crate::NativeMaterialRole::ModalScrim =>
+        {
+            Some(material.color.to_array())
+        }
+        _ => None,
+    });
+    let Some(scrim) = scrim else {
+        return;
+    };
+    for row in rows {
+        if matches!(
+            row.paint_scope.kind,
+            TextPaintScopeKind::Overlay
+                | TextPaintScopeKind::OverlayDecoration
+                | TextPaintScopeKind::TextInput
+        ) {
+            continue;
+        }
+        row.glyph_style.foreground = composite_scrim(row.glyph_style.foreground, scrim);
+        for range in &mut row.style_ranges {
+            range.style.foreground = composite_scrim(range.style.foreground, scrim);
+        }
+    }
+}
+
+fn composite_scrim(base: [u8; 4], scrim: [u8; 4]) -> [u8; 4] {
+    let alpha = u16::from(scrim[3]);
+    let inverse = 255u16.saturating_sub(alpha);
+    [
+        ((u16::from(scrim[0]) * alpha + u16::from(base[0]) * inverse + 127) / 255) as u8,
+        ((u16::from(scrim[1]) * alpha + u16::from(base[1]) * inverse + 127) / 255) as u8,
+        ((u16::from(scrim[2]) * alpha + u16::from(base[2]) * inverse + 127) / 255) as u8,
+        base[3],
+    ]
+}
+
 fn apply_native_text_scope_colors(
     rows: &mut [RowRun],
+    program: &CellProgram,
     scene: &WorkspaceScene,
     plan: &NativePresentationPlan,
 ) -> Result<(), SceneCompileError> {
@@ -1302,7 +1374,9 @@ fn apply_native_text_scope_colors(
             let index = usize::from(row.y)
                 .checked_mul(frame_width)
                 .and_then(|base| base.checked_add(usize::from(x)));
-            if let Some(color) = index.and_then(|index| colors.get(index)).copied().flatten() {
+            if !program.cell_at(x, row.y).is_some_and(|cell| cell.cursor)
+                && let Some(color) = index.and_then(|index| colors.get(index)).copied().flatten()
+            {
                 style.foreground = color;
             }
             if let Some(previous) = ranges.last_mut()
@@ -1335,7 +1409,10 @@ fn should_paint_legacy_background(
     if scene.presentation == mandatum_scene::ScenePresentation::default() {
         return true;
     }
-    if cell.cursor || cell.selection.is_some() || cell.raster_layer.is_some() {
+    if cell.cursor
+        || cell.selection == Some(CellSelection::Terminal)
+        || cell.raster_layer.is_some()
+    {
         return true;
     }
     match scope {
@@ -1351,7 +1428,9 @@ fn should_paint_legacy_background(
                     .iter()
                     .any(|mapping| mapping.visible_cell_rect.contains(x, y))
         }
-        TextPaintScopeKind::Overlay | TextPaintScopeKind::TextInput => true,
+        TextPaintScopeKind::Overlay
+        | TextPaintScopeKind::OverlayDecoration
+        | TextPaintScopeKind::TextInput => false,
     }
 }
 
@@ -2732,12 +2811,22 @@ impl GpuText {
         // only translates final topmost cells into solid backgrounds and
         // glyphon rows.
         let mut quads = Vec::with_capacity(program.cells.len().saturating_mul(8));
-        for (x, y, cell, background_visible) in &program.cells {
+        let mut foreground_quads = Vec::new();
+        for (x, y, cell, background_visible, scope, cursor) in &program.cells {
             if !background_visible {
                 continue;
             }
+            let target = if *cursor
+                && matches!(
+                    scope,
+                    TextPaintScopeKind::Overlay | TextPaintScopeKind::TextInput
+                ) {
+                &mut foreground_quads
+            } else {
+                &mut quads
+            };
             push_quad(
-                &mut quads,
+                target,
                 f32::from(*x) * self.cell_w,
                 f32::from(*y) * self.cell_h,
                 self.cell_w,
@@ -2745,6 +2834,8 @@ impl GpuText {
                 cell.background,
             );
         }
+        let base_instance_count = (quads.len() / 8) as u32;
+        quads.extend(foreground_quads);
 
         if quads.len() > self.inst_capacity_floats {
             self.inst_capacity_floats = quads.len().next_power_of_two();
@@ -2924,7 +3015,10 @@ impl GpuText {
                 pass.set_vertex_buffer(0, self.unit_buf.slice(..));
                 pass.set_vertex_buffer(1, self.material_inst_buf.slice(..));
                 for (instance, quad) in material_quads.iter().enumerate() {
-                    if quad.shadow {
+                    if quad.shadow
+                        || quad.role == crate::NativeMaterialRole::ModalScrim
+                        || is_overlay_material(quad.role)
+                    {
                         continue;
                     }
                     let (x, y, width, height) = quad.clip;
@@ -2933,12 +3027,12 @@ impl GpuText {
                 }
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             }
-            if instance_count > 0 {
+            if base_instance_count > 0 {
                 pass.set_pipeline(&self.quad_pipeline);
                 pass.set_bind_group(0, &self.res_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.unit_buf.slice(..));
                 pass.set_vertex_buffer(1, self.inst_buf.slice(..));
-                pass.draw(0..4, 0..instance_count);
+                pass.draw(0..4, 0..base_instance_count);
             }
             if !raster_rects.is_empty() {
                 pass.set_pipeline(&self.raster_pipeline);
@@ -2967,13 +3061,51 @@ impl GpuText {
                 }
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             }
-            if material_quads.iter().any(|quad| quad.shadow) {
+            if material_quads.iter().any(|quad| {
+                quad.shadow || quad.role == crate::NativeMaterialRole::ModalScrim
+                    || is_overlay_material(quad.role)
+            }) {
                 pass.set_pipeline(&self.material_pipeline);
                 pass.set_bind_group(0, &self.res_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.unit_buf.slice(..));
                 pass.set_vertex_buffer(1, self.material_inst_buf.slice(..));
+
+                // Raised workspace surfaces are base content and therefore
+                // sit below a modal scrim.
                 for (instance, quad) in material_quads.iter().enumerate() {
-                    if !quad.shadow {
+                    if !quad.shadow || is_overlay_material(quad.role) {
+                        continue;
+                    }
+                    let (x, y, width, height) = quad.clip;
+                    pass.set_scissor_rect(x, y, width, height);
+                    pass.draw(0..4, instance as u32..instance as u32 + 1);
+                }
+
+                // The scrim dims completed workspace materials, terminal
+                // backgrounds, and raster artifacts. Base glyph colors are
+                // composited by `apply_modal_scrim_to_base_text` because the
+                // shared glyphon pass occurs last.
+                for (instance, quad) in material_quads.iter().enumerate() {
+                    if quad.shadow || quad.role != crate::NativeMaterialRole::ModalScrim {
+                        continue;
+                    }
+                    let (x, y, width, height) = quad.clip;
+                    pass.set_scissor_rect(x, y, width, height);
+                    pass.draw(0..4, instance as u32..instance as u32 + 1);
+                }
+
+                // Overlay elevation belongs above the scrim but below the
+                // raised shell and its bands/selection materials.
+                for (instance, quad) in material_quads.iter().enumerate() {
+                    if !quad.shadow || !is_overlay_material(quad.role) {
+                        continue;
+                    }
+                    let (x, y, width, height) = quad.clip;
+                    pass.set_scissor_rect(x, y, width, height);
+                    pass.draw(0..4, instance as u32..instance as u32 + 1);
+                }
+                for (instance, quad) in material_quads.iter().enumerate() {
+                    if quad.shadow || !is_overlay_material(quad.role) {
                         continue;
                     }
                     let (x, y, width, height) = quad.clip;
@@ -2981,6 +3113,13 @@ impl GpuText {
                     pass.draw(0..4, instance as u32..instance as u32 + 1);
                 }
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            }
+            if instance_count > base_instance_count {
+                pass.set_pipeline(&self.quad_pipeline);
+                pass.set_bind_group(0, &self.res_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.unit_buf.slice(..));
+                pass.set_vertex_buffer(1, self.inst_buf.slice(..));
+                pass.draw(0..4, base_instance_count..instance_count);
             }
             let result = self
                 .text_renderer
@@ -3437,6 +3576,38 @@ mod tests {
             2,
             &cursor_cell,
             TextPaintScopeKind::PaneContent
+        ));
+        let item_selection = ProgramCell {
+            selection: Some(CellSelection::Item),
+            ..default_cell.clone()
+        };
+        assert!(
+            !should_paint_legacy_background(
+                &scene,
+                1,
+                2,
+                &item_selection,
+                TextPaintScopeKind::Overlay
+            ),
+            "native soft-selection material owns overlay item backgrounds"
+        );
+        let terminal_selection = ProgramCell {
+            selection: Some(CellSelection::Terminal),
+            ..default_cell.clone()
+        };
+        assert!(should_paint_legacy_background(
+            &scene,
+            1,
+            2,
+            &terminal_selection,
+            TextPaintScopeKind::PaneContent
+        ));
+        assert!(!should_paint_legacy_background(
+            &scene,
+            1,
+            2,
+            &default_cell,
+            TextPaintScopeKind::OverlayDecoration
         ));
         let custom_background = ProgramCell {
             style: mandatum_scene::SceneCellStyle {
@@ -4438,7 +4609,7 @@ mod tests {
         let final_cells = translated
             .cells
             .iter()
-            .filter(|(x, y, _, _)| (*x, *y) == (3, 6))
+            .filter(|(x, y, _, _, _, _)| (*x, *y) == (3, 6))
             .collect::<Vec<_>>();
 
         assert_eq!(final_cells.len(), 1);

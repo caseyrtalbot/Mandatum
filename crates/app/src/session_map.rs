@@ -98,26 +98,26 @@ pub(crate) fn session_map_rows(
 /// and the session heading draw from this table, and the overlay footer's
 /// legend is generated from it, so the two cannot drift. The focus marker is
 /// shared with frontends via [`SESSION_MAP_FOCUS_GLYPH`].
-pub(crate) const SESSION_MAP_GLYPH_LEGEND: &[(&str, &str)] = &[
-    ("▸", "session"),
-    ("❯", "terminal"),
-    ("▶", "task"),
-    ("◆", "agent"),
-    ("▣", "artifact"),
-    ("≡", "status"),
-    (SESSION_MAP_FOCUS_GLYPH, "focused"),
+pub(crate) const SESSION_MAP_GLYPH_LEGEND: &[(&str, &str, &str)] = &[
+    ("session", "▸", "session"),
+    ("terminal", "❯", "terminal"),
+    ("task", "▶", "task"),
+    ("agent", "◆", "agent"),
+    ("artifact", "▣", "artifact"),
+    ("status", "≡", "status"),
+    ("focused", SESSION_MAP_FOCUS_GLYPH, "focused"),
 ];
 
 /// The glyph for a session heading row (legend entry 0).
-const SESSION_GLYPH: &str = SESSION_MAP_GLYPH_LEGEND[0].0;
+const SESSION_GLYPH: &str = SESSION_MAP_GLYPH_LEGEND[0].1;
 
 fn pane_glyph(kind: &PaneKind) -> &'static str {
     match kind {
-        PaneKind::Terminal { .. } => SESSION_MAP_GLYPH_LEGEND[1].0,
-        PaneKind::Task { .. } => SESSION_MAP_GLYPH_LEGEND[2].0,
-        PaneKind::Agent { .. } => SESSION_MAP_GLYPH_LEGEND[3].0,
-        PaneKind::Artifact { .. } => SESSION_MAP_GLYPH_LEGEND[4].0,
-        PaneKind::StatusLog { .. } => SESSION_MAP_GLYPH_LEGEND[5].0,
+        PaneKind::Terminal { .. } => SESSION_MAP_GLYPH_LEGEND[1].1,
+        PaneKind::Task { .. } => SESSION_MAP_GLYPH_LEGEND[2].1,
+        PaneKind::Agent { .. } => SESSION_MAP_GLYPH_LEGEND[3].1,
+        PaneKind::Artifact { .. } => SESSION_MAP_GLYPH_LEGEND[4].1,
+        PaneKind::StatusLog { .. } => SESSION_MAP_GLYPH_LEGEND[5].1,
     }
 }
 
@@ -182,14 +182,14 @@ fn glyph_legend(rows: &[SessionMapRowModel]) -> Option<String> {
     let any_focused = rows.iter().any(|model| model.row.focused);
     let parts: Vec<String> = SESSION_MAP_GLYPH_LEGEND
         .iter()
-        .filter(|(glyph, _)| {
+        .filter(|(_, glyph, _)| {
             if *glyph == SESSION_MAP_FOCUS_GLYPH {
                 any_focused
             } else {
                 rows.iter().any(|model| model.row.glyph == *glyph)
             }
         })
-        .map(|(glyph, meaning)| format!("{glyph} {meaning}"))
+        .map(|(_, glyph, meaning)| format!("{glyph} {meaning}"))
         .collect();
     if parts.is_empty() {
         None
@@ -341,9 +341,9 @@ mod tests {
         let overlay = session_map_overlay(&rows, 0, SceneSize::new(120, 30));
 
         for model in &rows {
-            let (_, meaning) = SESSION_MAP_GLYPH_LEGEND
+            let (_, _, meaning) = SESSION_MAP_GLYPH_LEGEND
                 .iter()
-                .find(|(glyph, _)| *glyph == model.row.glyph)
+                .find(|(_, glyph, _)| *glyph == model.row.glyph)
                 .unwrap_or_else(|| panic!("glyph {:?} missing from legend", model.row.glyph));
             assert!(
                 overlay

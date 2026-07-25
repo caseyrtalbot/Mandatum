@@ -38,6 +38,9 @@ impl Compiler {
 
     fn paint_context_menu(&mut self, menu: &ContextMenuOverlay, theme: &Theme) {
         let (inner, surface) = self.paint_overlay_shell(menu.area, None, theme);
+        if inner.is_empty() {
+            return;
+        }
         for (index, item) in menu
             .items
             .iter()
@@ -47,29 +50,45 @@ impl Compiler {
             let selected = menu.selected == index;
             let line_style = selected_item_style(surface, selected, theme);
             let label = format!(" {}", item.label);
-            let label_width = display_width(&label);
-            let hint_width = display_width(&item.chord_hint) + 1;
-            let padding = usize::from(inner.width)
-                .saturating_sub(label_width + hint_width)
+            let hint_width =
+                display_width(&item.chord_hint).min(usize::from(inner.width.saturating_sub(2)));
+            let label_width = usize::from(inner.width)
+                .saturating_sub(hint_width.saturating_add(2))
                 .max(1);
             let y = inner.y.saturating_add(index as u16);
+            let label_area = SceneRect::new(inner.x, y, label_width as u16, 1);
             let mut column = 0usize;
-            let leading = format!("{label}{}", " ".repeat(padding));
-            for grapheme in leading.graphemes(true) {
-                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, line_style, selected);
-            }
-            for grapheme in item.chord_hint.graphemes(true) {
+            for grapheme in label.graphemes(true) {
                 self.paint_overlay_grapheme(
-                    inner,
+                    label_area,
                     &mut column,
                     y,
                     grapheme,
-                    SceneCellStyle {
-                        dim: true,
-                        ..line_style
-                    },
+                    line_style,
                     selected,
                 );
+            }
+            if !item.chord_hint.is_empty() {
+                let hint_area = SceneRect::new(
+                    inner.right().saturating_sub(hint_width as u16),
+                    y,
+                    hint_width as u16,
+                    1,
+                );
+                let mut hint_column = 0usize;
+                for grapheme in item.chord_hint.graphemes(true) {
+                    self.paint_overlay_grapheme(
+                        hint_area,
+                        &mut hint_column,
+                        y,
+                        grapheme,
+                        SceneCellStyle {
+                            dim: true,
+                            ..line_style
+                        },
+                        selected,
+                    );
+                }
             }
         }
     }
@@ -318,10 +337,16 @@ impl Compiler {
             } else {
                 format!("   {}", item.label)
             };
+            let key_width =
+                display_width(&item.keys).min(usize::from(inner.width.saturating_sub(2)));
+            let label_width = usize::from(inner.width)
+                .saturating_sub(key_width.saturating_add(2))
+                .max(1);
+            let label_area = SceneRect::new(inner.x, y, label_width as u16, 1);
             let mut column = 0usize;
             for grapheme in label.graphemes(true) {
                 self.paint_overlay_grapheme(
-                    inner,
+                    label_area,
                     &mut column,
                     y,
                     grapheme,
@@ -333,10 +358,17 @@ impl Compiler {
                 );
             }
             if !item.keys.is_empty() {
-                for grapheme in format!("  {}", item.keys).graphemes(true) {
+                let key_area = SceneRect::new(
+                    inner.right().saturating_sub(key_width as u16),
+                    y,
+                    key_width as u16,
+                    1,
+                );
+                let mut key_column = 0usize;
+                for grapheme in item.keys.graphemes(true) {
                     self.paint_overlay_grapheme(
-                        inner,
-                        &mut column,
+                        key_area,
+                        &mut key_column,
                         y,
                         grapheme,
                         SceneCellStyle {
@@ -421,8 +453,11 @@ impl Compiler {
         theme: &Theme,
     ) -> (SceneRect, SceneCellStyle) {
         let surface = style(theme.overlay_foreground, theme.overlay_background);
+        let surface_scope = self.begin_text_scope(TextPaintScopeKind::Overlay, area);
         self.paint_rect(area, surface);
+        self.begin_text_scope(TextPaintScopeKind::OverlayDecoration, area);
         self.paint_border(area, style(theme.palette_border, theme.overlay_background));
+        self.set_text_scope(surface_scope);
         if let Some(title) = title {
             self.paint_text(
                 SceneRect::new(
@@ -492,63 +527,18 @@ impl Compiler {
     }
 
     fn paint_palette(&mut self, palette: &PaletteOverlay, theme: &Theme) {
-        let surface = style(theme.overlay_foreground, theme.overlay_background);
-        let border = style(theme.palette_border, theme.overlay_background);
-        self.paint_rect(palette.area, surface);
-        self.paint_border(palette.area, border);
-        self.paint_text(
-            SceneRect::new(
-                palette.area.x.saturating_add(1),
-                palette.area.y,
-                palette.area.width.saturating_sub(2),
-                palette.area.height.min(1),
-            ),
-            " Command Palette ",
-            surface,
-        );
-
-        let inner = bordered_inner_rect(palette.area);
+        let (inner, surface) =
+            self.paint_overlay_shell(palette.area, Some(" Command Palette "), theme);
         if inner.is_empty() {
             return;
         }
 
-        self.paint_text_row(inner, 0, "> ", surface);
-        if palette.query.is_empty() {
-            self.paint_text(
-                SceneRect::new(
-                    inner.x.saturating_add(2),
-                    inner.y,
-                    inner.width.saturating_sub(2),
-                    1,
-                ),
-                "letters run their key · shift+letter to search",
-                SceneCellStyle {
-                    dim: true,
-                    ..surface
-                },
-            );
-        } else {
-            self.paint_text(
-                SceneRect::new(
-                    inner.x.saturating_add(2),
-                    inner.y,
-                    inner.width.saturating_sub(2),
-                    1,
-                ),
-                &palette.query,
-                surface,
-            );
-            let cursor_column = 2usize
-                .saturating_add(display_width(&palette.query))
-                .min(usize::from(inner.width.saturating_sub(1)));
-            let mut cursor = ProgramCell::glyph(' ', surface);
-            cursor.cursor = true;
-            self.paint_cell(
-                inner.x.saturating_add(cursor_column as u16),
-                inner.y,
-                cursor,
-            );
-        }
+        self.paint_input(
+            inner,
+            &palette.query,
+            "letters run their key · shift+letter to search",
+            surface,
+        );
 
         if palette.items.is_empty() && inner.height > 1 {
             self.paint_text_row(
@@ -577,8 +567,18 @@ impl Compiler {
             }
 
             let y = inner.y.saturating_add(1).saturating_add(row as u16);
+            let hint_width = item
+                .key_hint
+                .as_deref()
+                .map(display_width)
+                .unwrap_or(0)
+                .min(usize::from(inner.width.saturating_sub(2)));
+            let left_width = usize::from(inner.width)
+                .saturating_sub(hint_width.saturating_add(2))
+                .max(1);
+            let left_area = SceneRect::new(inner.x, y, left_width as u16, 1);
             let mut column = 0usize;
-            self.paint_overlay_grapheme(inner, &mut column, y, " ", line_style, selected);
+            self.paint_overlay_grapheme(left_area, &mut column, y, " ", line_style, selected);
             let mut scalar_position = 0usize;
             for grapheme in item.label.graphemes(true) {
                 let mut cell_style = line_style;
@@ -589,31 +589,51 @@ impl Compiler {
                     cell_style.bold = true;
                     cell_style.underline = true;
                 }
-                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, cell_style, selected);
+                self.paint_overlay_grapheme(
+                    left_area,
+                    &mut column,
+                    y,
+                    grapheme,
+                    cell_style,
+                    selected,
+                );
                 scalar_position += scalar_len;
-            }
-            if let Some(hint) = &item.key_hint {
-                for grapheme in format!("  {hint}").graphemes(true) {
-                    let cell_style = SceneCellStyle {
-                        dim: true,
-                        ..line_style
-                    };
-                    self.paint_overlay_grapheme(
-                        inner,
-                        &mut column,
-                        y,
-                        grapheme,
-                        cell_style,
-                        selected,
-                    );
-                }
             }
             for grapheme in format!("  {}", item.detail).graphemes(true) {
                 let cell_style = SceneCellStyle {
                     dim: true,
                     ..line_style
                 };
-                self.paint_overlay_grapheme(inner, &mut column, y, grapheme, cell_style, selected);
+                self.paint_overlay_grapheme(
+                    left_area,
+                    &mut column,
+                    y,
+                    grapheme,
+                    cell_style,
+                    selected,
+                );
+            }
+            if let Some(hint) = &item.key_hint {
+                let hint_area = SceneRect::new(
+                    inner.right().saturating_sub(hint_width as u16),
+                    y,
+                    hint_width as u16,
+                    1,
+                );
+                let mut hint_column = 0usize;
+                for grapheme in hint.graphemes(true) {
+                    self.paint_overlay_grapheme(
+                        hint_area,
+                        &mut hint_column,
+                        y,
+                        grapheme,
+                        SceneCellStyle {
+                            dim: true,
+                            ..line_style
+                        },
+                        selected,
+                    );
+                }
             }
         }
 

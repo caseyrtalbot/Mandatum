@@ -1034,7 +1034,7 @@ mod tests {
         // multibyte).
         let hint_byte = rows[3].rfind("ctrl+p z").expect("hint rendered");
         let hint_end = rows[3][..hint_byte].chars().count() + "ctrl+p z".chars().count();
-        let inner_right = 10 + 26 - 2; // one border column + one padding cell
+        let inner_right = 10 + 26 - 1; // immediately before the right border
         assert_eq!(hint_end as u16, inner_right);
 
         // The selected row is reversed; unselected rows are not.
@@ -1053,12 +1053,23 @@ mod tests {
             vec![split, PaletteEntry::new("Run task", "task")],
             Some(0),
         );
+        let area = match &with_palette.overlay {
+            Some(OverlayScene::Palette(palette)) => palette.area,
+            _ => unreachable!("palette fixture"),
+        };
         let rows = buffer_rows(&draw(&with_palette));
         let all = rows.join("\n");
 
         assert!(all.contains("Command Palette"));
         assert!(all.contains("> spl"));
-        assert!(all.contains("Split pane right  v  layout"));
+        let split_row = rows
+            .iter()
+            .find(|row| row.contains("Split pane right"))
+            .expect("split row rendered");
+        assert!(split_row.contains("Split pane right  layout"));
+        let hint_byte = split_row.rfind('v').expect("key hint rendered");
+        let hint_end = split_row[..hint_byte].chars().count() + 1;
+        assert_eq!(hint_end as u16, area.right().saturating_sub(1));
         assert!(all.contains("Run task  task"));
         assert!(all.contains("type to search · enter run · esc close"));
     }
@@ -1248,11 +1259,13 @@ mod tests {
             query: String::new(),
             items: vec![
                 HelpEntry {
+                    key: mandatum_scene::SemanticKey::new("layout"),
                     heading: true,
                     label: "Layout".to_owned(),
                     keys: String::new(),
                 },
                 HelpEntry {
+                    key: mandatum_scene::SemanticKey::new("split-pane-right"),
                     heading: false,
                     label: "Split pane right".to_owned(),
                     keys: "ctrl+p v".to_owned(),

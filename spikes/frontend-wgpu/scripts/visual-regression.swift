@@ -10,6 +10,7 @@ import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 private let fixedProfile = "casey-m4pro-metal-scale2"
+private let fixedDisplay = "Built-in Retina Display"
 private let scenarios: Set<String> = [
     "typography", "calm-terminal", "dense-workspace", "attention", "palette",
     "full-modal", "welcome", "context-menu", "artifacts", "narrow", "restored",
@@ -152,6 +153,8 @@ private func parseConfig() throws -> Config {
 
 private func requireFixedReferenceDisplay() throws {
     let eligible = NSScreen.screens.filter {
+        $0.localizedName == fixedDisplay
+            &&
         abs($0.backingScaleFactor - 2.0) < 0.001
             && $0.frame.width >= 800
             && $0.frame.height >= 600
@@ -165,7 +168,8 @@ private func requireFixedReferenceDisplay() throws {
             .joined(separator: ", ")
         throw CaptureError.runtime(
             "profile \(fixedProfile) requires an active 2.0 backing-scale display "
-                + "with at least 800x600 logical pixels; active displays: \(active)"
+                + "named \(fixedDisplay) with at least 800x600 logical pixels; "
+                + "active displays: \(active)"
         )
     }
 }
@@ -186,6 +190,7 @@ private func capture(_ config: Config) async throws {
         "--bin", "mandatum-native-lab", "--",
         "--visual-scenario", config.scenario,
         "--font-size", "13",
+        "--display", fixedDisplay,
         "--exit-after", "30",
     ]
     process.currentDirectoryURL = repo
@@ -207,6 +212,11 @@ private func capture(_ config: Config) async throws {
         throw CaptureError.runtime(
             "scenario window landed on \(screen.localizedName) at scale "
                 + "\(screen.backingScaleFactor), not 2.0"
+        )
+    }
+    guard screen.localizedName == fixedDisplay else {
+        throw CaptureError.runtime(
+            "scenario window landed on \(screen.localizedName), not \(fixedDisplay)"
         )
     }
 

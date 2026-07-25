@@ -145,6 +145,7 @@ pub enum PaneNodePart {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OverlayNodePart {
     Surface,
+    Title,
     Input,
     Footer,
 }
@@ -159,6 +160,19 @@ pub enum OverlayKind {
     Search,
     Help,
     Welcome,
+}
+
+/// Native material grammar for one overlay surface.
+///
+/// The product state stays in the typed overlay payloads above. This value
+/// names only the shared presentation treatment so renderers never infer
+/// modality from labels, geometry, or opaque node identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlayPresentationKind {
+    Modal,
+    Welcome,
+    ContextMenu,
 }
 
 impl OverlayScene {
@@ -190,6 +204,8 @@ pub enum PresentationNodeRole {
     TerminalOutput,
     TaskOutput,
     Overlay,
+    OverlayTitle,
+    OverlayFooter,
     TextInput,
     Item,
     Separator,
@@ -246,6 +262,7 @@ pub struct PresentationNodeState {
     pub hovered: bool,
     pub dragging: bool,
     pub tone: PresentationTone,
+    pub overlay_kind: Option<OverlayPresentationKind>,
 }
 
 /// Logical-pixel twin of one existing cell hit target.
@@ -434,6 +451,8 @@ pub struct HelpOverlay {
 /// One help row: a section heading, or a "label + keys" line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelpEntry {
+    /// Stable semantic identity independent of filtering and key labels.
+    pub key: SemanticKey,
     /// `true` renders the row emphasized as a section heading.
     pub heading: bool,
     pub label: String,

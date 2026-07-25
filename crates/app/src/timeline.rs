@@ -241,27 +241,27 @@ impl TimelineEventKind {
 /// help overlay. The companion test constructs every event kind (including
 /// every branch of the conditional glyphs) and asserts its glyph is listed
 /// here, so a new glyph without a legend entry fails the build's tests.
-pub(crate) const TIMELINE_GLYPH_LEGEND: &[(&str, &str)] = &[
-    ("»", "command"),
-    ("▶", "started"),
-    ("✓", "ok"),
-    ("✗", "failed"),
-    ("◆", "agent"),
-    ("?", "approval"),
-    ("!", "refused"),
-    ("▪", "saved"),
-    ("⟲", "restored"),
-    ("+", "pane opened"),
-    ("×", "pane closed"),
-    ("⟳", "config"),
+pub(crate) const TIMELINE_GLYPH_LEGEND: &[(&str, &str, &str)] = &[
+    ("command", "»", "command"),
+    ("started", "▶", "started"),
+    ("ok", "✓", "ok"),
+    ("failed", "✗", "failed"),
+    ("agent", "◆", "agent"),
+    ("approval", "?", "approval"),
+    ("refused", "!", "refused"),
+    ("saved", "▪", "saved"),
+    ("restored", "⟲", "restored"),
+    ("pane-opened", "+", "pane opened"),
+    ("pane-closed", "×", "pane closed"),
+    ("config", "⟳", "config"),
 ];
 
 /// The legend meaning of a timeline glyph, if it is a known glyph.
 pub(crate) fn timeline_glyph_meaning(glyph: &str) -> Option<&'static str> {
     TIMELINE_GLYPH_LEGEND
         .iter()
-        .find(|(candidate, _)| *candidate == glyph)
-        .map(|(_, meaning)| *meaning)
+        .find(|(_, candidate, _)| *candidate == glyph)
+        .map(|(_, _, meaning)| *meaning)
 }
 
 /// The append side of the timeline. `file: None` disables recording (test

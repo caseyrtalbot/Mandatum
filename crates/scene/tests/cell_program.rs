@@ -458,11 +458,13 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     assert_eq!(matched.style.foreground, theme.palette_selection);
     assert_eq!(matched.selection, Some(CellSelection::Item));
 
-    let key_hint = program.cell_at(24, 6).expect("palette key hint");
+    let key_hint = program
+        .cell_at(item_target.rect.right().saturating_sub(1), 6)
+        .expect("right-aligned palette key hint");
     assert_eq!(key_hint.occupancy, CellOccupancy::Grapheme('v'.to_string()));
     assert!(key_hint.style.dim);
 
-    let detail = program.cell_at(27, 6).expect("palette detail");
+    let detail = program.cell_at(24, 6).expect("palette detail");
     assert_eq!(detail.occupancy, CellOccupancy::Grapheme('l'.to_string()));
     assert!(detail.style.dim);
 
@@ -616,7 +618,7 @@ fn cell_program_assigns_distinct_exact_text_paint_scopes() {
     assert_eq!(second_content.clip, SceneRect::new(31, 2, 28, 16));
     assert_eq!(status.kind, TextPaintScopeKind::Status);
     assert_eq!(status.clip, scene.status.area);
-    assert_eq!(overlay.kind, TextPaintScopeKind::Overlay);
+    assert_eq!(overlay.kind, TextPaintScopeKind::OverlayDecoration);
     assert_eq!(overlay.clip, overlay_area);
 
     let ids = [
@@ -731,7 +733,9 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     assert_eq!(label.occupancy, CellOccupancy::Grapheme('O'.to_string()));
     assert_eq!(label.selection, Some(CellSelection::Item));
     assert!(label.style.inverse);
-    let chord = program.cell_at(47, 4).expect("right-aligned context chord");
+    let chord = program
+        .cell_at(context_target.rect.right().saturating_sub(6), 4)
+        .expect("right-aligned context chord");
     assert_eq!(chord.occupancy, CellOccupancy::Grapheme('c'.to_string()));
     assert!(chord.style.dim);
 
@@ -897,11 +901,13 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
             query: "sp".to_owned(),
             items: vec![
                 HelpEntry {
+                    key: mandatum_scene::SemanticKey::new("layout"),
                     heading: true,
                     label: "Layout".to_owned(),
                     keys: String::new(),
                 },
                 HelpEntry {
+                    key: mandatum_scene::SemanticKey::new("split"),
                     heading: false,
                     label: "Split".to_owned(),
                     keys: "ctrl+s".to_owned(),
@@ -920,7 +926,9 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
     let entry = program.cell_at(9, 6).expect("help entry");
     assert_eq!(entry.occupancy, CellOccupancy::Grapheme('S'.to_string()));
     assert_eq!(entry.selection, Some(CellSelection::Item));
-    let keys = program.cell_at(16, 6).expect("help key hint");
+    let keys = program
+        .cell_at(area.right().saturating_sub(1 + 6), 6)
+        .expect("right-aligned help key hint");
     assert_eq!(keys.occupancy, CellOccupancy::Grapheme('c'.to_string()));
     assert!(keys.style.dim);
     assert!(program.cell_at(7, 13).expect("help footer").style.dim);
@@ -1279,6 +1287,7 @@ fn every_degenerate_overlay_keeps_content_inside_its_true_border() {
                 area,
                 query: "X".to_owned(),
                 items: vec![HelpEntry {
+                    key: mandatum_scene::SemanticKey::new("x"),
                     heading: false,
                     label: "X".to_owned(),
                     keys: "X".to_owned(),
@@ -1441,7 +1450,7 @@ fn advanced_text_terminal_graphemes_keep_wide_marks_and_occlude_atomically() {
     let overlay_scope = occluded
         .paint_scope_at(3, 2)
         .expect("covering overlay owns the final cell");
-    assert_eq!(overlay_scope.kind, TextPaintScopeKind::Overlay);
+    assert_eq!(overlay_scope.kind, TextPaintScopeKind::OverlayDecoration);
     assert_eq!(overlay_scope.clip, SceneRect::new(3, 2, 1, 1));
 }
 

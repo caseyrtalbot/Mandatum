@@ -59,6 +59,9 @@ pub enum TextPaintScopeKind {
     PaneDecoration,
     PaneContent,
     Overlay,
+    /// Terminal-parity overlay borders. Native renderers consume the typed
+    /// rounded overlay shell instead of shaping these box glyphs.
+    OverlayDecoration,
     TextInput,
 }
 

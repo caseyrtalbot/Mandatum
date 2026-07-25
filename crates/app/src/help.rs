@@ -6,7 +6,7 @@
 //! written here, next to the code that implements them.
 
 use mandatum_commands::{BUILT_IN_COMMANDS, CommandCategory, CommandId, fuzzy::fuzzy_match};
-use mandatum_scene::{HelpEntry, WelcomeEntry};
+use mandatum_scene::{HelpEntry, SemanticKey, WelcomeEntry};
 
 use crate::keymap::{ChordAction, Keymap, format_chord};
 use crate::session_map::SESSION_MAP_GLYPH_LEGEND;
@@ -39,9 +39,13 @@ pub(crate) fn help_rows(keymap: &Keymap) -> Vec<HelpEntry> {
     let mut rows = Vec::new();
     let palette_chord = format_chord(keymap.toggle_palette);
 
-    rows.push(heading("Workspace control"));
-    rows.push(entry("Command palette", palette_chord.clone()));
-    rows.push(entry("Quit", format_chord(keymap.quit)));
+    rows.push(heading("workspace-control", "Workspace control"));
+    rows.push(entry(
+        "workspace-command-palette",
+        "Command palette",
+        palette_chord.clone(),
+    ));
+    rows.push(entry("workspace-quit", "Quit", format_chord(keymap.quit)));
 
     for (category, section) in CATEGORY_SECTIONS {
         let commands: Vec<_> = BUILT_IN_COMMANDS
@@ -51,77 +55,114 @@ pub(crate) fn help_rows(keymap: &Keymap) -> Vec<HelpEntry> {
         if commands.is_empty() {
             continue;
         }
-        rows.push(heading(*section));
+        rows.push(heading(command_category_key(*category), *section));
         for command in commands {
-            rows.push(entry(command.label, key_route(command.id, keymap)));
+            rows.push(entry(
+                &format!("command-{}", command.name),
+                command.label,
+                key_route(command.id, keymap),
+            ));
         }
         if *category == CommandCategory::Agent {
             // Direct keys: an agent pane has no terminal input to shadow.
             rows.push(entry(
+                "agent-direct-approve",
                 "Approve directly (focused pane awaits approval)",
                 "y".to_owned(),
             ));
             rows.push(entry(
+                "agent-direct-reject",
                 "Reject directly (focused pane awaits approval)",
                 "n".to_owned(),
             ));
         }
     }
 
-    rows.push(heading("Palette fast paths"));
+    rows.push(heading("palette-fast-paths", "Palette fast paths"));
     rows.push(entry(
+        "palette-bound-letter",
         "With an empty input, a bound letter runs its command",
         String::new(),
     ));
     rows.push(entry(
+        "palette-shift-filter",
         "Shift+letter (or any unbound key) starts the fuzzy filter",
         String::new(),
     ));
     rows.push(entry(
+        "palette-focus-cycle",
         "Tab / BackTab cycle pane focus while the input is empty",
         String::new(),
     ));
     rows.push(entry(
+        "palette-navigation",
         "Up/Down or Ctrl+N/Ctrl+P move · Enter run · Esc close",
         String::new(),
     ));
 
-    rows.push(heading("Mouse"));
+    rows.push(heading("mouse", "Mouse"));
     rows.push(entry(
+        "mouse-focus-zoom",
         "Click focuses a pane; double-click zooms",
         String::new(),
     ));
     rows.push(entry(
+        "mouse-resize",
         "Drag a split separator to resize (keys: Grow/Shrink pane)",
         String::new(),
     ));
     rows.push(entry(
+        "mouse-float-move",
         "Drag a floating pane's title to move it (keys: Move float)",
         String::new(),
     ));
     rows.push(entry(
+        "mouse-scroll-select",
         "Wheel scrolls history; drag selects text (keys: copy mode)",
         String::new(),
     ));
     rows.push(entry(
+        "mouse-context-status",
         "Right-click opens the pane menu; click the status strip for commands",
         String::new(),
     ));
     rows.push(entry(
+        "mouse-child-capture",
         "When a child app captures the mouse, alt+click / alt+drag reaches the workspace",
         String::new(),
     ));
 
-    rows.push(heading("Glyphs · session map"));
-    for (glyph, meaning) in SESSION_MAP_GLYPH_LEGEND {
-        rows.push(entry(format!("{glyph}  {meaning}"), String::new()));
+    rows.push(heading("glyphs-session-map", "Glyphs · session map"));
+    for (key, glyph, meaning) in SESSION_MAP_GLYPH_LEGEND {
+        rows.push(entry(
+            &format!("glyph-session-map-{key}"),
+            format!("{glyph}  {meaning}"),
+            String::new(),
+        ));
     }
-    rows.push(heading("Glyphs · timeline"));
-    for (glyph, meaning) in TIMELINE_GLYPH_LEGEND {
-        rows.push(entry(format!("{glyph}  {meaning}"), String::new()));
+    rows.push(heading("glyphs-timeline", "Glyphs · timeline"));
+    for (key, glyph, meaning) in TIMELINE_GLYPH_LEGEND {
+        rows.push(entry(
+            &format!("glyph-timeline-{key}"),
+            format!("{glyph}  {meaning}"),
+            String::new(),
+        ));
     }
 
     rows
+}
+
+fn command_category_key(category: CommandCategory) -> &'static str {
+    match category {
+        CommandCategory::Project => "category-project",
+        CommandCategory::Pane => "category-pane",
+        CommandCategory::Task => "category-task",
+        CommandCategory::Agent => "category-agent",
+        CommandCategory::Layout => "category-layout",
+        CommandCategory::Persistence => "category-persistence",
+        CommandCategory::Config => "category-config",
+        CommandCategory::App => "category-app",
+    }
 }
 
 /// Filter help rows with the palette input pattern: non-heading rows
@@ -222,16 +263,18 @@ pub(crate) fn welcome_entries(keymap: &Keymap) -> Vec<WelcomeEntry> {
     ]
 }
 
-fn heading(label: impl Into<String>) -> HelpEntry {
+fn heading(key: &str, label: impl Into<String>) -> HelpEntry {
     HelpEntry {
+        key: SemanticKey::new(key),
         heading: true,
         label: label.into(),
         keys: String::new(),
     }
 }
 
-fn entry(label: impl Into<String>, keys: String) -> HelpEntry {
+fn entry(key: &str, label: impl Into<String>, keys: String) -> HelpEntry {
     HelpEntry {
+        key: SemanticKey::new(key),
         heading: false,
         label: label.into(),
         keys,
@@ -303,7 +346,7 @@ mod tests {
             rows.iter().any(|row| row.label.contains("alt+click")),
             "the L5 mouse-capture override must be documented"
         );
-        for (glyph, meaning) in SESSION_MAP_GLYPH_LEGEND.iter().chain(TIMELINE_GLYPH_LEGEND) {
+        for (_, glyph, meaning) in SESSION_MAP_GLYPH_LEGEND.iter().chain(TIMELINE_GLYPH_LEGEND) {
             assert!(
                 rows.iter()
                     .any(|row| row.label.contains(glyph) && row.label.contains(meaning)),

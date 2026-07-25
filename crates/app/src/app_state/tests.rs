@@ -958,8 +958,15 @@ fn every_context_menu_row_names_its_keyboard_route() {
 fn context_menu_border_click_does_not_dismiss() {
     let mut state = state();
     frame(&mut state);
-    send_pointer(&mut state, right_down(5, 5));
-    let scene = state.build_scene(POINTER_FRAME);
+    send_pointer(&mut state, right_down(95, 5));
+    let viewport = mandatum_scene::ViewportMetrics::new(
+        mandatum_scene::LogicalSize::from_pixels(960.0, 480.0).unwrap(),
+        mandatum_scene::PhysicalSize::new(1920, 960),
+        mandatum_scene::BackingScale::new(2.0).unwrap(),
+        mandatum_scene::LogicalSize::from_pixels(8.0, 16.0).unwrap(),
+    )
+    .unwrap();
+    let scene = state.build_scene_with_viewport(viewport);
     let Some(mandatum_scene::OverlayScene::ContextMenu(menu)) = &scene.overlay else {
         panic!("right-click must open the context menu overlay");
     };

@@ -119,10 +119,15 @@ struct Config {
     harness_project_path: Option<String>,
     visual_scenario: Option<VisualScenarioId>,
     token_sampler: bool,
+    display_name: Option<String>,
 }
 
 fn parse_config() -> Result<Config, String> {
     parse_config_from(std::env::args().skip(1))
+}
+
+fn display_names_match(requested: &str, candidate: &str) -> bool {
+    requested == candidate || (requested == "Built-in Retina Display" && candidate == "Color LCD")
 }
 
 fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
@@ -151,6 +156,7 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
         harness_project_path: None,
         visual_scenario: None,
         token_sampler: false,
+        display_name: None,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -235,6 +241,12 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
                 );
             }
             "--token-sampler" => config.token_sampler = true,
+            "--display" => {
+                let value = required_value(&mut args, &arg)?;
+                config.display_name = Some(parse_font_family(&value).ok_or_else(|| {
+                    invalid_value(&arg, &value, "1..=128 non-control characters")
+                })?);
+            }
             "--inject-fault" => {
                 let value = required_value(&mut args, &arg)?;
                 config.fault = Some(match value.as_str() {
@@ -663,6 +675,7 @@ fn print_failure(
         harness_project_path: None,
         visual_scenario: None,
         token_sampler: false,
+        display_name: None,
     };
     let config = config.unwrap_or(&fallback_config);
     let evidence = RunEvidence {
@@ -1824,6 +1837,50 @@ impl ApplicationHandler<UserEvent> for App {
                         .with_inner_size(PhysicalSize::new(1_600_u32, 1_200_u32))
                         .with_decorations(false);
                 }
+                if let Some(display_name) = self.config.display_name.as_deref() {
+                    let monitors = event_loop.available_monitors().collect::<Vec<_>>();
+                    let monitor = monitors
+                        .iter()
+                        .find(|monitor| {
+                            monitor
+                                .name()
+                                .as_deref()
+                                .is_some_and(|candidate| {
+                                    display_names_match(display_name, candidate)
+                                })
+                                || (display_name == "Built-in Retina Display"
+                                    && (monitor.scale_factor() - 2.0).abs() < f64::EPSILON)
+                        })
+                        .ok_or_else(|| {
+                            let active = monitors
+                                .iter()
+                                .map(|monitor| {
+                                    format!(
+                                        "{} scale={} position={:?} size={:?}",
+                                        monitor.name().unwrap_or_else(|| "<unnamed>".to_owned()),
+                                        monitor.scale_factor(),
+                                        monitor.position(),
+                                        monitor.size()
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            GpuStartupError::no_display(format!(
+                                "requested display {display_name:?} is not active; active displays: {active}"
+                            ))
+                        })?;
+                    let position = monitor.position();
+                    let scale = monitor.scale_factor();
+                    // macOS reports a Retina monitor's global origin in the
+                    // main display's physical coordinate space. Window
+                    // placement expects the corresponding AppKit points.
+                    #[cfg(target_os = "macos")]
+                    let position = PhysicalPosition::new(
+                        (f64::from(position.x) / scale).round() as i32,
+                        (f64::from(position.y) / scale).round() as i32,
+                    );
+                    attributes = attributes.with_position(position);
+                }
                 let window = event_loop.create_window(attributes).map_err(|error| {
                     GpuStartupError::no_display(format!("no window (headless?): {error}"))
                 })?;
@@ -2871,14 +2928,25 @@ mod tests {
         assert_eq!(fault.fault_after.as_millis(), 500);
 
         let visual = parse_config_from(
-            ["--visual-scenario", "dense-workspace", "--exit-after", "30"]
-                .into_iter()
-                .map(str::to_owned),
+            [
+                "--visual-scenario",
+                "dense-workspace",
+                "--display",
+                "Built-in Retina Display",
+                "--exit-after",
+                "30",
+            ]
+            .into_iter()
+            .map(str::to_owned),
         )
         .expect("canonical visual scenario");
         assert_eq!(
             visual.visual_scenario,
             Some(VisualScenarioId::DenseWorkspace)
+        );
+        assert_eq!(
+            visual.display_name.as_deref(),
+            Some("Built-in Retina Display")
         );
         let sampler = parse_config_from(
             ["--token-sampler", "--exit-after", "5"]

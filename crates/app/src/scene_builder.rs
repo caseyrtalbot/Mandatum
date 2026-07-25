@@ -9,11 +9,11 @@ use mandatum_core::{AgentPaneIntent, PaneId, PaneKind, PaneSpec, Session, TaskPa
 use mandatum_scene::{
     AccessibilityActionKind, AccessibilityNode, AccessibilityRole, AccessibilityState,
     AgentApprovalPrompt, AgentContent, CellOccupancy, EmptyContent, HeaderScene, HitTarget,
-    HitTargetKind, LogicalHitTarget, LogicalRect, OverlayKind, OverlayNodePart, OverlayScene,
-    PaneBadgeKind, PaneContent, PaneNodePart, PaneScene, PaneSceneKind, PreeditScene,
-    PresentationAxis, PresentationNode, PresentationNodeId, PresentationNodeRole,
-    PresentationNodeState, PresentationTone, SceneCell, SceneCellStyle, SceneColor,
-    ScenePresentation, SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent,
+    HitTargetKind, LogicalHitTarget, LogicalRect, OverlayKind, OverlayNodePart,
+    OverlayPresentationKind, OverlayScene, PaneBadgeKind, PaneContent, PaneNodePart, PaneScene,
+    PaneSceneKind, PreeditScene, PresentationAxis, PresentationNode, PresentationNodeId,
+    PresentationNodeRole, PresentationNodeState, PresentationTone, SceneCell, SceneCellStyle,
+    SceneColor, ScenePresentation, SceneRect, SceneSize, StatusScene, SurfacePosition, TaskContent,
     TerminalProjection, TerminalSurface, TerminalViewportMapping, TextInputKind, TextInputScene,
     TransitionProperty, TransitionTarget, ViewportMetrics, WorkspaceNodePart, WorkspaceScene,
     cell_program::display_width,
@@ -66,9 +66,9 @@ pub fn build_workspace_scene_with_viewport(
         })
         .collect::<Vec<_>>();
 
-    // The overlays are all modal; opening one closes the others, so at most
-    // one overlay exists per frame.
-    let overlay = state
+    // Overlay surfaces are mutually exclusive; Welcome and Context Menu keep
+    // their distinct non-modal/anchored presentation grammar.
+    let mut overlay = state
         .context_menu_overlay(size)
         .map(OverlayScene::ContextMenu)
         .or_else(|| state.palette_overlay(size).map(OverlayScene::Palette))
@@ -88,6 +88,9 @@ pub fn build_workspace_scene_with_viewport(
         // The first-run note is last: it is not modal, so any real overlay
         // outranks it (and the action that opened one dismissed it anyway).
         .or_else(|| state.welcome_overlay_scene(size).map(OverlayScene::Welcome));
+    if let Some(overlay) = overlay.as_mut() {
+        constrain_overlay_area(overlay, viewport, state.theme());
+    }
 
     // The attention strip: approvals, failed tasks, stuck agents — or calm
     // session facts. Composed here so `&WorkspaceScene` alone paints a frame.
@@ -231,10 +234,14 @@ fn scene_presentation(
             overlay_id.clone(),
             Some(workspace_id.clone()),
             PresentationNodeRole::Overlay,
-            PresentationNodeState::default(),
+            PresentationNodeState {
+                overlay_kind: Some(overlay_presentation_kind(overlay)),
+                ..PresentationNodeState::default()
+            },
             overlay_area(overlay),
             viewport,
         ));
+        push_overlay_band_nodes(overlay, viewport, state.theme(), &overlay_id, &mut nodes);
         transition_targets.extend([
             TransitionTarget {
                 node_id: overlay_id.clone(),
@@ -267,18 +274,31 @@ fn scene_presentation(
             } else {
                 Some(workspace_id.clone())
             };
-            nodes.push(presentation_node(
+            let mut node = presentation_node(
                 node_id.clone(),
                 parent,
                 presentation_role_for_hit_target(&target.kind),
                 presentation_state_for_hit_target(&target.kind, overlay),
                 target.rect,
                 viewport,
-            ));
+            );
+            if is_overlay_item_target(&target.kind) {
+                node.logical_rect = overlay_row_logical_rect(target.rect, viewport, state.theme());
+            }
+            nodes.push(node);
         }
+        let logical_rect = if is_overlay_item_target(&target.kind) {
+            nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .map(|node| node.logical_rect)
+                .unwrap_or_else(|| logical_hit_rect(target, &separators, viewport))
+        } else {
+            logical_hit_rect(target, &separators, viewport)
+        };
         logical_hit_targets.push(LogicalHitTarget {
             node_id,
-            logical_rect: logical_hit_rect(target, &separators, viewport),
+            logical_rect,
             kind: target.kind.clone(),
         });
     }
@@ -302,6 +322,167 @@ fn scene_presentation(
         transition_targets,
         accessibility_nodes,
     }
+}
+
+fn is_overlay_item_target(kind: &HitTargetKind) -> bool {
+    matches!(
+        kind,
+        HitTargetKind::PaletteItem(_)
+            | HitTargetKind::ContextMenuItem(_)
+            | HitTargetKind::TimelineItem(_)
+            | HitTargetKind::SessionMapRow(_)
+            | HitTargetKind::SearchItem(_)
+    )
+}
+
+fn overlay_presentation_kind(overlay: &OverlayScene) -> OverlayPresentationKind {
+    match overlay {
+        OverlayScene::Welcome(_) => OverlayPresentationKind::Welcome,
+        OverlayScene::ContextMenu(_) => OverlayPresentationKind::ContextMenu,
+        OverlayScene::Palette(_)
+        | OverlayScene::Timeline(_)
+        | OverlayScene::SessionMap(_)
+        | OverlayScene::Prompt(_)
+        | OverlayScene::Search(_)
+        | OverlayScene::Help(_) => OverlayPresentationKind::Modal,
+    }
+}
+
+fn push_overlay_band_nodes(
+    overlay: &OverlayScene,
+    viewport: ViewportMetrics,
+    theme: &mandatum_scene::Theme,
+    overlay_id: &PresentationNodeId,
+    nodes: &mut Vec<PresentationNode>,
+) {
+    let area = overlay_area(overlay);
+    let kind = overlay.kind();
+    if !matches!(overlay, OverlayScene::ContextMenu(_)) {
+        let title = SceneRect::new(area.x, area.y, area.width, area.height.min(1));
+        if !title.is_empty() {
+            nodes.push(presentation_cell_logical_node(
+                PresentationNodeId::overlay(kind, OverlayNodePart::Title),
+                Some(overlay_id.clone()),
+                PresentationNodeRole::OverlayTitle,
+                PresentationNodeState::default(),
+                title,
+                inset_logical_rect(
+                    viewport.logical_rect_for_cells(title),
+                    theme.ui.radii.overlay,
+                ),
+            ));
+        }
+    }
+
+    let inner = layout::pane_inner_rect(area);
+    if matches!(
+        overlay,
+        OverlayScene::Palette(_)
+            | OverlayScene::Timeline(_)
+            | OverlayScene::Prompt(_)
+            | OverlayScene::Search(_)
+            | OverlayScene::Help(_)
+    ) && !inner.is_empty()
+    {
+        let input = SceneRect::new(inner.x, inner.y, inner.width, 1);
+        nodes.push(presentation_cell_logical_node(
+            PresentationNodeId::overlay(kind, OverlayNodePart::Input),
+            Some(overlay_id.clone()),
+            PresentationNodeRole::TextInput,
+            PresentationNodeState::default(),
+            input,
+            inset_logical_rect(
+                viewport.logical_rect_for_cells(input),
+                theme.ui.spacing.overlay_row_padding_x,
+            ),
+        ));
+    }
+
+    let footer = match overlay {
+        OverlayScene::Palette(_)
+        | OverlayScene::Timeline(_)
+        | OverlayScene::SessionMap(_)
+        | OverlayScene::Prompt(_)
+        | OverlayScene::Search(_)
+        | OverlayScene::Help(_)
+            if inner.height > 1 =>
+        {
+            Some(SceneRect::new(
+                inner.x,
+                inner.bottom().saturating_sub(1),
+                inner.width,
+                1,
+            ))
+        }
+        OverlayScene::Welcome(welcome) => {
+            let row = welcome.entries.len().saturating_add(3) as u16;
+            (row < inner.height).then_some(SceneRect::new(
+                inner.x,
+                inner.y.saturating_add(row),
+                inner.width,
+                1,
+            ))
+        }
+        _ => None,
+    };
+    if let Some(footer) = footer {
+        nodes.push(presentation_cell_logical_node(
+            PresentationNodeId::overlay(kind, OverlayNodePart::Footer),
+            Some(overlay_id.clone()),
+            PresentationNodeRole::OverlayFooter,
+            PresentationNodeState::default(),
+            footer,
+            inset_logical_rect(
+                viewport.logical_rect_for_cells(footer),
+                theme.ui.spacing.overlay_row_padding_x,
+            ),
+        ));
+    }
+
+    if let OverlayScene::Help(help) = overlay {
+        for (row, index) in
+            layout::palette_item_window(inner, help.items.len(), help.selected).enumerate()
+        {
+            let item = &help.items[index];
+            let cell_rect = SceneRect::new(
+                inner.x,
+                inner.y.saturating_add(1 + row as u16),
+                inner.width,
+                1,
+            );
+            nodes.push(presentation_cell_logical_node(
+                PresentationNodeId::overlay_item(OverlayKind::Help, item.key.clone()),
+                Some(overlay_id.clone()),
+                PresentationNodeRole::Item,
+                PresentationNodeState {
+                    selected: help.selected == Some(index),
+                    ..PresentationNodeState::default()
+                },
+                cell_rect,
+                overlay_row_logical_rect(cell_rect, viewport, theme),
+            ));
+        }
+    }
+}
+
+fn inset_logical_rect(rect: LogicalRect, inset_pixels: u16) -> LogicalRect {
+    let inset = (u64::from(inset_pixels) * 64)
+        .min(rect.size.width_units().saturating_sub(64).saturating_div(2));
+    LogicalRect::from_units(
+        rect.origin.x_units().saturating_add_unsigned(inset),
+        rect.origin.y_units(),
+        rect.size.width_units().saturating_sub(inset * 2),
+        rect.size.height_units(),
+    )
+}
+
+fn overlay_row_logical_rect(
+    cell_rect: SceneRect,
+    viewport: ViewportMetrics,
+    theme: &mandatum_scene::Theme,
+) -> LogicalRect {
+    let rect = viewport.logical_rect_for_cells(cell_rect);
+    inset_logical_rect(rect, theme.ui.spacing.overlay_row_padding_x)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -632,6 +813,82 @@ fn overlay_area(overlay: &OverlayScene) -> SceneRect {
     }
 }
 
+fn constrain_overlay_area(
+    overlay: &mut OverlayScene,
+    viewport: ViewportMetrics,
+    theme: &mandatum_scene::Theme,
+) {
+    let size = viewport.scene_size();
+    if size.width == 0 || size.height == 0 {
+        return;
+    }
+    let original = overlay_area(overlay);
+    let cell_width = viewport.measured_cell_metrics.width_units().max(1);
+    let cell_height = viewport.measured_cell_metrics.height_units().max(1);
+    // Cell-only frontends and fixtures deliberately model one logical pixel
+    // per terminal cell. Preserve their established projection; native
+    // logical constraints activate only with real measured font metrics.
+    if cell_width == 64 && cell_height == 64 {
+        return;
+    }
+    let edge_units = u64::from(theme.ui.spacing.viewport_edge_margin) * 64;
+    let margin_x = edge_units
+        .div_ceil(cell_width)
+        .min(u64::from(size.width.saturating_sub(1) / 2)) as u16;
+    let margin_y = edge_units
+        .div_ceil(cell_height)
+        .min(u64::from(size.height.saturating_sub(1) / 2)) as u16;
+    let available_width = size.width.saturating_sub(margin_x.saturating_mul(2)).max(1);
+    let available_height = size
+        .height
+        .saturating_sub(margin_y.saturating_mul(2))
+        .max(1);
+    let max_width_pixels: Option<u16> = match overlay {
+        OverlayScene::Palette(_) => Some(720),
+        OverlayScene::Timeline(_) | OverlayScene::Search(_) => Some(920),
+        OverlayScene::SessionMap(_) => Some(680),
+        OverlayScene::Help(_) => Some(960),
+        OverlayScene::Prompt(_) | OverlayScene::Welcome(_) => Some(720),
+        OverlayScene::ContextMenu(_) => None,
+    };
+    let maximum_columns = max_width_pixels
+        .map(|pixels| (u64::from(pixels) * 64 / cell_width).max(1))
+        .unwrap_or(u64::from(available_width))
+        .min(u64::from(u16::MAX)) as u16;
+    let minimum_width = available_width.min(3);
+    let minimum_height = available_height.min(3);
+    let width = original
+        .width
+        .min(maximum_columns)
+        .min(available_width)
+        .max(minimum_width);
+    let height = original.height.min(available_height).max(minimum_height);
+    let max_x = size.width.saturating_sub(margin_x).saturating_sub(width);
+    let max_y = size.height.saturating_sub(margin_y).saturating_sub(height);
+    let anchored = matches!(overlay, OverlayScene::ContextMenu(_));
+    let x = if anchored {
+        original.x.clamp(margin_x.min(max_x), max_x.max(margin_x))
+    } else {
+        size.width.saturating_sub(width) / 2
+    };
+    let y = if anchored {
+        original.y.clamp(margin_y.min(max_y), max_y.max(margin_y))
+    } else {
+        size.height.saturating_sub(height) / 2
+    };
+    let constrained = SceneRect::new(x, y, width, height);
+    match overlay {
+        OverlayScene::Palette(value) => value.area = constrained,
+        OverlayScene::ContextMenu(value) => value.area = constrained,
+        OverlayScene::Timeline(value) => value.area = constrained,
+        OverlayScene::SessionMap(value) => value.area = constrained,
+        OverlayScene::Prompt(value) => value.area = constrained,
+        OverlayScene::Search(value) => value.area = constrained,
+        OverlayScene::Help(value) => value.area = constrained,
+        OverlayScene::Welcome(value) => value.area = constrained,
+    }
+}
+
 fn presentation_id_for_hit_target(
     target: &HitTarget,
     overlay: Option<&OverlayScene>,
@@ -906,7 +1163,14 @@ fn overlay_item_label<'a>(
                 PresentationNodeId::overlay_item(OverlayKind::Search, key.clone()) == *node_id
             })
             .and_then(|index| value.items.get(index).map(|item| item.text.as_str())),
-        OverlayScene::Prompt(_) | OverlayScene::Help(_) | OverlayScene::Welcome(_) => None,
+        OverlayScene::Help(value) => value
+            .items
+            .iter()
+            .find(|item| {
+                PresentationNodeId::overlay_item(OverlayKind::Help, item.key.clone()) == *node_id
+            })
+            .map(|item| item.label.as_str()),
+        OverlayScene::Prompt(_) | OverlayScene::Welcome(_) => None,
     }
 }
 
@@ -1452,7 +1716,9 @@ mod tests {
 
     use mandatum_commands::CommandId;
     use mandatum_core::AgentStatus;
-    use mandatum_scene::input::{InputEvent, Key, KeyCode, Modifiers};
+    use mandatum_scene::input::{
+        InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind,
+    };
     use mandatum_scene::{
         AccessibilityRole, BackingScale, LogicalPoint, LogicalSize, PhysicalSize,
         PresentationNodeRole, compile_cell_program,
@@ -2013,6 +2279,114 @@ mod tests {
         assert_eq!(
             item_targets[0].rect,
             SceneRect::new(inner.x, inner.y + 1, inner.width, 1)
+        );
+    }
+
+    #[test]
+    fn phase_four_overlay_family_presentation_contract_is_scene_owned() {
+        let viewport = ViewportMetrics::new(
+            LogicalSize::from_pixels(1_600.0, 800.0).unwrap(),
+            PhysicalSize::new(3_200, 1_600),
+            BackingScale::new(2.0).unwrap(),
+            LogicalSize::from_pixels(8.0, 16.0).unwrap(),
+        )
+        .unwrap();
+        fn overlay_surface(scene: &WorkspaceScene) -> &PresentationNode {
+            scene
+                .presentation
+                .nodes
+                .iter()
+                .find(|node| node.role == PresentationNodeRole::Overlay)
+                .expect("overlay surface presentation node")
+        }
+
+        let mut palette_state = AppState::new(config(false));
+        palette_state.handle_key(ctrl('p'));
+        let palette_scene = palette_state.build_scene_with_viewport(viewport);
+        let palette_surface = overlay_surface(&palette_scene);
+        assert_eq!(
+            palette_surface.state.overlay_kind,
+            Some(OverlayPresentationKind::Modal)
+        );
+        let edge_units = 24 * 64;
+        assert_eq!(palette_surface.logical_rect.size.width_units(), 720 * 64);
+        assert!(palette_surface.logical_rect.origin.x_units() >= edge_units);
+        assert!(palette_surface.logical_rect.origin.y_units() >= edge_units);
+        assert!(
+            palette_surface.logical_rect.right_units()
+                <= viewport.logical_size.width_units() as i64 - edge_units
+        );
+        assert!(
+            palette_surface.logical_rect.bottom_units()
+                <= viewport.logical_size.height_units() as i64 - edge_units
+        );
+        for role in [
+            PresentationNodeRole::OverlayTitle,
+            PresentationNodeRole::TextInput,
+            PresentationNodeRole::OverlayFooter,
+        ] {
+            assert!(
+                palette_scene
+                    .presentation
+                    .nodes
+                    .iter()
+                    .any(|node| node.role == role
+                        && node.parent.as_ref() == Some(&palette_surface.id)),
+                "Palette must emit its {role:?} band"
+            );
+        }
+
+        let selected = palette_scene
+            .presentation
+            .nodes
+            .iter()
+            .find(|node| node.role == PresentationNodeRole::Item && node.state.selected)
+            .expect("selected Palette row presentation node");
+        let logical_target = palette_scene
+            .presentation
+            .logical_hit_targets
+            .iter()
+            .find(|target| target.node_id == selected.id)
+            .expect("selected Palette row logical hit target");
+        assert_eq!(selected.logical_rect, logical_target.logical_rect);
+        let cell_target = palette_scene
+            .hit_targets
+            .iter()
+            .find(|target| target.kind == logical_target.kind)
+            .expect("selected Palette row cell target");
+        let unpadded = viewport.logical_rect_for_cells(cell_target.rect);
+        assert!(selected.logical_rect.origin.x_units() > unpadded.origin.x_units());
+        assert!(selected.logical_rect.right_units() < unpadded.right_units());
+
+        let welcome_dir = FreshDir::new("phase-four-overlay-presentation");
+        let mut welcome_state = AppState::new(welcome_dir.config());
+        let welcome_scene = welcome_state.build_scene_with_viewport(viewport);
+        assert_eq!(
+            overlay_surface(&welcome_scene).state.overlay_kind,
+            Some(OverlayPresentationKind::Welcome)
+        );
+        assert!(
+            !welcome_scene
+                .presentation
+                .nodes
+                .iter()
+                .any(|node| node.role == PresentationNodeRole::TextInput),
+            "Welcome must not claim an input band"
+        );
+
+        let mut menu_state = AppState::new(config(false));
+        menu_state.build_scene_with_viewport(viewport);
+        menu_state.handle_event(InputEvent::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            button: Some(PointerButton::Right),
+            column: 5,
+            row: 5,
+            mods: Modifiers::NONE,
+        }));
+        let menu_scene = menu_state.build_scene_with_viewport(viewport);
+        assert_eq!(
+            overlay_surface(&menu_scene).state.overlay_kind,
+            Some(OverlayPresentationKind::ContextMenu)
         );
     }
 

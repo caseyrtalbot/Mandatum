@@ -4,12 +4,12 @@ use mandatum_native_renderer::{
     prepare_native_presentation, prepare_scene, prepare_token_sampler,
 };
 use mandatum_scene::{
-    AttentionKind, BackingScale, EmptyContent, HeaderScene, LogicalRect, LogicalSize,
-    PaneBadgeKind, PaneContent, PaneId, PaneNodePart, PaneScene, PaneSceneKind, PhysicalSize,
-    PresentationNode, PresentationNodeId, PresentationNodeRole, PresentationNodeState,
-    PresentationTone, ScenePresentation, SceneRect, SceneSize, StatusScene, TerminalProjection,
-    Theme, TransitionProperty, TransitionTarget, ViewportMetrics, WorkspaceNodePart,
-    WorkspaceScene, compile_cell_program,
+    AttentionKind, BackingScale, EmptyContent, HeaderScene, LogicalRect, LogicalSize, OverlayKind,
+    OverlayNodePart, OverlayPresentationKind, PaneBadgeKind, PaneContent, PaneId, PaneNodePart,
+    PaneScene, PaneSceneKind, PhysicalSize, PresentationNode, PresentationNodeId,
+    PresentationNodeRole, PresentationNodeState, PresentationTone, ScenePresentation, SceneRect,
+    SceneSize, SemanticKey, StatusScene, TerminalProjection, Theme, TransitionProperty,
+    TransitionTarget, ViewportMetrics, WorkspaceNodePart, WorkspaceScene, compile_cell_program,
 };
 
 fn scene(nodes: Vec<PresentationNode>, transitions: Vec<TransitionTarget>) -> WorkspaceScene {
@@ -439,6 +439,230 @@ fn phase_three_material_family_maps_tiled_floating_focus_separator_and_tone_stat
         NativeMaterialRole::BorderStrong
     );
     assert_eq!(material(&separator_drag_id).role, NativeMaterialRole::Focus);
+}
+
+#[test]
+fn phase_four_overlay_family() {
+    fn overlay_node(
+        kind: OverlayKind,
+        part: OverlayNodePart,
+        parent: &PresentationNodeId,
+        role: PresentationNodeRole,
+        state: PresentationNodeState,
+        logical_rect: LogicalRect,
+        cell_rect: SceneRect,
+    ) -> PresentationNode {
+        node(
+            PresentationNodeId::overlay(kind, part),
+            Some(parent.clone()),
+            role,
+            state,
+            logical_rect,
+            cell_rect,
+        )
+    }
+
+    fn overlay_surface(
+        kind: OverlayKind,
+        treatment: OverlayPresentationKind,
+        workspace_id: &PresentationNodeId,
+        logical_rect: LogicalRect,
+        cell_rect: SceneRect,
+    ) -> PresentationNode {
+        node(
+            PresentationNodeId::overlay(kind, OverlayNodePart::Surface),
+            Some(workspace_id.clone()),
+            PresentationNodeRole::Overlay,
+            PresentationNodeState {
+                overlay_kind: Some(treatment),
+                ..PresentationNodeState::default()
+            },
+            logical_rect,
+            cell_rect,
+        )
+    }
+
+    fn materials_for<'a>(
+        plan: &'a mandatum_native_renderer::NativePresentationPlan,
+        id: &PresentationNodeId,
+    ) -> Vec<&'a mandatum_native_renderer::NativeMaterial> {
+        plan.commands()
+            .iter()
+            .filter_map(|command| match command {
+                NativePlanCommand::Material(material) if &material.node_id == id => Some(material),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let theme = Theme::default();
+    let workspace_id = PresentationNodeId::workspace(WorkspaceNodePart::Surface);
+    let viewport_rect = LogicalRect::from_units(0, 0, 800 * 64, 600 * 64);
+    let workspace = || {
+        node(
+            workspace_id.clone(),
+            None,
+            PresentationNodeRole::Workspace,
+            PresentationNodeState::default(),
+            viewport_rect,
+            SceneRect::new(0, 0, 100, 30),
+        )
+    };
+
+    let modal_id = PresentationNodeId::overlay(OverlayKind::Palette, OverlayNodePart::Surface);
+    let modal = scene(
+        vec![
+            workspace(),
+            overlay_surface(
+                OverlayKind::Palette,
+                OverlayPresentationKind::Modal,
+                &workspace_id,
+                LogicalRect::from_units(160 * 64, 100 * 64, 480 * 64, 300 * 64),
+                SceneRect::new(20, 5, 60, 15),
+            ),
+            overlay_node(
+                OverlayKind::Palette,
+                OverlayNodePart::Title,
+                &modal_id,
+                PresentationNodeRole::OverlayTitle,
+                PresentationNodeState::default(),
+                LogicalRect::from_units(160 * 64, 100 * 64, 480 * 64, 20 * 64),
+                SceneRect::new(20, 5, 60, 1),
+            ),
+            overlay_node(
+                OverlayKind::Palette,
+                OverlayNodePart::Input,
+                &modal_id,
+                PresentationNodeRole::TextInput,
+                PresentationNodeState::default(),
+                LogicalRect::from_units(176 * 64, 140 * 64, 448 * 64, 20 * 64),
+                SceneRect::new(22, 7, 56, 1),
+            ),
+            overlay_node(
+                OverlayKind::Palette,
+                OverlayNodePart::Footer,
+                &modal_id,
+                PresentationNodeRole::OverlayFooter,
+                PresentationNodeState::default(),
+                LogicalRect::from_units(176 * 64, 360 * 64, 448 * 64, 20 * 64),
+                SceneRect::new(22, 18, 56, 1),
+            ),
+            node(
+                PresentationNodeId::overlay_item(
+                    OverlayKind::Palette,
+                    SemanticKey::new("selected"),
+                ),
+                Some(modal_id.clone()),
+                PresentationNodeRole::Item,
+                PresentationNodeState {
+                    selected: true,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(176 * 64, 180 * 64, 448 * 64, 40 * 64),
+                SceneRect::new(22, 9, 56, 2),
+            ),
+        ],
+        Vec::new(),
+    );
+    let modal_plan = prepare_native_presentation(&modal, &theme).unwrap();
+
+    let modal_materials = materials_for(&modal_plan, &modal_id);
+    assert_eq!(
+        modal_materials
+            .iter()
+            .map(|material| material.role)
+            .collect::<Vec<_>>(),
+        vec![
+            NativeMaterialRole::ModalScrim,
+            NativeMaterialRole::OverlaySurface
+        ]
+    );
+    assert_eq!(modal_materials[0].logical_rect, viewport_rect);
+    assert_eq!(modal_materials[0].clip, viewport_rect);
+    assert_eq!(modal_materials[0].color, theme.ui.palette.modal_scrim);
+    assert_eq!(theme.ui.radii.overlay, 10);
+    assert_eq!(
+        modal_materials[1].corner_radius_units,
+        u64::from(theme.ui.radii.overlay) * 64
+    );
+    assert_eq!(
+        modal_materials[1].raised_shadows,
+        Some(theme.ui.elevation.raised)
+    );
+
+    for part in [
+        OverlayNodePart::Title,
+        OverlayNodePart::Input,
+        OverlayNodePart::Footer,
+    ] {
+        let id = PresentationNodeId::overlay(OverlayKind::Palette, part);
+        assert_eq!(
+            materials_for(&modal_plan, &id)[0].role,
+            NativeMaterialRole::OverlayBand
+        );
+    }
+
+    let selected_id =
+        PresentationNodeId::overlay_item(OverlayKind::Palette, SemanticKey::new("selected"));
+    let selected = materials_for(&modal_plan, &selected_id);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|material| material.role)
+            .collect::<Vec<_>>(),
+        vec![
+            NativeMaterialRole::Selection,
+            NativeMaterialRole::SelectionIndicator
+        ]
+    );
+    assert_eq!(selected[0].color, theme.ui.palette.selection_fill);
+    assert!(selected[0].corner_radius_units > 0);
+    assert_eq!(theme.ui.selection.leading_indicator_width, 2);
+    assert_eq!(selected[1].logical_rect.size.width_units(), 2 * 64);
+    assert_eq!(selected[1].color, theme.ui.palette.focus);
+
+    for (kind, treatment, radius) in [
+        (
+            OverlayKind::Welcome,
+            OverlayPresentationKind::Welcome,
+            theme.ui.radii.overlay,
+        ),
+        (
+            OverlayKind::ContextMenu,
+            OverlayPresentationKind::ContextMenu,
+            theme.ui.radii.context_menu,
+        ),
+    ] {
+        let id = PresentationNodeId::overlay(kind, OverlayNodePart::Surface);
+        let plan = prepare_native_presentation(
+            &scene(
+                vec![
+                    workspace(),
+                    overlay_surface(
+                        kind,
+                        treatment,
+                        &workspace_id,
+                        LogicalRect::from_units(240 * 64, 160 * 64, 320 * 64, 200 * 64),
+                        SceneRect::new(30, 8, 40, 10),
+                    ),
+                ],
+                Vec::new(),
+            ),
+            &theme,
+        )
+        .unwrap();
+        let surface = materials_for(&plan, &id);
+        assert_eq!(surface.len(), 1);
+        assert_eq!(surface[0].role, NativeMaterialRole::OverlaySurface);
+        assert_eq!(surface[0].corner_radius_units, u64::from(radius) * 64);
+        assert_eq!(surface[0].raised_shadows, Some(theme.ui.elevation.raised));
+        assert!(plan.commands().iter().all(|command| !matches!(
+            command,
+            NativePlanCommand::Material(material)
+                if material.role == NativeMaterialRole::ModalScrim
+        )));
+    }
+    assert_eq!(theme.ui.radii.context_menu, 8);
 }
 
 #[test]
