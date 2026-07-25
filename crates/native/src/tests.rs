@@ -3,9 +3,10 @@ use std::cell::RefCell;
 use mandatum_scene::input::{PointerButton, PointerKind};
 
 use super::{
-    FontPreflightOutcome, PressedPointerButtons, VisualClock, apply_renderer_scale_transition,
-    launch_after_font_preflight, logical_pointer_position, native_window_geometry,
-    native_window_title, next_native_window_title, next_scheduled_deadline, parse_launch_options,
+    ConfiguredFont, FontPreflightOutcome, PressedPointerButtons, VisualClock,
+    apply_renderer_scale_transition, font_request, launch_after_font_preflight,
+    logical_pointer_position, native_window_geometry, native_window_title,
+    next_native_window_title, next_scheduled_deadline, parse_launch_options,
     pointer_input_needs_redraw, start_after_preflight,
 };
 
@@ -200,8 +201,8 @@ fn native_font_options_are_strict_and_lab_flags_are_rejected() {
             .map(str::to_owned),
     )
     .expect("valid native launch options");
-    assert_eq!(options.font_request.requested_family(), "Berkeley Mono");
-    assert_eq!(options.font_request.size(), 16.5);
+    assert_eq!(options.font_family.as_deref(), Some("Berkeley Mono"));
+    assert_eq!(options.font_size, Some(16.5));
     assert!(!options.font_info);
 
     assert!(
@@ -217,7 +218,8 @@ fn native_font_options_are_strict_and_lab_flags_are_rejected() {
     assert!(
         launch_after_font_preflight(
             ["--font-size", "500"].into_iter().map(str::to_owned),
-            |_| Ok(())
+            &ConfiguredFont::default(),
+            |_, _| Ok(())
         )
         .unwrap_err()
         .contains("between 6 and 72")
@@ -225,21 +227,79 @@ fn native_font_options_are_strict_and_lab_flags_are_rejected() {
 }
 
 #[test]
+fn font_precedence_is_cli_flag_then_config_then_built_in_default() {
+    let configured = ConfiguredFont {
+        family: Some("Berkeley Mono".to_owned()),
+        size: Some(15.0),
+    };
+
+    let defaults = parse_launch_options(std::iter::empty()).expect("no options");
+    let from_config = font_request(&defaults, &configured);
+    assert_eq!(from_config.requested_family(), "Berkeley Mono");
+    assert_eq!(from_config.size(), 15.0);
+
+    let flagged = parse_launch_options(
+        ["--font-family", "Menlo", "--font-size", "18"]
+            .into_iter()
+            .map(str::to_owned),
+    )
+    .expect("valid native launch options");
+    let from_flags = font_request(&flagged, &configured);
+    assert_eq!(from_flags.requested_family(), "Menlo");
+    assert_eq!(from_flags.size(), 18.0);
+
+    // Each value resolves independently: a size flag leaves the configured
+    // family in place.
+    let sized = parse_launch_options(["--font-size", "18"].into_iter().map(str::to_owned))
+        .expect("valid native launch options");
+    let mixed = font_request(&sized, &configured);
+    assert_eq!(mixed.requested_family(), "Berkeley Mono");
+    assert_eq!(mixed.size(), 18.0);
+
+    let built_in = font_request(&defaults, &ConfiguredFont::default());
+    assert_eq!(built_in.requested_family(), "JetBrains Mono");
+    assert_eq!(built_in.size(), 13.0);
+}
+
+#[test]
+fn unusable_config_font_warns_and_launches_instead_of_blocking_startup() {
+    let configured = ConfiguredFont {
+        family: Some("monospace".to_owned()),
+        size: None,
+    };
+    let FontPreflightOutcome::Launch(warning) =
+        launch_after_font_preflight(std::iter::empty(), &configured, |profile, warning| {
+            assert_eq!(profile.info().requested_family, "JetBrains Mono");
+            Ok(warning)
+        })
+        .expect("an unusable config font still launches")
+    else {
+        panic!("launch expected without --font-info");
+    };
+    let warning = warning.expect("the ignored config font is surfaced as a warning");
+    assert!(warning.contains("config [font] ignored"), "{warning}");
+    assert!(warning.contains("generic font family"), "{warning}");
+}
+
+#[test]
 fn font_info_is_stable_headless_json_and_default_is_bundled_jetbrains_mono_13() {
     let options = parse_launch_options(["--font-info"].into_iter().map(str::to_owned))
         .expect("valid options");
     assert!(options.font_info);
-    assert_eq!(options.font_request.requested_family(), "JetBrains Mono");
-    assert_eq!(options.font_request.size(), 13.0);
+    let request = font_request(&options, &ConfiguredFont::default());
+    assert_eq!(request.requested_family(), "JetBrains Mono");
+    assert_eq!(request.size(), 13.0);
 
     let downstream_constructed = RefCell::new(false);
-    let FontPreflightOutcome::Info(json) =
-        launch_after_font_preflight(["--font-info"].into_iter().map(str::to_owned), |_| {
+    let FontPreflightOutcome::Info(json) = launch_after_font_preflight(
+        ["--font-info"].into_iter().map(str::to_owned),
+        &ConfiguredFont::default(),
+        |_, _| {
             *downstream_constructed.borrow_mut() = true;
             Ok(())
-        })
-        .expect("headless font preflight")
-    else {
+        },
+    )
+    .expect("headless font preflight") else {
         panic!("--font-info must stop before application launch");
     };
     assert!(!*downstream_constructed.borrow());
@@ -256,7 +316,8 @@ fn invalid_explicit_font_fails_during_font_preflight() {
         ["--font-family", "monospace"]
             .into_iter()
             .map(str::to_owned),
-        |_| {
+        &ConfiguredFont::default(),
+        |_, _| {
             *downstream_constructed.borrow_mut() = true;
             Ok(())
         },
@@ -265,7 +326,7 @@ fn invalid_explicit_font_fails_during_font_preflight() {
     assert!(error.contains("generic font family"));
     assert!(
         !*downstream_constructed.borrow(),
-        "font failure must prevent AppConfig/event-loop/window/GPU/host launch construction"
+        "font failure must prevent event-loop/window/GPU/host launch construction"
     );
 }
 

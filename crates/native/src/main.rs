@@ -97,18 +97,27 @@ fn logical_pointer_position(x: f64, y: f64, backing_scale: f32) -> Option<Logica
     LogicalPoint::from_pixels(x / backing_scale, y / backing_scale).ok()
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Flags stay optional so an absent one defers to `[font]` in config rather
+/// than overwriting it with the built-in default.
+#[derive(Clone, Debug, Default, PartialEq)]
 struct NativeLaunchOptions {
-    font_request: FontRequest,
+    font_family: Option<String>,
+    font_size: Option<f32>,
     font_info: bool,
+}
+
+/// The `[font]` section of the loaded config, already validated for shape by
+/// `mandatum_app::config` (non-empty family, finite positive size).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ConfiguredFont {
+    family: Option<String>,
+    size: Option<f32>,
 }
 
 fn parse_launch_options(
     args: impl IntoIterator<Item = String>,
 ) -> Result<NativeLaunchOptions, String> {
-    let mut family = None;
-    let mut font_size = DEFAULT_FONT_SIZE;
-    let mut font_info = false;
+    let mut options = NativeLaunchOptions::default();
     let mut args = args.into_iter();
     while let Some(option) = args.next() {
         match option.as_str() {
@@ -119,28 +128,62 @@ fn parse_launch_options(
                 if value.starts_with("--") {
                     return Err("--font-family requires a value".to_owned());
                 }
-                family = Some(value);
+                options.font_family = Some(value);
             }
             "--font-size" => {
                 let value = args
                     .next()
                     .ok_or_else(|| "--font-size requires a value".to_owned())?;
-                font_size = value
-                    .parse::<f32>()
-                    .map_err(|_| format!("invalid --font-size value: {value}"))?;
+                options.font_size = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|_| format!("invalid --font-size value: {value}"))?,
+                );
             }
-            "--font-info" => font_info = true,
+            "--font-info" => options.font_info = true,
             _ => return Err(format!("unknown native option: {option}")),
         }
     }
-    let font_request = match family {
-        Some(family) => FontRequest::installed(family, font_size),
-        None => FontRequest::BundledDefault { size: font_size },
+    Ok(options)
+}
+
+/// CLI flag wins over the config value, which wins over the built-in default.
+fn font_request(options: &NativeLaunchOptions, configured: &ConfiguredFont) -> FontRequest {
+    let size = options
+        .font_size
+        .or(configured.size)
+        .unwrap_or(DEFAULT_FONT_SIZE);
+    match options
+        .font_family
+        .clone()
+        .or_else(|| configured.family.clone())
+    {
+        Some(family) => FontRequest::installed(family, size),
+        None => FontRequest::BundledDefault { size },
+    }
+}
+
+/// A flag is explicit per-launch intent, so an unusable one still fails the
+/// launch. A config value must never block launch (an uninstalled family or
+/// an out-of-range size would otherwise brick a double-clicked app bundle),
+/// so it degrades to the flag-or-default font and returns a warning for the
+/// startup status line.
+fn resolve_launch_font(
+    options: &NativeLaunchOptions,
+    configured: &ConfiguredFont,
+) -> Result<(ResolvedFontProfile, Option<String>), String> {
+    let error = match ResolvedFontProfile::resolve(font_request(options, configured)) {
+        Ok(profile) => return Ok((profile, None)),
+        Err(error) => error.to_string(),
     };
-    Ok(NativeLaunchOptions {
-        font_request,
-        font_info,
-    })
+    let config_contributed = (options.font_family.is_none() && configured.family.is_some())
+        || (options.font_size.is_none() && configured.size.is_some());
+    if !config_contributed {
+        return Err(error);
+    }
+    let profile = ResolvedFontProfile::resolve(font_request(options, &ConfiguredFont::default()))
+        .map_err(|error| error.to_string())?;
+    Ok((profile, Some(format!("config [font] ignored: {error}"))))
 }
 
 #[derive(Debug)]
@@ -151,18 +194,18 @@ enum FontPreflightOutcome<T> {
 
 fn launch_after_font_preflight<T>(
     args: impl IntoIterator<Item = String>,
-    construct_launch: impl FnOnce(Box<ResolvedFontProfile>) -> Result<T, String>,
+    configured: &ConfiguredFont,
+    construct_launch: impl FnOnce(Box<ResolvedFontProfile>, Option<String>) -> Result<T, String>,
 ) -> Result<FontPreflightOutcome<T>, String> {
     let options = parse_launch_options(args)?;
-    let profile =
-        ResolvedFontProfile::resolve(options.font_request).map_err(|error| error.to_string())?;
+    let (profile, warning) = resolve_launch_font(&options, configured)?;
     if options.font_info {
         let json = serde_json::to_string(profile.info())
             .map_err(|error| format!("could not encode --font-info: {error}"))?;
         return Ok(FontPreflightOutcome::Info(json));
     }
 
-    construct_launch(Box::new(profile)).map(FontPreflightOutcome::Launch)
+    construct_launch(Box::new(profile), warning).map(FontPreflightOutcome::Launch)
 }
 
 #[derive(Debug)]
@@ -950,13 +993,18 @@ struct NativeLaunch {
     app: App,
 }
 
-fn construct_native_launch(font_profile: Box<ResolvedFontProfile>) -> Result<NativeLaunch, String> {
+fn construct_native_launch(
+    mut app_config: AppConfig,
+    font_profile: Box<ResolvedFontProfile>,
+    font_warning: Option<String>,
+) -> Result<NativeLaunch, String> {
     eprintln!(
         "mandatum-native: font {}",
         serde_json::to_string(font_profile.info()).expect("FontInfo is JSON serializable")
     );
-    let app_config = AppConfig::from_current_dir()
-        .map_err(|error| format!("host initialization failed: {error}"))?;
+    if let Some(warning) = font_warning {
+        app_config.config_warnings.push(warning);
+    }
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(|error| format!("no display: {error}"))?;
@@ -967,18 +1015,34 @@ fn construct_native_launch(font_profile: Box<ResolvedFontProfile>) -> Result<Nat
 }
 
 fn main() {
-    let launch =
-        match launch_after_font_preflight(std::env::args().skip(1), construct_native_launch) {
-            Ok(FontPreflightOutcome::Info(json)) => {
-                println!("{json}");
-                return;
-            }
-            Ok(FontPreflightOutcome::Launch(launch)) => launch,
-            Err(error) => {
-                eprintln!("mandatum-native: {error}");
-                std::process::exit(2);
-            }
-        };
+    // Config loads before the font preflight so `[font]` can inform the
+    // request; `--font-info` therefore reports the configured font too.
+    let app_config = match AppConfig::from_current_dir() {
+        Ok(app_config) => app_config,
+        Err(error) => {
+            eprintln!("mandatum-native: host initialization failed: {error}");
+            std::process::exit(2);
+        }
+    };
+    let configured_font = ConfiguredFont {
+        family: app_config.font_family.clone(),
+        size: app_config.font_size,
+    };
+    let launch = match launch_after_font_preflight(
+        std::env::args().skip(1),
+        &configured_font,
+        |profile, warning| construct_native_launch(app_config, profile, warning),
+    ) {
+        Ok(FontPreflightOutcome::Info(json)) => {
+            println!("{json}");
+            return;
+        }
+        Ok(FontPreflightOutcome::Launch(launch)) => launch,
+        Err(error) => {
+            eprintln!("mandatum-native: {error}");
+            std::process::exit(2);
+        }
+    };
     let NativeLaunch {
         event_loop,
         mut app,

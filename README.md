@@ -109,6 +109,25 @@ rebindable, and `F1` shows help generated from the live keymap, so it never
 drifts from your bindings. Details are in
 [the interaction model](docs/interaction-model.md).
 
+Font and background color:
+
+```toml
+[font]
+family = "Berkeley Mono"  # any installed family; omit for bundled JetBrains Mono
+size = 15.0               # points
+
+[theme.terminal]
+background = "#0b0d12"    # terminal cells and the cleared frame
+
+[theme.ui]
+canvas = "#0b0d12"        # the native surface behind the panes
+```
+
+Colors apply the moment you run Reload Config. Font changes need an app
+restart, and `--font-family` / `--font-size` override the file for a single
+launch. A font the file asks for but the system cannot provide warns in the
+status line and falls back to the default rather than blocking startup.
+
 ## Status
 
 Mandatum is pre-release software. Current limits worth knowing before you

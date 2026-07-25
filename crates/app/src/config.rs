@@ -24,7 +24,7 @@ pub enum AgentConnectorKind {
 }
 
 /// Everything the config files can influence, resolved against defaults.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LoadedConfig {
     pub keymap: Keymap,
     pub theme: Theme,
@@ -38,6 +38,11 @@ pub struct LoadedConfig {
     pub task_command: Option<String>,
     pub agent_connector: Option<AgentConnectorKind>,
     pub agent_model: Option<String>,
+    /// Font family and point size for the native surface (`[font]`). `None`
+    /// keeps the bundled JetBrains Mono at its default size. Only the native
+    /// frontend reads these, and only at launch.
+    pub font_family: Option<String>,
+    pub font_size: Option<f32>,
     pub warnings: Vec<String>,
 }
 
@@ -142,7 +147,8 @@ fn apply_file(config: &mut LoadedConfig, path: &Path, label: &str) {
             ("shell", toml::Value::Table(shell)) => apply_shell(config, shell, label),
             ("task", toml::Value::Table(task)) => apply_task(config, task, label),
             ("agent", toml::Value::Table(agent)) => apply_agent(config, agent, label),
-            ("keymap" | "theme" | "ui" | "shell" | "task" | "agent", _) => {
+            ("font", toml::Value::Table(font)) => apply_font(config, font, label),
+            ("keymap" | "theme" | "ui" | "shell" | "task" | "agent" | "font", _) => {
                 config
                     .warnings
                     .push(format!("{label}: [{section}] must be a table"));
@@ -578,6 +584,54 @@ fn apply_agent(config: &mut LoadedConfig, table: toml::Table, label: &str) {
     }
 }
 
+fn apply_font(config: &mut LoadedConfig, table: toml::Table, label: &str) {
+    for (key, value) in table {
+        match key.as_str() {
+            "family" => {
+                let Some(text) = expect_string(config, "font.family", value, label) else {
+                    continue;
+                };
+                if text.trim().is_empty() {
+                    config
+                        .warnings
+                        .push(format!("{label}: font.family must not be empty"));
+                    continue;
+                }
+                config.font_family = Some(text);
+            }
+            "size" => {
+                if let Some(size) = expect_font_size(config, value, label) {
+                    config.font_size = Some(size);
+                }
+            }
+            unknown => config
+                .warnings
+                .push(format!("{label}: unknown key 'font.{unknown}'")),
+        }
+    }
+}
+
+/// TOML distinguishes `13` from `13.0`; both are legitimate point sizes here.
+fn expect_font_size(config: &mut LoadedConfig, value: toml::Value, label: &str) -> Option<f32> {
+    let size = match value {
+        toml::Value::Float(size) => size,
+        toml::Value::Integer(size) => size as f64,
+        other => {
+            config
+                .warnings
+                .push(format!("{label}: font.size must be a number, got {other}"));
+            return None;
+        }
+    };
+    if !size.is_finite() || size <= 0.0 {
+        config.warnings.push(format!(
+            "{label}: font.size must be a positive number, got {size}"
+        ));
+        return None;
+    }
+    Some(size as f32)
+}
+
 fn expect_string(
     config: &mut LoadedConfig,
     target: &str,
@@ -823,6 +877,10 @@ default_command = "cargo check"
 [agent]
 connector = "fake"
 model = "claude-opus-4-6"
+
+[font]
+family = "Berkeley Mono"
+size = 15.0
 "##,
         );
         let config = load_config(Some(&user), &dir.missing("project.toml"));
@@ -866,6 +924,81 @@ model = "claude-opus-4-6"
         assert_eq!(config.task_command.as_deref(), Some("cargo check"));
         assert_eq!(config.agent_connector, Some(AgentConnectorKind::Fake));
         assert_eq!(config.agent_model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(config.font_family.as_deref(), Some("Berkeley Mono"));
+        assert_eq!(config.font_size, Some(15.0));
+    }
+
+    #[test]
+    fn font_family_and_size_accept_float_and_integer_point_sizes() {
+        let dir = TestConfigDir::new();
+        let user = dir.write(
+            "user.toml",
+            "[font]\nfamily = \"Berkeley Mono\"\nsize = 15.5\n",
+        );
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.font_family.as_deref(), Some("Berkeley Mono"));
+        assert_eq!(config.font_size, Some(15.5));
+
+        let project = dir.write("project.toml", "[font]\nsize = 16\n");
+        let config = load_config(Some(&user), &project);
+
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(config.font_family.as_deref(), Some("Berkeley Mono"));
+        assert_eq!(config.font_size, Some(16.0));
+    }
+
+    #[test]
+    fn bad_font_values_warn_with_the_exact_problem_and_keep_defaults() {
+        let dir = TestConfigDir::new();
+        let user = dir.write(
+            "user.toml",
+            r##"
+[font]
+family = "   "
+size = 0
+weight = "bold"
+"##,
+        );
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+        let warnings = config.warnings.join("\n");
+
+        assert!(
+            warnings.contains("font.family must not be empty"),
+            "warnings: {warnings}"
+        );
+        assert!(
+            warnings.contains("font.size must be a positive number"),
+            "warnings: {warnings}"
+        );
+        assert!(
+            warnings.contains("unknown key 'font.weight'"),
+            "warnings: {warnings}"
+        );
+        assert_eq!(config.font_family, None);
+        assert_eq!(config.font_size, None);
+
+        let user = dir.write("nan.toml", "[font]\nsize = nan\n");
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+        assert!(
+            config.warnings.join("\n").contains("must be a positive"),
+            "warnings: {:?}",
+            config.warnings
+        );
+        assert_eq!(config.font_size, None);
+
+        let user = dir.write("string-size.toml", "[font]\nsize = \"13\"\n");
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+        assert!(
+            config
+                .warnings
+                .join("\n")
+                .contains("font.size must be a number"),
+            "warnings: {:?}",
+            config.warnings
+        );
+        assert_eq!(config.font_size, None);
     }
 
     #[test]

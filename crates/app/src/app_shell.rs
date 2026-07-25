@@ -241,7 +241,7 @@ fn propagate_input_thread_outcome(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
     pub workspace_name: String,
     pub project_path: PathBuf,
@@ -263,6 +263,11 @@ pub struct AppConfig {
     /// debug_status`). Off by default: diagnostics are noise that would
     /// overwrite meaningful status on every read.
     pub debug_status: bool,
+    /// Font family and point size for the native surface (`[font]`). `None`
+    /// keeps the bundled font at its default size; the terminal frontend
+    /// ignores both and inherits the host terminal's font.
+    pub font_family: Option<String>,
+    pub font_size: Option<f32>,
     /// Validation problems from config loading, surfaced as a startup
     /// status line. A broken config never prevents launch.
     pub config_warnings: Vec<String>,
@@ -291,6 +296,8 @@ impl Default for AppConfig {
             density: mandatum_scene::UiDensity::Compact,
             reduced_motion: false,
             debug_status: false,
+            font_family: None,
+            font_size: None,
             config_warnings: Vec::new(),
             user_config_file: None,
         }
@@ -299,13 +306,20 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn from_current_dir() -> io::Result<Self> {
-        let project_path = std::env::current_dir()?;
+        let (project_path, launch_warning) = resolve_project_path(
+            std::env::current_dir()?,
+            std::env::var_os("HOME").map(PathBuf::from),
+        );
         let user_config_file = user_config_file();
         let loaded = load_config(
             user_config_file.as_deref(),
             &project_config_file(&project_path),
         );
         let runtime = effective_runtime_settings(&loaded);
+        let mut config_warnings = loaded.warnings;
+        if let Some(warning) = launch_warning {
+            config_warnings.insert(0, warning);
+        }
         Ok(Self {
             workspace_name: "Mandatum".to_owned(),
             workspace_file: default_workspace_file(&project_path),
@@ -322,9 +336,38 @@ impl AppConfig {
             density: loaded.density,
             reduced_motion: loaded.reduced_motion,
             debug_status: loaded.debug_status,
-            config_warnings: loaded.warnings,
+            font_family: loaded.font_family,
+            font_size: loaded.font_size,
+            config_warnings,
             user_config_file,
         })
+    }
+}
+
+/// A Finder- or Dock-launched app inherits `/` as its working directory.
+/// `/` is a real directory, so the spawn-cwd guard accepts it, but no
+/// project lives there and `/.mandatum/workspace.json` is unwritable, so
+/// every task would fail. Treat `/` as "no directory chosen" and fall back
+/// to the user's home, matching Terminal.app's launch behavior.
+fn resolve_project_path(cwd: PathBuf, home: Option<PathBuf>) -> (PathBuf, Option<String>) {
+    if cwd != Path::new("/") {
+        return (cwd, None);
+    }
+    match home {
+        Some(home) => {
+            let warning = format!(
+                "launched without a project directory; working in {}",
+                home.display()
+            );
+            (home, Some(warning))
+        }
+        None => (
+            cwd,
+            Some(
+                "launched without a project directory and $HOME is unset; tasks will fail in /"
+                    .to_owned(),
+            ),
+        ),
     }
 }
 
@@ -493,6 +536,32 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    #[test]
+    fn resolve_project_path_keeps_a_real_working_directory() {
+        let (path, warning) = resolve_project_path(
+            PathBuf::from("/Users/casey/projects/demo"),
+            Some(PathBuf::from("/Users/casey")),
+        );
+        assert_eq!(path, PathBuf::from("/Users/casey/projects/demo"));
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn resolve_project_path_redirects_launcher_root_to_home_with_warning() {
+        let (path, warning) =
+            resolve_project_path(PathBuf::from("/"), Some(PathBuf::from("/Users/casey")));
+        assert_eq!(path, PathBuf::from("/Users/casey"));
+        let warning = warning.expect("redirect must be surfaced to the user");
+        assert!(warning.contains("/Users/casey"), "warning: {warning}");
+    }
+
+    #[test]
+    fn resolve_project_path_without_home_keeps_root_but_warns() {
+        let (path, warning) = resolve_project_path(PathBuf::from("/"), None);
+        assert_eq!(path, PathBuf::from("/"));
+        assert!(warning.is_some());
+    }
 
     #[test]
     fn terminal_frontend_encodes_clipboard_effect_as_osc52() {

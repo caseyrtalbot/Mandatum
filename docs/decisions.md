@@ -431,8 +431,10 @@ steal terminal typing — L5), `[keymap.palette]` (single letters),
 `[theme]` (named built-in — mandatum-dark / mandatum-light /
 mandatum-high-contrast — plus per-role color overrides), `[ui]`
 `reduced_motion`, `[shell] program`, `[task] default_command`,
-`[agent] connector/model`. Conflicts: later binding wins, with a warning.
-"Reload Config" (palette `e`) re-reads config live.
+`[agent] connector/model`, `[font] family/size` (native only, read once at
+launch, CLI flag > config > built-in default). Conflicts: later binding
+wins, with a warning. "Reload Config" (palette `e`) re-reads config live,
+except `[font]`, which the resolved font atlas fixes at startup.
 
 Theme placement: the scene stays color-semantic (`AgentContent` gained
 `status_role`); the `Theme` type (neutral `SceneColor` roles, defined in
@@ -3503,3 +3505,68 @@ restore), conformance passes against the new surfaces, and the packaged
 bundle launches with `--font-info` intact from inside `Mandatum.app`. The
 release pipeline's own smoke installs the published asset on both Mac
 architectures and exercises `mandatum update` end to end.
+
+## Braille Ships As A Generated Metric-Matched Fallback Face
+
+Context: CLI spinners emit Braille block characters (U+2800-U+28FF).
+Neither the bundled JetBrains Mono nor any monospace font on stock macOS
+covers the block, so cosmic-text's whole-database fallback scan picked
+Apple Braille, whose 0.692 em advance can never match the 0.6 em cell.
+Every spinner frame therefore failed admission and took the anchored
+decomposition path. The previously proposed lever, preferring
+`Family::Monospace` during fallback, was verified to be a no-op: glyphon
+pulls cosmic-text without the `monospace_fallback` feature, no fontdb
+monospace face covers Braille, and the database's monospace family is
+already the primary.
+
+Decision: bundle a fifth face, `Mandatum Braille`, generated from scratch
+by `packaging/make-braille-font.py` (fontTools): 256 glyphs drawing the
+dot pattern of `codepoint - 0x2800` on the standard 2x4 grid, with
+JetBrains Mono Regular's metrics (1000 UPM, 600 advance, 1020/-300 typo
+ascender/descender) and `post.isFixedPitch` set. The generated TTF is
+committed. `resolve_in_database` loads it into every resolved catalog
+after removing any same-named system face, and `create_font_system`
+installs a custom `Fallback` that answers `Script::Braille` with the
+bundled family and delegates everything else to `PlatformFallback`.
+Script fallback runs before the common list and the database scan, so the
+override is deterministic.
+
+Rationale: generating the face avoids third-party outlines entirely (no
+OFL reserved-name renames, no license text to carry) and is the only
+option that fixes the metrics as well as the look: subsetting an existing
+Braille font would inherit a foreign advance. Primary-font semantics are
+untouched, because only the Braille script's fallback list changes.
+
+Consequences: the app bundle grows by ~32 KB; the fallback report now
+names `MandatumBraille-Regular` where it previously named Apple Braille;
+regenerating the face requires fontTools, but only when the design
+changes, since the artifact is committed.
+
+Verification: `braille_spinner_glyphs_shape_admitted_from_the_bundled_fallback`
+pins that a spinner run shapes as one admitted grid-aligned run whose
+observations all resolve to the bundled face, and fails if the fallback
+override is disabled. The full native-renderer suite passes.
+
+## Launch Without A Working Directory Falls Back To Home
+
+Context: a Finder- or Dock-launched app inherits `/` as its working
+directory. `/` is a real directory, so the spawn-cwd guard accepts it,
+but no project lives there and `/.mandatum/workspace.json` is not
+writable, so every task in such a session failed. Refusing directories
+without a VCS marker was rejected because non-VCS project directories are
+legitimate; a project picker is the eventual product answer and remains
+open.
+
+Decision: `AppConfig::from_current_dir` routes through
+`resolve_project_path`, which treats a cwd of exactly `/` as "no
+directory chosen": it redirects the project path to `$HOME` and surfaces
+a status-line warning naming the substitution, matching Terminal.app's
+launch behavior. Any other cwd passes through untouched, and if `$HOME`
+is unset the original cwd is kept with a warning rather than guessing.
+
+Consequences: intentionally launching Mandatum with `/` as the working
+directory is no longer possible; that session now opens in `$HOME`. Given
+that tasks could never run from `/`, nothing functional is lost.
+
+Verification: three unit tests pin the pass-through, the redirect with
+its warning, and the no-`$HOME` case.
