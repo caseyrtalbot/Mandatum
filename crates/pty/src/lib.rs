@@ -257,6 +257,19 @@ pub struct NativePtySession {
 
 impl NativePtySession {
     pub fn spawn(intent: SpawnIntent) -> Result<Self, NativePtyError> {
+        // portable-pty silently substitutes `$HOME` for any cwd that is not
+        // an existing directory; reject it here so a stale pane cwd (e.g. a
+        // renamed project restored from durable state) fails loudly instead
+        // of quietly rerooting the child in the wrong directory.
+        if let Some(cwd) = intent.cwd()
+            && !cwd.is_dir()
+        {
+            return Err(NativePtyError::CwdNotFound {
+                session_id: intent.session_id().clone(),
+                cwd: cwd.clone(),
+            });
+        }
+
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
             .openpty(to_native_size(intent.size()))
@@ -691,6 +704,10 @@ pub enum NativePtyError {
         session_id: PtySessionId,
         message: String,
     },
+    CwdNotFound {
+        session_id: PtySessionId,
+        cwd: PathBuf,
+    },
     ReaderCloneFailed {
         session_id: PtySessionId,
         message: String,
@@ -742,6 +759,11 @@ impl fmt::Display for NativePtyError {
             } => write!(
                 formatter,
                 "failed to spawn child for PTY session {session_id}: {message}"
+            ),
+            Self::CwdNotFound { session_id, cwd } => write!(
+                formatter,
+                "cannot spawn PTY session {session_id}: working directory {} does not exist",
+                cwd.display()
             ),
             Self::ReaderCloneFailed {
                 session_id,
@@ -822,6 +844,9 @@ fn to_native_size(size: PtySize) -> portable_pty::PtySize {
 }
 
 fn child_exit_status(status: portable_pty::ExitStatus) -> ChildExitStatus {
+    // portable-pty reports a signal only as a `strsignal` name, never a
+    // number, so a signalled child cannot be mapped onto `Signaled` without
+    // reaping the child ourselves.
     if status.signal().is_some() {
         ChildExitStatus::Unknown
     } else {

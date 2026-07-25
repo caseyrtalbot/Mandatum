@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+use std::path::PathBuf;
+
 use mandatum_pty::{
     ChildExitStatus, NativePtyError, NativePtySession, PtyEvent, PtySessionId, PtySize,
     ResizeIntent, SpawnIntent,
@@ -123,6 +125,27 @@ fn native_pty_rejects_spawn_failure_without_runtime_session() {
         }
         other => panic!("expected spawn failure, got {other}"),
     }
+}
+
+#[test]
+fn native_pty_rejects_missing_cwd_instead_of_home_fallback() {
+    // portable-pty would silently run the child in `$HOME` here; the spawn
+    // boundary must reject the missing directory instead.
+    let intent =
+        shell_intent("native-missing-cwd", "pwd").with_cwd("/definitely/not/a/real/directory");
+
+    let error = match NativePtySession::spawn(intent) {
+        Ok(_) => panic!("spawn should fail"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        NativePtyError::CwdNotFound {
+            session_id: PtySessionId::new("native-missing-cwd"),
+            cwd: PathBuf::from("/definitely/not/a/real/directory"),
+        }
+    );
 }
 
 #[test]

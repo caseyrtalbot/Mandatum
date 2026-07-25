@@ -160,9 +160,9 @@ pub(crate) fn prepare_task_pane_runtime(
     let restart_generation = pane.restart_generation();
     let mut spawn_intent = SpawnIntent::new(session_id, shell_program.to_owned(), size)?
         .with_arguments(["-c", intent.command.as_str()]);
-    // Always resolved (intent -> pane -> project): an unset cwd would fall
-    // back to `$HOME` inside portable-pty and quietly run the user's task
-    // command in the wrong directory.
+    // Always resolved (intent -> pane -> project). The spawn boundary rejects
+    // a cwd that no longer exists; portable-pty would otherwise substitute
+    // `$HOME` and quietly run the user's task command in the wrong directory.
     spawn_intent = spawn_intent.with_cwd(crate::terminal_runtime::resolve_pane_cwd(
         workspace,
         pane,

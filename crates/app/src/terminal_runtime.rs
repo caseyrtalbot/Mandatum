@@ -258,9 +258,9 @@ pub(crate) fn prepare_terminal_pane_runtime(
 
 /// The working directory a pane's process actually runs in: explicit intent
 /// first, then the pane's durable cwd, then the active project's directory.
-/// Spawns always pass a cwd — leaving it unset would silently fall back to
-/// the user's `$HOME` (portable-pty's default), running project commands in
-/// the wrong directory.
+/// The resolved directory may be stale (durable state outlives renames), so
+/// the spawn boundary rejects a missing one rather than letting portable-pty
+/// silently substitute the user's `$HOME`.
 pub(crate) fn resolve_pane_cwd(
     workspace: &Workspace,
     pane: &PaneSpec,
