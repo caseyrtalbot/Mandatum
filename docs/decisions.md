@@ -3157,3 +3157,42 @@ layering, item recoloring, rounded-band overlap, constrained Context Menu hit
 geometry, degenerate shells, stable Help keys, and clipped key hints. The
 representative native matrix was reviewed and explicitly accepted from clean
 source commit `1988b0b`; the full repository gate ended `GATE GREEN`.
+
+## Workflow Presentation Is Typed, Bounded, And Scene-Owned
+
+Status: accepted and displayed (2026-07-24)
+
+Decision: task, agent, approval, and artifact panes expose one scene-owned
+typed workflow projection. `WorkflowRow` and stable `WorkflowNodePart`
+identities carry role, tone, and bounded fallback text; the native plan maps
+those roles to compact badges, contained callouts, console/inspector material,
+and artifact canvas material without parsing labels. `detail_lines()` formats
+the same rows for the terminal frontend.
+
+Rationale: styling `detail_lines()` by prefixes would create renderer-owned
+product meaning and let native and terminal geometry drift. Dropping offscreen
+nodes during resize would also make animation and accessibility identity
+unstable. Artifact pixels need a fail-closed semantic canvas contract rather
+than a best-effort lookup that can silently discard a ready surface.
+
+Consequences:
+
+- task status is typed separately from its label, including detached, waiting,
+  running, succeeded, diagnostic, and failed states;
+- approval and failure emphasis is limited to their callouts and compact
+  badges rather than the entire pane;
+- agent output lines are bounded before entering live runtime state and the
+  scene exposes only a bounded tail with an honest overflow marker;
+- `$`-prefixed raw output is never treated as a command channel;
+- hidden semantic nodes preserve identity across resize without painting; and
+- ready artifact preparation rejects a missing, wrongly typed, hidden, or
+  geometrically mismatched canvas when visible geometry is required.
+
+Verification: focused scene, cell-program, renderer, native-plan, app, and
+real-host tests cover typed mapping, compact badge geometry, resize identity,
+long content, terminal fallback, failure/approval attention, and artifact
+geometry. `./ci/native-frontend.sh` passed and the full repository gate ended
+`GATE GREEN`. The representative `dense-workspace`, `attention`, and
+`artifacts` references were visually reviewed and explicitly accepted from
+clean source commit `d17bdd2` on the MacBook Pro built-in Retina display;
+strict comparisons returned SSIM 1.0 with zero changed or masked pixels.

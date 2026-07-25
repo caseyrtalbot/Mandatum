@@ -1,6 +1,6 @@
 # Native Visual Polish Plan
 
-Status: Phase 4 Overlay Family accepted; Phase 5 next (2026-07-24)
+Status: Phase 5 Typed Workflow Surfaces accepted; Phase 6 next (2026-07-24)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -604,6 +604,23 @@ Exit:
 - artifact state changes do not shift layout; and
 - workflow baselines and full gate pass.
 
+Completion status (2026-07-24):
+
+- `mandatum-scene` owns bounded typed workflow rows and compact status badges;
+- task diagnostics, failures, rerun routes, agent objectives/actions/summaries,
+  changed files, approvals, raw output, and artifact inspector state cross the
+  native boundary without parsing display strings;
+- offscreen workflow nodes retain stable semantic identity across resize;
+- ready artifact pixels require the exact typed canvas geometry, while
+  loading, ready, and failed states retain one stable layout;
+- raw agent output is bounded at ingestion and again at scene projection;
+- the real-host canonical matrix asserts the Phase 5 scene roles and native
+  material plan; and
+- `dense-workspace`, `attention`, and `artifacts` were reviewed and explicitly
+  accepted on the MacBook Pro built-in Retina reference from clean source
+  commit `d17bdd2`; strict comparisons returned SSIM 1.0, zero changed pixels,
+  and zero masked pixels.
+
 ### Phase 6 — Motion And Fluid Geometry
 
 Goal: clarify change without adding visual noise or input risk.
@@ -713,7 +730,8 @@ Defer until the complete system above succeeds without them:
 
 ## Immediate Next Action
 
-Execute Phase 5 only: replace flattened task, agent, approval, and artifact
-details with typed scene-owned workflow surfaces while preserving honest
-terminal fallbacks. Do not pull motion, accessibility projection, installer,
-release, rollout, or public presentation work forward.
+Execute Phase 6 only: add deterministic typed motion and fluid geometry with
+an injectable visual clock, direct manipulation, complete reduced-motion
+behavior, and redraw scheduling only for active motion or real scene change.
+Do not pull theme/accessibility completion, installer, release, rollout, or
+public presentation work forward.

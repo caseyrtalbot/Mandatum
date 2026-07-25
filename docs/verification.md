@@ -816,6 +816,23 @@ developer unfamiliar with the current implementation can identify:
   and all canonical scenario-plan tests, ended `GATE GREEN`. A broader fresh
   performance series and unchanged-scenario recapture were intentionally
   scoped out as overkill.
+- **2026-07-24:** Phase 5 replaced flattened task, agent, approval, and
+  artifact details with bounded typed scene rows, stable workflow identities,
+  compact status badges, contained callouts, exact console material, and
+  stable artifact inspector/canvas geometry. Aggregate review corrected
+  unbounded agent lines, resize identity loss, diagnostic status semantics,
+  prompt-prefix inference, task-output material coverage, approval attention,
+  compact badge geometry, and missing/mismatched artifact canvases. The
+  canonical real-host aggregate test asserts the resulting scene roles and
+  native materials. `./ci/native-frontend.sh` passed, and the repository gate
+  ended `GATE GREEN` before capture. From clean source commit `d17bdd2`,
+  `dense-workspace`, `attention`, and `artifacts` were captured through the
+  real native Metal route on the MacBook Pro built-in Retina display at
+  800 x 600 logical / 1600 x 1200 physical / backing scale 2 / 120 Hz. Each
+  was visually reviewed and explicitly accepted; repeated comparisons returned
+  SSIM 1.0, zero changed pixels, zero masked pixels, and 1,920,000 compared
+  pixels. Unchanged scenarios and a fresh performance series were deliberately
+  scoped out because Phase 5 changed only this representative workflow family.
 
 ## Completion Rule
 

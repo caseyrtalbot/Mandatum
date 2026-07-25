@@ -476,6 +476,16 @@ workflow hierarchy extend `WorkspaceScene` while `CellProgram` remains the
 terminal-parity projection. The former Phase 7/8 admission and rollout policy
 is retired.
 
+Phase 5 deepens that same boundary for product workflows. `PaneScene` projects
+task, agent, approval, and artifact facts into bounded `WorkflowRow` values and
+stable `WorkflowNodePart` identities; `detail_lines()` formats the same rows
+for terminal parity. Compact status badges are separate semantic nodes rather
+than full-row inference. Offscreen nodes remain present with hidden state so
+resize does not destroy identity. Ready artifact pixels are admitted only when
+the scene carries the exact typed canvas geometry; missing or mismatched
+product presentation fails before GPU allocation. Native materials consume
+roles and tones only and never parse row text.
+
 ### `workflows`
 
 Owns developer-workflow definitions and cross-actor handoff policy. Built

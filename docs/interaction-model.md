@@ -272,6 +272,26 @@ for debugging sessions.
 Still open for attention: crashed panes, restore failures, dirty repo,
 server health.
 
+## Typed Workflow Surfaces
+
+Task panes lead with one typed status/command heading and compact status badge,
+then cwd/recipe metadata, a contained failure-and-rerun callout when failed,
+and the exact live console region. Runtime diagnostics use a warning semantic
+without manufacturing task failure.
+
+Agent panes keep objective, status, current action, summary, approval detail,
+changed files, and raw console output as separate typed regions. An approval
+callout always states command, scope, risk basis, and approve/reject routes;
+only the callout receives waiting emphasis. Output remains raw, is bounded at
+runtime ingestion and scene projection, and never gains meaning from `$`
+prefix parsing.
+
+Artifact panes reserve one stable five-row inspector above a contain-fit
+canvas: source, alt text, dimensions, revision, and preview state. Loading,
+ready, and failed transitions do not move the canvas. A failure uses one
+contained callout; it never paints the full pane as failed. These surfaces do
+not add new commands or input routing.
+
 ## Set Agent Objective
 
 "Set agent objective" (palette `p`, and the agent pane's context menu)

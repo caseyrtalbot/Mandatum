@@ -131,6 +131,12 @@ its design ceiling:
   reconstructing state;
 - the GPU adapter materializes those primitives but never parses
   `detail_lines()` or invents workflow hierarchy;
+- typed workflow rows resolve to compact status badges, contained
+  failure/approval callouts, bounded metadata/list regions, exact console
+  material, and artifact inspector/canvas material;
+- hidden workflow nodes retain stable identity without emitting material or
+  text, and a ready artifact with missing or mismatched typed canvas geometry
+  fails preparation rather than silently dropping pixels;
 - terminal content, child mouse reporting, hit targets, and cell ownership stay
   authoritative while native chrome gains materials, density, and motion.
 

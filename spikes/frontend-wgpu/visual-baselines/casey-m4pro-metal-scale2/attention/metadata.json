@@ -3,7 +3,7 @@
   "profile": "casey-m4pro-metal-scale2",
   "scenario": "attention",
   "theme": "mandatum-dark",
-  "captured_at": "2026-07-25T03:15:29Z",
+  "captured_at": "2026-07-25T05:40:57Z",
   "surface": {
     "logical_width": 800,
     "logical_height": 600,
@@ -27,9 +27,9 @@
     ]
   },
   "display": {
-    "id": "3",
-    "name": "LG ULTRAGEAR+",
-    "refresh_hz": 60.0
+    "id": "1",
+    "name": "Built-in Retina Display",
+    "refresh_hz": 120.0
   },
   "gpu": {
     "name": "Apple M4 Pro",
@@ -37,7 +37,7 @@
     "device_type": "integrated"
   },
   "source": {
-    "commit": "7221937acb360ad4626a4dd93f851c5cfb9f9af3",
+    "commit": "d17bdd2dd6f823feb714406a0547f2806a0fe175",
     "dirty": false
   },
   "build": {
@@ -54,7 +54,7 @@
   },
   "fallback_regions": [],
   "acceptance": {
-    "reason": "Phase 3 workspace shell materials, focus treatment, pane badges, separators, and floating shell reviewed on the native Metal route at 2x scale.",
-    "accepted_at_unix_seconds": 1784949484
+    "reason": "Phase 5 task-failure and waiting-approval callouts reviewed on the required built-in Retina reference",
+    "accepted_at_unix_seconds": 1784958110
   }
 }
