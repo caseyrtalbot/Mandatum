@@ -90,6 +90,11 @@ pub fn build_workspace_scene_with_viewport(
         })
         .or_else(|| state.prompt_overlay_scene(size).map(OverlayScene::Prompt))
         .or_else(|| state.help_overlay_scene(size).map(OverlayScene::Help))
+        .or_else(|| {
+            state
+                .appearance_overlay_scene(size)
+                .map(OverlayScene::Appearance)
+        })
         // The first-run note is last: it is not modal, so any real overlay
         // outranks it (and the action that opened one dismissed it anyway).
         .or_else(|| state.welcome_overlay_scene(size).map(OverlayScene::Welcome));
@@ -507,7 +512,8 @@ fn overlay_presentation_kind(overlay: &OverlayScene) -> OverlayPresentationKind 
         | OverlayScene::SessionMap(_)
         | OverlayScene::Prompt(_)
         | OverlayScene::Search(_)
-        | OverlayScene::Help(_) => OverlayPresentationKind::Modal,
+        | OverlayScene::Help(_)
+        | OverlayScene::Appearance(_) => OverlayPresentationKind::Modal,
     }
 }
 
@@ -1113,6 +1119,7 @@ fn overlay_area(overlay: &OverlayScene) -> SceneRect {
         OverlayScene::Prompt(value) => value.area,
         OverlayScene::Search(value) => value.area,
         OverlayScene::Help(value) => value.area,
+        OverlayScene::Appearance(value) => value.area,
         OverlayScene::Welcome(value) => value.area,
     }
 }
@@ -1152,7 +1159,9 @@ fn constrain_overlay_area(
         OverlayScene::Timeline(_) | OverlayScene::Search(_) => Some(920),
         OverlayScene::SessionMap(_) => Some(680),
         OverlayScene::Help(_) => Some(960),
-        OverlayScene::Prompt(_) | OverlayScene::Welcome(_) => Some(720),
+        OverlayScene::Prompt(_) | OverlayScene::Welcome(_) | OverlayScene::Appearance(_) => {
+            Some(720)
+        }
         OverlayScene::ContextMenu(_) => None,
     };
     let maximum_columns = max_width_pixels
@@ -1189,6 +1198,7 @@ fn constrain_overlay_area(
         OverlayScene::Prompt(value) => value.area = constrained,
         OverlayScene::Search(value) => value.area = constrained,
         OverlayScene::Help(value) => value.area = constrained,
+        OverlayScene::Appearance(value) => value.area = constrained,
         OverlayScene::Welcome(value) => value.area = constrained,
     }
 }
@@ -1247,7 +1257,10 @@ fn overlay_item_key(overlay: &OverlayScene, index: usize) -> Option<mandatum_sce
         OverlayScene::Timeline(value) => value.item_keys.get(index),
         OverlayScene::SessionMap(value) => value.item_keys.get(index),
         OverlayScene::Search(value) => value.item_keys.get(index),
-        OverlayScene::Prompt(_) | OverlayScene::Help(_) | OverlayScene::Welcome(_) => None,
+        OverlayScene::Prompt(_)
+        | OverlayScene::Help(_)
+        | OverlayScene::Appearance(_)
+        | OverlayScene::Welcome(_) => None,
     }
     .cloned()
 }
@@ -1423,6 +1436,7 @@ fn overlay_accessibility_label(overlay: &OverlayScene) -> &'static str {
         OverlayScene::Prompt(_) => "Text prompt",
         OverlayScene::Search(_) => "Search",
         OverlayScene::Help(_) => "Help",
+        OverlayScene::Appearance(_) => "Appearance",
         OverlayScene::Welcome(_) => "Welcome",
     }
 }
@@ -1474,7 +1488,7 @@ fn overlay_item_label<'a>(
                 PresentationNodeId::overlay_item(OverlayKind::Help, item.key.clone()) == *node_id
             })
             .map(|item| item.label.as_str()),
-        OverlayScene::Prompt(_) | OverlayScene::Welcome(_) => None,
+        OverlayScene::Prompt(_) | OverlayScene::Appearance(_) | OverlayScene::Welcome(_) => None,
     }
 }
 
@@ -2041,10 +2055,15 @@ fn hit_targets(
                 });
             }
         }
-        // The prompt and help have no row targets (click-away dismisses
-        // them); the first-run note is not even modal.
-        Some(OverlayScene::Prompt(_) | OverlayScene::Help(_) | OverlayScene::Welcome(_)) | None => {
-        }
+        // The prompt, help, and appearance overlays have no row targets
+        // (click-away dismisses them); the first-run note is not even modal.
+        Some(
+            OverlayScene::Prompt(_)
+            | OverlayScene::Help(_)
+            | OverlayScene::Appearance(_)
+            | OverlayScene::Welcome(_),
+        )
+        | None => {}
     }
 
     targets

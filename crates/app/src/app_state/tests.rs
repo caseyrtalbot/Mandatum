@@ -5264,3 +5264,71 @@ fn attention_failed_task_segment_click_jumps_to_the_failed_pane() {
 
     assert_eq!(focused(&state), task_pane.as_str());
 }
+
+#[test]
+fn appearance_overlay_adjusts_the_live_theme_and_owns_input_while_open() {
+    let mut state = state();
+    let size = SceneSize::new(100, 30);
+
+    state.dispatch(CommandId::AdjustAppearance);
+    let overlay = state
+        .appearance_overlay_scene(size)
+        .expect("dispatch opens the appearance overlay");
+    assert_eq!(overlay.selected, 0);
+    let before = state.theme().name.clone();
+
+    // Right on the theme row selects the next built-in as a full snapshot;
+    // Left returns to the dark default so color adjustments stay visible.
+    state.handle_key(key(KeyCode::Right));
+    assert_ne!(state.theme().name, before);
+    assert!(state.status().starts_with("theme "), "{}", state.status());
+    state.handle_key(key(KeyCode::Left));
+    assert_eq!(state.theme().name, before);
+
+    // Down to the saturation row, raise it well clear of near-gray, then
+    // confirm the hue row moves the background color and reports the hex.
+    state.handle_key(key(KeyCode::Down));
+    state.handle_key(key(KeyCode::Down));
+    for _ in 0..8 {
+        state.handle_key(key(KeyCode::Right));
+    }
+    let saturated = state.theme().terminal_palette.background;
+    state.handle_key(key(KeyCode::Up));
+    for _ in 0..5 {
+        state.handle_key(key(KeyCode::Right));
+    }
+    assert_ne!(state.theme().terminal_palette.background, saturated);
+    assert!(
+        state.status().starts_with("background #"),
+        "{}",
+        state.status()
+    );
+
+    // Paste is consumed while the modal owns input; nothing reaches a
+    // terminal and the overlay stays open.
+    state.handle_event(InputEvent::Paste("ls\n".to_owned()));
+    assert!(state.appearance_overlay_scene(size).is_some());
+
+    // The overlay scene reflects the adjusted state each frame.
+    let overlay = state.appearance_overlay_scene(size).unwrap();
+    assert_eq!(overlay.selected, 1);
+
+    state.handle_key(key(KeyCode::Escape));
+    assert!(state.appearance_overlay_scene(size).is_none());
+    assert_eq!(state.status(), "appearance closed");
+}
+
+#[test]
+fn opening_appearance_closes_other_overlays_and_vice_versa() {
+    let mut state = state();
+    let size = SceneSize::new(100, 30);
+
+    state.dispatch(CommandId::ShowHelp);
+    state.dispatch(CommandId::AdjustAppearance);
+    assert!(state.help_overlay_scene(size).is_none());
+    assert!(state.appearance_overlay_scene(size).is_some());
+
+    state.dispatch(CommandId::ShowHelp);
+    assert!(state.appearance_overlay_scene(size).is_none());
+    assert!(state.help_overlay_scene(size).is_some());
+}

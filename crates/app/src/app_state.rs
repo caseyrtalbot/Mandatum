@@ -39,6 +39,7 @@ use mandatum_workflows::TaskFailureHandoff;
 use crate::{
     agent_runtime::{AgentRuntimeEvent, connector_for_kind},
     app_shell::AppConfig,
+    appearance::{self, AppearanceViewState},
     artifact_preview::ArtifactPreviewStore,
     config::{AgentConnectorKind, effective_runtime_settings, load_config, project_config_file},
     copy_mode::CopyModeState,
@@ -142,6 +143,8 @@ pub struct AppState {
     session_map: Option<SessionMapState>,
     /// The open help overlay, if any (modal, like the palette).
     help_view: Option<HelpViewState>,
+    /// The open appearance overlay, if any (modal, like the palette).
+    appearance_view: Option<AppearanceViewState>,
     /// Whether the one-time first-run note is on screen. Set only when a
     /// launch that asked to restore found no saved workspace; cleared by any
     /// action (a saved workspace suppresses it on every later launch).
@@ -253,6 +256,7 @@ impl AppState {
             search_view: None,
             session_map: None,
             help_view: None,
+            appearance_view: None,
             first_run_note: false,
             objective_prompt: None,
             active_composition: None,
@@ -590,7 +594,8 @@ impl AppState {
             InputEvent::Paste(text)
                 if self.copy_mode.is_none()
                     && self.context_menu.is_none()
-                    && self.session_map.is_none() =>
+                    && self.session_map.is_none()
+                    && self.appearance_view.is_none() =>
             {
                 if self.write_to_focused_terminal(text.as_bytes()) {
                     self.mark_redraw();
@@ -888,6 +893,11 @@ impl AppState {
         }
         if self.help_view.is_some() {
             self.handle_help_key(key);
+            self.mark_redraw();
+            return;
+        }
+        if self.appearance_view.is_some() {
+            self.handle_appearance_key(key);
             self.mark_redraw();
             return;
         }
@@ -1270,6 +1280,7 @@ impl AppState {
         match runtime_command {
             RuntimeCommand::EnterCopyMode => self.enter_copy_mode(),
             RuntimeCommand::ReloadConfig => self.reload_config(),
+            RuntimeCommand::AdjustAppearance => self.open_appearance(),
             RuntimeCommand::OpenArtifactPreview => self.open_artifact_prompt(),
             RuntimeCommand::ShowTimeline => self.open_timeline(),
             RuntimeCommand::ShowSessionMap => self.open_session_map(),
@@ -1559,6 +1570,7 @@ impl AppState {
         self.search_view = None;
         self.session_map = None;
         self.help_view = None;
+        self.appearance_view = None;
         self.objective_prompt = None;
         self.frontend_effects.clear();
         self.last_copied = None;
@@ -3608,6 +3620,7 @@ impl AppState {
         self.search_view = None;
         self.session_map = None;
         self.help_view = None;
+        self.appearance_view = None;
         self.objective_prompt = None;
         let view = TimelineViewState::from_tail(self.timeline.read_tail());
         self.status = format!("timeline: {} event(s)", view.events.len());
@@ -3630,6 +3643,7 @@ impl AppState {
         self.timeline_view = None;
         self.session_map = None;
         self.help_view = None;
+        self.appearance_view = None;
         self.objective_prompt = None;
         self.copy_mode = None;
         let corpus = self.build_search_corpus();
@@ -3885,6 +3899,7 @@ impl AppState {
         self.timeline_view = None;
         self.search_view = None;
         self.help_view = None;
+        self.appearance_view = None;
         self.objective_prompt = None;
         let rows = self.session_map_row_models();
         let focused = self.workspace.active_session().focused_pane_id().clone();
@@ -3919,6 +3934,7 @@ impl AppState {
         self.search_view = None;
         self.session_map = None;
         self.objective_prompt = None;
+        self.appearance_view = None;
         self.help_view = Some(HelpViewState::default());
         self.status = "help: type to filter, Esc close".to_owned();
     }
@@ -3969,6 +3985,85 @@ impl AppState {
             }
             _ => {}
         }
+    }
+
+    fn open_appearance(&mut self) {
+        self.first_run_note = false;
+        self.palette = None;
+        self.context_menu = None;
+        self.timeline_view = None;
+        self.search_view = None;
+        self.session_map = None;
+        self.objective_prompt = None;
+        self.help_view = None;
+        self.appearance_view = Some(AppearanceViewState::default());
+        self.status = "appearance: ←/→ adjust, ↑/↓ select, Esc close".to_owned();
+    }
+
+    fn close_appearance(&mut self) {
+        self.appearance_view = None;
+        self.status = "appearance closed".to_owned();
+    }
+
+    fn handle_appearance_key(&mut self, key: Key) {
+        match self.keymap.chord_action(key) {
+            Some(ChordAction::Quit) => {
+                self.should_quit = true;
+                self.status = "quitting".to_owned();
+                return;
+            }
+            // The appearance chord toggles: pressing it again closes.
+            Some(ChordAction::Dispatch(CommandId::AdjustAppearance)) => {
+                self.close_appearance();
+                return;
+            }
+            _ => {}
+        }
+        let row_count = appearance::APPEARANCE_FIELDS.len();
+        let ctrl_only = key.mods.control && !key.mods.shift && !key.mods.alt && !key.mods.super_key;
+        if key.code == KeyCode::Up || (ctrl_only && key.code == KeyCode::Char('p')) {
+            if let Some(view) = self.appearance_view.as_mut() {
+                view.selected = view.selected.saturating_sub(1);
+            }
+            return;
+        }
+        if key.code == KeyCode::Down || (ctrl_only && key.code == KeyCode::Char('n')) {
+            if let Some(view) = self.appearance_view.as_mut() {
+                view.selected = (view.selected + 1).min(row_count.saturating_sub(1));
+            }
+            return;
+        }
+        let direction = match key.code {
+            KeyCode::Left => -1i8,
+            KeyCode::Right => 1i8,
+            KeyCode::Escape | KeyCode::Enter => {
+                self.close_appearance();
+                return;
+            }
+            _ => return,
+        };
+        let Some(field) = self
+            .appearance_view
+            .as_ref()
+            .and_then(|view| appearance::APPEARANCE_FIELDS.get(view.selected))
+            .copied()
+        else {
+            return;
+        };
+        self.status = appearance::adjust_theme(&mut self.theme, field, direction);
+    }
+
+    /// The appearance overlay for the current frame, `None` while closed.
+    pub(crate) fn appearance_overlay_scene(
+        &self,
+        size: SceneSize,
+    ) -> Option<mandatum_scene::AppearanceOverlay> {
+        let view = self.appearance_view.as_ref()?;
+        Some(appearance::appearance_overlay_scene(
+            &self.theme,
+            view.selected,
+            size,
+        ))
     }
 
     fn move_help_selection(&mut self, delta: isize) {
@@ -4058,6 +4153,7 @@ impl AppState {
         self.search_view = None;
         self.session_map = None;
         self.help_view = None;
+        self.appearance_view = None;
         self.objective_prompt = Some(TextPrompt::Objective {
             pane_id: pane_id.clone(),
             input: objective,
@@ -4075,6 +4171,7 @@ impl AppState {
         self.search_view = None;
         self.session_map = None;
         self.help_view = None;
+        self.appearance_view = None;
         self.objective_prompt = Some(TextPrompt::Artifact {
             input: String::new(),
         });

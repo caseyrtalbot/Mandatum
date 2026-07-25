@@ -6,6 +6,7 @@
 mod agent_runtime;
 mod app_shell;
 mod app_state;
+mod appearance;
 mod artifact_preview;
 mod attention;
 mod clipboard;

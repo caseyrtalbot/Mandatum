@@ -779,6 +779,7 @@ fn overlay_area(overlay: &OverlayScene) -> SceneRect {
         OverlayScene::Prompt(overlay) => overlay.area,
         OverlayScene::Search(overlay) => overlay.area,
         OverlayScene::Help(overlay) => overlay.area,
+        OverlayScene::Appearance(overlay) => overlay.area,
         OverlayScene::Welcome(overlay) => overlay.area,
     }
 }

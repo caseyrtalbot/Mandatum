@@ -48,6 +48,7 @@ pub enum CommandId {
     SaveWorkspace,
     RestoreWorkspace,
     ReloadConfig,
+    AdjustAppearance,
     Quit,
 }
 
@@ -369,6 +370,15 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         palette_key: Some('e'),
     },
     Command {
+        id: CommandId::AdjustAppearance,
+        label: "Adjust appearance",
+        name: "adjust-appearance",
+        category: CommandCategory::Config,
+        // Searchable in the palette; `i` stays reserved so a bare letter can
+        // still seed the filter.
+        palette_key: None,
+    },
+    Command {
         id: CommandId::Quit,
         label: "Quit Mandatum",
         name: "quit",
@@ -430,6 +440,7 @@ pub enum RuntimeCommand {
     CopySelection,
     OpenArtifactPreview,
     ReloadConfig,
+    AdjustAppearance,
     ShowTimeline,
     ShowSessionMap,
     SearchSession,
@@ -507,6 +518,7 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
             CommandTarget::Runtime(RuntimeCommand::OpenArtifactPreview)
         }
         CommandId::ReloadConfig => CommandTarget::Runtime(RuntimeCommand::ReloadConfig),
+        CommandId::AdjustAppearance => CommandTarget::Runtime(RuntimeCommand::AdjustAppearance),
         CommandId::ShowTimeline => CommandTarget::Runtime(RuntimeCommand::ShowTimeline),
         CommandId::ShowSessionMap => CommandTarget::Runtime(RuntimeCommand::ShowSessionMap),
         CommandId::SearchSession => CommandTarget::Runtime(RuntimeCommand::SearchSession),
@@ -681,6 +693,7 @@ pub fn core_action_for_command(
         | CommandId::CopySelection
         | CommandId::OpenArtifactPreview
         | CommandId::ReloadConfig
+        | CommandId::AdjustAppearance
         | CommandId::ShowTimeline
         | CommandId::ShowSessionMap
         | CommandId::SearchSession

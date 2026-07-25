@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use mandatum_scene::{
-    AgentApprovalPrompt, AgentContent, AgentStatus, ArtifactContent, ArtifactFit, ArtifactState,
-    AttentionSegment, CellOccupancy, CellSelection, ContextMenuEntry, ContextMenuOverlay,
-    EmptyContent, HeaderScene, HelpEntry, HelpOverlay, HitTarget, HitTargetKind, OverlayScene,
-    PaletteEntry, PaletteOverlay, PaneContent, PaneId, PaneScene, PaneSceneKind, PreeditScene,
-    PromptOverlay, RasterSurface, SceneCell, SceneCellStyle, SceneColor, SceneRect, SceneSize,
-    SearchEntry, SearchOverlay, SessionMapOverlay, SessionMapRow, StatusScene, SurfacePosition,
-    TaskContent, TerminalSurface, TextInputKind, TextInputScene, TextPaintScopeKind, Theme,
-    TimelineEntry, TimelineOverlay, WelcomeEntry, WelcomeOverlay, WorkspaceScene,
-    compile_cell_program, input::TextRange,
+    AgentApprovalPrompt, AgentContent, AgentStatus, AppearanceControl, AppearanceOverlay,
+    AppearanceRow, ArtifactContent, ArtifactFit, ArtifactState, AttentionSegment, CellOccupancy,
+    CellSelection, ContextMenuEntry, ContextMenuOverlay, EmptyContent, HeaderScene, HelpEntry,
+    HelpOverlay, HitTarget, HitTargetKind, OverlayScene, PaletteEntry, PaletteOverlay, PaneContent,
+    PaneId, PaneScene, PaneSceneKind, PreeditScene, PromptOverlay, RasterSurface, SceneCell,
+    SceneCellStyle, SceneColor, SceneRect, SceneSize, SearchEntry, SearchOverlay,
+    SessionMapOverlay, SessionMapRow, StatusScene, SurfacePosition, TaskContent, TerminalSurface,
+    TextInputKind, TextInputScene, TextPaintScopeKind, Theme, TimelineEntry, TimelineOverlay,
+    WelcomeEntry, WelcomeOverlay, WorkspaceScene, compile_cell_program, input::TextRange,
 };
 
 #[test]
@@ -686,6 +686,12 @@ fn every_remaining_overlay_variant_uses_the_shared_opaque_shell() {
             query: String::new(),
             items: Vec::new(),
             selected: None,
+            footer: String::new(),
+        }),
+        OverlayScene::Appearance(AppearanceOverlay {
+            area,
+            rows: Vec::new(),
+            selected: 0,
             footer: String::new(),
         }),
         OverlayScene::Welcome(WelcomeOverlay {
@@ -1610,4 +1616,84 @@ fn terminal_ime_cursor_replaces_pane_content_scope_with_text_input_scope() {
         assert_eq!(scope.clip, SceneRect::new(10, 5, 4, 1));
     }
     assert!(program.cell_at(11, 5).is_some_and(|cell| cell.cursor));
+}
+
+#[test]
+fn appearance_bars_paint_truthful_stop_colors_with_a_contrast_marker() {
+    let area = SceneRect::new(0, 0, 60, 8);
+    let stops = vec![[10, 10, 10], [200, 40, 40], [250, 250, 250]];
+    let overlay = OverlayScene::Appearance(AppearanceOverlay {
+        area,
+        rows: vec![
+            AppearanceRow {
+                label: "Theme".to_owned(),
+                control: AppearanceControl::Cycle {
+                    value: "mandatum-dark".to_owned(),
+                },
+            },
+            AppearanceRow {
+                label: "Background hue".to_owned(),
+                control: AppearanceControl::Bar {
+                    stops: stops.clone(),
+                    position_thousandths: 0,
+                    swatch: [1, 2, 3],
+                },
+            },
+        ],
+        selected: 1,
+        footer: "←/→ adjust".to_owned(),
+    });
+    let theme = Theme::default();
+    let program = compile_cell_program(&scene_with_overlay(overlay, Vec::new()), &theme);
+
+    // The bar row is the second item block (rows are two cells tall and start
+    // at the inner rect). Inner starts at (1,1); bar cells start after the
+    // 22-cell label region.
+    let bar_y = 3;
+    let first_bar_cell = program.cell_at(23, bar_y).expect("bar cell painted");
+    assert_eq!(
+        first_bar_cell.style.background,
+        SceneColor::Rgb(10, 10, 10),
+        "the first bar cell carries the first stop color"
+    );
+    assert_eq!(
+        first_bar_cell.occupancy,
+        CellOccupancy::Grapheme('│'.to_string()),
+        "the marker sits at position zero"
+    );
+    assert_eq!(
+        first_bar_cell.style.foreground,
+        SceneColor::Rgb(255, 255, 255),
+        "the marker picks white on a dark stop"
+    );
+
+    // The last bar cell shows the final stop; the swatch cells after it show
+    // the resolved color.
+    // Layout right-to-left: swatch cells at right-3 and right-2, one spacer
+    // cell, so the final bar cell sits at right-5.
+    let last_bar_x = area.right() - 5;
+    let last_bar_cell = program.cell_at(last_bar_x, bar_y).expect("last bar cell");
+    assert_eq!(
+        last_bar_cell.style.background,
+        SceneColor::Rgb(250, 250, 250)
+    );
+    let swatch = program
+        .cell_at(area.right() - 2, bar_y)
+        .expect("swatch cell");
+    assert_eq!(swatch.style.background, SceneColor::Rgb(1, 2, 3));
+
+    // The cycle row renders its value right-aligned on the first item block.
+    let value_row_y = 1;
+    let mut value_text = String::new();
+    for x in 1..area.right() - 1 {
+        if let Some(cell) = program.cell_at(x, value_row_y)
+            && let CellOccupancy::Grapheme(text) = &cell.occupancy
+        {
+            value_text.push_str(text);
+        }
+    }
+    assert!(
+        value_text.contains("mandatum-dark"),
+        "cycle value visible: {value_text:?}"
+    );
 }

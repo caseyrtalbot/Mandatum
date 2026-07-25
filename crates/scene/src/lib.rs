@@ -11,6 +11,7 @@
 //! (Constitution L1/L2/L4; enforced by `ci/conformance.sh`).
 
 pub mod cell_program;
+pub mod color;
 mod geometry;
 pub mod input;
 pub mod layout;
@@ -47,14 +48,14 @@ pub use theme::{
 };
 pub use workspace::{
     AccessibilityActionKind, AccessibilityNode, AccessibilityRole, AccessibilityState,
-    AttentionKind, AttentionSegment, ContextMenuEntry, ContextMenuOverlay, HeaderScene, HelpEntry,
-    HelpOverlay, HitTarget, HitTargetKind, LogicalHitTarget, OverlayKind, OverlayNodePart,
-    OverlayPresentationKind, OverlayScene, PaletteEntry, PaletteOverlay, PaneNodePart,
-    PreeditScene, PresentationAxis, PresentationNode, PresentationNodeId, PresentationNodeRole,
-    PresentationNodeState, PresentationTone, PromptOverlay, SESSION_MAP_FOCUS_GLYPH,
-    SceneMotionPolicy, ScenePresentation, SearchEntry, SearchOverlay, SemanticKey,
-    SessionMapOverlay, SessionMapRow, StatusScene, TerminalProjection, TerminalViewportMapping,
-    TextInputKind, TextInputScene, TimelineEntry, TimelineOverlay, TransitionProperty,
-    TransitionRole, TransitionTarget, WelcomeEntry, WelcomeOverlay, WorkspaceNodePart,
-    WorkspaceScene,
+    AppearanceControl, AppearanceOverlay, AppearanceRow, AttentionKind, AttentionSegment,
+    ContextMenuEntry, ContextMenuOverlay, HeaderScene, HelpEntry, HelpOverlay, HitTarget,
+    HitTargetKind, LogicalHitTarget, OverlayKind, OverlayNodePart, OverlayPresentationKind,
+    OverlayScene, PaletteEntry, PaletteOverlay, PaneNodePart, PreeditScene, PresentationAxis,
+    PresentationNode, PresentationNodeId, PresentationNodeRole, PresentationNodeState,
+    PresentationTone, PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneMotionPolicy, ScenePresentation,
+    SearchEntry, SearchOverlay, SemanticKey, SessionMapOverlay, SessionMapRow, StatusScene,
+    TerminalProjection, TerminalViewportMapping, TextInputKind, TextInputScene, TimelineEntry,
+    TimelineOverlay, TransitionProperty, TransitionRole, TransitionTarget, WelcomeEntry,
+    WelcomeOverlay, WorkspaceNodePart, WorkspaceScene,
 };

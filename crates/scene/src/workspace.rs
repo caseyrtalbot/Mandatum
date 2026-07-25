@@ -184,6 +184,7 @@ pub enum OverlayKind {
     Prompt,
     Search,
     Help,
+    Appearance,
     Welcome,
 }
 
@@ -210,6 +211,7 @@ impl OverlayScene {
             Self::Prompt(_) => OverlayKind::Prompt,
             Self::Search(_) => OverlayKind::Search,
             Self::Help(_) => OverlayKind::Help,
+            Self::Appearance(_) => OverlayKind::Appearance,
             Self::Welcome(_) => OverlayKind::Welcome,
         }
     }
@@ -480,7 +482,45 @@ pub enum OverlayScene {
     Prompt(PromptOverlay),
     Search(SearchOverlay),
     Help(HelpOverlay),
+    Appearance(AppearanceOverlay),
     Welcome(WelcomeOverlay),
+}
+
+/// The appearance overlay: live controls for the workspace theme and the
+/// terminal background color. Left/Right adjusts the selected row; every
+/// adjustment applies to the running session immediately.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppearanceOverlay {
+    pub area: SceneRect,
+    pub rows: Vec<AppearanceRow>,
+    /// Highlighted row.
+    pub selected: usize,
+    /// Footer hint line naming the overlay's own keys.
+    pub footer: String,
+}
+
+/// One appearance control row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppearanceRow {
+    pub label: String,
+    pub control: AppearanceControl,
+}
+
+/// How an appearance row renders and adjusts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppearanceControl {
+    /// A discrete value cycled with Left/Right ("mandatum-dark").
+    Cycle { value: String },
+    /// A numeric value stepped with Left/Right ("13.0 pt").
+    Stepper { value: String },
+    /// A color-channel bar: `stops` are evenly spaced direct colors the
+    /// painter spreads across the bar's cells, `position_thousandths`
+    /// (0..=1000) places the marker, and `swatch` is the resolved color.
+    Bar {
+        stops: Vec<[u8; 3]>,
+        position_thousandths: u16,
+        swatch: [u8; 3],
+    },
 }
 
 /// The help overlay: the live keymap grouped by category, palette fast

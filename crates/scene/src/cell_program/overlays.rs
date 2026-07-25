@@ -3,9 +3,9 @@ use super::{
     primitives::{bounded_grapheme, display_width},
 };
 use crate::{
-    ContextMenuOverlay, HelpOverlay, OverlayScene, PaletteOverlay, PromptOverlay,
-    SESSION_MAP_FOCUS_GLYPH, SceneCellStyle, SceneColor, SceneRect, SearchOverlay,
-    SessionMapOverlay, Theme, TimelineOverlay, WelcomeOverlay, layout,
+    AppearanceControl, AppearanceOverlay, ContextMenuOverlay, HelpOverlay, OverlayScene,
+    PaletteOverlay, PromptOverlay, SESSION_MAP_FOCUS_GLYPH, SceneCellStyle, SceneColor, SceneRect,
+    SearchOverlay, SessionMapOverlay, Theme, TimelineOverlay, WelcomeOverlay, color, layout,
 };
 
 use super::primitives::bordered_inner_rect;
@@ -21,6 +21,7 @@ impl Compiler {
             OverlayScene::Prompt(overlay) => overlay.area,
             OverlayScene::Search(overlay) => overlay.area,
             OverlayScene::Help(overlay) => overlay.area,
+            OverlayScene::Appearance(overlay) => overlay.area,
             OverlayScene::Welcome(overlay) => overlay.area,
         };
         self.begin_text_scope(TextPaintScopeKind::Overlay, area);
@@ -32,7 +33,163 @@ impl Compiler {
             OverlayScene::Prompt(prompt) => self.paint_prompt(prompt, theme),
             OverlayScene::Search(search) => self.paint_search(search, theme),
             OverlayScene::Help(help) => self.paint_help(help, theme),
+            OverlayScene::Appearance(appearance) => self.paint_appearance(appearance, theme),
             OverlayScene::Welcome(welcome) => self.paint_welcome(welcome, theme),
+        }
+    }
+
+    fn paint_appearance(&mut self, appearance: &AppearanceOverlay, theme: &Theme) {
+        let (inner, surface) =
+            self.paint_overlay_shell(appearance.area, Some(" Appearance "), theme);
+        if inner.is_empty() {
+            return;
+        }
+        // Bars need room beyond their label; below this width fall back to
+        // value-only rows so nothing paints outside the overlay.
+        let label_width = usize::from(inner.width).min(22);
+        for (row, index) in
+            layout::session_map_item_window(inner, appearance.rows.len(), Some(appearance.selected))
+                .enumerate()
+        {
+            let Some(block) = layout::session_map_item_rect(inner, row) else {
+                continue;
+            };
+            let item = &appearance.rows[index];
+            let selected = appearance.selected == index;
+            let y = block.y;
+            let marker = if selected { "▸ " } else { "  " };
+            let label_style = SceneCellStyle {
+                bold: selected,
+                ..surface
+            };
+            let mut column = 0usize;
+            let label_area = SceneRect::new(inner.x, y, label_width as u16, 1);
+            for grapheme in format!("{marker}{}", item.label).graphemes(true) {
+                self.paint_overlay_grapheme(
+                    label_area,
+                    &mut column,
+                    y,
+                    grapheme,
+                    label_style,
+                    false,
+                );
+            }
+            match &item.control {
+                AppearanceControl::Cycle { value } | AppearanceControl::Stepper { value } => {
+                    self.paint_appearance_value(inner, y, value, surface, selected);
+                }
+                AppearanceControl::Bar {
+                    stops,
+                    position_thousandths,
+                    swatch,
+                } => {
+                    self.paint_appearance_bar(
+                        inner,
+                        y,
+                        label_width,
+                        stops,
+                        *position_thousandths,
+                        *swatch,
+                        surface,
+                    );
+                }
+            }
+        }
+        if let Some(footer) = layout::footer_only_overlay_footer_rect(inner) {
+            self.paint_overlay_footer(footer, &appearance.footer, surface);
+        }
+    }
+
+    /// Right-aligned `‹ value ›` control text; emphasized when selected.
+    fn paint_appearance_value(
+        &mut self,
+        inner: SceneRect,
+        y: u16,
+        value: &str,
+        surface: SceneCellStyle,
+        selected: bool,
+    ) {
+        let text = format!("‹ {value} ›");
+        let width = display_width(&text).min(usize::from(inner.width));
+        let area = SceneRect::new(
+            inner.right().saturating_sub(width as u16),
+            y,
+            width as u16,
+            1,
+        );
+        let style = SceneCellStyle {
+            dim: !selected,
+            bold: selected,
+            ..surface
+        };
+        let mut column = 0usize;
+        for grapheme in text.graphemes(true) {
+            self.paint_overlay_grapheme(area, &mut column, y, grapheme, style, false);
+        }
+    }
+
+    /// A color-channel bar: stop colors spread across the cells between the
+    /// label and a trailing swatch, with a contrast-picked position marker.
+    /// Bar cells never take selection inverse video — their colors are the
+    /// control's value and must stay truthful.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_appearance_bar(
+        &mut self,
+        inner: SceneRect,
+        y: u16,
+        label_width: usize,
+        stops: &[[u8; 3]],
+        position_thousandths: u16,
+        swatch: [u8; 3],
+        surface: SceneCellStyle,
+    ) {
+        const SWATCH_CELLS: u16 = 2;
+        let bar_x = inner.x.saturating_add(label_width as u16);
+        let bar_end = inner.right().saturating_sub(SWATCH_CELLS.saturating_add(1));
+        if stops.is_empty() || bar_end <= bar_x {
+            return;
+        }
+        let bar_width = usize::from(bar_end - bar_x);
+        let marker_cell = usize::from(position_thousandths.min(1000)) * (bar_width - 1) / 1000;
+        for cell in 0..bar_width {
+            let stop_index = if bar_width == 1 {
+                0
+            } else {
+                cell * (stops.len() - 1) / (bar_width - 1)
+            };
+            let stop = stops[stop_index];
+            let background = SceneColor::Rgb(stop[0], stop[1], stop[2]);
+            let (glyph, foreground) = if cell == marker_cell {
+                let marker = color::marker_on(stop);
+                ('│', SceneColor::Rgb(marker[0], marker[1], marker[2]))
+            } else {
+                (' ', surface.foreground)
+            };
+            self.paint_cell(
+                bar_x.saturating_add(cell as u16),
+                y,
+                ProgramCell::glyph(
+                    glyph,
+                    SceneCellStyle {
+                        foreground,
+                        background,
+                        ..surface
+                    },
+                ),
+            );
+        }
+        for cell in 0..SWATCH_CELLS {
+            self.paint_cell(
+                bar_end.saturating_add(1).saturating_add(cell),
+                y,
+                ProgramCell::glyph(
+                    ' ',
+                    SceneCellStyle {
+                        background: SceneColor::Rgb(swatch[0], swatch[1], swatch[2]),
+                        ..surface
+                    },
+                ),
+            );
         }
     }
 

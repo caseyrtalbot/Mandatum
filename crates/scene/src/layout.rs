@@ -92,6 +92,20 @@ pub fn welcome_rect(size: SceneSize, line_count: u16) -> SceneRect {
     SceneRect::new(horizontal.x, y, horizontal.width, height)
 }
 
+/// The centered appearance overlay rect, sized to its `row_count` control
+/// rows plus the footer block and border.
+pub fn appearance_rect(size: SceneSize, row_count: u16) -> SceneRect {
+    let frame = SceneRect::new(0, 0, size.width, size.height);
+    let horizontal = centered_rect(60, 100, frame);
+    let height = row_count
+        .saturating_mul(OVERLAY_CONTROL_ROWS)
+        .saturating_add(OVERLAY_CONTROL_ROWS)
+        .saturating_add(2)
+        .min(size.height);
+    let y = (size.height.saturating_sub(height)) / 2;
+    SceneRect::new(horizontal.x, y, horizontal.width, height)
+}
+
 /// The centered one-line prompt overlay rect (Set agent objective): 60% of
 /// the width, two two-row inner controls (input and footer).
 pub fn prompt_rect(size: SceneSize) -> SceneRect {
