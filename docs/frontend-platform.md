@@ -121,8 +121,8 @@ later published releases and restore the previous command set if replacement
 fails. The archives contain command-line binaries rather than a `.app` bundle,
 so the project does not claim stapled or offline Gatekeeper tickets.
 
-Linux release archives contain the terminal frontend and approval bridge for
-arm64 and x86-64 glibc systems. There is no native Linux GUI release.
+Public binary releases currently target Apple Silicon and Intel macOS. Other
+platforms are outside the supported release path.
 
 ## Verification
 

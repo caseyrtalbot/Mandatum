@@ -900,8 +900,10 @@ developer unfamiliar with the current implementation can identify:
   every queued runtime event. Input-priority/wake-accounting tests, repeated
   focused flood/quit runs, and the synchronized gate passed. No native release
   was tagged: this checkout has no Developer ID Application certificate and
-  the required Apple release secrets are not configured. The synchronized
-  final `./ci/gate.sh` ended `GATE GREEN`.
+  the required Apple release secrets are not configured. The public binary
+  matrix and primary CI authority now target Apple Silicon and Intel macOS;
+  non-macOS distribution is deferred. The synchronized final `./ci/gate.sh`
+  ended `GATE GREEN`.
 
 ## Completion Rule
 

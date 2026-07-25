@@ -798,13 +798,14 @@ secure agent path work without a second manual discovery step.
 
 Consequences:
 
-- tags matching `v*` run the full gate, then native arm64 and x86-64 builds on
-  macOS and Linux; each archive contains both executables plus `LICENSE`
+- tags matching `v*` run the full gate on macOS, then Apple Silicon and Intel
+  macOS builds; each architecture receives a common archive and a separate
+  native archive
 - every archive has a SHA-256 sidecar, and `install.sh` verifies it before
   installing into `MANDATUM_INSTALL_DIR` (default `~/.local/bin`)
-- source installs remain documented as two explicit Cargo installs, one per
-  package, because Cargo requires package selection for a multi-package Git
-  source
+- source installs remain documented as three explicit Cargo installs, one per
+  executable package, because Cargo requires package selection in this
+  multi-package workspace
 - `cargo install mandatum` is not advertised until a separately verified
   crates.io publication decision exists
 

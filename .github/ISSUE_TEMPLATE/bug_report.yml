@@ -20,7 +20,7 @@ body:
     id: env
     attributes:
       label: Environment
-      placeholder: "macOS 15 / Ubuntu 24.04, terminal emulator, commit hash"
+      placeholder: "macOS version, Apple Silicon or Intel, commit or release version"
     validations:
       required: true
   - type: textarea

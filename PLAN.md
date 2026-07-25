@@ -1,9 +1,8 @@
 # Mandatum Roadmap
 
-Mandatum is a GPU-native development workstation for macOS with a maintained
-terminal frontend for macOS and glibc-based Linux. It keeps shells, tasks,
-long-running commands, agent activity, approvals, artifacts, and recovery in
-one spatial session.
+Mandatum is a GPU-native development workstation for macOS. It keeps shells,
+tasks, long-running commands, agent activity, approvals, artifacts, and
+recovery in one spatial session.
 
 This file points forward. Stable product behavior belongs in the public docs;
 accepted technical decisions and dated verification evidence remain in
@@ -73,9 +72,8 @@ source.
    Map the existing typed accessibility nodes and actions into the macOS
    accessibility tree, then qualify keyboard and VoiceOver behavior.
 
-Installer packaging, an editor surface, arbitrary document preview, Linux
-native GPU support, and broad agent-provider expansion remain outside the
-current milestone.
+An editor surface, arbitrary document preview, non-macOS distribution, and
+broad agent-provider expansion remain outside the current milestone.
 
 ## Release Standard
 

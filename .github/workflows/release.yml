@@ -17,8 +17,8 @@ env:
 
 jobs:
   gate:
-    name: full merge gate
-    runs-on: ubuntu-24.04
+    name: full macOS release gate
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Verify release tag matches the workspace version
@@ -57,10 +57,6 @@ jobs:
             target: aarch64-apple-darwin
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-          - runner: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -279,8 +275,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz' | wc -l)" -eq 6
-          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz.sha256' | wc -l)" -eq 6
+          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz' | wc -l)" -eq 4
+          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz.sha256' | wc -l)" -eq 4
           for checksum in dist/*.tar.gz.sha256; do
             (cd dist && sha256sum -c "$(basename "$checksum")")
           done
@@ -308,3 +304,44 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "Mandatum $GITHUB_REF_NAME"
+
+  smoke:
+    name: install and update ${{ matrix.target }}
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            machine: arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            machine: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the published release and exercise OTA update
+        shell: bash
+        env:
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+          MANDATUM_INSTALL_DIR: ${{ runner.temp }}/mandatum-bin
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
+          expected_version="${GITHUB_REF_NAME#v}"
+
+          sh install.sh
+          for binary in mandatum mandatum-native mandatum-approval-bridge; do
+            test -x "$MANDATUM_INSTALL_DIR/$binary"
+            codesign --verify --strict --verbose=2 \
+              "$MANDATUM_INSTALL_DIR/$binary"
+          done
+          test "$("$MANDATUM_INSTALL_DIR/mandatum" --version)" = \
+            "mandatum $expected_version"
+          test "$("$MANDATUM_INSTALL_DIR/mandatum-native" --font-info)" = \
+            '{"source":"bundled","requested_family":"JetBrains Mono","size":13.0,"faces":{"regular":"JetBrainsMono-Regular","bold":"JetBrainsMono-Bold","italic":"JetBrainsMono-Italic","bold_italic":"JetBrainsMono-BoldItalic"}}'
+
+          "$MANDATUM_INSTALL_DIR/mandatum" update
+          test "$("$MANDATUM_INSTALL_DIR/mandatum" --version)" = \
+            "mandatum $expected_version"

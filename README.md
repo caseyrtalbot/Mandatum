@@ -67,9 +67,8 @@ structure makes concurrent work easier to supervise.
 
 ## Status
 
-Mandatum is pre-release software. The native application currently targets
-macOS on Apple Silicon and Intel. A terminal frontend remains available for
-macOS and glibc-based Linux.
+Mandatum is pre-release software. Public binaries currently target macOS on
+Apple Silicon and Intel.
 
 The repository is prepared to produce signed and Apple-notarized macOS binaries,
 but the first compatible native release has not yet been published. Until a
@@ -156,15 +155,9 @@ cargo install --locked --path crates/agent-runtime \
   --bin mandatum-approval-bridge
 ```
 
-The terminal frontend also builds on glibc-based Linux:
-
-```sh
-cargo run --release -p mandatum-app --bin mandatum
-```
-
 ## Updates
 
-Installed releases update over the air through the terminal frontend:
+Compatible macOS releases update over the air through the terminal frontend:
 
 ```sh
 mandatum update
@@ -181,11 +174,9 @@ Updates follow published version tags, not every commit to `main`. Review the
 [release notes](https://github.com/caseyrtalbot/Mandatum/releases) before
 updating when reproducibility matters.
 
-An installation from before native archives were introduced needs one migration
-step. Run `mandatum update` twice: the first run updates the terminal command
-and its embedded installer while preserving the older archive contract; the
-second run downloads the separate native archive. Rerunning the one-line
-installer once has the same result.
+For an installation from before native archives were introduced, rerun the
+current one-line installer once. It downloads the complete macOS command set
+and applies the current checksum and Developer ID verification policy.
 
 ## First run
 

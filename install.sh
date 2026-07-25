@@ -194,24 +194,8 @@ case "$operating_system" in
         platform="apple-darwin"
         release_binaries="$common_release_binaries mandatum-native"
         ;;
-    Linux)
-        platform="unknown-linux-gnu"
-        release_binaries=$common_release_binaries
-        libc_description=""
-        if command -v getconf >/dev/null 2>&1; then
-            libc_description=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
-        fi
-        if [ -z "$libc_description" ] && command -v ldd >/dev/null 2>&1; then
-            libc_description=$(ldd --version 2>&1 || true)
-        fi
-        case "$libc_description" in
-            *musl* | *MUSL* | *Musl*)
-                fail "prebuilt Linux archives require glibc; build Mandatum from source on musl"
-                ;;
-        esac
-        ;;
     *)
-        fail "unsupported operating system: $operating_system"
+        fail "prebuilt releases currently support macOS only"
         ;;
 esac
 
