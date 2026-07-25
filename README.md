@@ -87,7 +87,8 @@ were running, and Mandatum never pretends otherwise.
 Terminal panes are real terminals. Input goes to the focused child process
 unless you explicitly invoke a workspace command, so full-screen tools like
 vim and htop behave normally. Text renders in a bundled JetBrains Mono
-through a wgpu pipeline on Metal.
+through a wgpu pipeline on Metal, with a generated Braille face filling
+the gap no stock macOS monospace covers.
 
 ## Agents
 

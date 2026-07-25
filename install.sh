@@ -89,7 +89,7 @@ install_launcher() {
 
 main() {
     [ "$(uname -s)" = "Darwin" ] \
-        || fail "Mandatum currently ships for macOS; see ${REPOSITORY} on GitHub for other platforms"
+        || fail "Mandatum is a macOS app; this installer requires macOS"
     command -v curl >/dev/null 2>&1 || fail "curl is required"
     command -v ditto >/dev/null 2>&1 || fail "ditto is required"
     command -v plutil >/dev/null 2>&1 || fail "plutil is required"
