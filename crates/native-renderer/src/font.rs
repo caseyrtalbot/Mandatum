@@ -393,6 +393,43 @@ impl FallbackReport {
     }
 }
 
+/// Families the appearance overlay's font row can offer: the bundled
+/// default first, then every installed family whose catalog metadata shows
+/// the four exact monospaced static-stretch style faces. This is a cheap
+/// prefilter — it reads face records, never font files — so a candidate can
+/// still fail strict resolution (a variable font, say); the apply path
+/// degrades that case to a status warning.
+pub fn cycle_candidate_families(database: &Database) -> Vec<String> {
+    let mut candidates = std::collections::BTreeMap::<String, [bool; 4]>::new();
+    for face in database.faces() {
+        let Some((family, _)) = face.families.first() else {
+            continue;
+        };
+        if family == BUNDLED_FAMILY || family == BRAILLE_FALLBACK_FAMILY {
+            continue;
+        }
+        if !face.monospaced || face.stretch != Stretch::Normal {
+            continue;
+        }
+        let slot = match (face.weight, face.style) {
+            (Weight::NORMAL, Style::Normal) => 0,
+            (Weight::BOLD, Style::Normal) => 1,
+            (Weight::NORMAL, Style::Italic) => 2,
+            (Weight::BOLD, Style::Italic) => 3,
+            _ => continue,
+        };
+        candidates.entry(family.clone()).or_default()[slot] = true;
+    }
+    let mut families = vec![BUNDLED_FAMILY.to_owned()];
+    families.extend(
+        candidates
+            .into_iter()
+            .filter(|(_, slots)| slots.iter().all(|present| *present))
+            .map(|(family, _)| family),
+    );
+    families
+}
+
 fn validate_request(request: &FontRequest) -> Result<(), FontProvisionError> {
     let family = request.requested_family().trim();
     if family.is_empty() || family.len() > 128 || family.chars().any(char::is_control) {
@@ -913,5 +950,33 @@ mod tests {
         assert_eq!(selected.for_style(true, false), selected.bold);
         assert_eq!(selected.for_style(false, true), selected.italic);
         assert_eq!(selected.for_style(true, true), selected.bold_italic);
+    }
+
+    #[test]
+    fn cycle_candidates_lead_with_the_bundled_family_and_require_four_styles() {
+        // An empty catalog offers only the bundled default.
+        assert_eq!(
+            cycle_candidate_families(&Database::new()),
+            vec![BUNDLED_FAMILY.to_owned()]
+        );
+
+        // A complete renamed monospace family qualifies; the bundled and
+        // Braille families are never listed as installed candidates, and a
+        // family missing a style face is excluded.
+        let mut database = renamed_database("Candidate Mono");
+        for face in renamed_database(BUNDLED_FAMILY).faces() {
+            let mut face = face.clone();
+            face.id = fontdb::ID::dummy();
+            database.push_face_info(face);
+        }
+        for face in renamed_database("Incomplete Mono").faces().take(3) {
+            let mut face = face.clone();
+            face.id = fontdb::ID::dummy();
+            database.push_face_info(face);
+        }
+        assert_eq!(
+            cycle_candidate_families(&database),
+            vec![BUNDLED_FAMILY.to_owned(), "Candidate Mono".to_owned()]
+        );
     }
 }

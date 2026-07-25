@@ -13,6 +13,7 @@ mod text_metrics;
 pub use font::{
     BUNDLED_FAMILY, DEFAULT_FONT_SIZE, FallbackRecord, FallbackReport, FontFacesInfo, FontInfo,
     FontProfileSource, FontProvisionError, FontRequest, ResolvedFontProfile, SelectedFontFaces,
+    cycle_candidate_families,
 };
 pub use motion::{ActiveTransitionWindow, PresentationMotion};
 pub use presentation_plan::{

@@ -31,14 +31,79 @@ pub(crate) enum AppearanceField {
     BackgroundHue,
     BackgroundSaturation,
     BackgroundLightness,
+    FontFamily,
+    FontSize,
 }
 
-pub(crate) const APPEARANCE_FIELDS: &[AppearanceField] = &[
+const THEME_FIELDS: &[AppearanceField] = &[
     AppearanceField::ThemeName,
     AppearanceField::BackgroundHue,
     AppearanceField::BackgroundSaturation,
     AppearanceField::BackgroundLightness,
 ];
+
+const ALL_FIELDS: &[AppearanceField] = &[
+    AppearanceField::ThemeName,
+    AppearanceField::BackgroundHue,
+    AppearanceField::BackgroundSaturation,
+    AppearanceField::BackgroundLightness,
+    AppearanceField::FontFamily,
+    AppearanceField::FontSize,
+];
+
+/// The rows the overlay offers. Font rows appear only when the frontend has
+/// declared its font facts — a terminal frontend inherits the host
+/// terminal's font and never shows them.
+pub(crate) fn appearance_fields(has_font: bool) -> &'static [AppearanceField] {
+    if has_font { ALL_FIELDS } else { THEME_FIELDS }
+}
+
+/// One Left/Right font size step and its hard bounds. The bounds mirror the
+/// native renderer's validation range so a stepped value can never fail to
+/// apply.
+const FONT_SIZE_STEP: f32 = 0.5;
+const FONT_SIZE_MINIMUM: f32 = 6.0;
+const FONT_SIZE_MAXIMUM: f32 = 72.0;
+
+/// The live font state a font-rendering frontend declares: the resolved
+/// family and size actually on screen, plus the families the family row can
+/// cycle through.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FontFacts {
+    pub(crate) family: String,
+    pub(crate) size: f32,
+    pub(crate) families: Vec<String>,
+}
+
+/// Apply one Left/Right adjustment to the declared font facts and describe
+/// the result for the status line.
+pub(crate) fn adjust_font(facts: &mut FontFacts, field: AppearanceField, direction: i8) -> String {
+    match field {
+        AppearanceField::FontFamily => {
+            if !facts.families.is_empty() {
+                let current = facts
+                    .families
+                    .iter()
+                    .position(|family| *family == facts.family)
+                    .unwrap_or(0);
+                let count = facts.families.len();
+                let next = if direction >= 0 {
+                    (current + 1) % count
+                } else {
+                    (current + count - 1) % count
+                };
+                facts.family = facts.families[next].clone();
+            }
+            format!("font {}", facts.family)
+        }
+        AppearanceField::FontSize => {
+            let stepped = facts.size + f32::from(direction) * FONT_SIZE_STEP;
+            facts.size = stepped.clamp(FONT_SIZE_MINIMUM, FONT_SIZE_MAXIMUM);
+            format!("font size {} pt", facts.size)
+        }
+        _ => String::new(),
+    }
+}
 
 /// Apply one Left/Right adjustment to the live theme and describe the result
 /// for the status line.
@@ -89,6 +154,7 @@ pub(crate) fn adjust_theme(theme: &mut Theme, field: AppearanceField, direction:
             );
             set_background(theme, hsl)
         }
+        AppearanceField::FontFamily | AppearanceField::FontSize => String::new(),
     }
 }
 
@@ -110,22 +176,39 @@ fn set_background(theme: &mut Theme, hsl: Hsl) -> String {
     format!("background #{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
 }
 
-/// Assemble the appearance overlay scene from the live theme.
+/// Assemble the appearance overlay scene from the live theme and the
+/// frontend's declared font facts.
 pub(crate) fn appearance_overlay_scene(
     theme: &Theme,
+    font: Option<&FontFacts>,
     selected: usize,
     size: SceneSize,
 ) -> AppearanceOverlay {
     let hsl = background_hsl(theme);
-    let rows = APPEARANCE_FIELDS
+    let fields = appearance_fields(font.is_some());
+    let rows = fields
         .iter()
-        .map(|field| appearance_row(theme, hsl, *field))
+        .map(|field| match field {
+            AppearanceField::FontFamily => AppearanceRow {
+                label: "Font family".to_owned(),
+                control: AppearanceControl::Cycle {
+                    value: font.map(|facts| facts.family.clone()).unwrap_or_default(),
+                },
+            },
+            AppearanceField::FontSize => AppearanceRow {
+                label: "Font size".to_owned(),
+                control: AppearanceControl::Stepper {
+                    value: format!("{} pt", font.map(|facts| facts.size).unwrap_or_default()),
+                },
+            },
+            _ => appearance_row(theme, hsl, *field),
+        })
         .collect::<Vec<_>>();
     let row_count = rows.len() as u16;
     AppearanceOverlay {
         area: layout::appearance_rect(size, row_count),
         rows,
-        selected: selected.min(APPEARANCE_FIELDS.len().saturating_sub(1)),
+        selected: selected.min(fields.len().saturating_sub(1)),
         footer: "←/→ adjust · ↑/↓ select · Esc close".to_owned(),
     }
 }
@@ -171,6 +254,9 @@ fn appearance_row(theme: &Theme, background: Hsl, field: AppearanceField) -> App
                 theme,
             ),
         },
+        AppearanceField::FontFamily | AppearanceField::FontSize => {
+            unreachable!("font rows are assembled from FontFacts by the scene builder")
+        }
     }
 }
 
@@ -238,8 +324,8 @@ mod tests {
     #[test]
     fn overlay_scene_rows_match_the_field_order_and_carry_truthful_swatches() {
         let theme = Theme::default();
-        let scene = appearance_overlay_scene(&theme, 2, SceneSize::new(120, 40));
-        assert_eq!(scene.rows.len(), APPEARANCE_FIELDS.len());
+        let scene = appearance_overlay_scene(&theme, None, 2, SceneSize::new(120, 40));
+        assert_eq!(scene.rows.len(), appearance_fields(false).len());
         assert_eq!(scene.selected, 2);
         assert!(matches!(
             scene.rows[0].control,
@@ -256,7 +342,49 @@ mod tests {
 
     #[test]
     fn selection_clamps_to_the_last_row() {
-        let scene = appearance_overlay_scene(&Theme::default(), 99, SceneSize::new(80, 24));
-        assert_eq!(scene.selected, APPEARANCE_FIELDS.len() - 1);
+        let scene = appearance_overlay_scene(&Theme::default(), None, 99, SceneSize::new(80, 24));
+        assert_eq!(scene.selected, appearance_fields(false).len() - 1);
+    }
+
+    #[test]
+    fn font_rows_appear_only_with_declared_facts_and_adjust_within_bounds() {
+        let mut facts = FontFacts {
+            family: "JetBrains Mono".to_owned(),
+            size: 13.0,
+            families: vec!["JetBrains Mono".to_owned(), "Berkeley Mono".to_owned()],
+        };
+        let theme = Theme::default();
+
+        let scene = appearance_overlay_scene(&theme, Some(&facts), 4, SceneSize::new(120, 40));
+        assert_eq!(scene.rows.len(), appearance_fields(true).len());
+        assert!(matches!(
+            &scene.rows[4].control,
+            AppearanceControl::Cycle { value } if value == "JetBrains Mono"
+        ));
+        assert!(matches!(
+            &scene.rows[5].control,
+            AppearanceControl::Stepper { value } if value == "13 pt"
+        ));
+
+        // Family cycles and wraps in both directions.
+        adjust_font(&mut facts, AppearanceField::FontFamily, 1);
+        assert_eq!(facts.family, "Berkeley Mono");
+        adjust_font(&mut facts, AppearanceField::FontFamily, 1);
+        assert_eq!(facts.family, "JetBrains Mono");
+        adjust_font(&mut facts, AppearanceField::FontFamily, -1);
+        assert_eq!(facts.family, "Berkeley Mono");
+
+        // Size steps by halves and pegs at the renderer's validation bounds.
+        let status = adjust_font(&mut facts, AppearanceField::FontSize, 1);
+        assert_eq!(facts.size, 13.5);
+        assert_eq!(status, "font size 13.5 pt");
+        for _ in 0..200 {
+            adjust_font(&mut facts, AppearanceField::FontSize, 1);
+        }
+        assert_eq!(facts.size, FONT_SIZE_MAXIMUM);
+        for _ in 0..200 {
+            adjust_font(&mut facts, AppearanceField::FontSize, -1);
+        }
+        assert_eq!(facts.size, FONT_SIZE_MINIMUM);
     }
 }

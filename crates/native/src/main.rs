@@ -16,8 +16,8 @@ use input::{
 };
 use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
 use mandatum_native_renderer::{
-    DEFAULT_FONT_SIZE, FontRequest, GpuRenderError, GpuRenderOutcome, GpuStartupError,
-    GpuStartupErrorKind, GpuText, ResolvedFontProfile,
+    BUNDLED_FAMILY, DEFAULT_FONT_SIZE, FontRequest, GpuRenderError, GpuRenderOutcome,
+    GpuStartupError, GpuStartupErrorKind, GpuText, ResolvedFontProfile, cycle_candidate_families,
 };
 use mandatum_scene::{
     LogicalPoint, SceneSize, ViewportMetrics, WorkspaceScene,
@@ -452,7 +452,88 @@ impl App {
                             .report_platform_error("clipboard write failed: clipboard unavailable");
                     }
                 }
+                FrontendEffect::ApplyFont { family, size } => self.apply_font(family, size),
             }
+        }
+    }
+
+    /// Re-declare the live font truth to the shared state: resolved family,
+    /// unscaled size, and the families the appearance overlay can offer.
+    fn declare_font_facts(&mut self) {
+        let family = self.font_profile.family().to_owned();
+        let size = self
+            .gpu
+            .as_ref()
+            .map(GpuText::base_font_size)
+            .unwrap_or_else(|| self.font_profile.size());
+        let families = cycle_candidate_families(self.font_profile.database());
+        self.host_mut().set_font_facts(family, size, families);
+    }
+
+    /// Apply a requested font live. A size change reuses the cheap metric
+    /// path; a family change resolves a fresh profile with launch-config
+    /// degrade semantics — failure keeps the current font and warns in the
+    /// status line instead of tearing anything down. Either way the actual
+    /// resolved state is re-declared afterwards, so the overlay's rows stay
+    /// truthful.
+    fn apply_font(&mut self, family: String, size: f32) {
+        let mut metrics_changed = false;
+        if family != self.font_profile.family() {
+            let request = if family == BUNDLED_FAMILY {
+                FontRequest::BundledDefault { size }
+            } else {
+                FontRequest::installed(family.clone(), size)
+            };
+            match ResolvedFontProfile::resolve(request) {
+                Ok(profile) => {
+                    let applied = match self.gpu.as_mut() {
+                        Some(gpu) => pollster::block_on(gpu.apply_font_profile(profile.clone())),
+                        None => Ok(()),
+                    };
+                    match applied {
+                        Ok(()) => {
+                            *self.font_profile = profile;
+                            metrics_changed = true;
+                        }
+                        Err(error) => {
+                            self.host_mut()
+                                .report_platform_error(format!("font not applied: {error}"));
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.host_mut()
+                        .report_platform_error(format!("font not applied: {error}"));
+                }
+            }
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            let before = gpu.base_font_size();
+            match gpu.set_base_font_size(size) {
+                Ok(()) => {
+                    if (before - size).abs() >= f32::EPSILON {
+                        metrics_changed = true;
+                    }
+                }
+                Err(error) => {
+                    self.host_mut()
+                        .report_platform_error(format!("font size not applied: {error}"));
+                }
+            }
+        }
+        self.declare_font_facts();
+        if metrics_changed {
+            // Cell metrics changed: the same choreography as a display-scale
+            // transition keeps pointer, motion, and PTY geometry coherent.
+            self.scene_presentable = false;
+            self.cancel_pointer_gesture();
+            self.host_mut().suspend_scene_interaction();
+            if let Some(gpu) = &mut self.gpu {
+                gpu.snap_presentation_motion();
+            }
+            self.refresh_mouse_cell();
+            self.resize_host();
+            self.request_redraw();
         }
     }
 
@@ -829,6 +910,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.host = Some(host);
+        self.declare_font_facts();
         self.next_heartbeat = Instant::now() + HEARTBEAT;
         self.resize_host();
         self.request_redraw();

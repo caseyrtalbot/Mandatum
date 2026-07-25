@@ -3570,3 +3570,51 @@ that tasks could never run from `/`, nothing functional is lost.
 
 Verification: three unit tests pin the pass-through, the redirect with
 its warning, and the no-`$HOME` case.
+
+## In-App Appearance Overlay And The First Config Writer
+
+Context: adjusting the theme, background color, or font required hand-
+editing `config.toml` and, for fonts, a restart. The config boundary was
+deliberately read-only: no production code path wrote the file. An in-app
+control surface needed both a live-apply path and a persistence story
+that would not trample a hand-maintained config.
+
+Decision: a new `adjust-appearance` command (palette-searchable; the
+reserved `i` letter stays free) opens a modal Appearance overlay defined
+in `mandatum-scene` and painted in the shared cell program, so both
+frontends render it (L1). Rows follow the index-selected list idiom:
+the base theme cycles the built-ins as a complete snapshot, matching
+`[theme] name` semantics, and the terminal background adjusts by HSL
+channel over cell-rendered gradient bars whose stops preview the exact
+resulting colors. Font rows appear only when a frontend declares its
+font facts (resolved family, size, and cycle candidates); the terminal
+frontend never does, since it inherits the host terminal's font. Font
+changes flow to the native frontend as a `FrontendEffect::ApplyFont`:
+size reuses the cheap metric path (shaping-cache flush, no atlas
+rebuild), family resolves a fresh profile and swaps it through the
+device-recreation path, and failure degrades to a status warning with
+the previous font kept — after every attempt the frontend re-declares
+the resolved truth, so the overlay's rows cannot drift from the screen.
+
+Every adjustment persists to the user config file through the codebase's
+first production config writer (`config_write.rs`): toml_edit edits only
+the managed keys (`[theme] name`, `[theme.terminal] background`,
+`[font] family`, `[font] size`), preserving the user's comments and
+formatting, and replaces the file atomically by temp-then-rename. A
+missing file is created with a short header; a file that is not valid
+TOML is never overwritten — the write fails into a status warning while
+the live session keeps the change. Project-level config still wins at
+the next launch through the unchanged overlay order.
+
+Consequences: `config.toml` is no longer strictly read-only at the
+boundary, but the writer's surface is exactly the four managed keys.
+Reload Config remains the live-apply path for hand edits to colors;
+hand edits to `[font]` still need a restart, since reload does not
+re-resolve fonts — the overlay is the live font path.
+
+Verification: config_write round-trip tests (creation, comment
+preservation, invalid-file refusal), appearance adjustment and overlay
+scene tests, app-state interaction tests (input ownership, mutual
+exclusion with other overlays, persistence wiring), a cell-program
+painting test pinning truthful bar stop colors and marker contrast, and
+a candidate-family enumeration test. Full local ci/gate.sh run.

@@ -124,10 +124,17 @@ background = "#0b0d12"    # terminal cells and the cleared frame
 canvas = "#0b0d12"        # the native surface behind the panes
 ```
 
-Colors apply the moment you run Reload Config. Font changes need an app
-restart, and `--font-family` / `--font-size` override the file for a single
-launch. A font the file asks for but the system cannot provide warns in the
-status line and falls back to the default rather than blocking startup.
+You rarely need to edit these by hand: the Adjust Appearance command
+(`Control-P`, type "appearance") changes the theme, background color, and
+font live, with gradient bars for hue, saturation, and lightness, and
+writes your choices back to the user config file without touching anything
+else in it.
+
+Hand-edited colors apply the moment you run Reload Config. Hand-edited font
+changes need an app restart, and `--font-family` / `--font-size` override
+the file for a single launch. A font the file asks for but the system
+cannot provide warns in the status line and falls back to the default
+rather than blocking startup.
 
 ## Status
 

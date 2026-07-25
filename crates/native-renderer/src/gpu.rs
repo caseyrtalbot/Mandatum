@@ -3012,6 +3012,7 @@ impl GpuText {
     pub async fn recreate_device(&mut self) -> Result<(), GpuStartupError> {
         let (width, height) = self.surface_size();
         let scale = self.scale;
+        let base_font_size = self.base_font_size;
         let next_device_generation = self.device_generation.saturating_add(1);
         let next_surface_generation = self.surface_generation.saturating_add(1);
         let next_device_recreations = self.device_recreations.saturating_add(1);
@@ -3026,6 +3027,9 @@ impl GpuText {
         replacement.resize_surface(width, height);
         replacement
             .set_scale(scale)
+            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
+        replacement
+            .set_base_font_size(base_font_size)
             .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
         replacement.surface_generation = next_surface_generation;
         replacement.surface_reconfigurations = self.surface_reconfigurations;
@@ -3056,14 +3060,76 @@ impl GpuText {
             return Ok(());
         }
         self.scale = scale;
+        self.refresh_text_metrics();
+        Ok(())
+    }
+
+    /// Change the live point size. Same invalidation contract as a scale
+    /// change: shaping-cache flush plus metric recomputation; glyphon's
+    /// atlas re-rasterizes on demand, so no GPU resource rebuild is needed.
+    pub fn set_base_font_size(&mut self, size: f32) -> Result<(), String> {
+        if !size.is_finite() || !(6.0..=72.0).contains(&size) {
+            return Err(format!(
+                "font size must be finite and between 6 and 72 points, got {size}"
+            ));
+        }
+        if (size - self.base_font_size).abs() < f32::EPSILON {
+            return Ok(());
+        }
+        self.base_font_size = size;
+        self.refresh_text_metrics();
+        Ok(())
+    }
+
+    /// The unscaled configured point size the next device recreation and
+    /// font-facts declaration must preserve.
+    pub fn base_font_size(&self) -> f32 {
+        self.base_font_size
+    }
+
+    fn refresh_text_metrics(&mut self) {
         self.scale_generation = self.scale_generation.saturating_add(1);
         self.shaping_cache.invalidate();
-        self.font_size = (self.base_font_size * scale).round();
+        self.font_size = (self.base_font_size * self.scale).round();
         let line_height = (self.font_size * 1.3).round();
         let metrics = Metrics::new(self.font_size, line_height);
         self.row_buffers.set_metrics(metrics);
         self.cell_w = measure_cell_width(&mut self.font_system, metrics, &self.font_family);
         self.cell_h = line_height;
+    }
+
+    /// Swap the live font family by rebuilding the text stack around a
+    /// freshly resolved profile. This reuses the device-recreation path —
+    /// heavier than a family change strictly needs, but every invariant of
+    /// that tested path (generation retirement, cache identity, surface
+    /// reconfiguration) carries over unchanged. The configured point size
+    /// survives the swap.
+    pub async fn apply_font_profile(
+        &mut self,
+        profile: ResolvedFontProfile,
+    ) -> Result<(), GpuStartupError> {
+        let base_font_size = self.base_font_size;
+        let (width, height) = self.surface_size();
+        let scale = self.scale;
+        let next_device_generation = self.device_generation.saturating_add(1);
+        let next_surface_generation = self.surface_generation.saturating_add(1);
+        let mut replacement =
+            Self::new_with_device_generation(self.window.clone(), profile, next_device_generation)
+                .await?;
+        replacement.resize_surface(width, height);
+        replacement
+            .set_scale(scale)
+            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
+        replacement
+            .set_base_font_size(base_font_size)
+            .map_err(|error| startup_error(StartupFailureStage::Configuration, error))?;
+        replacement.surface_generation = next_surface_generation;
+        replacement.surface_reconfigurations = self.surface_reconfigurations;
+        replacement.device_recreations = self.device_recreations;
+        replacement.injected_faults = self.injected_faults;
+        replacement.shaping_cache_enabled = self.shaping_cache_enabled;
+        retire_gpu_generation(&self.device_fault, next_device_generation);
+        *self = replacement;
         Ok(())
     }
 

@@ -6,8 +6,12 @@
 //! `AppState`.
 
 /// A platform action requested by the shared workstation state machine.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FrontendEffect {
     /// Replace the platform clipboard with the supplied text.
     SetClipboard(String),
+    /// Apply this font to the frontend's text surface. Only the native
+    /// frontend renders its own text; a terminal frontend inherits the host
+    /// terminal's font and ignores this.
+    ApplyFont { family: String, size: f32 },
 }

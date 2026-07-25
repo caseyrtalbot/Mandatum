@@ -3207,7 +3207,9 @@ fn copy_mode_enters_selects_and_copies_to_clipboard() {
     let effects = state.take_frontend_effects();
     assert_eq!(effects.len(), 1);
     let effect = effects.into_iter().next().expect("frontend effect staged");
-    let FrontendEffect::SetClipboard(text) = effect;
+    let FrontendEffect::SetClipboard(text) = effect else {
+        panic!("copy stages a clipboard effect, got {effect:?}");
+    };
     assert_eq!(state.last_copied(), Some(text.as_str()));
     assert!(state.take_frontend_effects().is_empty());
 

@@ -523,6 +523,9 @@ fn write_frontend_effect(writer: &mut dyn Write, effect: FrontendEffect) -> io::
             // disturb the rendered UI.
             writer.write_all(&osc52_sequence(&text))?;
         }
+        // The terminal frontend inherits the host terminal's font; it also
+        // never declares font facts, so this arm is unreachable in practice.
+        FrontendEffect::ApplyFont { .. } => {}
     }
     writer.flush()
 }

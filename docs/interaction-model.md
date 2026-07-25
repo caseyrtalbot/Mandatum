@@ -53,7 +53,12 @@ Ctrl+P opens it with an empty filter input. The interaction contract
 
 Command labels should be short, verb-first, and stable.
 
-Still open for the palette: recent commands, and settings/keymap commands.
+Still open for the palette: recent commands, and keymap commands.
+Appearance settings have their own surface: "Adjust appearance" opens a
+modal overlay whose rows cycle the theme, adjust the terminal background
+by HSL channel over live gradient bars, and (in the native app) change
+the font family and size, applying live and persisting to the user
+config file.
 
 ## Help
 

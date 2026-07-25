@@ -147,6 +147,17 @@ impl FrontendHost {
         }
     }
 
+    /// Declare the frontend's live font: the resolved family and size on
+    /// screen plus the families the appearance overlay can offer. Frontends
+    /// that render their own text call this at startup and after every font
+    /// apply attempt; a terminal frontend never does, which hides the
+    /// overlay's font rows.
+    pub fn set_font_facts(&mut self, family: String, size: f32, families: Vec<String>) {
+        if !self.shutdown_complete {
+            self.app.set_font_facts(family, size, families);
+        }
+    }
+
     /// Block until one unified input/runtime event is applied or the timeout
     /// expires. A shut-down host never blocks or applies queued work.
     pub fn wait_event(&mut self, timeout: Duration) -> bool {

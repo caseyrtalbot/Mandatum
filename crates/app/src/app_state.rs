@@ -146,6 +146,8 @@ pub struct AppState {
     help_view: Option<HelpViewState>,
     /// The open appearance overlay, if any (modal, like the palette).
     appearance_view: Option<AppearanceViewState>,
+    /// The frontend's declared live font, when it renders its own text.
+    font_facts: Option<appearance::FontFacts>,
     /// Whether the one-time first-run note is on screen. Set only when a
     /// launch that asked to restore found no saved workspace; cleared by any
     /// action (a saved workspace suppresses it on every later launch).
@@ -258,6 +260,7 @@ impl AppState {
             session_map: None,
             help_view: None,
             appearance_view: None,
+            font_facts: None,
             first_run_note: false,
             objective_prompt: None,
             active_composition: None,
@@ -4020,7 +4023,7 @@ impl AppState {
             }
             _ => {}
         }
-        let row_count = appearance::APPEARANCE_FIELDS.len();
+        let row_count = appearance::appearance_fields(self.font_facts.is_some()).len();
         let ctrl_only = key.mods.control && !key.mods.shift && !key.mods.alt && !key.mods.super_key;
         if key.code == KeyCode::Up || (ctrl_only && key.code == KeyCode::Char('p')) {
             if let Some(view) = self.appearance_view.as_mut() {
@@ -4046,13 +4049,41 @@ impl AppState {
         let Some(field) = self
             .appearance_view
             .as_ref()
-            .and_then(|view| appearance::APPEARANCE_FIELDS.get(view.selected))
+            .and_then(|view| {
+                appearance::appearance_fields(self.font_facts.is_some()).get(view.selected)
+            })
             .copied()
         else {
             return;
         };
-        self.status = appearance::adjust_theme(&mut self.theme, field, direction);
+        match field {
+            appearance::AppearanceField::FontFamily | appearance::AppearanceField::FontSize => {
+                let Some(facts) = self.font_facts.as_mut() else {
+                    return;
+                };
+                self.status = appearance::adjust_font(facts, field, direction);
+                let (family, size) = (facts.family.clone(), facts.size);
+                self.frontend_effects
+                    .push(FrontendEffect::ApplyFont { family, size });
+            }
+            _ => {
+                self.status = appearance::adjust_theme(&mut self.theme, field, direction);
+            }
+        }
         self.persist_appearance();
+    }
+
+    /// A font-rendering frontend declares what is actually on screen: the
+    /// resolved family and size plus the families the family row can cycle
+    /// through. Called at startup and again after every apply attempt, so
+    /// the overlay's font rows always tell the truth even when an apply
+    /// degrades.
+    pub(crate) fn set_font_facts(&mut self, family: String, size: f32, families: Vec<String>) {
+        self.font_facts = Some(appearance::FontFacts {
+            family,
+            size,
+            families,
+        });
     }
 
     /// Persist the appearance-owned keys to the user config file so the
@@ -4065,7 +4096,8 @@ impl AppState {
         let update = AppearanceUpdate {
             theme_name: Some(self.theme.name.clone()),
             terminal_background: Some(self.theme.terminal_palette.background),
-            ..AppearanceUpdate::default()
+            font_family: self.font_facts.as_ref().map(|facts| facts.family.clone()),
+            font_size: self.font_facts.as_ref().map(|facts| facts.size),
         };
         if let Err(problem) = write_appearance_update(path, &update) {
             self.status = format!("{}; {problem}", self.status);
@@ -4080,6 +4112,7 @@ impl AppState {
         let view = self.appearance_view.as_ref()?;
         Some(appearance::appearance_overlay_scene(
             &self.theme,
+            self.font_facts.as_ref(),
             view.selected,
             size,
         ))
