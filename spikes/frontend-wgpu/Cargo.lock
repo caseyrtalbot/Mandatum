@@ -1430,7 +1430,7 @@ dependencies = [
  "mandatum-workflows",
  "png",
  "ratatui",
- "rustix 0.38.44",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "toml",
