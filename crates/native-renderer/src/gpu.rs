@@ -6014,6 +6014,112 @@ mod tests {
     }
 
     #[test]
+    fn braille_spinner_glyphs_shape_admitted_from_the_bundled_fallback() {
+        // Spinner frames from the Braille block. JetBrains Mono has no
+        // Braille coverage and Apple Braille's 0.692em advance can never
+        // match the 0.6em cell, so before the bundled fallback these runs
+        // permanently failed admission and took the anchored path.
+        let text = "\u{280b}\u{2819}\u{28ff}";
+        let surface = TerminalSurface {
+            rows: vec![
+                text.chars()
+                    .map(|character| {
+                        SceneCell::grapheme(
+                            character.to_string(),
+                            mandatum_scene::SceneCellStyle::default(),
+                        )
+                    })
+                    .collect(),
+            ],
+            ..TerminalSurface::default()
+        };
+        let scene = scene(vec![pane(
+            PaneSceneKind::Terminal,
+            PaneContent::Terminal(surface),
+        )]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+        )
+        .unwrap();
+        let row = translated
+            .rows
+            .iter()
+            .find(|row| row.text == text)
+            .expect("same-style graphemes share one row run")
+            .clone();
+
+        let font_profile = ResolvedFontProfile::resolve(FontRequest::default()).unwrap();
+        let mut font_system = font_profile.create_font_system();
+        let line_height = (font_profile.size() * 1.3).round();
+        let metrics = Metrics::new(font_profile.size(), line_height);
+        let cell_advance = measure_cell_width(&mut font_system, metrics, font_profile.family());
+        let family = font_profile.family().to_owned();
+        let mut row_buffers = RowBufferPool::new();
+        let mut shaping_cache = ShapingCache::new();
+        let mut fallback_report = FallbackReport::new(font_profile.generation());
+        let mut diagnostics = BTreeSet::new();
+        let shaped = RowShapingPass {
+            font_system: &mut font_system,
+            row_buffers: &mut row_buffers,
+            shaping_cache: &mut shaping_cache,
+            fallback_report: &mut fallback_report,
+            diagnostics: &mut diagnostics,
+            font_profile: &font_profile,
+            font_family: &family,
+            cache_enabled: true,
+            terminal_metrics: metrics,
+            cell_advance,
+            cell_height: line_height,
+            scale: 1.0,
+            scale_generation: 1,
+        }
+        .run(vec![row.clone()])
+        .unwrap();
+
+        // Admitted as one grid-aligned run — no anchored retirement.
+        assert_eq!(
+            shaped
+                .iter()
+                .map(|shaped| (shaped.row.text.as_str(), shaped.row.x))
+                .collect::<Vec<_>>(),
+            vec![(text, row.x)]
+        );
+        let context = ShapingCacheContext {
+            font_generation: font_profile.generation(),
+            scale_generation: 1,
+            metric_generation: 0,
+            metric_slot: 0,
+            renderer_config_generation: SHAPING_POLICY_GENERATION,
+            font_size_bits: metrics.font_size.to_bits(),
+            line_height_bits: metrics.line_height.to_bits(),
+            cell_width_bits: cell_advance.to_bits(),
+            cell_height_bits: line_height.to_bits(),
+        };
+        let key = shaping_cache_key_for_candidate(true, false, &row, context)
+            .expect("admitted candidates are cacheable");
+        let Some(CachedShaping::Shaped { observations, .. }) = shaping_cache.get_cloned(&key)
+        else {
+            panic!("the braille run must be retained under its ordinary key");
+        };
+        assert!(!observations.is_empty());
+        for observation in observations.iter() {
+            let face = font_profile
+                .database()
+                .face(observation.font_id)
+                .expect("observed face is in the resolved catalog");
+            assert_eq!(
+                face.post_script_name, "MandatumBraille-Regular",
+                "braille glyphs must come from the bundled metric-matched face"
+            );
+        }
+    }
+
+    #[test]
     fn bundled_profile_shapes_regular_bold_italic_and_bold_italic_from_selected_faces() {
         let style = |bold, italic| mandatum_scene::SceneCellStyle {
             bold,

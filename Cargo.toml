@@ -54,6 +54,9 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sys-locale = "0.3"
 ttf-parser = "0.25"
+# Script values for the custom cosmic-text Fallback; must stay in sync
+# with the unicode-script version cosmic-text itself uses.
+unicode-script = "0.5"
 png = "0.18"
 pollster = "0.4"
 # preserve_order keeps config-file key order so "later binding wins"

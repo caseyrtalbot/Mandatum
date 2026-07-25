@@ -15,9 +15,11 @@ use std::{
 
 use glyphon::{
     FontSystem,
+    cosmic_text::{Fallback, PlatformFallback},
     fontdb::{self, Database, FaceInfo, Source, Stretch, Style, Weight},
 };
 use serde::Serialize;
+use unicode_script::Script;
 
 pub const BUNDLED_FAMILY: &str = "JetBrains Mono";
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
@@ -34,7 +36,40 @@ const ITALIC_BYTES: &[u8] =
 const BOLD_ITALIC_BYTES: &[u8] =
     include_bytes!("../assets/fonts/jetbrains-mono-v2.304/JetBrainsMono-BoldItalic.ttf");
 
+/// Generated Braille block (U+2800-U+28FF) at JetBrains Mono metrics
+/// (600/1000 em advance). Neither the bundled family nor any stock macOS
+/// monospace font covers Braille, so without this face CLI spinner glyphs
+/// fell through to Apple Braille, whose 0.692em advance fails cell
+/// admission and forces anchored decomposition. Regenerate with
+/// `packaging/make-braille-font.py`.
+pub const BRAILLE_FALLBACK_FAMILY: &str = "Mandatum Braille";
+const BRAILLE_BYTES: &[u8] =
+    include_bytes!("../assets/fonts/mandatum-braille/MandatumBraille-Regular.ttf");
+
 static NEXT_CATALOG_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Platform fallback with one override: Braille resolves to the bundled
+/// metric-matched face instead of whatever the database scan finds first
+/// (Apple Braille on macOS). Script fallback runs before the common list
+/// and the whole-database scan, so the override is deterministic.
+struct MandatumFallback;
+
+impl Fallback for MandatumFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        PlatformFallback.common_fallback()
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        PlatformFallback.forbidden_fallback()
+    }
+
+    fn script_fallback(&self, script: Script, locale: &str) -> &[&'static str] {
+        if script == Script::Braille {
+            return &[BRAILLE_FALLBACK_FAMILY];
+        }
+        PlatformFallback.script_fallback(script, locale)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FontRequest {
@@ -169,7 +204,11 @@ impl ResolvedFontProfile {
     /// Cloning this profile and calling this method during device recreation
     /// preserves the selected IDs and cannot rescan into a different primary.
     pub fn create_font_system(&self) -> FontSystem {
-        FontSystem::new_with_locale_and_db(self.locale.clone(), self.database.clone())
+        FontSystem::new_with_locale_and_db_and_fallback(
+            self.locale.clone(),
+            self.database.clone(),
+            MandatumFallback,
+        )
     }
 
     /// Clone the already resolved catalog for GPU-device recreation.
@@ -414,6 +453,7 @@ fn resolve_in_database(
             (FontProfileSource::System, family, selected)
         }
     };
+    load_braille_fallback_face(&mut database)?;
     database.set_monospace_family(family.clone());
     let info = FontInfo {
         source,
@@ -448,6 +488,28 @@ fn load_one_bundled_face(
         )));
     }
     Ok(ids[0])
+}
+
+/// Load the bundled Braille face for every profile, whichever primary the
+/// request selected. Any same-named system face is removed first so the
+/// resolved catalog is deterministic.
+fn load_braille_fallback_face(database: &mut Database) -> Result<(), FontProvisionError> {
+    let duplicate_ids = database
+        .faces()
+        .filter(|face| face_has_family(face, BRAILLE_FALLBACK_FAMILY, false))
+        .map(|face| face.id)
+        .collect::<Vec<_>>();
+    for id in duplicate_ids {
+        database.remove_face(id);
+    }
+    let ids = database.load_font_source(Source::Binary(Arc::new(BRAILLE_BYTES.to_vec())));
+    if ids.len() != 1 {
+        return Err(FontProvisionError::new(format!(
+            "bundled Mandatum Braille contained {} faces, expected one",
+            ids.len()
+        )));
+    }
+    Ok(())
 }
 
 fn select_exact_faces(

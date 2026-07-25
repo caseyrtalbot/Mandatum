@@ -16,5 +16,6 @@ mandatum-scene.workspace = true
 serde.workspace = true
 sys-locale.workspace = true
 ttf-parser.workspace = true
+unicode-script.workspace = true
 wgpu.workspace = true
 winit.workspace = true
