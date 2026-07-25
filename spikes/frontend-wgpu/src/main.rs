@@ -70,6 +70,8 @@ const TRANSITION_ACTION_INTERVAL: Duration = Duration::from_millis(180);
 const MAX_MEASUREMENT_SAMPLES: usize = 200_000;
 const HEARTBEAT: Duration = Duration::from_millis(250);
 const VISUAL_SCENARIO_SETTLE_DELAY: Duration = Duration::from_millis(300);
+const VISUAL_CHECKPOINT_RETRY_DELAY: Duration = Duration::from_millis(50);
+const MAX_VISUAL_CHECKPOINT_RETRIES: u8 = 40;
 const EVENT_DRAIN_BUDGET: usize = 16;
 const IDLE_FRAME_CUTOFF_MS: f64 = 250.0;
 
@@ -121,6 +123,25 @@ fn checkpoint_instant(
                 VisualCheckpoint::Reduced => unreachable!(),
             })
         }
+    }
+}
+
+fn retained_visual_checkpoint_snapshot<T: Clone>(
+    origin: Option<Instant>,
+    snapshot: Option<&T>,
+) -> Option<T> {
+    origin.and_then(|_| snapshot.cloned())
+}
+
+fn checkpoint_freeze_after_outcome(
+    current: Option<Instant>,
+    candidate: Option<Instant>,
+    presented: bool,
+) -> Option<Instant> {
+    if presented {
+        candidate.or(current)
+    } else {
+        current
     }
 }
 
@@ -1156,7 +1177,10 @@ struct App {
     visual_scenario_at: Option<Instant>,
     visual_checkpoint_snapshot: Option<FrameSnapshot>,
     visual_checkpoint_origin: Option<Instant>,
+    visual_checkpoint_pending_at: Option<Instant>,
     visual_checkpoint_frozen_at: Option<Instant>,
+    visual_checkpoint_retry_at: Option<Instant>,
+    visual_checkpoint_retries: u8,
 }
 
 impl App {
@@ -1244,7 +1268,10 @@ impl App {
             visual_scenario_at: None,
             visual_checkpoint_snapshot: None,
             visual_checkpoint_origin: None,
+            visual_checkpoint_pending_at: None,
             visual_checkpoint_frozen_at: None,
+            visual_checkpoint_retry_at: None,
+            visual_checkpoint_retries: 0,
         }
     }
 
@@ -1387,6 +1414,10 @@ impl App {
     fn begin_visual_measurement(&mut self, now: Instant) {
         if self.config.visual_checkpoint.is_some() {
             self.visual_checkpoint_origin = Some(now);
+            self.visual_checkpoint_pending_at = None;
+            self.visual_checkpoint_frozen_at = None;
+            self.visual_checkpoint_retry_at = None;
+            self.visual_checkpoint_retries = 0;
             return;
         }
         if let Some(duration) = self.config.visual_transition_exercise {
@@ -1592,15 +1623,11 @@ impl App {
             self.host_mut().suspend_scene_interaction();
             return Ok(());
         };
-        let mut snapshot = if self.visual_checkpoint_origin.is_some()
-            && self.visual_checkpoint_frozen_at.is_none()
-        {
-            self.visual_checkpoint_snapshot
-                .take()
-                .unwrap_or_else(|| self.host_mut().frame_with_viewport(viewport))
-        } else {
-            self.host_mut().frame_with_viewport(viewport)
-        };
+        let mut snapshot = retained_visual_checkpoint_snapshot(
+            self.visual_checkpoint_origin,
+            self.visual_checkpoint_snapshot.as_ref(),
+        )
+        .unwrap_or_else(|| self.host_mut().frame_with_viewport(viewport));
         if let Some(prepared) = &self.prepared_visual_scenario {
             prepared
                 .stabilize_snapshot(&mut snapshot)
@@ -1619,10 +1646,16 @@ impl App {
         self.sync_ime(&snapshot.scene);
         let checkpoint = self.config.visual_checkpoint;
         let checkpoint_origin = self.visual_checkpoint_origin;
+        let pending_at = self.visual_checkpoint_pending_at;
         let frozen_at = self.visual_checkpoint_frozen_at;
-        let first_checkpoint_render =
-            checkpoint.is_some() && checkpoint_origin.is_some() && frozen_at.is_none();
-        let visual_now = frozen_at.or(checkpoint_origin).unwrap_or_else(Instant::now);
+        let first_checkpoint_render = checkpoint.is_some()
+            && checkpoint_origin.is_some()
+            && pending_at.is_none()
+            && frozen_at.is_none();
+        let visual_now = frozen_at
+            .or(pending_at)
+            .or(checkpoint_origin)
+            .unwrap_or_else(Instant::now);
         let (render_result, freeze_at, animation_was_active) = {
             let Some(gpu) = self.gpu.as_mut() else {
                 return Ok(());
@@ -1683,7 +1716,7 @@ impl App {
             (result.0, result.1, animation_was_active)
         };
         if let Some(freeze_at) = freeze_at {
-            self.visual_checkpoint_frozen_at = Some(freeze_at);
+            self.visual_checkpoint_pending_at = Some(freeze_at);
         }
         let outcome = match render_result {
             Ok(outcome) => outcome,
@@ -1729,11 +1762,33 @@ impl App {
             }
             Err(error) => return Err(error),
         };
+        let freeze_candidate = self.visual_checkpoint_pending_at;
+        let was_checkpoint_frozen = self.visual_checkpoint_frozen_at.is_some();
+        self.visual_checkpoint_frozen_at = checkpoint_freeze_after_outcome(
+            self.visual_checkpoint_frozen_at,
+            freeze_candidate,
+            matches!(&outcome, GpuRenderOutcome::Presented { .. }),
+        );
+        let checkpoint_became_ready =
+            !was_checkpoint_frozen && self.visual_checkpoint_frozen_at.is_some();
         match outcome {
             GpuRenderOutcome::Presented {
                 at: present,
                 timings,
             } => {
+                if checkpoint.is_some() {
+                    self.visual_checkpoint_pending_at = None;
+                    self.visual_checkpoint_retry_at = None;
+                    self.visual_checkpoint_retries = 0;
+                }
+                if checkpoint_became_ready
+                    && let (Some(window), Some(checkpoint)) = (&self.window, checkpoint)
+                {
+                    window.set_title(&format!(
+                        "Mandatum Visual {}",
+                        checkpoint.reference_id()
+                    ));
+                }
                 self.present_count = self.present_count.saturating_add(1);
                 if self
                     .transition_started_at
@@ -1820,6 +1875,9 @@ impl App {
                         }
                     }
                 }
+                if checkpoint.is_some() {
+                    self.schedule_visual_checkpoint_retry()?;
+                }
             }
             GpuRenderOutcome::SurfaceReconfigured { recovery, timings } => {
                 self.shaping_ms
@@ -1847,8 +1905,23 @@ impl App {
                         "GPU surface recovery exceeded eight consecutive attempts",
                     );
                 }
+                if checkpoint.is_some() {
+                    self.schedule_visual_checkpoint_retry()?;
+                }
             }
         }
+        Ok(())
+    }
+
+    fn schedule_visual_checkpoint_retry(&mut self) -> Result<(), GpuRenderError> {
+        self.visual_checkpoint_retries = self.visual_checkpoint_retries.saturating_add(1);
+        if self.visual_checkpoint_retries > MAX_VISUAL_CHECKPOINT_RETRIES {
+            return Err(GpuRenderError::Internal {
+                message: "visual checkpoint surface remained unavailable after bounded retries"
+                    .to_owned(),
+            });
+        }
+        self.visual_checkpoint_retry_at = Some(Instant::now() + VISUAL_CHECKPOINT_RETRY_DELAY);
         Ok(())
     }
 
@@ -2311,6 +2384,13 @@ impl App {
         }
         let now = Instant::now();
         if self
+            .visual_checkpoint_retry_at
+            .is_some_and(|retry_at| now >= retry_at)
+        {
+            self.visual_checkpoint_retry_at = None;
+            self.request_redraw();
+        }
+        if self
             .visual_scenario_at
             .is_some_and(|visual_scenario_at| now >= visual_scenario_at)
         {
@@ -2323,7 +2403,7 @@ impl App {
                 );
                 return false;
             };
-            let Some(scene_size) = self.scene_size() else {
+            let Some(viewport) = self.viewport_metrics() else {
                 self.fail(
                     "runtime",
                     "visual_scenario",
@@ -2331,12 +2411,9 @@ impl App {
                 );
                 return false;
             };
+            let scene_size = viewport.scene_size();
             let drive_result = if self.config.visual_checkpoint.is_some() {
-                prepared.drive_attention_arrival(
-                    self.host_mut(),
-                    scene_size,
-                    Duration::from_secs(5),
-                )
+                prepared.drive_attention_arrival(self.host_mut(), viewport, Duration::from_secs(5))
             } else {
                 prepared.drive(self.host_mut(), scene_size, Duration::from_secs(5))
             };
@@ -2426,6 +2503,9 @@ impl App {
         if let Some(visual_scenario_at) = self.visual_scenario_at {
             next = next.min(visual_scenario_at);
         }
+        if let Some(visual_checkpoint_retry_at) = self.visual_checkpoint_retry_at {
+            next = next.min(visual_checkpoint_retry_at);
+        }
         if let Some(idle_measure_at) = self.idle_measure_at {
             next = next.min(idle_measure_at);
         }
@@ -2481,7 +2561,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let title = if self.config.token_sampler {
                     "Mandatum Phase 2 Token Sampler".to_owned()
                 } else if let Some(checkpoint) = self.config.visual_checkpoint {
-                    format!("Mandatum Visual {}", checkpoint.reference_id())
+                    format!("Mandatum Visual {} loading", checkpoint.reference_id())
                 } else {
                     self.config.visual_scenario.map_or_else(
                         || "Mandatum GPU Host Spike".to_owned(),
@@ -3375,11 +3455,12 @@ mod tests {
         PlatformEvidence, PressedPointerButtons, RefreshIntervalSummary, RenderStageEvidence,
         ResourceSample, RunEvidence, StressConfig, VisualCheckpoint, VisualScenarioId,
         VisualTransitionEvidence, WorkloadEvidence, animation_redraw_is_due,
-        configured_run_timeout, contiguous_animation_interval, ime_event_is_accepted,
-        key_for_platform_translation, pane_geometry_is_suspended, parse_config_from,
-        parse_font_family, parse_font_size, parse_ps_rss_kib, parse_scale_delay,
-        parse_scale_factor, run_exit_code, scene_size_from_metrics, start_after_preflight,
-        translate_ime, translate_key, uses_isolated_harness,
+        checkpoint_freeze_after_outcome, configured_run_timeout, contiguous_animation_interval,
+        ime_event_is_accepted, key_for_platform_translation, pane_geometry_is_suspended,
+        parse_config_from, parse_font_family, parse_font_size, parse_ps_rss_kib, parse_scale_delay,
+        parse_scale_factor, retained_visual_checkpoint_snapshot, run_exit_code,
+        scene_size_from_metrics, start_after_preflight, translate_ime, translate_key,
+        uses_isolated_harness,
     };
     use mandatum_scene::input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, TextRange,
@@ -3408,6 +3489,46 @@ mod tests {
         assert_eq!(result, Err("no display"));
         assert!(!gpu_constructed);
         assert!(!host_constructed);
+    }
+
+    #[test]
+    fn visual_checkpoint_retains_snapshot_and_freezes_only_after_presented() {
+        let origin = std::time::Instant::now();
+        let target = origin + std::time::Duration::from_millis(120);
+
+        assert_eq!(
+            retained_visual_checkpoint_snapshot(Some(origin), Some(&41_u64)),
+            Some(41),
+            "checkpoint retries keep the exact driven snapshot"
+        );
+        assert_eq!(
+            retained_visual_checkpoint_snapshot::<u64>(Some(origin), None),
+            None,
+            "a missing capture still falls back to one live frame"
+        );
+        assert_eq!(
+            retained_visual_checkpoint_snapshot(None, Some(&41_u64)),
+            None,
+            "ordinary rendering never reuses checkpoint-only state"
+        );
+
+        let after_skip = checkpoint_freeze_after_outcome(None, Some(target), false);
+        assert_eq!(
+            after_skip, None,
+            "timeout, occlusion, or surface recovery must not report a frozen checkpoint"
+        );
+        assert_eq!(
+            retained_visual_checkpoint_snapshot(Some(origin), Some(&41_u64)),
+            Some(41),
+            "checkpoint outcome classification does not consume the retained snapshot"
+        );
+        let after_present = checkpoint_freeze_after_outcome(after_skip, Some(target), true);
+        assert_eq!(after_present, Some(target));
+        assert_eq!(
+            checkpoint_freeze_after_outcome(after_present, None, false),
+            Some(target),
+            "later skipped redraws cannot unfreeze a presented checkpoint"
+        );
     }
 
     #[test]

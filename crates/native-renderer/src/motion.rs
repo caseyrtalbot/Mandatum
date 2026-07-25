@@ -1386,7 +1386,7 @@ mod tests {
         );
         let mut motion = PresentationMotion::default();
         motion.resolve(empty, SceneMotionPolicy::default(), origin);
-        motion.resolve(arrival, SceneMotionPolicy::default(), origin);
+        motion.resolve(arrival.clone(), SceneMotionPolicy::default(), origin);
 
         assert_eq!(
             motion.active_transition_window(TransitionRole::PaneGeometry),
@@ -1399,6 +1399,16 @@ mod tests {
                 finishes_at: origin + Duration::from_millis(120),
             })
         );
+        let settled = motion.resolve(
+            arrival.clone(),
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(120),
+        );
+        assert_eq!(
+            settled, arrival,
+            "the end checkpoint must equal the stable arrival plan exactly"
+        );
+        assert!(!motion.is_active());
     }
 
     #[test]

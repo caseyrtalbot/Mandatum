@@ -15,7 +15,7 @@ use mandatum_core::{
     Workspace,
 };
 use mandatum_scene::{
-    ArtifactState, HitTargetKind, PaneContent, SceneSize,
+    ArtifactState, HitTargetKind, PaneContent, SceneSize, ViewportMetrics,
     input::{InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent, PointerKind},
 };
 
@@ -447,7 +447,7 @@ impl PreparedVisualScenario {
     pub fn drive_attention_arrival(
         &self,
         host: &mut FrontendHost,
-        size: SceneSize,
+        viewport: ViewportMetrics,
         timeout: Duration,
     ) -> Result<FrameSnapshot, VisualScenarioError> {
         if self.id != VisualScenarioId::Attention {
@@ -455,9 +455,11 @@ impl PreparedVisualScenario {
                 "approval-arrival checkpoint requires the attention scenario".to_owned(),
             ));
         }
+        let size = viewport.scene_size();
         host.handle_input(InputEvent::Resize(size));
-        let _stable_before_arrival = host.frame(size);
-        self.wait_for_attention_arrival(host, size, timeout)
+        let _stable_before_arrival = host.frame_with_viewport(viewport);
+        self.wait_for_attention_arrival(host, size, timeout)?;
+        Ok(host.frame_with_viewport(viewport))
     }
 
     fn wait_for_attention_arrival(
@@ -857,10 +859,22 @@ mod tests {
         let root = fixture("attention-arrival");
         let prepared = prepare_visual_scenario(VisualScenarioId::Attention, &root).unwrap();
         let mut host = FrontendHost::new(prepared.app_config());
+        let viewport = ViewportMetrics::new(
+            mandatum_scene::LogicalSize::from_pixels(800.0, 600.0).unwrap(),
+            mandatum_scene::PhysicalSize::new(1_600, 1_200),
+            mandatum_scene::BackingScale::new(2.0).unwrap(),
+            mandatum_scene::LogicalSize::from_pixels(800.0 / 102.0, 600.0 / 35.0).unwrap(),
+        )
+        .unwrap();
         let frame = prepared
-            .drive_attention_arrival(&mut host, SceneSize::new(102, 35), Duration::from_secs(3))
+            .drive_attention_arrival(&mut host, viewport, Duration::from_secs(3))
             .unwrap();
 
+        assert_eq!(
+            frame.scene.presentation.viewport,
+            Some(viewport),
+            "checkpoint materials must retain the renderer's measured viewport projection"
+        );
         assert!(
             frame
                 .scene
