@@ -3069,7 +3069,7 @@ gate and push evidence are recorded in `docs/verification.md`.
 
 ## Workspace Chrome Uses Typed Materials And Dual-Coordinate Input
 
-Status: accepted; source implemented, displayed acceptance pending (2026-07-24)
+Status: accepted and displayed (2026-07-24)
 
 Decision: visual Phase 3 implements the everyday workspace as one typed
 capability family. `WorkspaceScene` owns header/status rails, typed attention
@@ -3111,7 +3111,13 @@ Consequences:
 
 Verification: focused RED/GREEN and aggregate-review corrections are green
 across core, scene/`CellProgram`, app, both renderers, native shell,
-frontend-parity, and the exact canonical-scenario plan test. Displayed layout
-and performance evidence, all 11 fixed-reference comparisons and explicit
-acceptance, the synchronized final gate, and the completion commit remain
-pending; no Phase 4 overlay work is authorized by this decision.
+frontend-parity, and the exact canonical-scenario plan test. The real native
+Metal route was reviewed at backing scale 2 through one, split, stacked,
+floating, zoomed, 720 x 480 minimum, and restored states. All 11 canonical
+candidates from clean source commit `7221937` were individually reviewed and
+explicitly accepted. A fresh repeated performance series was explicitly scoped
+out when it stopped adding useful confidence; existing reference preparation
+evidence and bounded plan/resource tests remain the regression guard. The
+display was restored and verified at 3440 x 1440 / scale 1 / 60 Hz. The
+synchronized final gate and completion commit are recorded in
+`docs/verification.md`.

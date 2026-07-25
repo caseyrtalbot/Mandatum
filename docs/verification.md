@@ -786,9 +786,22 @@ developer unfamiliar with the current implementation can identify:
   `every_visual_scenario_reaches_its_typed_state_and_gpu_render_plan` test.
   These runs prove typed materials/text, logical separator input, density
   geometry, focus/badges, floating occlusion, window policy/title, terminal
-  parity, and resource bounds. They do not yet claim the required displayed
-  matrix, performance comparison, fixed-reference review/acceptance, or final
-  repository gate.
+  parity, and resource bounds.
+- **2026-07-24:** Phase 3 displayed acceptance used the real native Metal route
+  on Apple M4 Pro and `LG ULTRAGEAR+` at 1720 x 720 logical / 3440 x 1440
+  physical / backing scale 2 / 60 Hz. Interactive review covered one, split,
+  stacked, floating, zoomed, and 720 x 480 minimum layouts; the locked
+  `restored` scenario covered restored split geometry. All 11 canonical
+  candidates from clean source commit `7221937` were visually reviewed and
+  explicitly accepted. Intended changes were the quiet header/status and title
+  rails, compact focus tick, typed badges/attention chips, one-logical-pixel
+  separators, and rounded bounded floating material/shadow. Terminal content,
+  cursor/selection/raster paint, and overlay content remained authoritative.
+  A fresh repeated performance series was explicitly scoped out when it stopped
+  adding useful confidence; the existing reference preparation result, focused
+  resource ceilings, and repository gate remain the regression checks. The LG
+  was restored and independently verified at 3440 x 1440 / backing scale 1 /
+  60 Hz before the synchronized final gate, which ended `GATE GREEN`.
 
 ## Completion Rule
 

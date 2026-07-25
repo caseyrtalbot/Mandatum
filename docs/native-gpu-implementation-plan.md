@@ -5,8 +5,7 @@ production shell and renderer into the workspace. Work 3 completed with a
 negative typography verdict. The accepted typography foundation is now
 implemented, displayed, and backed by the bounded Work 4 shaping cache. Work 5
 made native Casey's local default. Production-grade native in-app visual polish
-is active: visual Phase 3 has a focused-green source implementation and awaits
-displayed/fixed-reference acceptance.
+is active: visual Phase 3 is accepted and Phase 4's overlay family is next.
 
 ## Product Direction
 
@@ -339,7 +338,7 @@ That constraint governed Work 5 and remains part of its completed history. The
 subsequent product decision advances native in-app polish as its own phase while
 keeping distribution and public materials deferred.
 
-## Native Visual Polish Phase — Next
+## Native Visual Polish Phase — Active
 
 The complete ordered phase is
 [`docs/visual-polish-plan.md`](visual-polish-plan.md). It treats visual quality
@@ -407,13 +406,11 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Complete Phase 3 of
-[`docs/visual-polish-plan.md`](visual-polish-plan.md): display the layout family,
-record the performance comparison, compare every fixed-reference scenario, and
-explicitly accept only intended workspace-shell/material/focus changes before
-the final synchronized gate. Continue daily-driving the native launcher; if
-another concrete functional failure appears, reproduce it, fix the smallest
-owning product seam, and add a regression. Do not pull overlays, workflow
-cards, motion, accessibility projection, installer, updater, release workflow,
-archives, rollout, public-GitHub presentation, or public visual materials
-forward.
+Execute Phase 4 of
+[`docs/visual-polish-plan.md`](visual-polish-plan.md): migrate Palette, Search,
+Timeline, Session Map, Help, Prompt, Welcome, and Context Menu as one coherent
+overlay family. Continue daily-driving the native launcher; if another concrete
+functional failure appears, reproduce it, fix the smallest owning product seam,
+and add a regression. Do not pull workflow cards, motion, accessibility
+projection, installer, updater, release workflow, archives, rollout,
+public-GitHub presentation, or public visual materials forward.

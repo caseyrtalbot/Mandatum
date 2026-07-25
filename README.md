@@ -339,12 +339,13 @@ dated charter close and its red-team evidence are preserved in
 [docs/history/charter-closure-2026-07-10.md](docs/history/charter-closure-2026-07-10.md);
 current status and forward work live in [PLAN.md](PLAN.md).
 
-Immediate work: complete displayed and fixed-reference acceptance for the
-implemented workspace shell, pane materials, density, and focus capability
-family. The source capability, focused portable tests, canonical scenarios,
-token contract, logical presentation geometry, pure native plan, and Phase 2
-fixed-reference evidence are complete. Installer, release, rollout, marketing,
-and public-repository presentation remain separate deferred work.
+Immediate work: Phase 4 unifies Palette, Search, Timeline, Session Map, Help,
+Prompt, Welcome, and Context Menu around one raised overlay family. Phase 3's
+workspace shell, pane materials, density, and focus capability is implemented,
+displayed at backing scale 2, and explicitly accepted across all 11 canonical
+references. The smaller known shell debt is the one-row 17-logical-pixel pane
+title rail versus the intended 24–28-pixel rail. Installer, release, rollout,
+marketing, and public-repository presentation remain separate deferred work.
 Rewrap-on-resize remains a terminal engine concern.
 [PLAN.md](PLAN.md) holds the forward horizon;
 [docs/decisions.md](docs/decisions.md) records every judgment call.

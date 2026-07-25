@@ -1,6 +1,6 @@
 # Native Visual Polish Plan
 
-Status: Phase 2 complete; Phase 3 source implemented, displayed acceptance pending (2026-07-24)
+Status: Phase 3 accepted; Phase 4 Overlay Family next (2026-07-24)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -516,7 +516,7 @@ Exit:
 - narrow geometry degrades deliberately; and
 - the displayed layout matrix, performance comparison, and full gate pass.
 
-Source status on 2026-07-24:
+Completion status on 2026-07-24:
 
 - the typed scene now distinguishes header/status rails, attention kinds,
   pane badges, compact focus, separator hover/drag, density, and floating
@@ -530,10 +530,20 @@ Source status on 2026-07-24:
   changing the terminal `CellProgram` or PTY geometry;
 - the native shell owns a 1200 x 800 logical initial size, 720 x 480 minimum,
   and `Mandatum — <active project>` title; and
-- focused source, parity, scenario-plan, renderer, and native-shell tests pass.
-  Displayed layout/performance evidence, fixed-reference review and explicit
-  acceptance, final documentation synchronization, and the full gate remain
-  required before Phase 3 is complete.
+- focused source, parity, scenario-plan, renderer, and native-shell tests pass;
+- the real native Metal route was reviewed at backing scale 2 through one,
+  split, stacked, floating, zoomed, 720 x 480 minimum, and restored states;
+- all 11 canonical candidates were individually reviewed and explicitly
+  accepted from clean source commit `7221937`; and
+- the repeated fresh performance series was explicitly scoped out once it
+  stopped adding useful confidence. Existing reference preparation evidence,
+  bounded native-plan tests, and the repository gate remain the regression
+  guard.
+
+Known physical debt: pane title rails still occupy one 17-logical-pixel text
+row rather than the specified 24–28-pixel rail. This does not change PTY
+geometry or invalidate the accepted shell, but it remains a visible density
+improvement to revisit deliberately.
 
 ### Phase 4 — Overlay Family
 
@@ -690,9 +700,8 @@ Defer until the complete system above succeeds without them:
 
 ## Immediate Next Action
 
-Complete Phase 3 only: display and review the one/split/stacked/floating/
-zoomed/tiny/restored family, record the performance comparison, compare every
-fixed-reference scenario, explicitly accept only intended Phase 3 changes,
-then synchronize evidence and run the full gate. Do not pull overlays,
-workflow cards, motion, accessibility projection, or public presentation
-forward.
+Execute Phase 4 only: unify Palette, Search, Timeline, Session Map, Help,
+Prompt, Welcome, and Context Menu around the shared overlay material, geometry,
+selection, input, and footer system. Preserve exact clipping and shared
+scene-owned paint/hit geometry. Do not pull workflow cards, motion,
+accessibility projection, or public presentation forward.

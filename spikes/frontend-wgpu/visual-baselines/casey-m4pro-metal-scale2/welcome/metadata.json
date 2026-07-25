@@ -3,7 +3,7 @@
   "profile": "casey-m4pro-metal-scale2",
   "scenario": "welcome",
   "theme": "mandatum-dark",
-  "captured_at": "2026-07-25T02:04:22Z",
+  "captured_at": "2026-07-25T03:15:39Z",
   "surface": {
     "logical_width": 800,
     "logical_height": 600,
@@ -37,7 +37,7 @@
     "device_type": "integrated"
   },
   "source": {
-    "commit": "6979318e80fe867933c01e5f1efa411e90cd89b2",
+    "commit": "7221937acb360ad4626a4dd93f851c5cfb9f9af3",
     "dirty": false
   },
   "build": {
@@ -54,7 +54,7 @@
   },
   "fallback_regions": [],
   "acceptance": {
-    "reason": "Phase 2 deterministic fixture identity normalization and correction of Phase 1 external compositor color-state contamination after visual review",
-    "accepted_at_unix_seconds": 1784945296
+    "reason": "Phase 3 workspace shell materials, focus treatment, pane badges, separators, and floating shell reviewed on the native Metal route at 2x scale.",
+    "accepted_at_unix_seconds": 1784949486
   }
 }

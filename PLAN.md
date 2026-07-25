@@ -121,13 +121,21 @@ production pixels. Phase 2 — Token And Native Presentation Foundation — now
 implements the typed UI-token, logical-geometry, semantic-presentation,
 multi-metric text, and headless native-plan capability family while preserving
 the terminal `CellProgram`. Phase 3 — Workspace Shell, Pane Materials, Density,
-And Focus — now has its source capability family and focused portable tests:
-typed rails/badges/attention, native materials and floating depth, compact
-focus, logical separator interaction, density policy, and native window
-geometry/title. Its displayed matrix, performance comparison, fixed-reference
-review, and final gate remain the active completion work. Concrete functional
-failures found through daily use remain valid hardening work at their smallest
-owning seam.
+And Focus — is accepted: typed rails/badges/attention, native materials and
+floating depth, compact focus, logical separator interaction, density policy,
+and native window geometry/title are implemented. The real native Metal route
+was reviewed at backing scale 2 through one, split, stacked, floating, zoomed,
+minimum, and restored layouts; all 11 canonical references were reviewed and
+explicitly accepted. A fresh repeated performance series was intentionally
+scoped out when it stopped adding useful confidence; the bounded preparation
+tests and existing reference measurement remain the regression guard.
+
+Phase 4 — Overlay Family — is next because the still-flat Palette, Search,
+Timeline, Session Map, Help, Prompt, Welcome, and Context Menu are now the
+largest visible inconsistency. The smaller known shell debt is that pane title
+rails still occupy one 17-logical-pixel text row rather than the specified
+24–28-pixel rail. Concrete functional failures found through daily use remain
+valid hardening work at their smallest owning seam.
 
 ### Distribution and public presentation — shelved
 
