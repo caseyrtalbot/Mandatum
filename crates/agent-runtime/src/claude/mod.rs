@@ -1,20 +1,23 @@
 //! Reference [`AgentConnector`]: drives the Claude Code CLI headlessly.
 //!
-//! `launch` prepares a per-session runtime directory under the spec cwd
+//! `launch` prepares a private per-user runtime directory
 //! (settings.json with a PreToolUse approval hook), binds a Unix approval
 //! socket, spawns `claude -p <objective> --output-format stream-json`, and
 //! pumps its stdout/stderr into [`AgentSessionEvent`]s on plain OS threads.
 //! Gated tool calls travel: claude hook → `mandatum-approval-bridge` binary →
 //! Unix socket → [`AgentSessionEvent::ApprovalRequested`] → user decision →
-//! hook allow/deny. The bridge fails closed: no verdict ever means allow.
+//! hook allow/deny. The bridge fails closed: only an explicit verdict can
+//! allow a gated action.
 
 mod parser;
 mod runtime_dir;
 mod session;
 
 use std::{
+    fs, io,
+    os::unix::fs::PermissionsExt,
     os::unix::net::UnixListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -74,24 +77,114 @@ impl ClaudeCliConnector {
 
     fn resolve_bridge_binary(&self) -> Result<PathBuf, AgentConnectorError> {
         if let Some(path) = &self.config.bridge_binary {
-            return Ok(path.clone());
+            return resolve_required_executable(path, "configured approval bridge");
         }
         if let Ok(path) = std::env::var(BRIDGE_ENV_VAR)
             && !path.trim().is_empty()
         {
-            return Ok(PathBuf::from(path));
+            return resolve_required_executable(Path::new(&path), "MANDATUM_APPROVAL_BRIDGE");
         }
         if let Ok(current) = std::env::current_exe()
             && let Some(dir) = current.parent()
         {
             let sibling = dir.join(BRIDGE_BINARY_NAME);
-            if sibling.is_file() {
-                return Ok(sibling);
+            match fs::symlink_metadata(&sibling) {
+                Ok(_) => return validate_executable(sibling, "sibling approval bridge"),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(AgentConnectorError::LaunchFailed {
+                        message: format!(
+                            "could not inspect sibling approval bridge {}: {error}",
+                            sibling.display()
+                        ),
+                    });
+                }
             }
         }
-        // Fall back to PATH resolution at hook time.
-        Ok(PathBuf::from(BRIDGE_BINARY_NAME))
+        resolve_on_path(Path::new(BRIDGE_BINARY_NAME))?.ok_or_else(|| {
+            AgentConnectorError::LaunchFailed {
+                message: format!(
+                    "{BRIDGE_BINARY_NAME} is required for gated agent sessions; \
+                     install it beside Mandatum, put it on PATH, or set {BRIDGE_ENV_VAR}"
+                ),
+            }
+        })
     }
+}
+
+fn resolve_required_executable(
+    configured: &Path,
+    label: &str,
+) -> Result<PathBuf, AgentConnectorError> {
+    if configured.as_os_str().is_empty() {
+        return Err(AgentConnectorError::LaunchFailed {
+            message: format!("{label} path is empty"),
+        });
+    }
+    if configured.is_absolute() || configured.components().count() > 1 {
+        let absolute = if configured.is_absolute() {
+            configured.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|error| AgentConnectorError::LaunchFailed {
+                    message: format!("could not resolve {label}: {error}"),
+                })?
+                .join(configured)
+        };
+        return validate_executable(absolute, label);
+    }
+    resolve_on_path(configured)?.ok_or_else(|| AgentConnectorError::LaunchFailed {
+        message: format!("{label} {} was not found on PATH", configured.display()),
+    })
+}
+
+fn resolve_on_path(name: &Path) -> Result<Option<PathBuf>, AgentConnectorError> {
+    let Some(path_value) = std::env::var_os("PATH") else {
+        return Ok(None);
+    };
+    for directory in std::env::split_paths(&path_value) {
+        let candidate = if directory.is_absolute() {
+            directory.join(name)
+        } else {
+            std::env::current_dir()
+                .map_err(|error| AgentConnectorError::LaunchFailed {
+                    message: format!("could not resolve approval bridge on PATH: {error}"),
+                })?
+                .join(directory)
+                .join(name)
+        };
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => return validate_executable(candidate, "approval bridge on PATH").map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AgentConnectorError::LaunchFailed {
+                    message: format!(
+                        "could not inspect approval bridge {}: {error}",
+                        candidate.display()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn validate_executable(path: PathBuf, label: &str) -> Result<PathBuf, AgentConnectorError> {
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|error| AgentConnectorError::LaunchFailed {
+            message: format!("{label} {} is unavailable: {error}", path.display()),
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AgentConnectorError::LaunchFailed {
+            message: format!("{label} {} must be a regular file", path.display()),
+        });
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(AgentConnectorError::LaunchFailed {
+            message: format!("{label} {} is not executable", path.display()),
+        });
+    }
+    Ok(path)
 }
 
 impl AgentConnector for ClaudeCliConnector {
@@ -107,8 +200,12 @@ impl AgentConnector for ClaudeCliConnector {
             });
         }
 
+        let bridge_binary = if spec.approval_policy.gated_classes.is_empty() {
+            PathBuf::from(BRIDGE_BINARY_NAME)
+        } else {
+            self.resolve_bridge_binary()?
+        };
         let runtime = runtime_dir::prepare_session_dir(&spec.cwd)?;
-        let bridge_binary = self.resolve_bridge_binary()?;
         runtime_dir::write_settings_file(
             &runtime,
             &bridge_binary,
@@ -219,9 +316,11 @@ fn stdio_error(stream: &str) -> AgentConnectorError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
+
+    fn temp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("mandatum-bridge-{tag}-{}", std::process::id()))
+    }
 
     #[test]
     fn empty_objective_and_missing_cwd_are_rejected_before_any_spawn() {
@@ -242,14 +341,44 @@ mod tests {
 
     #[test]
     fn bridge_binary_resolution_prefers_the_config_override() {
+        let bridge = temp_path("configured");
+        fs::write(&bridge, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
         let connector = ClaudeCliConnector::new(ClaudeConnectorConfig {
-            bridge_binary: Some(PathBuf::from("/custom/bridge")),
+            bridge_binary: Some(bridge.clone()),
             ..ClaudeConnectorConfig::default()
         });
-        assert_eq!(
-            connector.resolve_bridge_binary().unwrap(),
-            Path::new("/custom/bridge")
-        );
+        assert_eq!(connector.resolve_bridge_binary().unwrap(), bridge);
+        fs::remove_file(bridge).unwrap();
+    }
+
+    #[test]
+    fn gated_launch_fails_before_claude_when_bridge_is_missing_or_not_executable() {
+        let cwd = temp_path("cwd");
+        fs::create_dir(&cwd).unwrap();
+
+        for (tag, mode) in [("missing", None), ("not-executable", Some(0o644))] {
+            let bridge = temp_path(tag);
+            if let Some(mode) = mode {
+                fs::write(&bridge, "#!/bin/sh\nexit 0\n").unwrap();
+                fs::set_permissions(&bridge, fs::Permissions::from_mode(mode)).unwrap();
+            }
+            let connector = ClaudeCliConnector::new(ClaudeConnectorConfig {
+                claude_binary: PathBuf::from("/bin/false"),
+                bridge_binary: Some(bridge.clone()),
+                ..ClaudeConnectorConfig::default()
+            });
+            let result = connector.launch(&AgentLaunchSpec::new("test", &cwd));
+            assert!(matches!(
+                result,
+                Err(AgentConnectorError::LaunchFailed { .. })
+            ));
+            if bridge.exists() {
+                fs::remove_file(&bridge).unwrap();
+            }
+        }
+
+        fs::remove_dir_all(cwd).unwrap();
     }
 
     #[test]

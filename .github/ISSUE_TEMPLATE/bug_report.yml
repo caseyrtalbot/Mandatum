@@ -27,4 +27,4 @@ body:
     id: evidence
     attributes:
       label: Evidence
-      description: Status line text, timeline entries (.mandatum/timeline.jsonl), or a captured frame if relevant.
+      description: Status text, relevant timeline entries, or a captured frame. Redact tokens, secrets, private paths, repository names, sensitive commands, and output before posting. Report security-sensitive evidence privately through SECURITY.md instead.

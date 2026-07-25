@@ -2,160 +2,134 @@
 
 ## Direction
 
-Mandatum is a personal GPU-native development environment. The native
-wgpu/winit frontend is the product and the primary daily-driver target. The
-terminal frontend is a maintained operational tool. There is no public-release
-audience.
+The GPU-native macOS frontend is Mandatum's primary product surface. A
+maintained terminal frontend serves remote, headless, recovery, and
+low-dependency use.
 
-Product behavior remains frontend-neutral: one `AppState`/`RuntimeEngine`,
-`FrontendHost`, and `WorkspaceScene` support both roles without duplicating
-terminal, task, agent, approval, persistence, or recovery truth.
+Both frontends consume one product model. `AppState`, `RuntimeEngine`,
+`FrontendHost`, and `WorkspaceScene` own terminal, task, agent, approval,
+persistence, and recovery behavior. Frontends translate platform input and
+render scenes; they do not create a second product state machine.
 
-## Frontend Roles
+## Native macOS frontend
 
-### Native frontend — product
+The native application owns:
 
-Use for:
+- the window and platform event loop;
+- GPU surface and device lifecycle;
+- font, scale, glyph, and texture resources;
+- clipboard, pointer, selection, and IME translation; and
+- presentation scheduling and animation.
 
-- Casey's normal local development;
-- Ghostty-class text, input, resize, and frame feel;
-- precise pointer, selection, clipboard, and IME behavior;
-- native visual identity, motion, and richer typed surfaces;
-- artifact and workflow presentation that cannot be expressed honestly as
-  terminal cells.
+Its production shell is `crates/native` (`mandatum-native`), built on winit.
+Scene-only GPU presentation lives in `crates/native-renderer`, built on wgpu
+and glyphon. Measurement, stress, and fault tools stay outside the application
+under `spikes/frontend-wgpu`.
 
-It owns the window, platform events, GPU lifecycle, font/scale state, glyph and
-texture caches, and presentation scheduling. It receives product state only
-through `FrontendHost` and paints only `WorkspaceScene`.
+The native renderer receives product state only through `FrontendHost` and
+paints only `WorkspaceScene`. It supports terminal, task, agent, Empty, and
+artifact pane content; application chrome; status and attention surfaces; and
+the complete overlay family.
 
-The production shell is `crates/native` (`mandatum-native`) and the scene-only
-GPU renderer is `crates/native-renderer`. Measurement, stress, fault, and
-terminal probes remain separate under `spikes/frontend-wgpu`.
+## Terminal frontend
 
-### Terminal frontend — maintained tool
-
-Use for:
+The terminal application (`mandatum`) is intended for:
 
 - SSH and remote operation;
 - headless or low-dependency environments;
 - recovery when native startup is unavailable;
-- deterministic frontend checks;
-- an explicit escape hatch.
+- deterministic frontend checks; and
+- users who prefer an in-terminal surface.
 
-It remains a first-class terminal experience and continues to preserve L5 input
-routing. It is not the design ceiling or default product target.
+It preserves the same command, layout, runtime, persistence, and input-routing
+behavior through the shared scene model. Native-only materials and raster
+presentation have explicit terminal fallbacks.
 
-## Shared Contract
+## Shared contract
 
 Every frontend must:
 
 - consume neutral input and typed effects through `FrontendHost`;
 - paint from `WorkspaceScene`;
-- leave layout, product state, command routing, persistence, runtime identity,
-  and recovery policy in shared modules;
+- leave layout, command routing, persistence, runtime identity, and recovery
+  policy in shared modules;
 - expose platform failures clearly;
-- keep live frontend resources out of durable state;
+- keep live frontend resources out of durable state; and
 - support deterministic checks at the deepest practical seam.
 
-`CellProgram` is the complete terminal-parity representation. Native may also
-consume richer semantic scene data, but only through typed `mandatum-scene`
-extensions. Artifact Preview's bounded `RasterSurface` is the reference
+`CellProgram` is the complete terminal-parity representation. The native
+frontend may consume richer typed scene data, but only through
+`mandatum-scene`. Artifact Preview's bounded `RasterSurface` is the reference
 pattern: durable intent in core, safe live loading in app, typed pixels in the
 scene, native presentation, and an honest terminal fallback.
 
-## Selected Stack
+## Native presentation
 
-Keep:
+The native application currently provides:
 
-- winit for window and platform event integration;
-- wgpu for portable native GPU rendering;
-- glyphon/cosmic-text behind the accepted terminal row-run adapter;
-- `mandatum-scene` as the frontend contract.
+- dark, light, and high-contrast theme palettes;
+- bundled JetBrains Mono with strict, observable font overrides;
+- cell-exact terminal text and separate typography roles for application UI;
+- native materials for workspace chrome, panes, overlays, approvals, and
+  artifact surfaces;
+- reduced-motion behavior;
+- resize and display-scale handling;
+- typed surface/device recovery and bounded event draining; and
+- GPU preflight before restore state or live PTYs are created.
 
-Do not start a Metal or Swift renderer fork. The accepted implementation now
-bundles pinned JetBrains Mono, fails closed for explicit unavailable or
-incomplete static system families, puts the native pixel surface's terminal
-colors in `Theme::terminal_palette`, and shapes clipped same-style row runs
-with cosmic-text's cell-width constraint. The terminal escape hatch continues
-delegating reset and named ANSI colors to its host.
+Platform-independent accessibility roles, labels, states, bounds, and actions
+exist in the scene model. Native macOS accessibility projection, including
+VoiceOver support, is not yet implemented and is not claimed.
 
-## Verified Baseline
+Pane title rails currently occupy one terminal row. Making those rails taller
+without consuming child-terminal content requires a future layout and PTY
+contract change.
 
-The current native implementation:
+## Distribution
 
-- drives the real `FrontendHost` and `RuntimeEngine`;
-- wakes from the app-owned event channel through `EventLoopProxy`;
-- translates platform input into neutral `InputEvent`;
-- paints real terminal, task, agent, Empty, artifact, chrome, status, and
-  overlay scene data;
-- shares layout, paint order, styles, grapheme spans, cursor, selection, and
-  composition semantics with the terminal adapter;
-- completes window and GPU renderer preflight before constructing
-  `FrontendHost`, restore state, or live PTYs;
-- handles clipboard, pointer capture, scrollback, focus, resize, scale, restore,
-  and shutdown without a second product state machine;
-- has typed surface/device recovery, explicit GPU failures, bounded draining,
-  resource bounds, stress tooling, and regression probes.
+Tagged releases are prepared to publish separate Apple Silicon and Intel macOS
+artifacts. Each architecture has a common archive:
 
-Detailed historical runs are frozen in
-[`spikes/frontend-wgpu/RESULTS.md`](../spikes/frontend-wgpu/RESULTS.md). Current
-procedures and dated one-line evidence live in
-[`docs/verification.md`](verification.md).
+```text
+mandatum
+mandatum-approval-bridge
+LICENSE
+```
 
-## Forward Work
+and a native archive:
 
-The ordered work is:
+```text
+mandatum-native
+LICENSE
+```
 
-1. Reorder startup so GPU preflight succeeds before `FrontendHost` exists
-   — complete.
-2. Move the native frontend into the workspace, narrow the GPU dependency
-   allowlist, and make the authoritative gate run the native checks in CI
-   — complete.
-3. Compare text quality directly with Ghostty — complete; the focused
-   typography contract is accepted.
-4. Accepted font, palette, and row-run foundation plus the bounded
-   generation-aware shaping cache — complete and profiled.
-5. Make native Casey's local interactive default with an explicit terminal
-   escape hatch — complete. Daily use now supplies concrete functional
-   hardening work.
-6. Build the production-grade native in-app visual system — complete. Phase
-   6's typed motion, reduced-motion, redraw, pacing, and idle capability is
-   implemented and accepted on the native Metal route at backing scale 2. The
-   single finishing slice completes light/high-contrast palettes, per-role UI
-   metrics, and explicit two-row overlay controls while preserving exact
-   terminal metrics and geometry. Native macOS accessibility projection and
-   VoiceOver qualification are deferred honestly; typed semantics,
-   keyboard-only operation, and non-color cues remain. The ordered capability
-   families live in
-   [`docs/visual-polish-plan.md`](visual-polish-plan.md).
-7. Begin named task and dev-server recipes — next.
+Keeping the common archive's membership stable lets pre-native installations
+upgrade their terminal command and embedded installer without rejecting an
+unexpected file. The installer treats an equal version as current only when
+the complete selected platform set is present, so a terminal-only installation
+can acquire the native archive without a version bump or forced downgrade.
 
-The authoritative detail is
-[`docs/native-gpu-implementation-plan.md`](native-gpu-implementation-plan.md).
+The release workflow is configured to sign all three macOS binaries with a
+Developer ID Application certificate, enable the hardened runtime, and submit
+them to Apple for notarization. Missing credentials or an unsuccessful
+signing/notarization step fails publication.
 
-## Verification Policy
+The installer detects the Mac architecture, verifies both release checksums,
+validates each binary's Developer ID signature against the pinned Apple Team
+ID, and installs all three commands. Newer `mandatum update` versions apply
+later published releases and restore the previous command set if replacement
+fails. The archives contain command-line binaries rather than a `.app` bundle,
+so the project does not claim stapled or offline Gatekeeper tickets.
 
-`./ci/gate.sh`, conformance, doc trace, and the native gate remain mandatory.
-Latency, idle, resize, recovery, and fault measurements remain visible
-regression checks. They are not adoption permission gates.
+Linux release archives contain the terminal frontend and approval bridge for
+arm64 and x86-64 glibc systems. There is no native Linux GUI release.
 
-Retired requirements include the former sub-20 ms threshold, 25% paired
-improvement, mandatory long soak, multi-display matrix, Linux-native target,
-accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
+## Verification
 
-## Current Implementation Drift
+`./ci/gate.sh` is the authoritative repository gate. It runs formatting,
+Clippy, builds, tests, native maintenance checks, architecture conformance, and
+documentation traceability on the pinned Rust toolchain.
 
-The ordered launcher and shaping-cache gaps are closed. Row damage remains
-unjustified by the measured preparation profile. Native in-app visual polish
-is complete: complete built-in palettes, per-role UI
-metrics and proportional advances, two-row overlay controls with
-at-least-28-logical-pixel targets, and an unclipped displayed 18 pt smoke are
-implemented. Terminal text retains exact terminal metrics and geometry. The
-remaining known shell debt is the one-row pane title rail versus the intended
-24–28-pixel rail; changing it requires an explicit PTY/layout contract. Native
-macOS accessibility projection and VoiceOver qualification are deferred, not
-claimed. Typed accessibility semantics, keyboard routes, and non-color cues
-remain. The retired Phase 8 ceremony is not a separate work item. Named task
-and dev-server recipes are next. Installer, release,
-rollout, public-GitHub presentation, and public visual materials remain
-shelved for a separate distribution phase.
+Additional native measurement, displayed-capture, resize, recovery, and fault
+procedures live in [verification.md](verification.md). Historical measurement
+records remain under `spikes/frontend-wgpu`; they are not product guarantees.

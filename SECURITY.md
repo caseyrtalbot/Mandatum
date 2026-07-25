@@ -2,31 +2,35 @@
 
 ## Reporting a vulnerability
 
-Please report vulnerabilities privately through GitHub's security advisory
-flow: [Report a vulnerability](https://github.com/caseyrtalbot/Mandatum/security/advisories/new).
-Do not open a public issue for anything exploitable.
+Please report potential vulnerabilities privately through
+[GitHub Security Advisories](https://github.com/caseyrtalbot/Mandatum/security/advisories/new).
+Do not open a public issue for an exploitable problem or include sensitive
+details in a discussion.
 
-You can expect an acknowledgment within a week. Mandatum is pre-release
-software; there is no embargo program, but reports are triaged ahead of all
-other work.
-
-## Scope notes
-
-Areas of particular interest:
-
-- **The approval bridge** (`mandatum-approval-bridge`): it is designed to
-  fail closed; any input, socket, or timing condition that makes it emit an
-  allow decision on a failure path is a vulnerability.
-- **The agent runtime boundary**: any way for a replaced or dead runtime's
-  events to mutate durable state, or for live runtime state (sockets,
-  tokens, handles) to reach a persisted file.
-- **Workspace persistence**: symlink or path tricks against
-  `.mandatum/workspace.json` and `.mandatum/timeline.jsonl` (both writers
-  reject symlinks and cap sizes; bypasses are vulnerabilities).
-- **VT parsing**: crashes or state corruption from hostile terminal output
-  (the parser is fuzz-hardened by test fixtures; new hostile inputs
-  welcome).
+Reports should include the affected version, operating system, reproduction
+steps, impact, and any suggested mitigation. You can expect an acknowledgment
+within seven days.
 
 ## Supported versions
 
-Pre-release: only the tip of `main` is supported.
+Mandatum is pre-release software. Security fixes are applied to the latest
+published release and the current `main` branch; older releases may not receive
+backports.
+
+## Security-sensitive boundaries
+
+Reports are especially useful for:
+
+- approval requests that allow an action when the approval bridge encounters
+  malformed input, a timeout, or another failure;
+- stale or replaced runtime events that mutate current durable state;
+- live process handles, sockets, credentials, or transient output appearing in
+  persisted workspace data;
+- path traversal, symlink, archive, or replacement attacks in persistence,
+  artifact loading, installation, or updating; and
+- crashes or state corruption caused by hostile terminal output.
+
+The default Claude connector gates shell commands and auto-allows file reads
+and writes. This policy is connector-dependent. The command-risk label shown
+with an approval is a heuristic for human review, not a sandbox or a security
+guarantee. Users remain responsible for reviewing commands before approval.

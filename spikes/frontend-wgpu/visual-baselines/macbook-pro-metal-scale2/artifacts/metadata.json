@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "profile": "casey-m4pro-metal-scale2",
-  "scenario": "attention",
+  "profile": "macbook-pro-metal-scale2",
+  "scenario": "artifacts",
   "theme": "mandatum-dark",
-  "captured_at": "2026-07-25T05:40:57Z",
+  "captured_at": "2026-07-25T05:41:17Z",
   "surface": {
     "logical_width": 800,
     "logical_height": 600,
@@ -42,7 +42,7 @@
   },
   "build": {
     "profile": "debug",
-    "executable": "/Users/caseytalbot/Projects/mandatum/spikes/frontend-wgpu/target/debug/mandatum-native-lab"
+    "executable": "spikes/frontend-wgpu/target/debug/mandatum-native-lab"
   },
   "capture": {
     "api": "ScreenCaptureKit",
@@ -54,7 +54,7 @@
   },
   "fallback_regions": [],
   "acceptance": {
-    "reason": "Phase 5 task-failure and waiting-approval callouts reviewed on the required built-in Retina reference",
-    "accepted_at_unix_seconds": 1784958110
+    "reason": "Phase 5 artifact canvas, inspector, failure state, and overlay occlusion reviewed on the required built-in Retina reference",
+    "accepted_at_unix_seconds": 1784958116
   }
 }

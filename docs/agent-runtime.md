@@ -24,6 +24,9 @@ conformance gate). Owns:
   risk }` answered by `ApprovalDecision { approval_id, Approved | Rejected }`.
   Risk bands are advisory heuristics (`assess_command_risk`); the gate itself
   is the enforcement point.
+- `ApprovalPolicy` determines which tool classes pause. The default policy
+  gates shell commands only; file reads and writes are auto-allowed. This is a
+  connector policy, not a sandbox or a claim that every mutation waits.
 - `FakeConnector`: deterministic scripted connector used by the gate's agent
   flows and the demo; two explicitly ignored tests exercise the live Claude
   CLI connector.

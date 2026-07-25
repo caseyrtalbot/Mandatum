@@ -21,6 +21,9 @@ cargo test --workspace
 step "native frontend"
 ./ci/native-frontend.sh
 
+step "distribution installer"
+./ci/distribution-smoke.sh
+
 step "conformance (Constitution L1/L2 dependency laws)"
 ./ci/conformance.sh
 

@@ -242,12 +242,11 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    /// Captured from a real `claude -p … --output-format stream-json` run on
-    /// this machine (claude CLI 2.1.205): approved echo command.
+    /// Minimal synthetic stream-json fixture for an approved echo command.
     const ALLOW_FIXTURE: &str = include_str!("../../tests/fixtures/claude_stream_allow.jsonl");
-    /// Same objective, PreToolUse hook denied the Bash call.
+    /// Synthetic equivalent where the PreToolUse hook denied the Bash call.
     const DENY_FIXTURE: &str = include_str!("../../tests/fixtures/claude_stream_deny.jsonl");
-    /// A Write tool creating hello.txt.
+    /// Synthetic Write tool stream creating hello.txt.
     const WRITE_FIXTURE: &str = include_str!("../../tests/fixtures/claude_stream_write.jsonl");
 
     fn parse_all(fixture: &str) -> Vec<AgentSessionEvent> {

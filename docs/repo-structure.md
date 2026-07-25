@@ -12,12 +12,12 @@ LICENSE        Apache-2.0
 Cargo.toml     Rust workspace manifest + shared release version
 Cargo.lock     locked Rust dependencies
 rust-toolchain.toml  pinned gate toolchain
-install.sh     latest-release installer (checksum verification + both binaries)
-ci/            merge gate plus current native frontend maintenance check
-.github/       GitHub Actions CI + maintained terminal-tool release archives,
-               Dependabot config, issue and PR templates
+install.sh     architecture-aware installer with checksum + macOS signer verification
+ci/            merge gate, distribution smoke, and native frontend maintenance
+.github/       GitHub Actions CI + signed/notarized macOS and terminal release
+               archives, Dependabot config, issue and PR templates
 docs/          product and architecture specs
-docs/assets/   README frames: SVGs generated from real captured sessions
+docs/assets/   README interface frames
 crates/        implementation modules
 examples/      live-slice driven demo (the stranger-test scene)
 spikes/        excluded measurement, stress, fault, and terminal probes

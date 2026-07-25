@@ -8,10 +8,13 @@ preserve dated rationale and evidence.
 
 ## Product direction
 
-The native wgpu frontend is the product and Casey's daily-driver target. The
+The native wgpu frontend is the macOS product. The
 terminal frontend is a maintained tool for SSH, headless use, recovery, and an
 explicit escape hatch. The former Phase 7/8 admission framework is retired.
-There is no public-release audience.
+The repository is public: product, installation, update, security, and
+contribution claims must be defensible from shipped behavior. Never commit raw
+user transcripts, personal paths, machine/account inventories, credentials, or
+unredacted runtime timelines.
 Sub-20 ms latency, paired percentage improvement, long soak, multi-display,
 Linux-native, accessibility/theme parity, and rollout ceremony are not adoption
 gates. Keep the probes as regression measurements; do not use them to resist
@@ -25,7 +28,8 @@ authoritative ordered work is `docs/native-gpu-implementation-plan.md`.
 ## The gate
 
 `./ci/gate.sh` is the single merge gate: fmt, clippy `-D warnings`, build,
-test, `ci/native-frontend.sh`, `ci/conformance.sh`, and `ci/doc-trace.sh`.
+test, `ci/distribution-smoke.sh`, `ci/native-frontend.sh`,
+`ci/conformance.sh`, and `ci/doc-trace.sh`.
 GitHub Actions runs exactly this script, so local and remote CI cannot drift.
 Red means the change does not land. Run it before claiming any change
 complete; commits go directly to main, gated by a green run (solo repo, see
@@ -121,6 +125,9 @@ loses its documentation or its gate.
   that happened.
 - Update `README.md` and `docs/repo-structure.md` when crates or the doc set
   change. Remove references to files that no longer exist.
+- Keep the public README product-facing. Historical implementation evidence may
+  remain in dated technical records, but it must not expose personal
+  identifiers or contradict current policy.
 - Do not let historical decisions or frozen spike evidence overwrite the active
   native-first direction.
 

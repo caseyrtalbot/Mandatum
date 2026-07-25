@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "profile": "casey-m4pro-metal-scale2",
-  "scenario": "artifacts",
+  "profile": "macbook-pro-metal-scale2",
+  "scenario": "attention-motion-midpoint",
   "theme": "mandatum-dark",
-  "captured_at": "2026-07-25T05:41:17Z",
+  "captured_at": "2026-07-25T10:59:23Z",
   "surface": {
     "logical_width": 800,
     "logical_height": 600,
@@ -37,12 +37,12 @@
     "device_type": "integrated"
   },
   "source": {
-    "commit": "d17bdd2dd6f823feb714406a0547f2806a0fe175",
+    "commit": "4732ba8828442831a3223c013cec40b68cf8708e",
     "dirty": false
   },
   "build": {
     "profile": "debug",
-    "executable": "/Users/caseytalbot/Projects/mandatum/spikes/frontend-wgpu/target/debug/mandatum-native-lab"
+    "executable": "spikes/frontend-wgpu/target/debug/mandatum-native-lab"
   },
   "capture": {
     "api": "ScreenCaptureKit",
@@ -54,7 +54,7 @@
   },
   "fallback_regions": [],
   "acceptance": {
-    "reason": "Phase 5 artifact canvas, inspector, failure state, and overlay occlusion reviewed on the required built-in Retina reference",
-    "accepted_at_unix_seconds": 1784958116
+    "reason": "Phase 6 approval-arrival checkpoint after fixed-reference visual review",
+    "accepted_at_unix_seconds": 1784977215
   }
 }

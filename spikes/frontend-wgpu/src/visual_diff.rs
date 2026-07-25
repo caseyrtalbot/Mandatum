@@ -9,7 +9,7 @@ use std::{
 use png::{BitDepth, ColorType, Decoder, Limits};
 use serde::{Deserialize, Serialize};
 
-pub const PROFILE_ID: &str = "casey-m4pro-metal-scale2";
+pub const PROFILE_ID: &str = "macbook-pro-metal-scale2";
 pub const PHYSICAL_WIDTH: u32 = 1_600;
 pub const PHYSICAL_HEIGHT: u32 = 1_200;
 pub const LOGICAL_WIDTH: u32 = 800;

@@ -76,11 +76,11 @@ fn native_pty_writes_input_bytes_to_child() {
     ))
     .unwrap();
 
-    session.write_input(b"casey\n").unwrap();
+    session.write_input(b"sample\n").unwrap();
 
-    let output = read_until_contains(&mut session, b"reply:casey");
+    let output = read_until_contains(&mut session, b"reply:sample");
 
-    assert!(contains_bytes(&output, b"reply:casey"));
+    assert!(contains_bytes(&output, b"reply:sample"));
     assert_eq!(
         session.wait().unwrap().status(),
         ChildExitStatus::Exited { code: 0 }
@@ -190,7 +190,7 @@ fn native_pty_split_supports_concurrent_read_write_and_control() {
     assert_eq!(parts.controller.session_id().as_str(), "native-split");
     assert!(parts.controller.process_id().is_some());
 
-    parts.writer.write_input(b"casey\n").unwrap();
+    parts.writer.write_input(b"sample\n").unwrap();
 
     let mut output = Vec::new();
     for _ in 0..8 {
@@ -201,12 +201,12 @@ fn native_pty_split_supports_concurrent_read_write_and_control() {
             panic!("expected output event");
         };
         output.extend(chunk.into_bytes());
-        if contains_bytes(&output, b"split:casey") {
+        if contains_bytes(&output, b"split:sample") {
             break;
         }
     }
 
-    assert!(contains_bytes(&output, b"split:casey"));
+    assert!(contains_bytes(&output, b"split:sample"));
     assert_eq!(
         parts.controller.wait().unwrap().status(),
         ChildExitStatus::Exited { code: 0 }

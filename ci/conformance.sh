@@ -127,14 +127,16 @@ for name in sorted(workspace_names - NATIVE_FRONTEND_PACKAGES):
             f"a modeled {name} -> wgpu edge"
         )
 
-# Keep the legacy terminal release/install surfaces on their existing explicit
-# artifact allowlists. Native promotion does not add a native binary to them.
+# Keep release/install surfaces on explicit target and artifact allowlists.
+# macOS ships the native product beside the terminal/recovery tool and approval
+# bridge; Linux remains terminal/headless only.
 ALLOWED_RELEASE_TARGETS = {
     ("mandatum-app", "mandatum"),
     ("mandatum-agent-runtime", "mandatum-approval-bridge"),
+    ("mandatum-native", "mandatum-native"),
 }
-ALLOWED_RELEASE_MEMBERS = {"LICENSE", "mandatum", "mandatum-approval-bridge"}
-ALLOWED_RELEASE_BINARIES = {"mandatum", "mandatum-approval-bridge"}
+COMMON_RELEASE_BINARIES = {"mandatum", "mandatum-approval-bridge"}
+MACOS_RELEASE_BINARIES = COMMON_RELEASE_BINARIES | {"mandatum-native"}
 release_path = ".github/workflows/release.yml"
 install_path = "install.sh"
 release_text = open(release_path).read()
@@ -169,58 +171,95 @@ if release_targets != ALLOWED_RELEASE_TARGETS:
         f"(allowed: {sorted(ALLOWED_RELEASE_TARGETS)})"
     )
 
-def printf_member_set(source, variable):
-    match = re.search(rf"{variable}=\$\(printf '%s\\n' ([^|]+)\|", source)
-    return set(match.group(1).split()) if match else set()
-
-release_members = printf_member_set(release_text, "expected")
-installer_members = printf_member_set(install_text, "expected_members")
-if release_members != ALLOWED_RELEASE_MEMBERS:
+release_common_match = re.search(
+    r"common_release_binaries=\(([^)]*)\)", release_text
+)
+release_common = (
+    set(release_common_match.group(1).split()) if release_common_match else set()
+)
+if release_common != COMMON_RELEASE_BINARIES:
     failures.append(
-        f"[NATIVE-DEPENDENCY-BOUNDARY] release archive members changed: "
-        f"{sorted(release_members)} (allowed: {sorted(ALLOWED_RELEASE_MEMBERS)})"
+        "[NATIVE-DEPENDENCY-BOUNDARY] common release binaries changed: "
+        f"{sorted(release_common)} (allowed: {sorted(COMMON_RELEASE_BINARIES)})"
     )
-if installer_members != ALLOWED_RELEASE_MEMBERS:
+release_macos = release_common | (
+    {"mandatum-native"}
+    if 'native_archive="mandatum-native-${TARGET}.tar.gz"' in release_text
+    else set()
+)
+if release_macos != MACOS_RELEASE_BINARIES:
     failures.append(
-        f"[NATIVE-DEPENDENCY-BOUNDARY] installer archive members changed: "
-        f"{sorted(installer_members)} (allowed: {sorted(ALLOWED_RELEASE_MEMBERS)})"
-    )
-if 'test "$actual" = "$expected"' not in release_text:
-    failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] release archive allowlist assertion is missing"
-    )
-if '[ "$archive_members" = "$expected_members" ]' not in install_text:
-    failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] installer archive allowlist assertion is missing"
+        "[NATIVE-DEPENDENCY-BOUNDARY] macOS release binaries changed: "
+        f"{sorted(release_macos)} "
+        f"(allowed: {sorted(MACOS_RELEASE_BINARIES)})"
     )
 
-release_stage_sources = set(
-    re.findall(r"install -m 0755 target/release/([A-Za-z0-9_-]+)", release_text)
+installer_common_match = re.search(
+    r'common_release_binaries="([^"]+)"', install_text
 )
-installer_stage_sources = set(
-    re.findall(r'install -m 0755 "\$\{extract_dir\}/([A-Za-z0-9_-]+)"', install_text)
+installer_macos_match = re.search(
+    r'release_binaries="\$common_release_binaries ([^"]+)"', install_text
 )
-installer_binary_loops = [
-    set(match.split())
-    for match in re.findall(r"for binary in ([^;]+); do", install_text)
-]
-if release_stage_sources != ALLOWED_RELEASE_BINARIES:
+installer_common = (
+    set(installer_common_match.group(1).split()) if installer_common_match else set()
+)
+installer_macos_extra = (
+    set(installer_macos_match.group(1).split()) if installer_macos_match else set()
+)
+if installer_common != COMMON_RELEASE_BINARIES:
     failures.append(
-        f"[NATIVE-DEPENDENCY-BOUNDARY] release staging binaries changed: "
-        f"{sorted(release_stage_sources)} (allowed: {sorted(ALLOWED_RELEASE_BINARIES)})"
+        "[NATIVE-DEPENDENCY-BOUNDARY] common installer binaries changed: "
+        f"{sorted(installer_common)} (allowed: {sorted(COMMON_RELEASE_BINARIES)})"
     )
-if installer_stage_sources != ALLOWED_RELEASE_BINARIES:
+if installer_common | installer_macos_extra != MACOS_RELEASE_BINARIES:
     failures.append(
-        f"[NATIVE-DEPENDENCY-BOUNDARY] installer staging binaries changed: "
-        f"{sorted(installer_stage_sources)} (allowed: {sorted(ALLOWED_RELEASE_BINARIES)})"
+        "[NATIVE-DEPENDENCY-BOUNDARY] macOS installer binaries changed: "
+        f"{sorted(installer_common | installer_macos_extra)} "
+        f"(allowed: {sorted(MACOS_RELEASE_BINARIES)})"
     )
-if len(installer_binary_loops) != 2 or any(
-    binaries != ALLOWED_RELEASE_BINARIES for binaries in installer_binary_loops
-):
+
+required_release_assertions = (
+    'if [[ "$RUNNER_OS" == "macOS" ]]',
+    'if [[ "$TARGET" == *-apple-darwin ]]',
+    'expected=$(printf \'%s\\n\' LICENSE "${common_release_binaries[@]}"',
+    "native_expected=$(printf '%s\\n' LICENSE mandatum-native",
+    'test "$actual" = "$expected"',
+    'test "$native_actual" = "$native_expected"',
+)
+for assertion in required_release_assertions:
+    if assertion not in release_text:
+        failures.append(
+            "[NATIVE-DEPENDENCY-BOUNDARY] release target/archive assertion "
+            f"is missing: {assertion}"
+        )
+required_installer_assertions = (
+    "common_expected_members=$(printf '%s\\n' LICENSE $common_release_binaries",
+    "native_expected_members=$(printf '%s\\n' LICENSE mandatum-native",
+    'fetch_verified_archive "$common_archive_name" "$common_expected_members"',
+    'fetch_verified_archive "$native_archive_name" "$native_expected_members"',
+    '[ "$release_archive_members" = "$release_expected_members" ]',
+)
+for assertion in required_installer_assertions:
+    if assertion in install_text:
+        continue
     failures.append(
-        f"[NATIVE-DEPENDENCY-BOUNDARY] installer binary loops changed: "
-        f"{[sorted(binaries) for binaries in installer_binary_loops]} "
-        f"(allowed twice: {sorted(ALLOWED_RELEASE_BINARIES)})"
+        "[NATIVE-DEPENDENCY-BOUNDARY] installer archive assertion "
+        f"is missing: {assertion}"
+    )
+if install_text.count("for binary in $release_binaries; do") != 7:
+    failures.append(
+        "[NATIVE-DEPENDENCY-BOUNDARY] installer must validate members, "
+        "signatures, and installation completeness, then back up, stage, and "
+        "install only the selected platform binary allowlist"
+    )
+if '"${extract_dir}/${binary}" "${install_stage}/${binary}"' not in install_text:
+    failures.append(
+        "[NATIVE-DEPENDENCY-BOUNDARY] installer staging no longer follows "
+        "the selected binary allowlist"
+    )
+if 'mv -f "${install_stage}/mandatum" "${install_dir}/mandatum"' not in install_text:
+    failures.append(
+        "[NATIVE-DEPENDENCY-BOUNDARY] self-update owner must be installed last"
     )
 
 # ---- [L1-GATE] direct-dependency bans across the render seam ------------

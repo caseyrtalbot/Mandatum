@@ -9,7 +9,7 @@ import ImageIO
 import ScreenCaptureKit
 import UniformTypeIdentifiers
 
-private let fixedProfile = "casey-m4pro-metal-scale2"
+private let fixedProfile = "macbook-pro-metal-scale2"
 private let fixedDisplay = "Built-in Retina Display"
 private let visualThemes: Set<String> = [
     "mandatum-dark", "mandatum-light", "mandatum-high-contrast",

@@ -20,11 +20,30 @@ jobs:
     name: full merge gate
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify release tag matches the workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n \
+            '/^\[workspace\.package\]/,/^\[/{s/^version = "\([^"]*\)"/\1/p;}' \
+            Cargo.toml)
+          test -n "$version"
+          test "$GITHUB_REF_NAME" = "v${version}"
+          printf '%s\n' "$version" | awk -F. '
+            NF == 3 &&
+            $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {
+              valid = 1
+            }
+            END { exit !valid }
+          ' || {
+            echo "release version must be a numeric x.y.z triplet: $version" >&2
+            exit 1
+          }
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: ./ci/gate.sh
 
   build:
@@ -44,9 +63,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: release-${{ matrix.target }}
       - name: Verify native build host
@@ -55,41 +74,192 @@ jobs:
           host=$(rustc -vV | sed -n 's/^host: //p')
           test "$host" = "${{ matrix.target }}"
       - name: Build release binaries
+        shell: bash
         run: |
+          set -euo pipefail
           cargo build --locked --release -p mandatum-app --bin mandatum
           cargo build --locked --release -p mandatum-agent-runtime --bin mandatum-approval-bridge
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            cargo build --locked --release -p mandatum-native --bin mandatum-native
+          fi
+      - name: Sign and notarize macOS binaries
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for required_name in \
+            APPLE_CERTIFICATE_P12_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_SIGNING_IDENTITY \
+            APPLE_ID \
+            APPLE_TEAM_ID \
+            APPLE_APP_PASSWORD
+          do
+            if [[ -z "${!required_name:-}" ]]; then
+              echo "required macOS release secret is missing: $required_name" >&2
+              exit 1
+            fi
+          done
+          test "$APPLE_TEAM_ID" = "3S2Y6XKV4P" || {
+            echo "APPLE_TEAM_ID does not match Mandatum's pinned signing team" >&2
+            exit 1
+          }
+          case "$APPLE_SIGNING_IDENTITY" in
+            "Developer ID Application:"*) ;;
+            *)
+              echo "APPLE_SIGNING_IDENTITY must name a Developer ID Application certificate" >&2
+              exit 1
+              ;;
+          esac
+
+          certificate="$RUNNER_TEMP/mandatum-developer-id.p12"
+          keychain="$RUNNER_TEMP/mandatum-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -f "$certificate"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" |
+            openssl base64 -d -A -out "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" \
+            -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain"
+
+          verify_developer_id() {
+            local binary=$1
+            local signature_info
+            codesign --verify --strict --verbose=2 "$binary"
+            signature_info=$(codesign --display --verbose=4 "$binary" 2>&1)
+            grep -q '^TeamIdentifier=3S2Y6XKV4P$' <<<"$signature_info" || {
+              echo "$binary was not signed by Mandatum's pinned Apple team" >&2
+              exit 1
+            }
+            grep -q '^Authority=Developer ID Application:' <<<"$signature_info" || {
+              echo "$binary was not signed with a Developer ID Application certificate" >&2
+              exit 1
+            }
+          }
+
+          for binary in mandatum mandatum-native mandatum-approval-bridge; do
+            codesign \
+              --force \
+              --options runtime \
+              --timestamp \
+              --keychain "$keychain" \
+              --sign "$APPLE_SIGNING_IDENTITY" \
+              "target/release/$binary"
+            verify_developer_id "target/release/$binary"
+          done
+
+          notarization_dir="$RUNNER_TEMP/mandatum-notarization"
+          notarization_zip="$RUNNER_TEMP/mandatum-notarization.zip"
+          mkdir "$notarization_dir"
+          for binary in mandatum mandatum-native mandatum-approval-bridge; do
+            install -m 0755 "target/release/$binary" "$notarization_dir/$binary"
+          done
+          ditto -c -k --keepParent "$notarization_dir" "$notarization_zip"
+          notarization_result="$RUNNER_TEMP/mandatum-notarization-result.plist"
+          xcrun notarytool submit "$notarization_zip" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait \
+            --output-format plist >"$notarization_result"
+          notarization_status=$(plutil -extract status raw -o - "$notarization_result")
+          notarization_id=$(plutil -extract id raw -o - "$notarization_result")
+          if [[ "$notarization_status" != "Accepted" ]]; then
+            xcrun notarytool log "$notarization_id" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" || true
+            echo "Apple notarization was not accepted: $notarization_status" >&2
+            exit 1
+          fi
       - name: Package and verify archive
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          archive="mandatum-${TARGET}.tar.gz"
-          mkdir -p dist/stage
-          install -m 0755 target/release/mandatum dist/stage/mandatum
-          install -m 0755 target/release/mandatum-approval-bridge \
-            dist/stage/mandatum-approval-bridge
-          install -m 0644 LICENSE dist/stage/LICENSE
-          tar -C dist/stage -czf "dist/${archive}" \
-            mandatum mandatum-approval-bridge LICENSE
+          verify_developer_id() {
+            local binary=$1
+            local signature_info
+            codesign --verify --strict --verbose=2 "$binary"
+            signature_info=$(codesign --display --verbose=4 "$binary" 2>&1)
+            grep -q '^TeamIdentifier=3S2Y6XKV4P$' <<<"$signature_info" || {
+              echo "$binary was not signed by Mandatum's pinned Apple team" >&2
+              exit 1
+            }
+            grep -q '^Authority=Developer ID Application:' <<<"$signature_info" || {
+              echo "$binary was not signed with a Developer ID Application certificate" >&2
+              exit 1
+            }
+          }
 
-          expected=$(printf '%s\n' LICENSE mandatum mandatum-approval-bridge | LC_ALL=C sort)
+          archive="mandatum-${TARGET}.tar.gz"
+          common_release_binaries=(mandatum mandatum-approval-bridge)
+          mkdir -p dist/common
+          for binary in "${common_release_binaries[@]}"; do
+            install -m 0755 "target/release/$binary" "dist/common/$binary"
+          done
+          install -m 0644 LICENSE dist/common/LICENSE
+          tar -C dist/common -czf "dist/${archive}" \
+            "${common_release_binaries[@]}" LICENSE
+
+          expected=$(printf '%s\n' LICENSE "${common_release_binaries[@]}" | LC_ALL=C sort)
           actual=$(tar -tzf "dist/${archive}" | LC_ALL=C sort)
           test "$actual" = "$expected"
 
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd dist && sha256sum "$archive" >"${archive}.sha256")
-            (cd dist && sha256sum -c "${archive}.sha256")
-          else
-            (cd dist && shasum -a 256 "$archive" >"${archive}.sha256")
-            (cd dist && shasum -a 256 -c "${archive}.sha256")
+          if [[ "$TARGET" == *-apple-darwin ]]; then
+            for binary in "${common_release_binaries[@]}"; do
+              verify_developer_id "dist/common/$binary"
+            done
+            native_archive="mandatum-native-${TARGET}.tar.gz"
+            mkdir -p dist/native
+            install -m 0755 target/release/mandatum-native \
+              dist/native/mandatum-native
+            install -m 0644 LICENSE dist/native/LICENSE
+            tar -C dist/native -czf "dist/${native_archive}" \
+              mandatum-native LICENSE
+            native_expected=$(printf '%s\n' LICENSE mandatum-native | LC_ALL=C sort)
+            native_actual=$(tar -tzf "dist/${native_archive}" | LC_ALL=C sort)
+            test "$native_actual" = "$native_expected"
+            verify_developer_id dist/native/mandatum-native
           fi
-      - uses: actions/upload-artifact@v4
+
+          for packaged_archive in dist/*.tar.gz; do
+            packaged_archive=$(basename "$packaged_archive")
+            if command -v sha256sum >/dev/null 2>&1; then
+              (cd dist && sha256sum "$packaged_archive" >"${packaged_archive}.sha256")
+              (cd dist && sha256sum -c "${packaged_archive}.sha256")
+            else
+              (cd dist && shasum -a 256 "$packaged_archive" >"${packaged_archive}.sha256")
+              (cd dist && shasum -a 256 -c "${packaged_archive}.sha256")
+            fi
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.target }}
-          path: |
-            dist/mandatum-${{ matrix.target }}.tar.gz
-            dist/mandatum-${{ matrix.target }}.tar.gz.sha256
+          path: dist/*.tar.gz*
           if-no-files-found: error
           retention-days: 7
 
@@ -100,7 +270,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           path: dist
@@ -109,10 +279,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz' | wc -l)" -eq 4
-          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz.sha256' | wc -l)" -eq 4
+          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz' | wc -l)" -eq 6
+          test "$(find dist -maxdepth 1 -type f -name 'mandatum-*.tar.gz.sha256' | wc -l)" -eq 6
           for checksum in dist/*.tar.gz.sha256; do
             (cd dist && sha256sum -c "$(basename "$checksum")")
+          done
+          for archive in dist/*.tar.gz; do
+            case "$archive" in
+              */mandatum-native-*-apple-darwin.tar.gz)
+                expected=$(printf '%s\n' LICENSE mandatum-native | LC_ALL=C sort)
+                ;;
+              *)
+                expected=$(printf '%s\n' \
+                  LICENSE mandatum mandatum-approval-bridge |
+                  LC_ALL=C sort)
+                ;;
+            esac
+            actual=$(tar -tzf "$archive" | LC_ALL=C sort)
+            test "$actual" = "$expected"
           done
       - name: Create GitHub release
         env:

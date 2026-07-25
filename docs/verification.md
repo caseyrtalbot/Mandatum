@@ -167,7 +167,7 @@ The intent is to detect busy spin, not to certify a release.
 
 ## Typography Comparison
 
-Use Casey's actual font, size, scale, theme, and display. Render the same corpus
+Use the reference environment's actual font, size, scale, theme, and display. Render the same corpus
 beside Ghostty and capture:
 
 - ASCII, symbols, fallback, ligatures, CJK, combining text, and emoji;
@@ -324,7 +324,7 @@ Capture one candidate with:
 
 ```sh
 spikes/frontend-wgpu/scripts/visual-regression.swift capture \
-  --profile casey-m4pro-metal-scale2 \
+  --profile macbook-pro-metal-scale2 \
   --scenario calm-terminal
 ```
 
@@ -338,7 +338,7 @@ Compare without writing files:
 ```sh
 cargo run --manifest-path spikes/frontend-wgpu/Cargo.toml \
   --bin visual-diff -- compare \
-  --profile casey-m4pro-metal-scale2 \
+  --profile macbook-pro-metal-scale2 \
   --scenario calm-terminal
 ```
 
@@ -347,7 +347,7 @@ After side-by-side human review, accept explicitly:
 ```sh
 cargo run --manifest-path spikes/frontend-wgpu/Cargo.toml \
   --bin visual-diff -- accept \
-  --profile casey-m4pro-metal-scale2 \
+  --profile macbook-pro-metal-scale2 \
   --scenario calm-terminal \
   --reason "describe the intended visual change"
 ```
@@ -531,14 +531,16 @@ changed files, output tails, restore behavior, and failed-task investigation.
 Adversarial task text must remain bounded, prefixed, JSON-escaped, and labeled
 untrusted before it enters a mandate.
 
-## Legacy Distribution Checks
+## Public Distribution Checks
 
-There is no public-release audience. The existing `mandatum` terminal command,
-installer, updater, and release archives remain on disk as operational tooling,
-not an active distribution roadmap or native adoption path. If those surfaces
-change, re-run their existing binary, distribution, installer, checksum, and
-update tests. Native promotion does not add a native binary to the legacy
-archives.
+The public installer, updater, and release archives are product boundaries. Any
+change must rerun `ci/distribution-smoke.sh`, the distribution/update tests,
+archive membership and checksum checks, and the authoritative repository gate.
+The common archive must remain compatible with pre-native updaters; native
+macOS binaries ship in a separate per-architecture archive. A public release is
+not qualified until a real signed Apple Silicon and Intel build completes
+notarization and a fresh install verifies checksums, signatures, pinned Team ID,
+launch, and update behavior.
 
 ## The Stranger Test
 
@@ -586,7 +588,7 @@ developer unfamiliar with the current implementation can identify:
   Ctrl+Q. No visual matrix was required because Work 2 changed package and CI
   ownership without changing rendered behavior.
 - **2026-07-24:** Work 3 displayed one deterministic typography corpus in
-  Ghostty 1.2.3 and the production native shell on the LG ULTRAGEAR+
+  Ghostty 1.2.3 and the production native shell on the external reference display
   (3440×1440, scale 1.0, 85 Hz). The requested actual Ghostty settings
   (embedded JetBrains Mono 13; background `#282c34`; foreground `#ffffff`;
   ANSI `#1d1f21 #cc6666 #b5bd68 #f0c674 #81a2be #b294bb #8abeb7
@@ -668,7 +670,7 @@ developer unfamiliar with the current implementation can identify:
   hits, zero evictions, and zero rejections. Row-level damage remains deferred.
   With source and active docs synchronized, `./ci/gate.sh` reported
   `GATE GREEN`.
-- **2026-07-24:** Work 5 made native Casey's local interactive default without
+- **2026-07-24:** Work 5 made native the reference environment's local interactive default without
   changing the installed terminal or any tracked distribution surface.
   Interactive zsh resolved `mandatum`, `mandatum-native`, and
   `mandatum-terminal` through the new local functions; native
@@ -685,7 +687,7 @@ developer unfamiliar with the current implementation can identify:
   `./ci/gate.sh` run reported `GATE GREEN`; the synchronized rerun after this
   evidence entry also reported `GATE GREEN` and is the completion authority.
 - **2026-07-24:** the first native daily-drive after Work 5 reproduced a
-  first-run input defect on Casey's vi-mode zsh: Escape dismissed the welcome
+  first-run input defect on the reference environment's vi-mode zsh: Escape dismissed the welcome
   note but also reached the child, so the following `pwd` characters edited
   and executed a prior history command. A second fresh workspace proved the
   route when Escape consumed a leading `i` as zsh's insert-mode command before
@@ -720,7 +722,7 @@ developer unfamiliar with the current implementation can identify:
   native plan, typechecked the ScreenCaptureKit script, displayed
   `calm-terminal` through the lab, and verified the live-slice native launch
   route. The fixed-reference capture command then refused the only active
-  `LG ULTRAGEAR+` display because its live backing scale was 1.0. No baseline
+  `external reference display` display because its live backing scale was 1.0. No baseline
   was captured, accepted, or claimed from resampled pixels; Phase 1 remains
   open until a genuine scale-2 display or mode is active.
 - **2026-07-24:** Phase 1 then used the LG display's genuine 1720 x 720
@@ -772,7 +774,7 @@ developer unfamiliar with the current implementation can identify:
   geometry, focus/badges, floating occlusion, window policy/title, terminal
   parity, and resource bounds.
 - **2026-07-24:** Phase 3 displayed acceptance used the real native Metal route
-  on Apple M4 Pro and `LG ULTRAGEAR+` at 1720 x 720 logical / 3440 x 1440
+  on Apple M4 Pro and `external reference display` at 1720 x 720 logical / 3440 x 1440
   physical / backing scale 2 / 60 Hz. Interactive review covered one, split,
   stacked, floating, zoomed, and 720 x 480 minimum layouts; the locked
   `restored` scenario covered restored split geometry. All 11 canonical
@@ -874,6 +876,26 @@ developer unfamiliar with the current implementation can identify:
   idle, recovery, and 1,000-resize probes were not repeated because their
   owning seams did not change. The final synchronized `./ci/gate.sh` ended
   `GATE GREEN`.
+- **2026-07-25:** public-release preparation replaced the repository entrance
+  with capability-first product documentation and explicit current limits,
+  sanitized the current tree's agent fixtures and machine-specific labels,
+  renamed the fixed-reference profile, and prepared version `0.3.0`. The
+  release boundary now builds backward-compatible common archives plus native
+  macOS archives, pins workflow actions, requires exact Developer ID team and
+  authority evidence, requires Apple notarization status `Accepted`, verifies
+  checksums and exact members at install time, and preserves recovery copies
+  if rollback itself fails. The updater permits equal-version completion when
+  a platform binary is missing. Approval execution now uses a private per-user
+  runtime root, preflights its bridge, and converts any bridge execution
+  failure into a blocking hook result. Focused bridge, private-runtime,
+  installer, retained-recovery, equal-version migration, parser, distribution,
+  conformance, syntax, and documentation checks passed. `ratatui` moved to
+  `0.30.2`, removing the affected transitive `lru 0.12.5` dependency. Live
+  repository settings confirmed private vulnerability reporting, secret
+  scanning, and push protection enabled. No native release was tagged: this
+  checkout has no Developer ID Application certificate and the required Apple
+  release secrets are not configured. The synchronized final `./ci/gate.sh`
+  ended `GATE GREEN`.
 
 ## Completion Rule
 

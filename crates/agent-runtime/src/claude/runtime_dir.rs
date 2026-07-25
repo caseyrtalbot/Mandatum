@@ -1,12 +1,11 @@
 //! Per-session runtime directory for the Claude CLI connector.
 //!
-//! Each launch gets `.mandatum/agent-runtime/<session-id>/` under the spec
-//! cwd, holding the generated `settings.json` (PreToolUse approval hook) and,
-//! when the path is short enough for a `sockaddr_un`, the approval socket.
-//! `.mandatum/` is kept out of version control by writing
-//! `.mandatum/.gitignore` on first use, mirroring how workspace.json
-//! persistence treats `.mandatum` as untracked local state (and its
-//! symlink-rejection convention from `crates/app/src/persistence.rs`).
+//! Each launch gets an owner-only directory beneath
+//! `/tmp/mandatum-agent-<euid>/`, holding the generated `settings.json`
+//! (PreToolUse approval hook) and approval socket. Keeping this
+//! security-sensitive state below a sticky system temporary directory and an
+//! owner-only root avoids traversing project directories that may be shared or
+//! writable by another local user.
 
 use std::{
     fs, io,
@@ -20,13 +19,8 @@ use crate::{
     spec::{ApprovalPolicy, ToolClass},
 };
 
-/// Unix domain socket paths must fit `sockaddr_un.sun_path` (104 bytes on
-/// macOS including the NUL); beyond this we fall back to a short path.
-const MAX_SOCKET_PATH_BYTES: usize = 100;
-
-/// Fallback directory for approval sockets when the session directory path
-/// is too long to bind (deep cwds, macOS temp dirs).
-const SHORT_SOCKET_DIR: &str = "/tmp/mandatum-agent";
+/// Prefix for the private per-user runtime directory.
+const SHORT_SOCKET_DIR_PREFIX: &str = "/tmp/mandatum-agent";
 
 /// Tools the Claude CLI may use without an interactive permission prompt.
 /// Gated classes stay in this list — the PreToolUse hook, not the allowlist,
@@ -40,33 +34,22 @@ static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct SessionRuntimeDir {
     /// Where the approval listener binds; removed on shutdown.
     pub(crate) socket_path: PathBuf,
-    /// The generated `--settings` file, inside
-    /// `.mandatum/agent-runtime/<session-id>/`.
+    /// The generated `--settings` file, inside the private session directory.
     pub(crate) settings_path: PathBuf,
 }
 
-/// Create the session runtime directory under `cwd` and pick a bindable
-/// socket path.
-pub(crate) fn prepare_session_dir(cwd: &Path) -> Result<SessionRuntimeDir, AgentConnectorError> {
+/// Create an owner-only session directory below the sticky system temporary
+/// directory. The project cwd is deliberately not part of this trust boundary.
+pub(crate) fn prepare_session_dir(_cwd: &Path) -> Result<SessionRuntimeDir, AgentConnectorError> {
     let session_id = generate_session_id();
-    let mandatum_dir = cwd.join(".mandatum");
-    create_dir_rejecting_symlinks(&mandatum_dir)?;
-    ensure_gitignore(&mandatum_dir)?;
-    let dir = mandatum_dir.join("agent-runtime").join(&session_id);
-    fs::create_dir_all(&dir).map_err(|error| launch_error(&dir, &error))?;
-
-    let colocated = dir.join("approval.sock");
-    let socket_path = if colocated.as_os_str().len() <= MAX_SOCKET_PATH_BYTES {
-        colocated
-    } else {
-        let short_dir = PathBuf::from(SHORT_SOCKET_DIR);
-        create_private_dir(&short_dir)?;
-        short_dir.join(format!("{session_id}.sock"))
-    };
+    let root = short_socket_dir();
+    create_private_dir(&root)?;
+    let dir = root.join(&session_id);
+    create_private_dir(&dir)?;
 
     Ok(SessionRuntimeDir {
         settings_path: dir.join("settings.json"),
-        socket_path,
+        socket_path: dir.join("approval.sock"),
     })
 }
 
@@ -91,7 +74,9 @@ pub(crate) fn write_settings_file(
             .saturating_sub(BRIDGE_TIMEOUT_MARGIN_SECS)
             .max(1);
         let command = format!(
-            "{} {} {bridge_timeout_secs}",
+            "{} {} {bridge_timeout_secs} || {{ \
+             printf '%s\\n' 'Mandatum approval bridge failed; action denied' >&2; \
+             exit 2; }}",
             shell_quote(&bridge_binary.to_string_lossy()),
             shell_quote(&runtime.socket_path.to_string_lossy()),
         );
@@ -157,43 +142,67 @@ fn generate_session_id() -> String {
     )
 }
 
-/// `create_dir_all` with the persistence convention: an existing path must be
-/// a real directory, never a symlink.
-fn create_dir_rejecting_symlinks(dir: &Path) -> Result<(), AgentConnectorError> {
+fn short_socket_dir() -> PathBuf {
+    PathBuf::from(format!("{SHORT_SOCKET_DIR_PREFIX}-{}", effective_uid()))
+}
+
+/// Create or validate an owner-only runtime directory without following a
+/// symlink. Existing directories owned by this user are tightened to `0700`;
+/// paths owned by another user fail closed.
+fn create_private_dir(dir: &Path) -> Result<(), AgentConnectorError> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     match fs::symlink_metadata(dir) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err(AgentConnectorError::LaunchFailed {
+            return Err(AgentConnectorError::LaunchFailed {
                 message: format!("{} must not be a symlink", dir.display()),
-            })
+            });
         }
-        Ok(metadata) if !metadata.is_dir() => Err(AgentConnectorError::LaunchFailed {
-            message: format!("{} is not a directory", dir.display()),
-        }),
-        Ok(_) => Ok(()),
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(AgentConnectorError::LaunchFailed {
+                message: format!("{} is not a directory", dir.display()),
+            });
+        }
+        Ok(metadata) => {
+            if metadata.uid() != effective_uid() {
+                return Err(AgentConnectorError::LaunchFailed {
+                    message: format!("{} is not owned by the current user", dir.display()),
+                });
+            }
+            if metadata.permissions().mode() & 0o777 != 0o700 {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+                    .map_err(|error| launch_error(dir, &error))?;
+            }
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(dir).map_err(|error| launch_error(dir, &error))
+            match fs::DirBuilder::new().mode(0o700).create(dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    return create_private_dir(dir);
+                }
+                Err(error) => return Err(launch_error(dir, &error)),
+            }
         }
-        Err(error) => Err(launch_error(dir, &error)),
+        Err(error) => return Err(launch_error(dir, &error)),
     }
+    let metadata = fs::symlink_metadata(dir).map_err(|error| launch_error(dir, &error))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != effective_uid()
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(AgentConnectorError::LaunchFailed {
+            message: format!("{} is not a private runtime directory", dir.display()),
+        });
+    }
+    Ok(())
 }
 
-/// Write `.mandatum/.gitignore` ignoring everything, if absent.
-fn ensure_gitignore(mandatum_dir: &Path) -> Result<(), AgentConnectorError> {
-    let gitignore = mandatum_dir.join(".gitignore");
-    if gitignore.exists() {
-        return Ok(());
+fn effective_uid() -> u32 {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
     }
-    fs::write(&gitignore, "*\n").map_err(|error| launch_error(&gitignore, &error))
-}
-
-/// Create the shared short socket directory, owner-only.
-fn create_private_dir(dir: &Path) -> Result<(), AgentConnectorError> {
-    use std::os::unix::fs::DirBuilderExt;
-    match fs::DirBuilder::new().mode(0o700).create(dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(launch_error(dir, &error)),
-    }
+    // SAFETY: `geteuid` takes no arguments and has no failure mode.
+    unsafe { geteuid() }
 }
 
 /// Single-quote a string for use inside a hook shell command.
@@ -222,33 +231,73 @@ mod tests {
     }
 
     #[test]
-    fn prepare_creates_session_dir_and_gitignore_once() {
+    fn prepare_creates_private_session_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
         let cwd = temp_cwd("prepare");
         let runtime = prepare_session_dir(&cwd).unwrap();
         let session_dir = runtime.settings_path.parent().unwrap();
-        assert!(session_dir.starts_with(cwd.join(".mandatum/agent-runtime")));
+        assert!(session_dir.starts_with(short_socket_dir()));
         assert!(session_dir.is_dir());
-        let gitignore = cwd.join(".mandatum/.gitignore");
-        assert_eq!(fs::read_to_string(&gitignore).unwrap(), "*\n");
-
-        // A pre-existing gitignore is left alone.
-        fs::write(&gitignore, "workspace.json\n").unwrap();
-        let second = prepare_session_dir(&cwd).unwrap();
-        assert_ne!(second.settings_path, runtime.settings_path);
-        assert_eq!(fs::read_to_string(&gitignore).unwrap(), "workspace.json\n");
+        assert_eq!(
+            fs::symlink_metadata(short_socket_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::symlink_metadata(session_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         fs::remove_dir_all(&cwd).unwrap();
     }
 
     #[test]
-    fn deep_cwds_fall_back_to_a_short_socket_path() {
+    fn deep_cwds_still_use_a_short_private_socket_path() {
         let mut cwd = temp_cwd("deep");
         for _ in 0..6 {
             cwd = cwd.join("very-long-directory-segment-for-socket-paths");
         }
         fs::create_dir_all(&cwd).unwrap();
         let runtime = prepare_session_dir(&cwd).unwrap();
-        assert!(runtime.socket_path.as_os_str().len() <= MAX_SOCKET_PATH_BYTES);
-        assert!(runtime.socket_path.starts_with(SHORT_SOCKET_DIR));
+        assert!(runtime.socket_path.starts_with(short_socket_dir()));
+        fs::remove_dir_all(&cwd).unwrap();
+    }
+
+    #[test]
+    fn private_directory_helper_rejects_symlinks_and_tightens_owned_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let cwd = temp_cwd("hostile");
+        let private_dir = cwd.join("runtime");
+        fs::create_dir(&private_dir).unwrap();
+        fs::set_permissions(&private_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_dir(&private_dir).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&private_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        fs::remove_dir_all(&cwd).unwrap();
+
+        let cwd = temp_cwd("symlink");
+        let outside = temp_cwd("outside");
+        let symlink_path = cwd.join("runtime");
+        symlink(&outside, &symlink_path).unwrap();
+        let problem =
+            create_private_dir(&symlink_path).expect_err("runtime symlink must fail closed");
+        assert!(problem.to_string().contains("must not be a symlink"));
+        fs::remove_dir_all(&cwd).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]
@@ -292,8 +341,40 @@ mod tests {
         assert!(command.contains(runtime.socket_path.to_str().unwrap()));
         // The bridge's own verdict bound rides along as argv[2], strictly
         // under the hook timeout.
-        assert!(command.ends_with(" 570"), "command was: {command}");
+        assert!(command.contains(" 570 ||"), "command was: {command}");
+        assert!(
+            command.ends_with("exit 2; }"),
+            "bridge failure must become a blocking hook exit: {command}"
+        );
         assert_eq!(hook["hooks"][0]["timeout"], 600);
+        fs::remove_dir_all(&cwd).unwrap();
+    }
+
+    #[test]
+    fn hook_command_blocks_when_a_preflighted_bridge_disappears() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cwd = temp_cwd("missing-after-preflight");
+        let bridge = cwd.join("bridge");
+        fs::write(&bridge, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&bridge, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(bridge.is_file());
+
+        let runtime = prepare_session_dir(&cwd).unwrap();
+        write_settings_file(&runtime, &bridge, &ApprovalPolicy::default(), 600).unwrap();
+        fs::remove_file(&bridge).unwrap();
+
+        let raw = fs::read_to_string(&runtime.settings_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let command = value["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(2));
         fs::remove_dir_all(&cwd).unwrap();
     }
 

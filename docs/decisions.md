@@ -2384,8 +2384,9 @@ Status: accepted (2026-07-24)
 Decision: Mandatum is a personal GPU-native development environment. The native
 wgpu frontend is the primary product surface and daily-driver target. The
 terminal frontend is a maintained tool for SSH, headless use, recovery, and an
-explicit escape hatch. There is no public-release audience and no Phase 7/8
-admission ceremony.
+explicit escape hatch. At this decision point, public distribution was not in
+scope and there was no Phase 7/8 admission ceremony. The later public-release
+decision supersedes only that distribution boundary.
 
 Context: the shared host, neutral input/effects, complete scene composition,
 typed Artifact Preview, advanced text/IME, GPU recovery, bounded scheduling,
@@ -2393,7 +2394,7 @@ and measurement probes are already implemented. The former production-admission
 framing made personal adoption wait on requirements that do not serve the
 product's actual user or support matrix.
 
-Rationale: daily use on Casey's known macOS hardware is the relevant quality
+Rationale: daily use on the reference environment's known macOS hardware is the relevant quality
 gate. Native polish and richer typed scene capabilities now create direct
 product value. Existing probes remain useful regression evidence, but do not
 grant permission to pursue the product direction.
@@ -2530,9 +2531,9 @@ boundaries. This does not authorize a Metal or Swift renderer rewrite;
 glyphon/cosmic-text may remain if a focused row-run adapter proves the right
 path.
 
-Context: Casey's zero-config Ghostty 1.2.3 uses an embedded JetBrains Mono at
+Context: the reference environment's zero-config Ghostty 1.2.3 uses an embedded JetBrains Mono at
 13 points, default background `#282c34`, default foreground `#ffffff`, and a
-separate built-in ANSI palette on one LG ULTRAGEAR+ at 3440×1440, scale 1.0,
+separate built-in ANSI palette on one external reference display at 3440×1440, scale 1.0,
 85 Hz. Mandatum's production CLI accepts the same family name, but cosmic-text
 sees only system fonts and the CLI does not verify resolution, so the nominal
 actual-settings run silently used an unknown fallback. Native terminal
@@ -2553,7 +2554,7 @@ Consequences:
 
 - explicit font requests must become observable and must not silently pass as
   matched evidence when the face is unavailable;
-- Casey's chosen face needs a deliberate product provisioning path;
+- the reference environment's chosen face needs a deliberate product provisioning path;
 - terminal foreground, background, and ANSI colors need explicit ownership
   before exact reference comparisons;
 - the next implementation decision must compare a glyphon/cosmic-text row-run
@@ -2608,7 +2609,7 @@ glyphon `TextArea` bounds clip a complete run.
 Rationale: the defect is the adapter contract, not the selected GPU text stack.
 Replacing glyphon/cosmic-text would duplicate shaping, fallback, atlas, and
 wgpu integration while weakening the scene-only renderer boundary. A bundled
-open-licensed primary makes Casey's default reproducible; strict system
+open-licensed primary makes the reference environment's default reproducible; strict system
 overrides keep proprietary or preferred installed faces possible without
 allowing silent primary fallback. Palette data belongs beside the existing
 semantic theme because it already follows config reload through `AppState` and
@@ -2796,7 +2797,7 @@ packaging, archives, release workflows, public-repository presentation assets,
 pane materials, spacing, transitions, or other visual polish merely because
 those surfaces are adjacent.
 
-Work 5 is therefore narrowed to making native Casey's default local launcher
+Work 5 is therefore narrowed to making native the reference environment's default local launcher
 while preserving an explicit terminal escape hatch. Its initial inventory
 covers the development command and local `mandatum` / `mandatum-native`
 executable seams only. If a local default cannot be selected without changing
@@ -2818,25 +2819,25 @@ Consequences:
 - the concluding build phase incorporates the deferred public and visual work
   together.
 
-## Casey-Local Interactive Shell Selects Native Without Replacing The Terminal Tool
+## the primary user-Local Interactive Shell Selects Native Without Replacing The Terminal Tool
 
 Status: accepted (2026-07-24)
 
-Decision: Casey's interactive zsh defines `mandatum-native` as the existing
+Decision: the reference environment's interactive zsh defines `mandatum-native` as the existing
 absolute-manifest native development command, routes the no-argument
 `mandatum` name through it, and exposes `mandatum-terminal` as an explicit call
 to the unchanged installed terminal release. The launcher does not change
 directories, so the caller's current project remains the workspace context.
-Non-interactive shells continue resolving `/Users/caseytalbot/.local/bin/mandatum`.
+Non-interactive shells continue resolving `~/.local/bin/mandatum`.
 
 Context: the production workspace already owned the stable
-`cargo run -p mandatum-native --bin mandatum-native` seam, while Casey's PATH
+`cargo run -p mandatum-native --bin mandatum-native` seam, while the reference environment's PATH
 contained only the installed `mandatum` terminal release. Replacing or renaming
 that file would couple a personal daily-driver switch to the frozen installer,
 updater, archive, and automation contract.
 
 Rationale: an interactive-shell route is the narrow local-only boundary. It
-makes the native product Casey's ordinary local launch without changing a
+makes the native product the reference environment's ordinary local launch without changing a
 tracked executable, Cargo target, installer destination, updater lookup,
 release archive, or non-interactive command used by automation.
 
@@ -2872,7 +2873,7 @@ The shared `AppState` owns the exception so native and terminal frontends
 retain identical product behavior.
 
 Context: the first native daily-drive after Work 5 dismissed the note with
-Escape. The same byte reached Casey's vi-mode zsh, switched it out of insert
+Escape. The same byte reached the reference environment's vi-mode zsh, switched it out of insert
 mode behind the overlay, and caused the following `pwd` characters to edit and
 execute a prior history command. A second fresh-workspace run proved the path:
 after Escape, a leading `i` was consumed as zsh's insert-mode command while the
@@ -2912,14 +2913,14 @@ phase. In-app typography, materials, hierarchy, density, focus, overlays,
 workflow surfaces, motion, accessibility, and visual verification are now
 active product work. Installer, updater, release, rollout, public-GitHub
 presentation, and marketing material remain shelved and are not prerequisites
-for improving Casey's daily-driver experience.
+for improving the reference environment's daily-driver experience.
 
 The phase follows `docs/visual-polish-plan.md`. Its visual direction is a
 "quiet instrument": a dense graphite workbench in which terminal content is
 the visual center, chrome is restrained and structural, and color communicates
 navigation or changed state rather than decoration.
 
-Context: the native frontend has crossed the Casey-local daily-driver bar and
+Context: the native frontend has crossed the reference-environment daily-driver bar and
 the first functional hardening defect is fixed. A displayed audit of the
 current Welcome, Palette, Help, and multi-pane states found one typographic
 voice, touching box-glyph borders, weak material separation, and inverse-video
@@ -2965,7 +2966,7 @@ them.
 
 Status: accepted (2026-07-24)
 
-Decision: the `casey-m4pro-metal-scale2` profile means a genuinely scale-2
+Decision: the `macbook-pro-metal-scale2` profile means a genuinely scale-2
 native client and ScreenCaptureKit frame. The capture tool must refuse a
 scale-1 window or display rather than upscale it and relabel the result.
 Canonical `narrow` is narrow pane geometry inside the same fixed
@@ -2973,7 +2974,7 @@ Canonical `narrow` is narrow pane geometry inside the same fixed
 belong to the later pairwise matrix.
 
 Context: Phase 1 implemented the real-host catalog and fixed capture/diff
-interfaces while the initial capture attempt saw only `LG ULTRAGEAR+` at
+interfaces while the initial capture attempt saw only `external reference display` at
 backing scale 1.0. ScreenCaptureKit can resample output dimensions, but those
 pixels do not prove the accepted scale-2 font rasterization, rounding, or
 compositor path. Treating that file as the fixed baseline would make exact
@@ -3317,8 +3318,9 @@ Consequences:
   not relabeled as three-run fixed-reference authority;
 - Phase 8 remains retired, and the next product family is named task and
   dev-server recipes rather than another visual-polish ceremony; and
-- installer, updater, release, rollout, and public-presentation work remain
-  shelved.
+- installer, updater, release, rollout, and public presentation were outside
+  this visual slice; the later public-distribution decision supersedes that
+  separate deferral.
 
 Verification: three independent cold reviews found and drove corrections for
 an overlay empty-state overwrite, semantic-emphasis erasure, line-box
@@ -3330,3 +3332,75 @@ frame-preparation sanity check passed. Exact capture diffs, diagnostics,
 measurements, and the intentionally scoped-out probes are recorded in
 `docs/verification.md`. The authoritative synchronized `./ci/gate.sh` ended
 `GATE GREEN`.
+
+## Public Distribution Uses Split Signed Archives And A Verified Update Boundary
+
+Status: accepted, release pending (2026-07-25)
+
+Decision: present Mandatum as a public pre-release product with a concise
+capability-first README and a truthful limitations section. Version `0.3.0`
+prepares the first native macOS distribution without breaking the published
+`0.2.0` updater contract: each architecture keeps the common
+`mandatum`/approval-bridge archive, while macOS receives a separate
+`mandatum-native` archive. The installer verifies exact members and SHA-256 for
+every archive. When native assets exist, it also verifies every executable's
+Developer ID signature against the pinned Apple Team ID before replacing
+anything. Partial replacement restores the prior binary set, and an equal
+published version is a no-op rather than a possible same-version downgrade.
+
+Release automation pins every GitHub Action to an immutable commit, requires a
+tag that exactly matches the root semantic version, signs all macOS executables
+with the hardened runtime, submits them to Apple notarization, and fails
+publication when any required credential or verification is absent. Until the
+first native release exists, the public installer detects the missing native
+asset and safely installs only the already-published terminal frontend.
+
+The same public-readiness boundary removes raw real-agent transcripts and
+personal machine identifiers from the current tree, neutralizes visual
+baseline profile names, enables private vulnerability reporting and secret
+scanning, and replaces private build-diary language at the repository entrance
+with current product and roadmap documentation.
+
+Context: the repository was already public, but its front page said there was
+no public audience, release archives omitted the native product, test fixtures
+contained private workstation metadata, and GitHub private vulnerability
+reporting was disabled despite the security policy linking to it. A public
+release also makes the approval socket and update supply chain advertised
+security boundaries. Review found that the fallback approval directory trusted
+a shared `/tmp` path and that checksums downloaded beside release archives did
+not independently exercise the configured Developer ID identity.
+
+Rationale: public claims must follow shipped artifacts and fail-closed
+boundaries. A separate native archive preserves the old updater's allowlist,
+while signature/team verification makes Developer ID signing meaningful at the
+client. Approval settings and sockets live below a per-user `0700` root under
+the sticky system temporary directory, so the gated protocol never traverses a
+shared or writable project directory. Gated launch also resolves and validates
+the bridge executable before Claude starts. Synthetic parser fixtures preserve
+behavioral coverage without publishing irrelevant personal state.
+
+Consequences:
+
+- the first native release cannot publish until valid Developer ID and Apple
+  notarization credentials are configured in GitHub Actions;
+- an equal-version install is a no-op only when every selected platform binary
+  is already present, so adding the native archive cannot strand an earlier
+  terminal-only installation;
+- raw command archives do not claim a stapled or offline notarization ticket;
+- the default agent policy is documented precisely: Bash gates by default,
+  while reads and writes auto-allow;
+- repository history still contains the superseded raw fixtures; removing that
+  historical privacy residue would require a disruptive history rewrite and is
+  not silently folded into this release-preparation commit; and
+- direct-to-main remains the documented solo-maintainer policy, with the full
+  repository gate required before each push and the tag workflow rerunning it
+  before release publication.
+
+Verification: focused parser, bridge-resolution, and private-runtime tests; the
+distribution installer/rollback/retained-recovery/current-version smoke;
+distribution/update tests; locked native and terminal builds; exact Developer
+ID and notarization-status workflow checks; shell/workflow syntax validation;
+conformance; and documentation trace checks passed during implementation. The
+synchronized authoritative `./ci/gate.sh` ended `GATE GREEN`. A real
+signed/notarized release remains the final remote authority and is explicitly
+pending valid Apple credentials.

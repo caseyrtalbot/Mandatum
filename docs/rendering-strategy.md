@@ -191,7 +191,7 @@ owned by [verification.md](verification.md) when their seam changes or focused
 evidence exposes risk. Pixel baselines supplement semantic tests; they never
 replace them or update implicitly.
 
-Phase 1's deterministic acceptance catalog lives in
+The deterministic visual-scenario catalog lives in
 `crates/app/src/visual_scenario.rs`: it prepares product fixtures through the
 core model and drives the real `FrontendHost` only with neutral input. The
 excluded native lab's `--visual-scenario` route displays those same scenes;
@@ -200,8 +200,8 @@ and `visual-diff` owns read-only comparison plus explicit human acceptance.
 Neither capture nor comparison derives product meaning or changes production
 renderer behavior.
 
-Phase 2 adds the native translation seam without replacing the accepted cell
-paint. App-built scenes carry stable opaque semantic node ids, fixed-point
+The native translation seam preserves the shared cell paint. App-built scenes
+carry stable opaque semantic node ids, fixed-point
 logical rectangles, cell projections, PTY mappings, hit targets, transition
 targets, and accessibility meaning. `prepare_native_presentation` validates
 their hierarchy, bounds, clips, ordering, and aggregate resource ceilings
@@ -219,7 +219,7 @@ size; child-terminal text retains the configured terminal metrics and exact
 cell advance. Direct UI colors come from `Theme.ui`, never from terminal ANSI
 identity.
 
-Phase 3 materializes the everyday workspace through that seam. Canvas,
+The everyday workspace is materialized through that seam. Canvas,
 tiled-pane, header/status, title, badge, attention, separator, focus, and
 floating-shell primitives come from typed plan commands. Modern app-owned
 chrome/default pane backgrounds no longer repaint those materials through the
@@ -230,26 +230,22 @@ floating shadow fragments are bounded and clipped around later raised panes.
 Compact/comfortable density changes native rail geometry only; terminal cell
 and PTY geometry remain exact.
 
-The current accepted Phase 3 reference set lives under
-`spikes/frontend-wgpu/visual-baselines/casey-m4pro-metal-scale2/`. Its 11
-baseline/metadata pairs record the workspace shell from clean source commit
-`7221937`; later presentation work compares against these files and may replace
-them only through explicit reviewed acceptance. The set includes the accepted
-typed rails, focus tick, badges, hairline separators, attention chips, and
-bounded floating material/shadow while retaining exact terminal paint.
+Fixed-reference visual baselines live under
+`spikes/frontend-wgpu/visual-baselines/`. They may be replaced only through
+explicit reviewed acceptance. The set covers typed rails, focus treatment,
+badges, separators, attention chips, bounded floating material and shadow,
+overlays, typography, workflow surfaces, and motion checkpoints while retaining
+exact terminal paint.
 
-Phase 4 adds a separate native overlay material stack above workspace
-materials, terminal backgrounds, and raster artifacts: modal scrim, overlay
+The native overlay material stack sits above workspace materials, terminal
+backgrounds, and raster artifacts: modal scrim, overlay
 shadow, raised shell, inset bands/soft selection/leading indicator, late
 overlay cursor quads, then text. Welcome omits the scrim; Context Menu stays
-anchored and also omits it. The Palette, full modal, Welcome, and
-artifact-plus-menu representative references are accepted from clean source
-commit `1988b0b` on the MacBook Pro built-in Retina display at backing scale
-2.0. Remaining scenarios keep their historical accepted evidence until their
-own pixels change; all new captures target the built-in display.
+anchored and also omits it. Representative references cover Palette, full
+modal, Welcome, and artifact-plus-menu states.
 
-Phase 6 resolves typed transition targets through one deterministic
-renderer-local `PresentationMotion` state machine. The scene names Focus,
+One deterministic renderer-local `PresentationMotion` state machine resolves
+typed transition targets. The scene names Focus,
 Selection, Overlay, PaneGeometry, and ApprovalArrival intent against stable
 nodes; the renderer applies only typed geometry, opacity, or scale properties
 with the configured motion tokens and an injected monotonic instant. Overlay
@@ -271,15 +267,13 @@ work, and retains static semantic emphasis. Pointer routing is suspended while
 pane or overlay hit-bearing geometry is visually between the scene-owned
 endpoint targets.
 
-The fixed-reference Phase 6 matrix freezes approval arrival at start,
+The fixed-reference motion matrix freezes approval arrival at start,
 midpoint, end, and reduced-motion state only after the target frame has
 presented. The capture path retains the exact real-viewport snapshot and target
 instant across bounded surface retries, publishes readiness through the final
 window title, and fails closed rather than accepting a stale pre-checkpoint
-frame. All four references were accepted from clean source commit `4732ba8`
-on the MacBook Pro built-in Retina display.
+frame.
 
-The finishing slice turns the presentation contracts into everyday geometry.
 Filtered overlays reserve two-row blocks for the input, each visible item, and
 the footer; Session Map reserves two-row item/footer blocks; Context Menu uses
 two-row item blocks. Paint, native presentation nodes, and pointer hit targets
@@ -291,13 +285,11 @@ overwrites the filter input, and the prompt's IME target remains anchored to
 its full input block. These overlay-only rows do not change pane layout,
 terminal viewport mappings, or PTY size.
 
-The maintained 18-point displayed check was reviewed from clean source commit
-`8092f7c` on the MacBook Pro built-in Retina display at backing scale 2.0 and a
-1600x1200 client surface. It showed no clipping or overlap, and app-owned text
-no longer falls back to the terminal's global metric. Pane title rails remain
-one terminal row; making them taller without consuming terminal content
-requires a later pane-layout/PTY contract change rather than a renderer-only
-adjustment.
+The maintained 18-point display check showed no clipping or overlap, and
+app-owned text no longer falls back to the terminal's global metric. Pane title
+rails remain one terminal row; making them taller without consuming terminal
+content requires a later pane-layout/PTY contract change rather than a
+renderer-only adjustment.
 
 ## Resize And Rewrap
 

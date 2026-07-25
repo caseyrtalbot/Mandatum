@@ -4,7 +4,7 @@ Status: native-first direction accepted on 2026-07-24. Work 2 promoted the
 production shell and renderer into the workspace. Work 3 completed with a
 negative typography verdict. The accepted typography foundation is now
 implemented, displayed, and backed by the bounded Work 4 shaping cache. Work 5
-made native Casey's local default. Production-grade native in-app visual polish
+made native the reference environment's local default. Production-grade native in-app visual polish
 is complete: visual Phase 6 is accepted, and the final physical theme,
 UI-metric, and overlay-control improvements closed without restoring a
 separate Phase 7/8 ceremony.
@@ -15,15 +15,16 @@ Mandatum is a personal, GPU-native development environment with Ghostty-class
 feel, living outside the terminal.
 
 - The native wgpu frontend is the product and the primary development surface.
-- Daily-driver quality for Casey on known macOS hardware is the adoption bar.
+- Daily-driver quality for the primary user on known macOS hardware is the adoption bar.
 - The terminal frontend is a maintained tool for SSH, headless use, recovery,
   and an explicit escape hatch.
 - Native in-app visual polish and richer workflow surfaces are complete as
   specified in
   [`docs/visual-polish-plan.md`](visual-polish-plan.md).
 - Named task and dev-server recipes are the next ordered product family.
-- Installer, release, rollout, archives, public-GitHub presentation, and public
-  visual materials remain shelved for a later distribution phase.
+- Public repository presentation and the signed native release pipeline are now
+  prepared separately. The first native release remains pending Apple signing
+  credentials and a successful notarized tag build.
 
 ## Product Roles
 
@@ -76,8 +77,8 @@ A native macOS accessibility adapter and VoiceOver qualification are deferred;
 typed scene semantics, keyboard operation, and non-color cues remain. Concrete
 functional failures found through daily native use remain hardening work at
 their smallest owning seam; they are not reasons to restore the retired
-admission ceremony or pull forward the shelved distribution and
-public-presentation phase.
+admission ceremony. Public distribution and repository presentation are now a
+separate prepared capability, as recorded in the root roadmap.
 
 ## Work 1 — Reorder Startup — Complete
 
@@ -133,9 +134,9 @@ Exit: the native frontend is a workspace component; the native gate and
 
 Completed on 2026-07-24 through the negative decision branch.
 
-- Casey's zero-config Ghostty 1.2.3 resolves JetBrains Mono at 13 points from
+- the reference environment's zero-config Ghostty 1.2.3 resolves JetBrains Mono at 13 points from
   an embedded face and uses default background `#282c34`, foreground
-  `#ffffff`, and its built-in ANSI palette on the LG ULTRAGEAR+ at 3440×1440,
+  `#ffffff`, and its built-in ANSI palette on the external reference display at 3440×1440,
   scale 1.0, 85 Hz.
 - The nominal native launch with `--font-family "JetBrains Mono"` was rejected
   as comparison evidence: cosmic-text's system database cannot see Ghostty's
@@ -164,7 +165,7 @@ Completed on 2026-07-24 through the negative decision branch.
   remained coherent; no stale frame or scale-transition corruption was
   observed.
 
-Verdict: the current production typography path cannot yet delight at Casey's
+Verdict: the current production typography path cannot yet delight at the reference environment's
 actual settings. A focused decision on font provisioning/resolution, palette
 ownership, and row-run shaping is required before broader visual-identity
 investment or a shaping cache.
@@ -223,7 +224,7 @@ and bounded cache are implemented.
   materialization belongs to the native pixel surface; changing the escape
   hatch to emit explicit RGB requires a separate decision.
 - Start built-in palettes with the current native constants so implementing
-  ownership alone does not smuggle in a visual redesign. Casey's recorded
+  ownership alone does not smuggle in a visual redesign. the reference environment's recorded
   Ghostty palette becomes expressible configuration.
 
 ### Row-run shaping adapter
@@ -287,7 +288,7 @@ support is explicitly separate from this cache-preparation family.
   combining, emoji, fallback, wide cells, decorations, pane/artifact clipping,
   and scale changes. Prove RTL/bidi input takes the bounded observable fallback
   without bleed, panic, or cursor/selection drift; do not claim bidi support.
-- Display the shared typography corpus at Casey's accepted font, size, theme,
+- Display the shared typography corpus at the reference environment's accepted font, size, theme,
   and scale before beginning the cache.
 
 The foundation checks and cache are green:
@@ -324,11 +325,11 @@ entry or accounted-byte resource.
 
 Completed on 2026-07-24.
 
-- Casey's interactive zsh routes `mandatum` and `mandatum-native` through the
+- the reference environment's interactive zsh routes `mandatum` and `mandatum-native` through the
   stable native development command without changing the caller's working
   directory.
 - `mandatum-terminal` executes the untouched
-  `/Users/caseytalbot/.local/bin/mandatum` terminal release as the explicit
+  `~/.local/bin/mandatum` terminal release as the explicit
   recovery, SSH, help, version, and update escape hatch.
 - Non-interactive shells continue resolving the installed terminal command.
   The installer/updater contract therefore remains intact and can still
@@ -350,7 +351,7 @@ keeping distribution and public materials deferred.
 
 The complete ordered phase is
 [`docs/visual-polish-plan.md`](visual-polish-plan.md). It treats visual quality
-as a cornerstone capability of Casey's daily-driver product:
+as a cornerstone capability of the reference environment's daily-driver product:
 
 - visual acceptance and representative scenarios before pixel changes;
 - semantic tokens and typography hierarchy;
@@ -359,7 +360,7 @@ as a cornerstone capability of Casey's daily-driver product:
 - richer typed task, agent, approval, and artifact presentation;
 - fluid geometry and purposeful motion with reduced-motion behavior; and
 - typed accessibility semantics, keyboard/non-color cues, and displayed
-  acceptance on Casey's actual native surface.
+  acceptance on the reference environment's actual native surface.
 
 The architecture remains unchanged: `WorkspaceScene` owns product meaning and
 layout, richer native presentation enters through typed `mandatum-scene`
@@ -380,7 +381,7 @@ Visual-phase exit checks:
 
 - startup and shutdown never strand runtimes;
 - keyboard, pointer, clipboard, and IME behavior are trustworthy;
-- text is delightful at Casey's normal settings;
+- text is delightful at the reference environment's normal settings;
 - resize, recovery, and continuous output remain responsive;
 - failures are visible and recoverable;
 - probes reveal regressions without becoming permission gates.
@@ -430,6 +431,7 @@ Begin the named task and dev-server recipe catalog in `PLAN.md`: project-local
 build, test, lint, and server recipes with duration, cwd, start time, port, and
 health facts. Continue daily-driving the native launcher; if another concrete
 functional failure appears, reproduce it, fix the smallest owning product
-seam, and add a regression. Do not pull native VoiceOver qualification,
-installer, updater, release workflow, archives, rollout, public-GitHub
-presentation, or public visual materials forward.
+seam, and add a regression. Do not pull native VoiceOver qualification or
+unrelated rollout ceremony into the recipe family. The signed installer,
+updater, archive, and public-repository work is tracked independently by
+`PLAN.md`.

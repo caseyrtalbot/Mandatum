@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "profile": "casey-m4pro-metal-scale2",
-  "scenario": "attention-motion-start",
+  "profile": "macbook-pro-metal-scale2",
+  "scenario": "palette",
   "theme": "mandatum-dark",
-  "captured_at": "2026-07-25T10:59:20Z",
+  "captured_at": "2026-07-25T12:14:44Z",
   "surface": {
     "logical_width": 800,
     "logical_height": 600,
@@ -37,12 +37,12 @@
     "device_type": "integrated"
   },
   "source": {
-    "commit": "4732ba8828442831a3223c013cec40b68cf8708e",
+    "commit": "95d9d74c1ac60a348d2f49a5aa64a59e3b75d060",
     "dirty": false
   },
   "build": {
     "profile": "debug",
-    "executable": "/Users/caseytalbot/Projects/mandatum/spikes/frontend-wgpu/target/debug/mandatum-native-lab"
+    "executable": "spikes/frontend-wgpu/target/debug/mandatum-native-lab"
   },
   "capture": {
     "api": "ScreenCaptureKit",
@@ -54,7 +54,7 @@
   },
   "fallback_regions": [],
   "acceptance": {
-    "reason": "Phase 6 approval-arrival checkpoint after fixed-reference visual review",
-    "accepted_at_unix_seconds": 1784977215
+    "reason": "Finish overlay controls with two-row targets, centered interface text, and reviewed spacing",
+    "accepted_at_unix_seconds": 1784981819
   }
 }

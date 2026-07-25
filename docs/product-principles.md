@@ -2,14 +2,12 @@
 
 ## Thesis
 
-Mandatum is a personal GPU-native development workstation for builders. It
-brings shells, editors, builds, tests, servers, agents, diffs, approvals, logs,
-artifacts, and recovery into one spatial session surface.
+Mandatum is a GPU-native development workstation for terminal-centered
+builders. It brings shells, tasks, long-running commands, agents, approvals,
+logs, visual artifacts, and recovery into one spatial session surface.
 
-The product lives outside the terminal while preserving a terminal soul. It
-should feel as immediate and polished as Ghostty while expanding into a
-complete work loop: fast, precise, commandable, inspectable, and calm under
-load.
+The product lives outside the terminal while preserving a terminal soul. It is
+designed to be fast, precise, commandable, inspectable, and calm under load.
 
 ## User
 
@@ -30,7 +28,7 @@ The user can always answer:
 - Which agents are active, blocked, or waiting for approval?
 - Which files changed?
 - What can I rerun, stop, restart, restore, copy, search, or inspect?
-- What will survive app restart, machine sleep, or process failure?
+- What will survive an application restart?
 
 ## Product Pillars
 
@@ -64,8 +62,7 @@ not be restored. Restarting the app should not destroy the user's mental map.
 ### 6. Agents As Session Actors
 
 Agents are visible workers in the session. Their panes show objective, status,
-current action, approvals, changed files, commands, checks, blockers, and
-handoff state.
+current action, approvals, changed files, and bounded output.
 
 ### 7. Native Product, Honest Terminal Tool
 

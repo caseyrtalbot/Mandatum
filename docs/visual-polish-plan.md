@@ -27,11 +27,11 @@ This phase includes:
 
 A native macOS accessibility adapter and VoiceOver qualification are deferred
 rather than implied by the typed scene semantics. They remain valid future
-enhancements, not completion gates for Casey's current daily-driver surface.
+enhancements, not completion gates for the reference environment's current daily-driver surface.
 
-This phase does not include installer, updater, release, rollout, archives,
-public-GitHub presentation, marketing screenshots, or other public-distribution
-work. Those remain a separate deferred phase.
+This completed phase did not include installer, updater, release, archives, or
+public-repository presentation. Those concerns are handled by the later public
+distribution slice and the current root roadmap.
 
 ## Starting Point
 
@@ -334,7 +334,7 @@ Work:
 
 The reference artifact contract is:
 
-- profile ID: `casey-m4pro-metal-scale2`;
+- profile ID: `macbook-pro-metal-scale2`;
 - fixed surface: 1600 x 1200 physical pixels, backing scale 2.0, expected
   102 x 35 scene, bundled JetBrains Mono 13;
 - scenarios:
@@ -380,7 +380,7 @@ Completion status (2026-07-24):
   nonblank reason and refuses dirty candidate metadata;
 - the live-slice displayed route launches `mandatum-native`; and
 - all 11 fixed-reference images and metadata records were captured from clean
-  source commit `ebd7ee4` on `LG ULTRAGEAR+` at genuine backing scale 2.0,
+  source commit `ebd7ee4` on `external reference display` at genuine backing scale 2.0,
   1600 x 1200 physical / 800 x 600 logical / 102 x 35 scene, 60 Hz, Apple M4
   Pro / Metal, and bundled JetBrains Mono 13;
 - visual review caught and corrected a lab startup-order defect that dismissed

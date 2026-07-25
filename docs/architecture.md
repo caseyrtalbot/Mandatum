@@ -176,12 +176,11 @@ app's `scene_builder` converts engine grids into scene surfaces.
 
 ### Native Presentation Contract
 
-Phase 2 implements the following renderer-neutral interface as one capability
-family. `FrontendHost::frame_with_viewport` gives the app one coherent viewport
-snapshot; app-built scenes populate semantic presentation alongside the
-existing `CellProgram`; and `mandatum-native-renderer` validates a pure native
-presentation plan before GPU allocation. The terminal frontend and current
-production cell paint remain unchanged.
+The renderer-neutral native interface begins with
+`FrontendHost::frame_with_viewport`, which gives the app one coherent viewport
+snapshot. App-built scenes populate semantic presentation alongside the
+existing `CellProgram`, and `mandatum-native-renderer` validates a pure native
+presentation plan before GPU allocation.
 
 The scene interface includes these renderer-neutral value types:
 
@@ -297,7 +296,7 @@ cannot claim explicit chrome/overlay targets or interfere with child mouse
 reporting; only `TerminalViewportMapping` converts an admitted pane-body
 logical point to a child cell.
 
-Phase 3 makes this logical contract active in the product shell. Native cursor
+The native shell applies this logical contract directly. Native cursor
 positions cross `FrontendHost` as `LogicalPoint` values for workspace hit
 testing while the same neutral pointer event retains cell coordinates for
 terminal child input and split math. Separator hover and drag resolve against a
@@ -312,7 +311,7 @@ parsing glyphs or remapping semantic roles. Tiled panes and separators precede
 floating panes in scene order; floating shells own their rounded boundary and
 raised shadows, with later floats occluding earlier shadow fragments.
 
-Phase 4 extends the same contract to the complete overlay family. The scene
+The same contract covers the complete overlay family. The scene
 declares Modal, Welcome, and Context Menu presentation grammar plus title,
 input, footer, and stable item nodes. The native plan resolves those nodes into
 scrim, raised shell, band, soft selection, and leading-indicator materials.
@@ -326,17 +325,17 @@ Accessibility meaning remains dependency-free in `mandatum-scene`.
 the same `PresentationNodeId`; AccessKit, AppKit, winit, and other platform
 types stay in `mandatum-native`. The semantic hierarchy is workspace, then
 header/panes/status/active overlay, then their controls and items; paint-only
-decoration has no accessibility node. Phase 2 defines the dependency-free
-nodes and the neutral actions `Focus`, `Activate`, and `SetText`; the native
-platform projection remains Phase 7 work.
+decoration has no accessibility node. The scene defines dependency-free nodes
+and the neutral actions `Focus`, `Activate`, and `SetText`; native macOS
+platform projection is not yet implemented.
 
 The neutral input contract includes `AccessibilityActionEvent`, never a command
 or direct mutation. It carries the `FrameSnapshot` revision, node id, and typed
-action needed for the Phase 7 platform adapter and same-frame action-map
-resolution. Phase 2 deliberately leaves those events inert: it does not create
-an AccessKit/AppKit bridge or let an unprojected platform event mutate product
-state. Presentation nodes, mappings, future action maps, caches, focus bridges,
-and animation progress remain live state that is never serialized as durable
+action needed for a future platform adapter and same-frame action-map
+resolution. These events remain inert until an AccessKit or AppKit bridge
+projects them; an unprojected platform event cannot mutate product state.
+Presentation nodes, mappings, future action maps, caches, focus bridges, and
+animation progress remain live state that is never serialized as durable
 workspace intent.
 
 ### Frontend Adapters
@@ -415,14 +414,13 @@ decides whether the first-run note exists, and the scene carries its resolved
 area, introduction, ordered live key routes and descriptions, and dismissal
 text. The adapter paints and clips that opaque card without reading persistence,
 the keymap, or app state.
-The current GPU adapter treats layout/composition and content/style as two
-completed capability families. `prepare_scene` validates renderer-safety
-invariants and checked aggregate resource limits, then receives the one
-whole-frame `CellProgram` compiled by `mandatum-scene`; it does not recognize
-named topologies or retain a content-specific shadow plan. Identity, tiled
-coverage, gaps, overlap, stack/zoom/floating flags, focus ordering, chrome,
-pane/overlay text, opacity, selection, cursor, and styles are not reconstructed
-in the adapter because the scene compiler already owns those meanings.
+`prepare_scene` validates renderer-safety invariants and checked aggregate
+resource limits, then receives the one whole-frame `CellProgram` compiled by
+`mandatum-scene`; it does not recognize named topologies or retain a
+content-specific shadow plan. Identity, tiled coverage, gaps, overlap,
+stack/zoom/floating flags, focus ordering, chrome, pane/overlay text, opacity,
+selection, cursor, and styles are not reconstructed in the adapter because the
+scene compiler already owns those meanings.
 
 The compiler applies scene paint order and emits final topmost cells in
 deterministic row-major order. The ratatui adapter translates their neutral
@@ -450,41 +448,30 @@ preedit/commit/cancel, `AppState` locks composition to the active terminal or
 overlay text target, and focus/modal/pointer transitions cancel it. The native
 shell owns platform IME enablement and caret geometry only. On macOS, left
 Option remains available to dead-key composition and right Option is terminal
-Meta. Its former `TerminalSession`, direct parser/input path, and `scene_bridge` are
-removed; its window, platform-input translation, GPU, and paint-scheduling
-state remain frontend-local. Phase 3 input/lifecycle parity is complete in the
-native shell: configured workspace chords have first refusal before native
-copy/paste fallback; the neutral key seam covers xterm baseline modifiers and
-control aliases; pointer drag, child capture, any-event motion, scrollback,
-selection, focus cancellation, resize, runtime scale changes, restore, and
-clean shutdown all cross the shared host boundary. A frame that cannot be
-presented clears app hit targets and suppresses pointer input until the next
-successful present.
+Meta. The window, platform-input translation, GPU, and paint-scheduling state
+remain frontend-local. In the native shell, configured workspace chords have
+first refusal before native copy/paste fallback; the neutral key seam covers
+xterm baseline modifiers and control aliases; pointer drag, child capture,
+any-event motion, scrollback, selection, focus cancellation, resize, runtime
+scale changes, restore, and clean shutdown all cross the shared host boundary.
+A frame that cannot be presented clears app hit targets and suppresses pointer
+input until the next successful present.
 
 A native shell may own a window, platform wake handle, DPI/IME state,
 clipboard integration, GPU surface/device resources, glyph caches, and paint
 scheduling. It may not own a second PTY/parser path, command router, approval
-model, persistence model, or recovery policy. The ordered native-first work and
-verification policy are in
-[native-gpu-implementation-plan.md](native-gpu-implementation-plan.md).
-The native implementation already covers layout/composition, content/style,
-input/lifecycle, Artifact Preview, advanced text/IME, typed surface/device
-recovery, explicit failure outcomes, bounded event-loop work, resize/scale
-stress, and regression measurement behind the same `FrontendHost` and
-`WorkspaceScene` boundaries. Its product source now lives in the workspace;
-the separate `spikes/frontend-wgpu` lab retains measurement and fault tooling
-and is not a second product runtime. Typography validation found that explicit
-font requests were not resolution-checked, terminal colors were
-renderer-owned, and the adapter shaped one grapheme per buffer. The accepted
-bundled-font, theme-owned palette, clipped row-run, and shaping-cache path has
-closed that boundary, and native is now Casey's local default. The next
-architectural deepening is the typed native presentation plan in
-[visual-polish-plan.md](visual-polish-plan.md): richer native materials and
-workflow hierarchy extend `WorkspaceScene` while `CellProgram` remains the
-terminal-parity projection. The former Phase 7/8 admission and rollout policy
-is retired.
+model, persistence model, or recovery policy. The public frontend roles and
+distribution contract are in [frontend-platform.md](frontend-platform.md).
+The native implementation covers layout and composition, content and style,
+input lifecycle, Artifact Preview, text and IME, typed surface/device recovery,
+explicit failure outcomes, bounded event-loop work, and resize/scale handling
+behind the same `FrontendHost` and `WorkspaceScene` boundaries. The separate
+`spikes/frontend-wgpu` lab retains measurement and fault tooling; it is not a
+second product runtime. Bundled fonts, theme-owned palettes, clipped row-run
+shaping, and a bounded shaping cache remain renderer concerns while
+`CellProgram` remains the terminal-parity projection.
 
-Phase 5 deepens that same boundary for product workflows. `PaneScene` projects
+Product workflow presentation follows the same boundary. `PaneScene` projects
 task, agent, approval, and artifact facts into bounded `WorkflowRow` values and
 stable `WorkflowNodePart` identities; `detail_lines()` formats the same rows
 for terminal parity. Compact status badges are separate semantic nodes rather
@@ -494,7 +481,7 @@ the scene carries the exact typed canvas geometry; missing or mismatched
 product presentation fails before GPU allocation. Native materials consume
 roles and tones only and never parse row text.
 
-Phase 6 adds motion without moving product truth into a frontend.
+Motion does not move product truth into a frontend.
 `ScenePresentation::motion_policy` expresses reduced-motion and direct-geometry
 policy for the whole frame. `TransitionTarget` pairs a stable
 `PresentationNodeId` and typed property (`Geometry`, `Opacity`, or `Scale`) with

@@ -1,80 +1,73 @@
 # Contributing to Mandatum
 
-Thanks for looking under the hood. This repo runs on two documents and one
-script; internalize those and the rest follows.
+Mandatum welcomes focused bug reports, design discussions, documentation
+improvements, and code contributions. The project is pre-release, so opening an
+issue before a large change is the best way to confirm that the work fits the
+current direction.
 
-## The gate is the review
+Please report security issues privately as described in
+[SECURITY.md](SECURITY.md).
+
+## Set up a development checkout
+
+Mandatum uses the Rust toolchain pinned in `rust-toolchain.toml`.
+
+```sh
+git clone https://github.com/caseyrtalbot/Mandatum.git
+cd Mandatum
+./ci/gate.sh
+```
+
+Run the native macOS application from source:
+
+```sh
+cargo run -p mandatum-native --bin mandatum-native
+```
+
+Run the terminal frontend:
+
+```sh
+cargo run -p mandatum-app --bin mandatum
+```
+
+## Before opening a pull request
+
+Run the same gate used by CI:
 
 ```sh
 ./ci/gate.sh
 ```
 
-Runs fmt, clippy with `-D warnings`, build, the full test suite, the
-dependency-conformance scans, and doc-trace. CI executes exactly this
-script on the pinned toolchain (`rust-toolchain.toml`). A change that
-reddens the gate does not land; there are no exceptions, including for
-documentation (doc-trace is part of the gate).
+It checks formatting, Clippy with warnings denied, the workspace build and test
+suite, the public distribution contract, native-frontend maintenance,
+architectural conformance, and documentation traceability.
 
-## The Constitution is not up for debate in a PR
+Keep changes narrow and explain the behavior they change. Bug fixes should add
+a regression test at the lowest useful seam. Tests for agent behavior must use
+the deterministic `FakeConnector`; the live Claude CLI tests are intentionally
+excluded from CI.
 
-[docs/constitution.md](docs/constitution.md) defines five laws (engine and
-frontend separation; core as a runtime-free leaf; durable intent separate
-from live runtime; terminal quality behind `TerminalAdapter`; terminal
-soul). Each is enforced by a gate. If your feature seems to need a law
-broken, the boundary of your feature is wrong, not the law; open an issue
-to discuss the design instead.
+The five architectural invariants in
+[docs/constitution.md](docs/constitution.md) are enforced by the gate. If a
+proposal appears to conflict with one, open an issue to discuss the boundary
+before investing in an implementation.
 
-## How to work
+## Pull requests
 
-- **Bugs get a failing test first**, then the fix. Live-PTY behavior has a
-  harness pattern in `crates/app/tests/terminal_smoke.rs`.
-- **Agents use the FakeConnector in tests**, always. The two live Claude
-  CLI tests are `#[ignore]` and run explicitly.
-- **Every changed line traces to the change's purpose.** No drive-by
-  refactors or restyling.
-- **Prefer focused modules under 800 lines.** Existing oversized modules
-  should shrink when touched; do not grow one without documenting why a
-  split would make the design worse.
-- **New judgment calls go to `docs/decisions.md`** (status, decision,
-  context, rationale, consequences). Docs are reconciled to code in the
-  same change that alters behavior.
-- **Latency-sensitive changes** re-run the standing probe:
-  `cargo run --release --bin tui_probe` from `spikes/frontend-wgpu`
-  (procedure in [docs/verification.md](docs/verification.md)).
+A useful pull request includes:
 
-## Commit style
+- the problem and intended user outcome;
+- the implementation approach and important tradeoffs;
+- the verification performed;
+- screenshots or a short recording when visible behavior changes; and
+- updated documentation when behavior, paths, or configuration change.
 
-`<type>: <description>` where type is one of
-feat, fix, refactor, docs, test, chore, perf, ci.
+Use a clear commit subject. Conventional prefixes such as `feat:`, `fix:`,
+`docs:`, `test:`, and `chore:` are welcome but not required.
 
-## Publishing a release
+## Releases
 
-A normal push to `main` runs CI but does not replace the version users receive.
-User downloads are deliberately tag-driven so every shipped build has a stable
-version and rollback point.
-
-1. Change the single `version` in `[workspace.package]` in `Cargo.toml`.
-2. Run `./ci/gate.sh`, commit the versioned release state, and ensure `main` is
-   current on `origin`.
-3. Create an annotated tag with the same version and push it:
-
-```sh
-git tag -a v0.2.0 -m "Mandatum v0.2.0"
-git push origin main v0.2.0
-```
-
-The tag starts `.github/workflows/release.yml`, which reruns the full gate,
-builds four native archives, verifies their checksums, and publishes the GitHub
-Release consumed by `mandatum update`. Do not expose this maintainer operation
-as `mandatum push`: the public command updates an installation and requires no
-repository permissions.
-
-## Setup
-
-```sh
-git clone https://github.com/caseyrtalbot/Mandatum.git
-cd Mandatum
-./ci/gate.sh          # rustup installs the pinned toolchain automatically
-cargo run -p mandatum-native --bin mandatum-native  # native product
-cargo run -p mandatum-app --bin mandatum            # terminal escape hatch
-```
+Releases are maintainer-operated and tag-driven. Pushing an ordinary commit to
+`main` does not update user installations. The release workflow validates the
+tagged source, builds the supported artifacts, verifies checksums, and publishes
+a GitHub Release.

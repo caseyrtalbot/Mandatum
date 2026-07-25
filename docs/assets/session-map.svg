@@ -15,7 +15,7 @@
 <text x="362.4" y="53.5" fill="#e06c75" font-weight="bold">1 task failed · checks</text>
 <text x="18.0" y="71.5" fill="#5c6370">┌ terminal ──────────────────┐┌ checks ────────────────────┐┌ dev server ──────────────────────────────────────────────┐</text>
 <text x="18.0" y="89.5" fill="#c8ccd4">│</text>
-<text x="26.4" y="89.5" fill="#c8ccd4">caseytalbot@Caseys-MacBook-P</text>
+<text x="26.4" y="89.5" fill="#c8ccd4">developer@mac</text>
 <text x="261.6" y="89.5" fill="#5c6370">││</text>
 <text x="278.4" y="89.5" fill="#c8ccd4">command: sh ./flaky-check.sh</text>
 <text x="513.6" y="89.5" fill="#5c6370">││</text>

@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "profile": "casey-m4pro-metal-scale2",
-  "scenario": "dense-workspace",
+  "profile": "macbook-pro-metal-scale2",
+  "scenario": "full-modal",
   "theme": "mandatum-dark",
-  "captured_at": "2026-07-25T12:13:39Z",
+  "captured_at": "2026-07-25T04:11:28Z",
   "surface": {
     "logical_width": 800,
     "logical_height": 600,
@@ -37,12 +37,12 @@
     "device_type": "integrated"
   },
   "source": {
-    "commit": "95d9d74c1ac60a348d2f49a5aa64a59e3b75d060",
+    "commit": "1988b0b7bcef4e549e9d5fdbbc958944375117f1",
     "dirty": false
   },
   "build": {
     "profile": "debug",
-    "executable": "/Users/caseytalbot/Projects/mandatum/spikes/frontend-wgpu/target/debug/mandatum-native-lab"
+    "executable": "spikes/frontend-wgpu/target/debug/mandatum-native-lab"
   },
   "capture": {
     "api": "ScreenCaptureKit",
@@ -54,7 +54,7 @@
   },
   "fallback_regions": [],
   "acceptance": {
-    "reason": "Finish native hierarchy with role-sized text, coherent dark placement, and reviewed multi-line geometry",
-    "accepted_at_unix_seconds": 1784981818
+    "reason": "Phase 4 overlay-family pixels reviewed on the required MacBook Pro built-in Retina display; re-anchor this representative baseline from the retired LG reference",
+    "accepted_at_unix_seconds": 1784952721
   }
 }

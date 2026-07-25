@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "profile": "casey-m4pro-metal-scale2",
-  "scenario": "attention-motion-midpoint",
+  "profile": "macbook-pro-metal-scale2",
+  "scenario": "attention-motion-end",
   "theme": "mandatum-dark",
-  "captured_at": "2026-07-25T10:59:23Z",
+  "captured_at": "2026-07-25T10:59:27Z",
   "surface": {
     "logical_width": 800,
     "logical_height": 600,
@@ -42,7 +42,7 @@
   },
   "build": {
     "profile": "debug",
-    "executable": "/Users/caseytalbot/Projects/mandatum/spikes/frontend-wgpu/target/debug/mandatum-native-lab"
+    "executable": "spikes/frontend-wgpu/target/debug/mandatum-native-lab"
   },
   "capture": {
     "api": "ScreenCaptureKit",
@@ -55,6 +55,6 @@
   "fallback_regions": [],
   "acceptance": {
     "reason": "Phase 6 approval-arrival checkpoint after fixed-reference visual review",
-    "accepted_at_unix_seconds": 1784977215
+    "accepted_at_unix_seconds": 1784977216
   }
 }
