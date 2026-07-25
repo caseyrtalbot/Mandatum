@@ -2574,7 +2574,10 @@ impl GpuText {
             alpha_mode,
             color_space: wgpu::SurfaceColorSpace::Auto,
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            // One frame of queue, not wgpu's default two: hover and typing
+            // respond a full refresh sooner, and the scene is cheap enough
+            // that we never need the second frame of slack.
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(&device, &config);
 
