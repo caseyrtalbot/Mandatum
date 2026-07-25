@@ -702,8 +702,8 @@ That claim only became true with these bounds.
 Consequences:
 
 - worst-case queued PTY memory is 64 KiB per pane plus one chunk
-- input events queue behind at most that bounded backlog, so the quit
-  chord and typing stay responsive during a flood
+- input events use the later priority-lane decision, so the quit chord and
+  typing do not wait for even this bounded runtime backlog
 - a finite flood drains at full parser speed; only an infinite producer
   is throttled, and it throttles in the child, not the workstation
 
@@ -3404,3 +3404,46 @@ conformance; and documentation trace checks passed during implementation. The
 synchronized authoritative `./ci/gate.sh` ended `GATE GREEN`. A real
 signed/notarized release remains the final remote authority and is explicitly
 pending valid Apple credentials.
+
+## User Input Overtakes Runtime Backlogs
+
+Status: accepted (2026-07-25)
+
+Decision: keep `AppEventSender` as the sole frontend/runtime ingress, but give
+neutral `InputEvent` values a priority lane. Each input also places an internal
+wake marker on the runtime lane. The receiver checks input first, then runtime
+events; a blocking receiver still waits on only the runtime lane and the marker
+wakes it for input. Shared queue accounting claims a marker when its input is
+consumed early and discards that marker later without losing or duplicating an
+event.
+
+Context: the public-preparation push ran the authoritative gate successfully on
+macOS, then the Linux GitHub runner twice failed the live `yes` flood regression
+because a queued quit chord did not arrive within two seconds. Tightening the
+per-pane PTY credit cap from 256 KiB to 64 KiB was a useful memory and parse
+backlog improvement, but the second runner failure proved that FIFO scheduling
+still could not defend input latency under variable parser and host load.
+
+Rationale: extending the wall-clock assertion would hide a real product defect,
+and reducing the PTY cap to one chunk would trade throughput for an indirect
+latency hope. A priority input lane states the actual invariant directly: user
+input must not wait for runtime output. The runtime marker preserves the
+single-blocking-wait architecture and existing platform-neutral wake callback.
+
+Consequences:
+
+- key, paste, pointer, focus, and resize input preserve FIFO order with each
+  other while overtaking queued PTY, agent, and artifact events;
+- runtime events retain their own FIFO order, flow credits, generation tokens,
+  and bounded drain behavior;
+- the 64 KiB per-pane PTY cap remains because it independently bounds memory
+  and parse work; and
+- `AppEventReceiver` is app-private and consumed only by the runtime engine or
+  focused tests, so platform and renderer boundaries do not change.
+
+Verification: the event tests prove input overtakes a queued runtime event,
+input bursts preserve order and wake coalescing, concurrent wake transitions
+do not strand events, and PTY/agent producers retain the same app-owned sender.
+The live flood test proves quit and shutdown remain responsive while flow
+credits stay within the cap. The final synchronized `./ci/gate.sh` ended
+`GATE GREEN`.

@@ -1334,7 +1334,7 @@ impl AppState {
         self.poll_child_exits();
     }
 
-    /// A clone of the unified event channel's send side, for the frontend's
+    /// A clone of the unified event ingress, for the frontend's
     /// input thread.
     pub(crate) fn event_sender(&self) -> crate::events::AppEventSender {
         self.runtime.event_sender()
@@ -1343,7 +1343,7 @@ impl AppState {
     /// Block until the next event arrives (and apply it) or `timeout`
     /// elapses. Returns whether an event was applied. This is the shell's
     /// one blocking wait: input, PTY output, and agent events all land on
-    /// the same channel, so nothing can arrive without waking the loop.
+    /// the same ingress, so nothing can arrive without waking the loop.
     pub(crate) fn wait_event(&mut self, timeout: Duration) -> bool {
         match self.runtime.recv_event_timeout(timeout) {
             Ok(event) => {

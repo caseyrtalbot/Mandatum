@@ -892,14 +892,16 @@ developer unfamiliar with the current implementation can identify:
   conformance, syntax, and documentation checks passed. `ratatui` moved to
   `0.30.2`, removing the affected transitive `lru 0.12.5` dependency. Live
   repository settings confirmed private vulnerability reporting, secret
-  scanning, and push protection enabled. The first Linux remote gate exposed
-  real input latency under an unbounded `yes` flood: 256 KiB of admitted PTY
-  output could remain ahead of a queued quit chord. The physical per-pane cap
-  was tightened to 64 KiB, and ten consecutive focused flood/quit runs passed
-  before the synchronized gate was repeated. No native release was tagged:
-  this checkout has no Developer ID Application certificate and the required
-  Apple release secrets are not configured. The synchronized final
-  `./ci/gate.sh` ended `GATE GREEN`.
+  scanning, and push protection enabled. Linux remote gates exposed real input
+  latency under an unbounded `yes` flood: lowering the admitted PTY backlog
+  from 256 KiB to 64 KiB improved the physical bound but did not make FIFO
+  scheduling sufficient on the shared runner. The unified ingress now gives
+  input a priority lane while retaining one blocking runtime wake path and
+  every queued runtime event. Input-priority/wake-accounting tests, repeated
+  focused flood/quit runs, and the synchronized gate passed. No native release
+  was tagged: this checkout has no Developer ID Application certificate and
+  the required Apple release secrets are not configured. The synchronized
+  final `./ci/gate.sh` ended `GATE GREEN`.
 
 ## Completion Rule
 

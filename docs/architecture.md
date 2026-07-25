@@ -111,7 +111,7 @@ It owns:
 - terminal pane runtime registry
 - task runtime registry
 - agent runtime registry
-- the unified input / PTY / agent event channel
+- the unified input / PTY / agent event ingress
 - process event routing
 - reader-thread lifecycle
 - runtime tokens and replaced-runtime event rejection
@@ -134,9 +134,12 @@ over three materially different runtime kinds.
 Supporting Implementations remain in `events`, `process_events`,
 `terminal_runtime`, `task_runtime`, and `agent_runtime`; `app_shell`,
 `frontend`, `input`, and `persistence` remain adjacent orchestration Modules
-(full module map: docs/repo-structure.md). The run loop is event-driven: one
-unified channel (`AppEvent::Input | Pty | Agent`) behind app-owned
-`AppEventSender`, a 250 ms heartbeat, and an 8 ms redraw cap. The sender can
+(full module map: docs/repo-structure.md). The run loop is event-driven:
+app-owned `AppEventSender` provides one ingress for
+`AppEvent::Input | Pty | Agent`, with a priority input lane and a runtime lane
+that carries input wake markers. This preserves one blocking wait while
+preventing terminal parsing from delaying newly arrived input. A 250 ms
+heartbeat and an 8 ms redraw cap bound periodic and paint work. The sender can
 invoke one frontend-neutral callback per non-empty queue interval; shared
 queue accounting makes the last receive and next enqueue one race-safe state
 transition. PTY readers remain bounded by flow-credit backpressure (64 KiB in
@@ -144,7 +147,7 @@ flight per pane).
 
 The current native shell binds that neutral callback to
 `EventLoopProxy<UserEvent>`. The proxy is a disposable platform notification;
-the unified channel remains event truth, and the native shell drains it through
+the unified ingress remains event truth, and the native shell drains it through
 `FrontendHost` rather than owning a parallel runtime path.
 
 Live runtime state is never serialized as durable truth.

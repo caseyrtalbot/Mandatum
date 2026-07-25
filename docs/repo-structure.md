@@ -149,7 +149,8 @@ The shared workstation runtime and maintained terminal shell:
 - `artifact_preview.rs`: project-relative observation, descriptor-relative
   no-follow opening on macOS/Linux, bounded PNG header/decode, aggregate
   reservation/worker queue, reload, and live RGBA8 cache
-- `events.rs`: the unified app event channel (input / PTY / agent / artifact)
+- `events.rs`: the unified app event ingress with priority input and bounded
+  runtime lanes (input / PTY / agent / artifact)
   plus the
   app-owned sender that coalesces optional frontend wakes without replacing
   channel truth

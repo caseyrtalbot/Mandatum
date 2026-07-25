@@ -1,14 +1,16 @@
 //! The app's unified event channel.
 //!
 //! Every wake source — frontend input, PTY reader threads, agent forwarder
-//! threads — sends into one `std::sync::mpsc` channel, so the main loop has
-//! exactly one blocking wait and can never miss a wake. This is what lets the
-//! shell block on event arrival instead of polling on a fixed interval.
+//! threads — sends through one app-owned ingress. Input has a priority lane;
+//! its marker shares the runtime lane so the main loop still has exactly one
+//! blocking wait and can never miss a wake. This prevents a bounded PTY flood
+//! from putting terminal parsing ahead of newly arrived user input.
 
 use std::{
+    cell::Cell,
     sync::{
         Arc, Mutex,
-        mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
     },
     time::Duration,
 };
@@ -40,6 +42,18 @@ pub(crate) enum AppEvent {
 pub(crate) type WakeCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[derive(Debug)]
+enum QueuedEvent {
+    App(AppEvent),
+    InputWake,
+}
+
+pub(crate) struct AppEventReceiver {
+    events: Receiver<QueuedEvent>,
+    inputs: Receiver<InputEvent>,
+    claimed_input_wakes: Cell<usize>,
+}
+
+#[derive(Debug)]
 pub(crate) struct AppEventSendError;
 
 #[derive(Default)]
@@ -56,40 +70,59 @@ struct WakeState {
 /// enqueueing the next event cannot clear each other's wake.
 #[derive(Clone)]
 pub(crate) struct AppEventSender {
-    tx: Sender<AppEvent>,
+    tx: Sender<QueuedEvent>,
+    input_tx: Sender<InputEvent>,
     wake: Option<WakeCallback>,
     state: Arc<Mutex<WakeState>>,
 }
 
 impl AppEventSender {
-    pub(crate) fn new(tx: Sender<AppEvent>) -> Self {
-        Self::with_optional_wake_callback(tx, None)
+    pub(crate) fn channel() -> (Self, AppEventReceiver) {
+        Self::with_optional_wake_callback(None)
     }
 
     #[cfg(test)]
-    pub(crate) fn with_wake_callback(
-        tx: Sender<AppEvent>,
+    pub(crate) fn channel_with_wake_callback(
         wake: impl Fn() + Send + Sync + 'static,
-    ) -> Self {
-        Self::with_optional_wake_callback(tx, Some(Arc::new(wake)))
+    ) -> (Self, AppEventReceiver) {
+        Self::with_optional_wake_callback(Some(Arc::new(wake)))
     }
 
-    pub(crate) fn with_shared_wake_callback(tx: Sender<AppEvent>, wake: WakeCallback) -> Self {
-        Self::with_optional_wake_callback(tx, Some(wake))
+    pub(crate) fn channel_with_shared_wake_callback(
+        wake: WakeCallback,
+    ) -> (Self, AppEventReceiver) {
+        Self::with_optional_wake_callback(Some(wake))
     }
 
-    fn with_optional_wake_callback(tx: Sender<AppEvent>, wake: Option<WakeCallback>) -> Self {
-        Self {
-            tx,
-            wake,
-            state: Arc::new(Mutex::new(WakeState::default())),
-        }
+    fn with_optional_wake_callback(wake: Option<WakeCallback>) -> (Self, AppEventReceiver) {
+        let (tx, events) = mpsc::channel();
+        let (input_tx, inputs) = mpsc::channel();
+        (
+            Self {
+                tx,
+                input_tx,
+                wake,
+                state: Arc::new(Mutex::new(WakeState::default())),
+            },
+            AppEventReceiver {
+                events,
+                inputs,
+                claimed_input_wakes: Cell::new(0),
+            },
+        )
     }
 
     pub(crate) fn send(&self, event: AppEvent) -> Result<(), AppEventSendError> {
         let should_wake = {
             let mut state = self.state.lock().expect("app event wake state lock");
-            self.tx.send(event).map_err(|_| AppEventSendError)?;
+            let queued = match event {
+                AppEvent::Input(input) => {
+                    self.input_tx.send(input).map_err(|_| AppEventSendError)?;
+                    QueuedEvent::InputWake
+                }
+                event => QueuedEvent::App(event),
+            };
+            self.tx.send(queued).map_err(|_| AppEventSendError)?;
             state.queued_events = state
                 .queued_events
                 .checked_add(1)
@@ -108,39 +141,66 @@ impl AppEventSender {
         Ok(())
     }
 
-    pub(crate) fn try_recv(&self, rx: &Receiver<AppEvent>) -> Result<AppEvent, TryRecvError> {
+    pub(crate) fn try_recv(&self, rx: &AppEventReceiver) -> Result<AppEvent, TryRecvError> {
         let mut state = self.state.lock().expect("app event wake state lock");
-        match rx.try_recv() {
-            Ok(event) => {
-                Self::finish_receive(&mut state);
-                Ok(event)
-            }
-            Err(TryRecvError::Empty) => {
-                debug_assert_eq!(state.queued_events, 0);
-                state.wake_pending = false;
-                Err(TryRecvError::Empty)
-            }
-            Err(TryRecvError::Disconnected) => {
-                state.queued_events = 0;
-                state.wake_pending = false;
-                Err(TryRecvError::Disconnected)
+        if let Ok(input) = rx.inputs.try_recv() {
+            Self::finish_receive(&mut state);
+            rx.claimed_input_wakes.set(
+                rx.claimed_input_wakes
+                    .get()
+                    .checked_add(1)
+                    .expect("claimed input wake count overflowed"),
+            );
+            return Ok(AppEvent::Input(input));
+        }
+        loop {
+            match rx.events.try_recv() {
+                Ok(QueuedEvent::App(event)) => {
+                    Self::finish_receive(&mut state);
+                    return Ok(event);
+                }
+                Ok(QueuedEvent::InputWake) => {
+                    if rx.claimed_input_wakes.get() > 0 {
+                        rx.claimed_input_wakes.set(rx.claimed_input_wakes.get() - 1);
+                        continue;
+                    }
+                    Self::finish_receive(&mut state);
+                    if let Ok(input) = rx.inputs.try_recv() {
+                        return Ok(AppEvent::Input(input));
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    debug_assert_eq!(state.queued_events, 0);
+                    state.wake_pending = false;
+                    return Err(TryRecvError::Empty);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    state.queued_events = 0;
+                    state.wake_pending = false;
+                    return Err(TryRecvError::Disconnected);
+                }
             }
         }
     }
 
     pub(crate) fn recv_timeout(
         &self,
-        rx: &Receiver<AppEvent>,
+        rx: &AppEventReceiver,
         timeout: Duration,
     ) -> Result<AppEvent, RecvTimeoutError> {
         match self.try_recv(rx) {
             Ok(event) => Ok(event),
             Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
             Err(TryRecvError::Empty) => {
-                let event = rx.recv_timeout(timeout)?;
+                let queued = rx.events.recv_timeout(timeout)?;
                 let mut state = self.state.lock().expect("app event wake state lock");
                 Self::finish_receive(&mut state);
-                Ok(event)
+                match queued {
+                    QueuedEvent::App(event) => Ok(event),
+                    QueuedEvent::InputWake => {
+                        rx.inputs.recv_timeout(Duration::ZERO).map(AppEvent::Input)
+                    }
+                }
             }
         }
     }
@@ -178,11 +238,10 @@ mod tests {
         process_events::{PtyFlowControl, spawn_reader_thread},
     };
 
-    fn counting_sender() -> (AppEventSender, mpsc::Receiver<AppEvent>, Arc<AtomicUsize>) {
-        let (tx, rx) = mpsc::channel();
+    fn counting_sender() -> (AppEventSender, AppEventReceiver, Arc<AtomicUsize>) {
         let wake_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&wake_count);
-        let sender = AppEventSender::with_wake_callback(tx, move || {
+        let (sender, rx) = AppEventSender::channel_with_wake_callback(move || {
             callback_count.fetch_add(1, Ordering::SeqCst);
         });
         (sender, rx, wake_count)
@@ -234,9 +293,8 @@ mod tests {
     fn event_racing_with_pending_wake_clear_is_never_stranded() {
         const EVENT_COUNT: u16 = 4_096;
 
-        let (event_tx, event_rx) = mpsc::channel();
         let (wake_tx, wake_rx) = mpsc::channel();
-        let sender = AppEventSender::with_wake_callback(event_tx, move || {
+        let (sender, event_rx) = AppEventSender::channel_with_wake_callback(move || {
             wake_tx.send(()).expect("fake frontend is listening");
         });
         let producer = {
@@ -275,6 +333,34 @@ mod tests {
 
         producer.join().unwrap();
         assert_eq!(received, usize::from(EVENT_COUNT));
+    }
+
+    #[test]
+    fn input_overtakes_a_runtime_backlog_without_dropping_runtime_events() {
+        let (sender, rx, _) = counting_sender();
+        sender
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::ReaderClosed {
+                    pane_id: PaneId::new("flooded-pane"),
+                    restart_generation: 0,
+                    runtime_token: 1,
+                },
+                None,
+            ))
+            .unwrap();
+        sender
+            .send(AppEvent::Input(InputEvent::FocusGained))
+            .unwrap();
+
+        assert!(matches!(
+            sender.try_recv(&rx),
+            Ok(AppEvent::Input(InputEvent::FocusGained))
+        ));
+        assert!(matches!(
+            sender.try_recv(&rx),
+            Ok(AppEvent::Pty(PtyRuntimeEvent::ReaderClosed { .. }, None))
+        ));
+        assert!(matches!(sender.try_recv(&rx), Err(TryRecvError::Empty)));
     }
 
     #[cfg(unix)]

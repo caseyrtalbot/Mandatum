@@ -18,6 +18,8 @@ use mandatum_core::{ArtifactPaneIntent, PaneId, PaneKind, SessionId, Workspace};
 use mandatum_scene::{ArtifactContent, ArtifactState, RasterSurface};
 use png::{BitDepth, ColorType, Decoder, Limits, Transformations};
 
+#[cfg(test)]
+use crate::events::AppEventReceiver;
 use crate::events::{AppEvent, AppEventSender};
 
 pub(crate) const MAX_ARTIFACT_ENCODED_BYTES: u64 = 16 * 1024 * 1024;
@@ -732,7 +734,6 @@ mod tests {
     use std::{
         fs,
         sync::atomic::{AtomicU64, Ordering},
-        sync::mpsc,
         time::Duration,
     };
 
@@ -820,15 +821,14 @@ mod tests {
         surface
     }
 
-    fn sender() -> (AppEventSender, mpsc::Receiver<AppEvent>) {
-        let (tx, rx) = mpsc::channel();
-        (AppEventSender::new(tx), rx)
+    fn sender() -> (AppEventSender, AppEventReceiver) {
+        AppEventSender::channel()
     }
 
     fn apply_next_load(
         store: &mut ArtifactPreviewStore,
         sender: &AppEventSender,
-        rx: &mpsc::Receiver<AppEvent>,
+        rx: &AppEventReceiver,
     ) {
         let event = sender
             .recv_timeout(rx, Duration::from_secs(2))

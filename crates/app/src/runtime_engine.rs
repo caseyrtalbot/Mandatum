@@ -1,7 +1,7 @@
 //! Live runtime ownership and cross-registry lifecycle policy.
 //!
 //! `RuntimeEngine` is the app-local Module that owns every live registry, the
-//! unified event channel, and runtime-token allocation. The terminal, task,
+//! unified event ingress, and runtime-token allocation. The terminal, task,
 //! and agent modules remain its low-level Implementations; callers use this
 //! Module for replacement transactions, session retirement, shutdown, and
 //! identity checks.
@@ -9,7 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
+    sync::mpsc::{RecvTimeoutError, TryRecvError},
     time::Duration,
 };
 
@@ -22,7 +22,7 @@ use mandatum_terminal_vt::{MouseMode, TerminalGrid};
 
 use crate::{
     agent_runtime::{AgentRuntimeEvent, AgentRuntimeRegistry, activate_agent_session},
-    events::{AppEvent, AppEventSender, WakeCallback},
+    events::{AppEvent, AppEventReceiver, AppEventSender, WakeCallback},
     process_events::PtyRuntimeEvent,
     task_runtime::{
         TaskInvestigationFailure, TaskPaneRuntime, TaskRuntimeRegistry, prepare_task_pane_runtime,
@@ -265,7 +265,7 @@ pub(crate) struct RuntimeEngine {
     tasks: TaskRuntimeRegistry,
     agents: AgentRuntimeRegistry,
     event_tx: AppEventSender,
-    event_rx: Receiver<AppEvent>,
+    event_rx: AppEventReceiver,
     next_runtime_token: u64,
     next_lifecycle_epoch: u64,
     last_lifecycle_report: RuntimeLifecycleReport,
@@ -281,10 +281,9 @@ impl RuntimeEngine {
     }
 
     fn new_with_event_sender(wake: Option<WakeCallback>) -> Self {
-        let (raw_event_tx, event_rx) = mpsc::channel();
-        let event_tx = match wake {
-            Some(wake) => AppEventSender::with_shared_wake_callback(raw_event_tx, wake),
-            None => AppEventSender::new(raw_event_tx),
+        let (event_tx, event_rx) = match wake {
+            Some(wake) => AppEventSender::channel_with_shared_wake_callback(wake),
+            None => AppEventSender::channel(),
         };
         Self {
             terminals: TerminalRuntimeRegistry::new(),
@@ -1529,11 +1528,11 @@ mod tests {
 
         engine.discard_pending_runtime_events();
 
-        assert!(matches!(engine.try_recv_event(), Ok(AppEvent::Artifact(_))));
         assert!(matches!(
             engine.try_recv_event(),
             Ok(AppEvent::Input(InputEvent::FocusGained))
         ));
+        assert!(matches!(engine.try_recv_event(), Ok(AppEvent::Artifact(_))));
         assert!(matches!(engine.try_recv_event(), Err(TryRecvError::Empty)));
     }
 
