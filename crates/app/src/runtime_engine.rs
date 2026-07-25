@@ -29,7 +29,7 @@ use crate::{
         task_status_label,
     },
     terminal_runtime::{
-        PendingTerminalPaneRuntime, TerminalRuntimeError, TerminalRuntimeRegistry,
+        CwdFallback, PendingTerminalPaneRuntime, TerminalRuntimeError, TerminalRuntimeRegistry,
         prepare_terminal_pane_runtime,
     },
 };
@@ -38,6 +38,10 @@ use crate::{
 pub(crate) enum RuntimeReconcileNotice {
     TerminalSpawned(PaneId),
     TerminalRestarted(PaneId),
+    TerminalCwdFallback {
+        pane_id: PaneId,
+        fallback: CwdFallback,
+    },
     TaskStarted(PaneId),
 }
 
@@ -271,6 +275,21 @@ impl PreparedRuntimeRestore {
             trigger,
             geometry,
         }
+    }
+
+    /// One status line for the panes this restore had to open outside their
+    /// own cwd, last pane first. Read it before committing: committing
+    /// consumes the staged runtimes.
+    pub(crate) fn cwd_fallback_status(&self) -> Option<String> {
+        self.terminals
+            .iter()
+            .filter_map(|(pane_id, runtime)| {
+                runtime
+                    .cwd_fallback
+                    .as_ref()
+                    .map(|fallback| cwd_fallback_status(pane_id, fallback))
+            })
+            .next_back()
     }
 }
 
@@ -751,8 +770,10 @@ impl RuntimeEngine {
                             pane_id: pane_id.clone(),
                             source,
                         })?;
+                    let fallback = pending.cwd_fallback.clone();
                     self.activate_terminal(pane_id.clone(), pending);
-                    notices.push(RuntimeReconcileNotice::TerminalRestarted(pane_id));
+                    notices.push(RuntimeReconcileNotice::TerminalRestarted(pane_id.clone()));
+                    push_cwd_fallback_notice(&mut notices, pane_id, fallback);
                 } else if let Some(runtime) = self.terminals.get_mut(&pane_id) {
                     if let Err(source) = runtime.resize(size) {
                         runtime.error = Some(source.to_string());
@@ -765,8 +786,10 @@ impl RuntimeEngine {
                             pane_id: pane_id.clone(),
                             source,
                         })?;
+                    let fallback = pending.cwd_fallback.clone();
                     self.activate_terminal(pane_id.clone(), pending);
-                    notices.push(RuntimeReconcileNotice::TerminalSpawned(pane_id));
+                    notices.push(RuntimeReconcileNotice::TerminalSpawned(pane_id.clone()));
+                    push_cwd_fallback_notice(&mut notices, pane_id, fallback);
                 }
             }
             self.mark_recovery_geometry_reconciled(&session_id, &visible_terminal_ids);
@@ -1335,6 +1358,25 @@ impl RuntimeEngine {
     }
 }
 
+fn push_cwd_fallback_notice(
+    notices: &mut Vec<RuntimeReconcileNotice>,
+    pane_id: PaneId,
+    fallback: Option<CwdFallback>,
+) {
+    if let Some(fallback) = fallback {
+        notices.push(RuntimeReconcileNotice::TerminalCwdFallback { pane_id, fallback });
+    }
+}
+
+/// The one wording every path uses to report a pane that lost its cwd.
+pub(crate) fn cwd_fallback_status(pane_id: &PaneId, fallback: &CwdFallback) -> String {
+    format!(
+        "pane {pane_id}: {} is missing; opened in {}",
+        fallback.requested.display(),
+        fallback.used.display()
+    )
+}
+
 fn detached_fact(
     epoch: RuntimeLifecycleEpoch,
     trigger: RuntimeLifecycleTrigger,
@@ -1661,6 +1703,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(detached.status, AgentStatus::Unknown);
+    }
+
+    // A restore with geometry already available spawns every pane up front,
+    // so one pane whose durable cwd is gone must degrade rather than abort
+    // the restore and leave the saved workspace unloaded.
+    #[test]
+    fn restore_stages_a_stale_cwd_pane_instead_of_failing() {
+        let project_path = std::env::temp_dir();
+        let missing = project_path.join("mandatum-restore-stale-cwd-never-created");
+        let mut workspace = Workspace::new("test", project_path.clone());
+        workspace
+            .apply_action(CoreAction::NewTerminal {
+                title: "stale".to_owned(),
+                cwd: Some(missing.clone()),
+            })
+            .unwrap();
+        let stale_pane = workspace.active_session().focused_pane_id().clone();
+
+        let mut engine = RuntimeEngine::new();
+        let prepared = engine
+            .prepare_restore(
+                &workspace,
+                "/bin/sh",
+                true,
+                RuntimeLifecycleTrigger::ExplicitRestore,
+                RestoreGeometry::Available,
+                vec![(stale_pane, PtySize::new(80, 24).unwrap())],
+            )
+            .expect("a stale pane cwd must not abort the restore");
+
+        let status = prepared.cwd_fallback_status().expect("fallback status");
+        assert!(
+            status.contains(&missing.display().to_string())
+                && status.contains(&project_path.display().to_string()),
+            "status must name the missing and fallback directories, got {status}"
+        );
     }
 
     #[test]

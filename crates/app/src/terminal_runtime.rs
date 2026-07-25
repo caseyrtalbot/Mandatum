@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc, thread::JoinHandle};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    path::{Path, PathBuf},
+    sync::Arc,
+    thread::JoinHandle,
+};
 
 use mandatum_core::{PaneId, PaneSpec, Workspace};
 use mandatum_pty::{
@@ -143,6 +149,16 @@ pub(crate) struct PendingTerminalPaneRuntime {
     pub(crate) size: PtySize,
     pub(crate) restart_generation: u64,
     pub(crate) runtime_token: u64,
+    /// Set when the pane's own cwd was gone and the shell opened elsewhere.
+    pub(crate) cwd_fallback: Option<CwdFallback>,
+}
+
+/// A pane that opened somewhere other than its resolved cwd, because that
+/// directory no longer exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CwdFallback {
+    pub(crate) requested: PathBuf,
+    pub(crate) used: PathBuf,
 }
 
 impl PendingTerminalPaneRuntime {
@@ -154,6 +170,8 @@ impl PendingTerminalPaneRuntime {
             size,
             restart_generation,
             runtime_token,
+            // Already reported by the caller that staged this runtime.
+            cwd_fallback: _,
         } = self;
         let flow = PtyFlowControl::new();
         let reader_thread = spawn_reader_thread(
@@ -237,13 +255,14 @@ pub(crate) fn prepare_terminal_pane_runtime(
         .ok_or_else(|| TerminalRuntimeError::MissingPane(pane_id.clone()))?;
     let session_id = PtySessionId::new(pane_id.as_str().to_owned());
     let restart_generation = pane.restart_generation();
+    let requested_cwd = resolve_pane_cwd(workspace, pane, None);
     let mut intent = SpawnIntent::new(session_id, shell_program.to_owned(), size)?;
-    intent = intent.with_cwd(resolve_pane_cwd(workspace, pane, None));
+    intent = intent.with_cwd(requested_cwd.clone());
     // The hardened parser handles real VT output, so advertise a capable
     // terminal. The rest of the environment (PATH, HOME, prompt) is inherited.
     intent = intent.with_environment([("TERM", "xterm-256color")]);
 
-    let session = NativePtySession::spawn(intent)?;
+    let (session, cwd_fallback) = spawn_with_cwd_fallback(intent, workspace, &requested_cwd)?;
     let parts = session.into_split()?;
 
     Ok(PendingTerminalPaneRuntime {
@@ -253,7 +272,54 @@ pub(crate) fn prepare_terminal_pane_runtime(
         size,
         restart_generation,
         runtime_token,
+        cwd_fallback,
     })
+}
+
+/// Spawn a terminal pane, degrading a dead cwd to a live one.
+///
+/// A pane's durable cwd outlives the directory itself (renames, deletes), and
+/// one such pane must not take the reconcile pass down with it: reopen this
+/// pane alone in the project directory, or `$HOME` when that is gone too.
+/// Every other spawn failure still propagates.
+fn spawn_with_cwd_fallback(
+    intent: SpawnIntent,
+    workspace: &Workspace,
+    requested_cwd: &Path,
+) -> Result<(NativePtySession, Option<CwdFallback>), TerminalRuntimeError> {
+    let error = match NativePtySession::spawn(intent.clone()) {
+        Ok(session) => return Ok((session, None)),
+        Err(error) => error,
+    };
+    if !matches!(error, NativePtyError::CwdNotFound { .. }) {
+        return Err(error.into());
+    }
+    let Some(fallback) = fallback_cwd(workspace) else {
+        return Err(error.into());
+    };
+
+    let session = NativePtySession::spawn(intent.with_cwd(fallback.clone()))?;
+    Ok((
+        session,
+        Some(CwdFallback {
+            requested: requested_cwd.to_owned(),
+            used: fallback,
+        }),
+    ))
+}
+
+/// The directory a pane with a dead cwd opens in instead: the active
+/// project when it still exists, else the user's home. `None` means there is
+/// nothing live to fall back to and the original failure stands.
+fn fallback_cwd(workspace: &Workspace) -> Option<PathBuf> {
+    let project_path = workspace.active_project_path();
+    if project_path.is_dir() {
+        return Some(project_path.to_owned());
+    }
+
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_dir())
 }
 
 /// The working directory a pane's process actually runs in: explicit intent

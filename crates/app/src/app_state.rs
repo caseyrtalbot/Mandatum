@@ -55,7 +55,7 @@ use crate::{
         AgentApprovalError, AgentRuntimeView, PreparedRuntimeRestore, RestoreGeometry,
         RestoreRuntimeError, RuntimeEngine, RuntimeExitEffect, RuntimeLifecycleTrigger,
         RuntimePtyEffect, RuntimeReconcileError, RuntimeReconcileNotice, TaskAttempt,
-        TaskLaunchOutcome, TaskStopOutcome,
+        TaskLaunchOutcome, TaskStopOutcome, cwd_fallback_status,
     },
     scene_builder::PaneViewState,
     search::{
@@ -120,6 +120,9 @@ pub struct AppState {
     terminal_size: Option<(u16, u16)>,
     status: String,
     preserve_status_on_next_resize: bool,
+    /// The last reconcile's stale-cwd notice, until a caller that writes its
+    /// own status afterwards takes it. Every reconcile resets it.
+    cwd_fallback_status: Option<String>,
     /// Monotonic presentation-dirtiness generation. Frontends compare this
     /// around input, runtime drains, and heartbeat work rather than treating a
     /// requested frame number as proof that the scene changed.
@@ -235,6 +238,7 @@ impl AppState {
             terminal_size: None,
             status: "ready".to_owned(),
             preserve_status_on_next_resize: false,
+            cwd_fallback_status: None,
             scene_generation: 0,
             runtime: match wake {
                 Some(wake) => RuntimeEngine::with_wake_callback(wake),
@@ -816,12 +820,24 @@ impl AppState {
             if let Err(error) = self.reconcile_runtimes() {
                 self.status = format!("{status}; {error}");
             } else {
-                self.status = status;
+                // A preserved status (config warnings, restore outcome) and a
+                // pane cwd-fallback notice are both actionable; a Finder
+                // launch with a stale restored pane produces both at once,
+                // so combine rather than let one replace the other.
+                self.status = match self.cwd_fallback_status.take() {
+                    Some(fallback) => format!("{status}; {fallback}"),
+                    None => status,
+                };
             }
             self.preserve_status_on_next_resize = false;
         } else {
             match self.reconcile_runtimes() {
-                Ok(()) => self.status = format!("terminal resized to {columns}x{rows}"),
+                Ok(()) => {
+                    self.status = self
+                        .cwd_fallback_status
+                        .take()
+                        .unwrap_or_else(|| format!("terminal resized to {columns}x{rows}"));
+                }
                 Err(error) => self.status = error.to_string(),
             }
         }
@@ -1448,11 +1464,13 @@ impl AppState {
                 .prepare_restore_runtimes(&workspace, RuntimeLifecycleTrigger::StartupRestore)
             {
                 Ok(runtimes) => {
+                    let fallback_status = runtimes.cwd_fallback_status();
                     self.replace_workspace_from_disk(workspace, runtimes);
                     let path = self.persistence.workspace_file().display().to_string();
                     self.timeline
                         .record(TimelineEventKind::WorkspaceRestored { path: path.clone() });
-                    self.status = format!("workspace restored from {path}");
+                    self.status = fallback_status
+                        .unwrap_or_else(|| format!("workspace restored from {path}"));
                     self.preserve_status_on_next_resize = true;
                 }
                 Err(error) => {
@@ -1484,11 +1502,13 @@ impl AppState {
                 .prepare_restore_runtimes(&workspace, RuntimeLifecycleTrigger::ExplicitRestore)
             {
                 Ok(runtimes) => {
+                    let fallback_status = runtimes.cwd_fallback_status();
                     self.replace_workspace_from_disk(workspace, runtimes);
                     let path = self.persistence.workspace_file().display().to_string();
                     self.timeline
                         .record(TimelineEventKind::WorkspaceRestored { path: path.clone() });
-                    self.status = format!("workspace restored from {path}");
+                    self.status = fallback_status
+                        .unwrap_or_else(|| format!("workspace restored from {path}"));
                 }
                 Err(error) => {
                     self.status = format!("workspace restore failed: {error}");
@@ -2206,6 +2226,7 @@ impl AppState {
     fn reconcile_runtimes(&mut self) -> Result<(), RuntimeReconcileError> {
         let visible_terminals = self.visible_terminal_pane_sizes();
         let visible_tasks = self.visible_task_pane_sizes();
+        self.cwd_fallback_status = None;
         let notices = self.runtime.reconcile(
             &mut self.workspace,
             &self.shell_program,
@@ -2238,6 +2259,9 @@ impl AppState {
                     }
                     self.status = format!("restarted shell for {pane_id}");
                 }
+                RuntimeReconcileNotice::TerminalCwdFallback { pane_id, fallback } => {
+                    self.cwd_fallback_status = Some(cwd_fallback_status(&pane_id, &fallback));
+                }
                 RuntimeReconcileNotice::TaskStarted(pane_id) => {
                     self.timeline.record(TimelineEventKind::TaskStarted {
                         pane: pane_id.to_string(),
@@ -2246,6 +2270,12 @@ impl AppState {
                     self.status = format!("task {pane_id} running");
                 }
             }
+        }
+        // A pane that lost its directory outranks the routine spawn and task
+        // notices around it; callers that write their own status afterwards
+        // take the pending notice rather than bury it.
+        if let Some(status) = &self.cwd_fallback_status {
+            self.status = status.clone();
         }
         Ok(())
     }

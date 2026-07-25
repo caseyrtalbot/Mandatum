@@ -180,6 +180,7 @@ pub(crate) fn prepare_task_pane_runtime(
         size,
         restart_generation,
         runtime_token,
+        cwd_fallback: None,
     })
 }
 

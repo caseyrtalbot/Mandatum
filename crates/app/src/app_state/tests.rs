@@ -2224,6 +2224,121 @@ fn pty_flood_stays_bounded_responsive_and_quittable() {
     );
 }
 
+// A pane whose durable cwd was renamed or deleted must degrade alone: it
+// reopens in the project directory and says so. Rejecting the stale cwd at
+// the spawn boundary aborted the whole reconcile loop, so every pane ordered
+// after the stale one stayed dead until the directory came back.
+#[test]
+fn stale_pane_cwd_falls_back_and_later_panes_still_spawn() {
+    let dir = TestWorkspaceDir::new();
+    let config = dir.app_config(true, false);
+    let project_dir = config.project_path.clone();
+    let renamed_away = dir.path.join("renamed-away");
+
+    let mut state = AppState::new(config);
+    state.handle_terminal_resize(120, 40);
+    state
+        .workspace_mut()
+        .apply_action(CoreAction::NewTerminal {
+            title: "stale".to_owned(),
+            cwd: Some(renamed_away.clone()),
+        })
+        .unwrap();
+    let stale_pane = state.workspace().active_session().focused_pane_id().clone();
+    state
+        .workspace_mut()
+        .apply_action(CoreAction::NewTerminal {
+            title: "healthy".to_owned(),
+            cwd: Some(project_dir.clone()),
+        })
+        .unwrap();
+    let healthy_pane = state.workspace().active_session().focused_pane_id().clone();
+    assert!(
+        stale_pane < healthy_pane,
+        "the stale pane must reconcile before the healthy one"
+    );
+
+    state.handle_terminal_resize(120, 41);
+
+    assert!(
+        state.runtime.terminals().get(&stale_pane).is_some(),
+        "the stale-cwd pane must come up in the fallback directory"
+    );
+    assert!(
+        state.runtime.terminals().get(&healthy_pane).is_some(),
+        "a stale cwd must not wedge the panes ordered after it"
+    );
+    assert!(
+        state.status().contains(&renamed_away.display().to_string())
+            && state.status().contains(&project_dir.display().to_string()),
+        "the fallback must be visible in the status, got {}",
+        state.status()
+    );
+
+    // The fallback shell must be live in the fallback directory, not merely
+    // spawned: its side effects have to land in the project directory.
+    wait_for_shell_ready(&mut state, &stale_pane);
+    state
+        .runtime
+        .write_terminal(&stale_pane, b"touch OPENED_HERE\r")
+        .unwrap();
+    let landed = pump_runtime_until(&mut state, |_| project_dir.join("OPENED_HERE").exists());
+    assert!(
+        landed,
+        "the fallback shell never ran in the project directory; rows:\n{}",
+        grid_text(&state, &stale_pane)
+    );
+
+    // Reconcile must converge: the pane is live, so a later pass neither
+    // respawns it nor re-reports the fallback.
+    state.handle_terminal_resize(120, 42);
+    assert_eq!(state.status(), "terminal resized to 120x42");
+
+    state.shutdown();
+}
+
+// A preserved status and a pane cwd-fallback notice must combine, not
+// replace each other. A Finder launch produces both at once: the launcher
+// cwd redirect puts a warning in the preserved config status, and the
+// deferred startup restore surfaces the stale-pane fallback on the first
+// resize-driven reconcile — which used to drop the preserved line.
+#[test]
+fn preserved_status_and_cwd_fallback_notice_both_survive_the_first_resize() {
+    let dir = TestWorkspaceDir::new();
+    let config = dir.app_config(true, false);
+    let project_dir = config.project_path.clone();
+    let renamed_away = dir.path.join("renamed-away");
+
+    let mut state = AppState::new(config);
+    state.handle_terminal_resize(120, 40);
+    state
+        .workspace_mut()
+        .apply_action(CoreAction::NewTerminal {
+            title: "stale".to_owned(),
+            cwd: Some(renamed_away.clone()),
+        })
+        .unwrap();
+
+    // The launch shape: a preserved line (config warnings, restore outcome)
+    // is pending when the reconcile that trips the fallback runs.
+    state.status = "config: launched without a project directory".to_owned();
+    state.preserve_status_on_next_resize = true;
+
+    state.handle_terminal_resize(120, 41);
+
+    assert!(
+        state
+            .status()
+            .starts_with("config: launched without a project directory; ")
+            && state.status().contains(&renamed_away.display().to_string())
+            && state.status().contains(&project_dir.display().to_string()),
+        "both notices must survive, got {}",
+        state.status()
+    );
+
+    state.shutdown();
+}
+
 // A task whose intent names no cwd must run in the project directory —
 // never portable-pty's `$HOME` fallback, which silently ran user task
 // commands in the wrong directory (the live-slice demo's checks pane
