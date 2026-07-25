@@ -69,6 +69,61 @@ impl TerminalAdapter for VteTerminalAdapter {
     }
 }
 
+/// A designated G0/G1 character set (`ESC ( 0` etc.). Only ASCII and DEC
+/// Special Graphics are modeled; unknown designations fall back to ASCII so
+/// output stays legible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Charset {
+    Ascii,
+    DecSpecialGraphics,
+}
+
+impl Charset {
+    /// Map a printable through the charset. DEC Special Graphics replaces
+    /// `0x5F..=0x7E` with line-drawing and symbol glyphs (the standard table),
+    /// which is how ncurses/dialog draw boxes under TERM=xterm-256color.
+    fn map(self, character: char) -> char {
+        if self == Self::Ascii {
+            return character;
+        }
+        match character {
+            '_' => ' ',
+            '`' => '\u{25c6}', // ◆
+            'a' => '\u{2592}', // ▒
+            'b' => '\u{2409}', // ␉
+            'c' => '\u{240c}', // ␌
+            'd' => '\u{240d}', // ␍
+            'e' => '\u{240a}', // ␊
+            'f' => '\u{00b0}', // °
+            'g' => '\u{00b1}', // ±
+            'h' => '\u{2424}', // ␤
+            'i' => '\u{240b}', // ␋
+            'j' => '\u{2518}', // ┘
+            'k' => '\u{2510}', // ┐
+            'l' => '\u{250c}', // ┌
+            'm' => '\u{2514}', // └
+            'n' => '\u{253c}', // ┼
+            'o' => '\u{23ba}', // ⎺
+            'p' => '\u{23bb}', // ⎻
+            'q' => '\u{2500}', // ─
+            'r' => '\u{23bc}', // ⎼
+            's' => '\u{23bd}', // ⎽
+            't' => '\u{251c}', // ├
+            'u' => '\u{2524}', // ┤
+            'v' => '\u{2534}', // ┴
+            'w' => '\u{252c}', // ┬
+            'x' => '\u{2502}', // │
+            'y' => '\u{2264}', // ≤
+            'z' => '\u{2265}', // ≥
+            '{' => '\u{03c0}', // π
+            '|' => '\u{2260}', // ≠
+            '}' => '\u{00a3}', // £
+            '~' => '\u{00b7}', // ·
+            other => other,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SavedCursor {
     row: u16,
@@ -88,6 +143,9 @@ struct TerminalState {
     scroll_bottom: u16,
     wrap_pending: bool,
     dirty: bool,
+    // G0/G1 charset designations plus the currently invoked set (SI/SO).
+    charsets: [Charset; 2],
+    active_charset: usize,
     capabilities: TerminalCapabilities,
     // Mouse-reporting requests from the child (DECSET 9/1000/1002/1003 +
     // 1006). Tracked per mode so disabling one falls back to the others.
@@ -110,6 +168,8 @@ impl TerminalState {
             scroll_bottom: size.rows() - 1,
             wrap_pending: false,
             dirty: false,
+            charsets: [Charset::Ascii; 2],
+            active_charset: 0,
             capabilities: TerminalCapabilities {
                 true_color: true,
                 mouse_reporting: false,
@@ -264,6 +324,8 @@ impl TerminalState {
         self.scroll_top = 0;
         self.scroll_bottom = self.primary.size().rows() - 1;
         self.wrap_pending = false;
+        self.charsets = [Charset::Ascii; 2];
+        self.active_charset = 0;
         self.release_mouse_tracking();
         self.dirty = true;
         self.primary.erase_in_display(2, CellStyle::default());
@@ -283,6 +345,8 @@ impl TerminalState {
         self.scroll_top = 0;
         self.scroll_bottom = self.active_grid().size().rows() - 1;
         self.wrap_pending = false;
+        self.charsets = [Charset::Ascii; 2];
+        self.active_charset = 0;
         self.release_mouse_tracking();
         self.dirty = true;
         self.active_grid_mut().set_cursor_visible(true);
@@ -547,6 +611,7 @@ impl TerminalState {
 impl Perform for TerminalState {
     fn print(&mut self, character: char) {
         self.dirty = true;
+        let character = self.charsets[self.active_charset].map(character);
         let pen = self.pen;
         let wrap_pending = self.wrap_pending;
         let write = self
@@ -590,6 +655,9 @@ impl Perform for TerminalState {
                 self.line_feed();
             }
             0x0d => self.carriage_return(),
+            // SO/SI invoke the designated G1/G0 charset for later printables.
+            0x0e => self.active_charset = 1,
+            0x0f => self.active_charset = 0,
             _ => {}
         }
     }
@@ -626,10 +694,23 @@ impl Perform for TerminalState {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
-        if ignore || !intermediates.is_empty() {
-            // Charset designations (`ESC ( B`, etc.) carry intermediates and are
-            // intentionally ignored.
+        if ignore {
             return;
+        }
+        match intermediates {
+            [] => {}
+            // Charset designations: `ESC ( 0` puts DEC Special Graphics in G0
+            // (`ESC )` targets G1); any other final byte restores ASCII.
+            [b'('] | [b')'] => {
+                let slot = usize::from(intermediates == b")");
+                self.charsets[slot] = if byte == b'0' {
+                    Charset::DecSpecialGraphics
+                } else {
+                    Charset::Ascii
+                };
+                return;
+            }
+            _ => return,
         }
         match byte {
             b'7' => self.save_cursor(),
@@ -999,6 +1080,89 @@ mod tests {
                 .occupancy(),
             TerminalCellOccupancy::Grapheme(grapheme) if grapheme == " "
         ));
+    }
+
+    #[test]
+    fn batched_scroll_in_decstbm_region_moves_rows_and_blanks_bottom() {
+        let mut adapter = adapter(8, 4);
+        adapter.feed(b"aaa\r\nbbb\r\nccc\r\nddd").unwrap();
+        // Region rows 2-3 (1-based); scroll up by 2 inside it.
+        adapter.feed(b"\x1b[2;3r\x1b[2S").unwrap();
+        assert_eq!(trimmed(&adapter), vec!["aaa", "", "", "ddd"]);
+        assert_eq!(
+            adapter.grid().scrollback_len(),
+            0,
+            "regional scrolls never enter scrollback"
+        );
+    }
+
+    #[test]
+    fn batched_full_screen_scroll_captures_scrollback_oldest_first() {
+        let mut adapter = adapter(8, 3);
+        adapter.feed(b"one\r\ntwo\r\nthree").unwrap();
+        adapter.feed(b"\x1b[2S").unwrap();
+        assert_eq!(trimmed(&adapter), vec!["three", "", ""]);
+        assert_eq!(adapter.grid().scrollback_len(), 2);
+        let history = |index: usize| {
+            adapter
+                .grid()
+                .scrollback_row_text(index)
+                .map(|row| row.trim_end().to_owned())
+        };
+        assert_eq!(history(0), Some("one".to_owned()));
+        assert_eq!(history(1), Some("two".to_owned()));
+    }
+
+    #[test]
+    fn hostile_scroll_counts_are_clamped_to_region_height() {
+        let mut adapter = adapter(8, 3);
+        adapter.feed(b"one\r\ntwo\r\nthree").unwrap();
+        adapter.feed(b"\x1b[65535S").unwrap();
+        assert_eq!(trimmed(&adapter), vec!["", "", ""]);
+        // Only the three real rows enter history, not thousands of blanks.
+        assert_eq!(adapter.grid().scrollback_len(), 3);
+
+        adapter.feed(b"x\x1b[65535T").unwrap();
+        assert_eq!(trimmed(&adapter), vec!["", "", ""]);
+        assert_eq!(adapter.grid().scrollback_len(), 3);
+    }
+
+    #[test]
+    fn wide_grapheme_on_one_column_grid_does_not_panic() {
+        let mut adapter = adapter(1, 2);
+        adapter.feed("界界".as_bytes()).unwrap();
+        // The wide grapheme can never fit; it degrades to a blank cell.
+        assert_eq!(adapter.grid().row_text(0).unwrap(), " ");
+        assert_eq!(adapter.grid().row_text(1).unwrap(), " ");
+    }
+
+    #[test]
+    fn dec_special_graphics_charset_maps_box_drawing() {
+        let mut adapter = adapter(8, 1);
+        adapter.feed(b"\x1b(0lqqk\x1b(Bx").unwrap();
+        assert_eq!(trimmed(&adapter), vec!["\u{250c}\u{2500}\u{2500}\u{2510}x"]);
+    }
+
+    #[test]
+    fn shift_out_invokes_g1_charset() {
+        let mut adapter = adapter(8, 1);
+        adapter.feed(b"\x1b)0\x0eq\x0fq").unwrap();
+        assert_eq!(trimmed(&adapter), vec!["\u{2500}q"]);
+    }
+
+    #[test]
+    fn history_cell_ref_matches_history_cell() {
+        let mut adapter = adapter(4, 2);
+        adapter.feed(b"ab\r\ncd\r\nef").unwrap();
+        let grid = adapter.grid();
+        for row in 0..grid.total_rows() {
+            for column in 0..=4u16 {
+                assert_eq!(
+                    grid.history_cell_ref(row, column).cloned(),
+                    grid.history_cell(row, column)
+                );
+            }
+        }
     }
 
     #[test]

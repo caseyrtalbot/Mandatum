@@ -139,6 +139,23 @@ impl TerminalGrid {
             .cloned()
     }
 
+    /// Borrowing form of [`Self::history_cell`] for hot paths (e.g. per-frame
+    /// scene building) that must not clone a cell per lookup.
+    pub fn history_cell_ref(&self, absolute_row: usize, column: u16) -> Option<&TerminalCell> {
+        let scrollback_len = self.scrollback.len();
+        if absolute_row < scrollback_len {
+            return self
+                .scrollback
+                .get(absolute_row)
+                .and_then(|row| row.get(usize::from(column)));
+        }
+        let screen_row = absolute_row - scrollback_len;
+        if screen_row >= usize::from(self.size.rows()) {
+            return None;
+        }
+        self.cell(GridPosition::new(screen_row as u16, column))
+    }
+
     pub fn resize(&mut self, size: TerminalSize) {
         let mut next_cells =
             vec![TerminalCell::default(); usize::from(size.columns()) * usize::from(size.rows())];
@@ -195,12 +212,19 @@ impl TerminalGrid {
         let index = self
             .cell_index(GridPosition::new(row, column))
             .expect("cursor stays in grid bounds");
-        self.cells[index] = TerminalCell::grapheme(grapheme, style);
-        if width == 2 {
-            let next = self
-                .cell_index(GridPosition::new(row, column + 1))
-                .expect("double-width grapheme was wrapped before placement");
-            self.cells[next] = TerminalCell::wide_continuation(style);
+        if width == 2 && column + 1 >= self.size.columns() {
+            // A double-width grapheme can never fit (e.g. a one-column grid):
+            // degrade to a blank cell, matching how `repair_row` resolves a
+            // wide pair without room for its continuation.
+            self.cells[index] = TerminalCell::blank_with_background(style);
+        } else {
+            self.cells[index] = TerminalCell::grapheme(grapheme, style);
+            if width == 2 {
+                let next = self
+                    .cell_index(GridPosition::new(row, column + 1))
+                    .expect("double-width grapheme was wrapped before placement");
+                self.cells[next] = TerminalCell::wide_continuation(style);
+            }
         }
 
         let next_column = column.saturating_add(u16::from(width));
@@ -458,22 +482,38 @@ impl TerminalGrid {
         capture_scrollback: bool,
         style: CellStyle,
     ) {
+        let bottom = bottom.min(self.size.rows().saturating_sub(1));
         if top > bottom {
             return;
         }
+        // Clamp to the region height: a hostile count (e.g. `CSI 65535 S`) must
+        // not multiply work, and `rotate_left` requires `mid <= len`.
+        let count = count.min(bottom - top + 1);
         let captures_full_screen_scrollback =
             capture_scrollback && top == 0 && bottom == self.size.rows().saturating_sub(1);
+        let columns = self.column_count();
         let blank = TerminalCell::blank_with_background(style);
-        for _ in 0..count {
-            if captures_full_screen_scrollback {
-                let evicted = self.row_cells(top);
+        if captures_full_screen_scrollback {
+            // Move (not clone) the evicted rows into scrollback, oldest first,
+            // leaving blanks that the rotation carries to the freed bottom rows.
+            for row in top..top + count {
+                let start = usize::from(row) * columns;
+                let evicted: Vec<TerminalCell> = self.cells[start..start + columns]
+                    .iter_mut()
+                    .map(|cell| std::mem::replace(cell, blank.clone()))
+                    .collect();
                 self.push_scrollback(evicted);
             }
-            for row in top..bottom {
-                let source = self.row_cells(row + 1);
-                self.write_row(row, &source);
+        }
+        // Rows are contiguous in the flat cell buffer, so one row-granular
+        // rotation of the region sub-slice replaces per-row cloning.
+        let start = usize::from(top) * columns;
+        let end = (usize::from(bottom) + 1) * columns;
+        self.cells[start..end].rotate_left(usize::from(count) * columns);
+        if !captures_full_screen_scrollback {
+            for row in (bottom + 1 - count)..=bottom {
+                self.fill_row(row, blank.clone());
             }
-            self.fill_row(bottom, blank.clone());
         }
     }
 
@@ -484,18 +524,19 @@ impl TerminalGrid {
         bottom: u16,
         style: CellStyle,
     ) {
+        let bottom = bottom.min(self.size.rows().saturating_sub(1));
         if top > bottom {
             return;
         }
+        // Same clamp and row-granular rotation as `scroll_up_region`, mirrored.
+        let count = count.min(bottom - top + 1);
+        let columns = self.column_count();
+        let start = usize::from(top) * columns;
+        let end = (usize::from(bottom) + 1) * columns;
+        self.cells[start..end].rotate_right(usize::from(count) * columns);
         let blank = TerminalCell::blank_with_background(style);
-        for _ in 0..count {
-            let mut row = bottom;
-            while row > top {
-                let source = self.row_cells(row - 1);
-                self.write_row(row, &source);
-                row -= 1;
-            }
-            self.fill_row(top, blank.clone());
+        for row in top..top + count {
+            self.fill_row(row, blank.clone());
         }
     }
 
@@ -509,18 +550,6 @@ impl TerminalGrid {
         while self.scrollback.len() > self.scrollback_limit {
             self.scrollback.pop_front();
         }
-    }
-
-    fn row_cells(&self, row: u16) -> Vec<TerminalCell> {
-        let columns = self.column_count();
-        let start = usize::from(row) * columns;
-        self.cells[start..start + columns].to_vec()
-    }
-
-    fn write_row(&mut self, row: u16, source: &[TerminalCell]) {
-        let columns = self.column_count();
-        let start = usize::from(row) * columns;
-        self.cells[start..start + columns].clone_from_slice(source);
     }
 
     fn fill_row(&mut self, row: u16, value: TerminalCell) {

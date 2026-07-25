@@ -22,7 +22,9 @@ use mandatum_scene::{
     cell_program::display_width,
     layout::{self, PaneLayout},
 };
-use mandatum_terminal_vt::{CellStyle, Color as VtColor, TerminalCellOccupancy, TerminalGrid};
+use mandatum_terminal_vt::{
+    CellStyle, Color as VtColor, TerminalCell, TerminalCellOccupancy, TerminalGrid,
+};
 
 use crate::{
     app_state::{AppState, CompositionTarget, agent_status_label},
@@ -1814,12 +1816,17 @@ fn terminal_surface(
     let max_top = total_rows.saturating_sub(view_rows);
     let first_row = max_top.saturating_sub(view.scroll_offset);
 
+    // Borrowed lookups (`history_cell_ref`) keep this per-frame hot loop at one
+    // grapheme clone per visible cell; `blank` backs out-of-range rows.
+    let blank = TerminalCell::blank();
     let rows = (0..view_rows)
         .map(|line| {
             let absolute_row = first_row + line;
             let mut row = (0..columns)
                 .map(|column| {
-                    let cell = grid.history_cell(absolute_row, column).unwrap_or_default();
+                    let cell = grid
+                        .history_cell_ref(absolute_row, column)
+                        .unwrap_or(&blank);
                     SceneCell {
                         occupancy: match cell.occupancy() {
                             TerminalCellOccupancy::Grapheme(grapheme) => {
@@ -1835,7 +1842,7 @@ fn terminal_surface(
                 .collect::<Vec<_>>();
             if columns < grid.size().columns()
                 && grid
-                    .history_cell(absolute_row, columns)
+                    .history_cell_ref(absolute_row, columns)
                     .is_some_and(|cell| {
                         matches!(cell.occupancy(), TerminalCellOccupancy::WideContinuation)
                     })
