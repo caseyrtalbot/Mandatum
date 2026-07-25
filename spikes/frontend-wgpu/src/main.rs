@@ -235,6 +235,7 @@ struct Config {
     text_settings: NativeTextSettings,
     harness_project_path: Option<String>,
     visual_scenario: Option<VisualScenarioId>,
+    visual_theme: Option<Theme>,
     token_sampler: bool,
     display_name: Option<String>,
     visual_transition_exercise: Option<Duration>,
@@ -276,6 +277,7 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
         text_settings: defaults,
         harness_project_path: None,
         visual_scenario: None,
+        visual_theme: None,
         token_sampler: false,
         display_name: None,
         visual_transition_exercise: None,
@@ -363,6 +365,18 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
                     value
                         .parse::<VisualScenarioId>()
                         .map_err(|error| error.to_string())?,
+                );
+            }
+            "--visual-theme" => {
+                let value = required_value(&mut args, &arg)?;
+                config.visual_theme = Some(
+                    Theme::BUILTIN_NAMES
+                        .contains(&value.as_str())
+                        .then(|| Theme::builtin(&value))
+                        .flatten()
+                        .ok_or_else(|| {
+                            invalid_value(&arg, &value, &Theme::BUILTIN_NAMES.join("|"))
+                        })?,
                 );
             }
             "--token-sampler" => config.token_sampler = true,
@@ -525,6 +539,12 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
     {
         return Err(
             "visual checkpoints must run in isolation from timed visual measurements".to_owned(),
+        );
+    }
+    if config.visual_theme.is_some() && config.visual_scenario.is_none() && !config.token_sampler {
+        return Err(
+            "--visual-theme requires --visual-scenario, --token-sampler, or a visual measurement"
+                .to_owned(),
         );
     }
     Ok(config)
@@ -934,6 +954,7 @@ fn print_failure(
         text_settings: fallback,
         harness_project_path: None,
         visual_scenario: None,
+        visual_theme: None,
         token_sampler: false,
         display_name: None,
         visual_transition_exercise: None,
@@ -3356,6 +3377,9 @@ fn app_config_for_run(config: &mut Config) -> std::io::Result<AppConfig> {
         if config.visual_checkpoint == Some(VisualCheckpoint::Reduced) {
             app_config.reduced_motion = true;
         }
+        if let Some(theme) = config.visual_theme.clone() {
+            app_config.theme = theme;
+        }
         config.harness_project_path = Some(project_path.display().to_string());
         Ok(app_config)
     } else {
@@ -3451,7 +3475,7 @@ mod tests {
         LifecycleEvidence, MemorySummary, MetricSummary, OutcomeEvidence, PlatformAction,
         PlatformEvidence, PressedPointerButtons, RefreshIntervalSummary, RenderStageEvidence,
         ResourceSample, RunEvidence, StressConfig, VisualCheckpoint, VisualScenarioId,
-        VisualTransitionEvidence, WorkloadEvidence, animation_redraw_is_due,
+        VisualTransitionEvidence, WorkloadEvidence, animation_redraw_is_due, app_config_for_run,
         checkpoint_freeze_after_outcome, configured_run_timeout, contiguous_animation_interval,
         ime_event_is_accepted, key_for_platform_translation, pane_geometry_is_suspended,
         parse_config_from, parse_font_family, parse_font_size, parse_ps_rss_kib, parse_scale_delay,
@@ -3459,6 +3483,7 @@ mod tests {
         scene_size_from_metrics, start_after_preflight, translate_ime, translate_key,
         uses_isolated_harness,
     };
+    use mandatum_scene::Theme;
     use mandatum_scene::input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, TextRange,
     };
@@ -3657,6 +3682,56 @@ mod tests {
         assert_eq!(parse_font_size("NaN"), None);
         assert_eq!(parse_ps_rss_kib(b" 12345\n"), Some(12_641_280));
         assert_eq!(parse_ps_rss_kib(b"not-a-number"), None);
+    }
+
+    #[test]
+    fn visual_theme_cli_accepts_only_canonical_themes_on_visual_routes() {
+        for name in Theme::BUILTIN_NAMES.iter().copied() {
+            let config = parse_config_from(
+                ["--visual-scenario", "palette", "--visual-theme", name]
+                    .into_iter()
+                    .map(str::to_owned),
+            )
+            .expect("canonical visual theme");
+            assert_eq!(
+                config
+                    .visual_theme
+                    .as_ref()
+                    .map(|theme| theme.name.as_str()),
+                Some(name)
+            );
+        }
+
+        for invalid in [
+            vec!["--visual-theme", "mandatum-light"],
+            vec!["--visual-theme", "light", "--visual-scenario", "palette"],
+            vec!["--visual-theme", "solarized", "--token-sampler"],
+        ] {
+            assert!(
+                parse_config_from(invalid.into_iter().map(str::to_owned)).is_err(),
+                "invalid visual theme route was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_visual_theme_reaches_the_isolated_host_config() {
+        let mut config = parse_config_from(
+            [
+                "--token-sampler",
+                "--visual-theme",
+                "mandatum-high-contrast",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("high-contrast token sampler");
+        let app_config = app_config_for_run(&mut config).expect("isolated app config");
+        let project_path = app_config.project_path.clone();
+
+        assert_eq!(app_config.theme.name, "mandatum-high-contrast");
+
+        std::fs::remove_dir_all(project_path).expect("remove isolated test harness");
     }
 
     #[test]

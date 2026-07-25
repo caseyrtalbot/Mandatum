@@ -11,6 +11,9 @@ import UniformTypeIdentifiers
 
 private let fixedProfile = "casey-m4pro-metal-scale2"
 private let fixedDisplay = "Built-in Retina Display"
+private let visualThemes: Set<String> = [
+    "mandatum-dark", "mandatum-light", "mandatum-high-contrast",
+]
 private let attentionCheckpoints: [String: String] = [
     "attention-motion-start": "start",
     "attention-motion-midpoint": "midpoint",
@@ -41,6 +44,7 @@ private struct Config {
     let scenario: String
     let baseScenario: String
     let checkpoint: String?
+    let theme: String
 }
 
 private struct CapturedFrame {
@@ -127,12 +131,14 @@ private func parseConfig() throws -> Config {
     var args = Array(CommandLine.arguments.dropFirst())
     guard args.first == "capture" else {
         throw CaptureError.usage(
-            "usage: visual-regression.swift capture --profile <id> --scenario <id>"
+            "usage: visual-regression.swift capture --profile <id> --scenario <id> "
+                + "[--theme <mandatum-dark|mandatum-light|mandatum-high-contrast>]"
         )
     }
     args.removeFirst()
     var profile: String?
     var scenario: String?
+    var theme = "mandatum-dark"
     while !args.isEmpty {
         let option = args.removeFirst()
         guard !args.isEmpty else {
@@ -144,6 +150,8 @@ private func parseConfig() throws -> Config {
             profile = value
         case "--scenario":
             scenario = value
+        case "--theme":
+            theme = value
         default:
             throw CaptureError.usage("unknown option: \(option)")
         }
@@ -158,12 +166,16 @@ private func parseConfig() throws -> Config {
             "unknown scenario \(scenario ?? "<missing>")"
         )
     }
+    guard visualThemes.contains(theme) else {
+        throw CaptureError.usage("unknown theme \(theme)")
+    }
     let checkpoint = attentionCheckpoints[scenario]
     return Config(
         profile: fixedProfile,
         scenario: scenario,
         baseScenario: checkpoint == nil ? scenario : "attention",
-        checkpoint: checkpoint
+        checkpoint: checkpoint,
+        theme: theme
     )
 }
 
@@ -205,6 +217,7 @@ private func capture(_ config: Config) async throws {
         "--manifest-path", manifest.path,
         "--bin", "mandatum-native-lab", "--",
         "--visual-scenario", config.baseScenario,
+        "--visual-theme", config.theme,
         "--font-size", "13",
         "--display", fixedDisplay,
         "--exit-after", "30",
@@ -314,7 +327,7 @@ private func capture(_ config: Config) async throws {
         "schema_version": 1,
         "profile": config.profile,
         "scenario": config.scenario,
-        "theme": "mandatum-dark",
+        "theme": config.theme,
         "captured_at": ISO8601DateFormatter().string(from: Date()),
         "surface": [
             "logical_width": 800,

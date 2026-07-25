@@ -890,6 +890,35 @@ fn context_menu_rows_are_clickable() {
     );
 }
 
+#[test]
+fn either_half_of_each_two_row_overlay_target_resolves_to_the_same_item() {
+    let mut state = state();
+    state.handle_key(ctrl('p'));
+    let scene = state.build_scene(POINTER_FRAME);
+    let targets = scene
+        .hit_targets
+        .iter()
+        .filter(|target| matches!(target.kind, HitTargetKind::PaletteItem(_)))
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 2);
+    for target in targets {
+        assert_eq!(
+            target.rect.height,
+            mandatum_scene::layout::OVERLAY_CONTROL_ROWS
+        );
+        for row in target.rect.y..target.rect.bottom() {
+            assert_eq!(
+                state
+                    .pointer_target(target.rect.x.saturating_add(1), row)
+                    .map(|resolved| resolved.kind),
+                Some(target.kind.clone())
+            );
+        }
+    }
+}
+
 // State-aware menu labels: a zoomed pane's menu offers "Unzoom pane",
 // and docking/floating already flips its row — the menu never names an
 // action that would do the opposite of its label.
@@ -994,7 +1023,7 @@ fn context_menu_border_click_does_not_dismiss() {
     );
 
     // A genuine click-away still dismisses.
-    send_pointer(&mut state, left(PointerKind::Down, 95, 28));
+    send_pointer(&mut state, left(PointerKind::Down, 0, 29));
     let scene = state.build_scene(POINTER_FRAME);
     assert!(scene.overlay.is_none());
 }

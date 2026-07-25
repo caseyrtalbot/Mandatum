@@ -93,11 +93,11 @@ pub fn welcome_rect(size: SceneSize, line_count: u16) -> SceneRect {
 }
 
 /// The centered one-line prompt overlay rect (Set agent objective): 60% of
-/// the width, three inner rows (input plus breathing room and footer).
+/// the width, two two-row inner controls (input and footer).
 pub fn prompt_rect(size: SceneSize) -> SceneRect {
     let frame = SceneRect::new(0, 0, size.width, size.height);
     let horizontal = centered_rect(60, 100, frame);
-    let height = 5.min(size.height);
+    let height = 6.min(size.height);
     let y = (size.height.saturating_sub(height)) / 2;
     SceneRect::new(horizontal.x, y, horizontal.width, height)
 }
@@ -119,30 +119,140 @@ pub fn list_item_window(
     start..(start + rows).min(item_count)
 }
 
+/// App-owned overlay controls occupy two terminal rows. The overlay floats
+/// above the workspace, so this gives native materials and pointer targets a
+/// real 32+ logical-pixel stride without changing pane or PTY geometry.
+pub const OVERLAY_CONTROL_ROWS: u16 = 2;
+
+/// The input block shared by filtered overlays.
+pub fn filtered_overlay_input_rect(inner: SceneRect) -> SceneRect {
+    SceneRect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.min(OVERLAY_CONTROL_ROWS),
+    )
+}
+
+/// The footer block shared by filtered overlays. Tiny overlays prefer their
+/// input rather than overlapping two controls.
+pub fn filtered_overlay_footer_rect(inner: SceneRect) -> Option<SceneRect> {
+    (inner.height >= OVERLAY_CONTROL_ROWS.saturating_mul(2)).then(|| {
+        SceneRect::new(
+            inner.x,
+            inner.bottom().saturating_sub(OVERLAY_CONTROL_ROWS),
+            inner.width,
+            OVERLAY_CONTROL_ROWS,
+        )
+    })
+}
+
+/// One displayed filtered-list item block, between input and footer.
+pub fn palette_item_rect(inner: SceneRect, display_row: usize) -> Option<SceneRect> {
+    let y = inner.y.saturating_add(OVERLAY_CONTROL_ROWS).saturating_add(
+        u16::try_from(display_row)
+            .unwrap_or(u16::MAX)
+            .saturating_mul(OVERLAY_CONTROL_ROWS),
+    );
+    let footer_y = filtered_overlay_footer_rect(inner)?.y;
+    y.saturating_add(OVERLAY_CONTROL_ROWS)
+        .le(&footer_y)
+        .then_some(SceneRect::new(
+            inner.x,
+            y,
+            inner.width,
+            OVERLAY_CONTROL_ROWS,
+        ))
+}
+
 /// The palette/timeline items visible inside an overlay's inner rect: the
-/// top inner row holds the filter input and the bottom inner row holds the
-/// footer, so items get `height - 2` rows.
+/// top and bottom two-row blocks hold the filter input and footer.
 pub fn palette_item_window(
     inner: SceneRect,
     item_count: usize,
     selected: Option<usize>,
 ) -> core::ops::Range<usize> {
     list_item_window(
-        usize::from(inner.height.saturating_sub(2)),
+        usize::from(
+            inner
+                .height
+                .saturating_sub(OVERLAY_CONTROL_ROWS.saturating_mul(2))
+                / OVERLAY_CONTROL_ROWS,
+        ),
         item_count,
         selected,
     )
 }
 
+/// The footer block for a list without an input, such as Session Map.
+pub fn footer_only_overlay_footer_rect(inner: SceneRect) -> Option<SceneRect> {
+    (inner.height >= OVERLAY_CONTROL_ROWS).then(|| {
+        SceneRect::new(
+            inner.x,
+            inner.bottom().saturating_sub(OVERLAY_CONTROL_ROWS),
+            inner.width,
+            OVERLAY_CONTROL_ROWS,
+        )
+    })
+}
+
+/// One displayed item block for a list without an input.
+pub fn session_map_item_rect(inner: SceneRect, display_row: usize) -> Option<SceneRect> {
+    let y = inner.y.saturating_add(
+        u16::try_from(display_row)
+            .unwrap_or(u16::MAX)
+            .saturating_mul(OVERLAY_CONTROL_ROWS),
+    );
+    let footer_y = footer_only_overlay_footer_rect(inner)?.y;
+    y.saturating_add(OVERLAY_CONTROL_ROWS)
+        .le(&footer_y)
+        .then_some(SceneRect::new(
+            inner.x,
+            y,
+            inner.width,
+            OVERLAY_CONTROL_ROWS,
+        ))
+}
+
 /// The session-map rows visible inside its inner rect: only the bottom inner
-/// row is reserved (the footer); there is no filter input.
+/// two-row block is reserved (the footer); there is no filter input.
 pub fn session_map_item_window(
     inner: SceneRect,
     item_count: usize,
     selected: Option<usize>,
 ) -> core::ops::Range<usize> {
     list_item_window(
-        usize::from(inner.height.saturating_sub(1)),
+        usize::from(inner.height.saturating_sub(OVERLAY_CONTROL_ROWS) / OVERLAY_CONTROL_ROWS),
+        item_count,
+        selected,
+    )
+}
+
+/// One context-menu row block. The menu has no reserved inner bands.
+pub fn context_menu_item_rect(inner: SceneRect, display_row: usize) -> Option<SceneRect> {
+    let y = inner.y.saturating_add(
+        u16::try_from(display_row)
+            .unwrap_or(u16::MAX)
+            .saturating_mul(OVERLAY_CONTROL_ROWS),
+    );
+    y.saturating_add(OVERLAY_CONTROL_ROWS)
+        .le(&inner.bottom())
+        .then_some(SceneRect::new(
+            inner.x,
+            y,
+            inner.width,
+            OVERLAY_CONTROL_ROWS,
+        ))
+}
+
+/// The selected-aware window for a height-clamped context menu.
+pub fn context_menu_item_window(
+    inner: SceneRect,
+    item_count: usize,
+    selected: Option<usize>,
+) -> core::ops::Range<usize> {
+    list_item_window(
+        usize::from(inner.height / OVERLAY_CONTROL_ROWS),
         item_count,
         selected,
     )
@@ -794,32 +904,62 @@ mod tests {
         assert_eq!(timeline_overlay_rect(size), SceneRect::new(10, 5, 80, 21));
         // Session map: centered 60% x 60%.
         assert_eq!(session_map_rect(size), SceneRect::new(20, 6, 60, 18));
-        // Prompt: centered 60% wide, five rows tall.
-        assert_eq!(prompt_rect(size), SceneRect::new(20, 12, 60, 5));
+        // Prompt: centered 60% wide, two two-row controls plus its border.
+        assert_eq!(prompt_rect(size), SceneRect::new(20, 12, 60, 6));
         // A tiny frame clamps the prompt height.
         assert_eq!(prompt_rect(SceneSize::new(10, 3)).height, 3);
     }
 
     #[test]
-    fn session_map_window_reserves_only_the_footer_row() {
-        let inner = SceneRect::new(1, 1, 40, 10); // 9 item rows
-        assert_eq!(session_map_item_window(inner, 24, Some(0)), 0..9);
-        assert_eq!(session_map_item_window(inner, 24, Some(9)), 1..10);
+    fn session_map_window_reserves_the_two_row_footer_block() {
+        let inner = SceneRect::new(1, 1, 40, 10);
+        assert_eq!(
+            footer_only_overlay_footer_rect(inner),
+            Some(SceneRect::new(1, 9, 40, 2))
+        );
+        assert_eq!(
+            session_map_item_rect(inner, 0),
+            Some(SceneRect::new(1, 1, 40, 2))
+        );
+        assert_eq!(
+            session_map_item_rect(inner, 3),
+            Some(SceneRect::new(1, 7, 40, 2))
+        );
+        assert_eq!(session_map_item_rect(inner, 4), None);
+        assert_eq!(session_map_item_window(inner, 24, Some(0)), 0..4);
+        assert_eq!(session_map_item_window(inner, 24, Some(4)), 1..5);
         assert_eq!(session_map_item_window(inner, 4, Some(3)), 0..4);
         assert_eq!(session_map_item_window(inner, 0, None), 0..0);
     }
 
     #[test]
     fn palette_item_window_reserves_input_and_footer_rows_and_tracks_selection() {
-        let inner = SceneRect::new(1, 1, 40, 10); // 8 item rows
-        assert_eq!(palette_item_window(inner, 24, Some(0)), 0..8);
-        assert_eq!(palette_item_window(inner, 24, None), 0..8);
+        let inner = SceneRect::new(1, 1, 40, 10);
+        assert_eq!(
+            filtered_overlay_input_rect(inner),
+            SceneRect::new(1, 1, 40, 2)
+        );
+        assert_eq!(
+            filtered_overlay_footer_rect(inner),
+            Some(SceneRect::new(1, 9, 40, 2))
+        );
+        assert_eq!(
+            palette_item_rect(inner, 0),
+            Some(SceneRect::new(1, 3, 40, 2))
+        );
+        assert_eq!(
+            palette_item_rect(inner, 2),
+            Some(SceneRect::new(1, 7, 40, 2))
+        );
+        assert_eq!(palette_item_rect(inner, 3), None);
+        assert_eq!(palette_item_window(inner, 24, Some(0)), 0..3);
+        assert_eq!(palette_item_window(inner, 24, None), 0..3);
         // The selected item is always inside the window.
-        assert_eq!(palette_item_window(inner, 24, Some(7)), 0..8);
-        assert_eq!(palette_item_window(inner, 24, Some(8)), 1..9);
-        assert_eq!(palette_item_window(inner, 24, Some(23)), 16..24);
+        assert_eq!(palette_item_window(inner, 24, Some(2)), 0..3);
+        assert_eq!(palette_item_window(inner, 24, Some(3)), 1..4);
+        assert_eq!(palette_item_window(inner, 24, Some(23)), 21..24);
         // Out-of-range selection clamps to the last item.
-        assert_eq!(palette_item_window(inner, 24, Some(99)), 16..24);
+        assert_eq!(palette_item_window(inner, 24, Some(99)), 21..24);
         // Fewer items than rows and degenerate heights.
         assert_eq!(palette_item_window(inner, 3, Some(2)), 0..3);
         assert_eq!(

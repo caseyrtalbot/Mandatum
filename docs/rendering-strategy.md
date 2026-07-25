@@ -143,7 +143,13 @@ its design ceiling:
 The flagship direction is a compact graphite workbench: quiet continuous tiled
 surfaces, raised floating/modal surfaces, one navigation accent, and distinct
 semantic colors reserved for waiting, failure, success, and completion.
-Decorative effects are not substitutes for hierarchy.
+Decorative effects are not substitutes for hierarchy. Each built-in theme owns
+both sides of that presentation contract: `mandatum-light` and
+`mandatum-high-contrast` now have complete terminal foreground/background and
+16-color palettes as well as their UI palettes, while `mandatum-dark` retains
+its accepted palette byte-for-byte. App-owned surfaces and terminal defaults
+therefore agree instead of placing a dark terminal palette inside light or
+high-contrast chrome.
 
 ## Frontend Adapter Expectations
 
@@ -179,10 +185,11 @@ Rendering work is not complete until it has been checked under:
 - restored workspace
 - artifact load, reload, failure, overlay occlusion, and aspect-ratio resize
 
-Visual-polish work additionally requires the portable contrast, geometry,
-motion, fixed-reference macOS baseline, resize, idle, and frame-preparation
-procedures in [verification.md](verification.md). Pixel baselines supplement
-semantic tests; they never replace them or update implicitly.
+Visual-polish work additionally uses the portable contrast, geometry, motion,
+fixed-reference macOS baseline, resize, idle, and frame-preparation procedures
+owned by [verification.md](verification.md) when their seam changes or focused
+evidence exposes risk. Pixel baselines supplement semantic tests; they never
+replace them or update implicitly.
 
 Phase 1's deterministic acceptance catalog lives in
 `crates/app/src/visual_scenario.rs`: it prepares product fixtures through the
@@ -199,9 +206,18 @@ logical rectangles, cell projections, PTY mappings, hit targets, transition
 targets, and accessibility meaning. `prepare_native_presentation` validates
 their hierarchy, bounds, clips, ordering, and aggregate resource ceilings
 headlessly. Interface text uses typed metric roles and only the four
-provisioned static faces; shared baselines and clipping fail closed, and metric
-generation plus slot are part of shaping-cache identity. Direct UI colors come
-from `Theme.ui`, never from terminal ANSI identity.
+provisioned static faces. `NativeTextScope` role identity now controls the
+app-owned font face, point size, and line box; cell bold and italic remain
+additive semantic emphasis rather than being discarded by the role face.
+Metric generation plus role slot are part of shaping-cache identity. A scope
+that occupies one painted cell row centers that row in its semantic logical
+rectangle. A scope with text on multiple rows divides its rectangle into
+nonoverlapping proportional row bands and centers each row in its band.
+Horizontal origins and clips remain terminal-grid exact. App-owned shaped
+advance scales by the role font size divided by the configured terminal font
+size; child-terminal text retains the configured terminal metrics and exact
+cell advance. Direct UI colors come from `Theme.ui`, never from terminal ANSI
+identity.
 
 Phase 3 materializes the everyday workspace through that seam. Canvas,
 tiled-pane, header/status, title, badge, attention, separator, focus, and
@@ -262,6 +278,26 @@ instant across bounded surface retries, publishes readiness through the final
 window title, and fails closed rather than accepting a stale pre-checkpoint
 frame. All four references were accepted from clean source commit `4732ba8`
 on the MacBook Pro built-in Retina display.
+
+The finishing slice turns the presentation contracts into everyday geometry.
+Filtered overlays reserve two-row blocks for the input, each visible item, and
+the footer; Session Map reserves two-row item/footer blocks; Context Menu uses
+two-row item blocks. Paint, native presentation nodes, and pointer hit targets
+share those exact rectangles. At the default native font and the maintained
+18-point large-font setting, each control is at least 28 logical pixels high
+and adjacent targets do not overlap. Selection-aware windows preserve access
+when fewer items fit. Empty-result copy is confined to an item block and never
+overwrites the filter input, and the prompt's IME target remains anchored to
+its full input block. These overlay-only rows do not change pane layout,
+terminal viewport mappings, or PTY size.
+
+The maintained 18-point displayed check was reviewed from clean source commit
+`8092f7c` on the MacBook Pro built-in Retina display at backing scale 2.0 and a
+1600x1200 client surface. It showed no clipping or overlap, and app-owned text
+no longer falls back to the terminal's global metric. Pane title rails remain
+one terminal row; making them taller without consuming terminal content
+requires a later pane-layout/PTY contract change rather than a renderer-only
+adjustment.
 
 ## Resize And Rewrap
 

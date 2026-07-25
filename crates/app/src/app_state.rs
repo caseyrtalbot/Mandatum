@@ -3420,7 +3420,9 @@ impl AppState {
             .max()
             .unwrap_or(0) as u16;
         let width = widest.saturating_add(4);
-        let height = (items.len() as u16).saturating_add(2);
+        let height = (items.len() as u16)
+            .saturating_mul(mandatum_scene::layout::OVERLAY_CONTROL_ROWS)
+            .saturating_add(2);
         let area = context_menu_rect(menu.anchor.0, menu.anchor.1, width, height, size);
         Some(ContextMenuOverlay {
             area,

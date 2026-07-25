@@ -118,12 +118,17 @@ The ordered work is:
 5. Make native Casey's local interactive default with an explicit terminal
    escape hatch — complete. Daily use now supplies concrete functional
    hardening work.
-6. Build the production-grade native in-app visual system — active. Phase 6's
-   typed motion, reduced-motion, redraw, pacing, and idle capability is
-   implemented and accepted on the native Metal route at backing scale 2.
-   Phase 7 theme/accessibility completion is next. The ordered capability
+6. Build the production-grade native in-app visual system — complete. Phase
+   6's typed motion, reduced-motion, redraw, pacing, and idle capability is
+   implemented and accepted on the native Metal route at backing scale 2. The
+   single finishing slice completes light/high-contrast palettes, per-role UI
+   metrics, and explicit two-row overlay controls while preserving exact
+   terminal metrics and geometry. Native macOS accessibility projection and
+   VoiceOver qualification are deferred honestly; typed semantics,
+   keyboard-only operation, and non-color cues remain. The ordered capability
    families live in
    [`docs/visual-polish-plan.md`](visual-polish-plan.md).
+7. Begin named task and dev-server recipes — next.
 
 The authoritative detail is
 [`docs/native-gpu-implementation-plan.md`](native-gpu-implementation-plan.md).
@@ -142,9 +147,15 @@ accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
 
 The ordered launcher and shaping-cache gaps are closed. Row damage remains
 unjustified by the measured preparation profile. Native in-app visual polish
-is active: Phase 6 is accepted, Phase 7 theme/accessibility completion is next,
-and the smaller known shell debt is the 17-logical-pixel pane title rail versus
-the intended 24–28-pixel rail. Concrete failures found through daily use remain
-hardening work at their smallest owning seam. Installer, release, rollout,
-public-GitHub presentation, and public visual materials remain shelved for a
-separate distribution phase.
+is complete: complete built-in palettes, per-role UI
+metrics and proportional advances, two-row overlay controls with
+at-least-28-logical-pixel targets, and an unclipped displayed 18 pt smoke are
+implemented. Terminal text retains exact terminal metrics and geometry. The
+remaining known shell debt is the one-row pane title rail versus the intended
+24–28-pixel rail; changing it requires an explicit PTY/layout contract. Native
+macOS accessibility projection and VoiceOver qualification are deferred, not
+claimed. Typed accessibility semantics, keyboard routes, and non-color cues
+remain. The retired Phase 8 ceremony is not a separate work item. Named task
+and dev-server recipes are next. Installer, release,
+rollout, public-GitHub presentation, and public visual materials remain
+shelved for a separate distribution phase.

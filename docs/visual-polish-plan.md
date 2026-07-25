@@ -1,7 +1,6 @@
 # Native Visual Polish Plan
 
-Status: Phase 6 Motion And Fluid Geometry source implemented; displayed
-evidence and final gate pending (2026-07-24)
+Status: complete and accepted (2026-07-25)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -23,8 +22,12 @@ This phase includes:
 - typed task, agent, approval, and artifact presentation;
 - purposeful motion and fluid geometry;
 - coherent dark, light, and high-contrast themes;
-- native accessibility semantics; and
+- typed accessibility semantics, keyboard operation, and non-color cues; and
 - maintained visual-regression evidence.
+
+A native macOS accessibility adapter and VoiceOver qualification are deferred
+rather than implied by the typed scene semantics. They remain valid future
+enhancements, not completion gates for Casey's current daily-driver surface.
 
 This phase does not include installer, updater, release, rollout, archives,
 public-GitHub presentation, marketing screenshots, or other public-distribution
@@ -214,8 +217,9 @@ Likely implementation seams:
 - `crates/native-renderer/src/gpu.rs`: pure native plan and material pipelines;
 - `crates/native-renderer/src/row_run.rs`: multi-metric text scopes;
 - `crates/native/src/main.rs`: window policy and bounded animation scheduling;
-- a native accessibility adapter under `crates/native` that projects typed
-  scene accessibility nodes and routes actions through neutral input/commands;
+- a deferred native accessibility adapter under `crates/native` may eventually
+  project the existing typed scene nodes and route actions through neutral
+  input/commands;
 - `crates/app/src/config.rs`: compatible theme and reduced-motion config; and
 - `spikes/frontend-wgpu/`: fixed-reference capture and performance evidence.
 
@@ -315,8 +319,8 @@ Work:
   `FrontendHost` state and neutral input;
 - write the accepted dual-geometry contract before implementation: neutral
   viewport metrics, scene-owned logical rectangles, stable presentation-node
-  IDs, PTY content mapping, logical hit targets, terminal fallback, and
-  accessibility-node/action projection;
+  IDs, PTY content mapping, logical hit targets, terminal fallback, and typed
+  accessibility nodes/actions;
 - cover calm terminal, dense mixed panes, failed task, waiting approval,
   Palette, full modal, Welcome, context menu, artifacts, narrow geometry, and
   restore;
@@ -425,8 +429,8 @@ Work:
   content rectangles;
 - implement multi-metric UI shaping, baseline alignment, and cache identity
   using only the provisioned Regular/Bold/Italic/BoldItalic faces; and
-- define typed accessibility nodes/actions even though the native projection
-  lands in Phase 7; and
+- define typed accessibility nodes/actions without claiming a native platform
+  projection; and
 - preserve existing `CellProgram` output byte-for-byte unless an intentional
   terminal fallback change is separately accepted.
 
@@ -558,10 +562,10 @@ representative `palette`, `full-modal`, `welcome`, and `artifacts` references
 were reviewed and explicitly accepted from clean source commit `1988b0b`; the
 complete repository gate reported `GATE GREEN`.
 
-Known physical debt: native overlay bands and rows still inherit one terminal
-text row rather than consuming the final `overlay_outer_padding` and
-`overlay_row_padding_y` vertical rhythm. This is visible spacing debt, not a
-second interaction or paint authority.
+The finishing slice closes the overlay-spacing debt with centralized two-row
+control blocks. Painted selection and logical hit geometry cover both rows,
+producing disjoint targets of at least 28 logical pixels at the default and
+18 pt smoke sizes without changing terminal viewport or PTY geometry.
 
 Work:
 
@@ -689,69 +693,63 @@ Implementation status (2026-07-24):
 - the three-run median static idle window used 0.067% of one core with zero
   redraws and zero presents.
 
-### Phase 7 — Theme And Accessibility Completion
+### Finishing Slice — Physical Theme, Metrics, And Controls
 
-Goal: make the visual system coherent beyond the flagship dark surface.
+Goal: close the remaining visible native gaps without turning regression tools
+into a second acceptance product.
 
-Work:
+Implementation:
 
-- complete light and high-contrast UI and terminal palettes;
-- validate all app-owned contrast pairs;
-- add native accessibility roles, labels, values, focus, and hierarchy for
-  panes, overlays, attention chips, rows, and approval actions;
-- verify keyboard-only operation and non-color state cues;
-- verify native font scaling without clipped chrome;
-- verify representative color-vision distinctions; and
-- confirm minimum 28 px explicit pointer targets.
+- complete light and high-contrast UI and terminal palettes and validate the
+  app-owned painted contrast pairs;
+- project typed UI roles through their own point size, line height, face, and
+  proportional advance while terminal output retains exact terminal metrics;
+- centralize two-row overlay control geometry so painted rows and logical hit
+  targets remain aligned and at least 28 logical pixels tall;
+- preserve selection-aware overlay windows, keyboard routing, non-color state
+  cues, terminal viewport geometry, and prompt IME behavior;
+- review a dense native scene at 18 pt without clipped chrome; and
+- retain the one-row pane title rail as explicit bounded debt because a taller
+  rail requires an intentional PTY/layout contract.
 
-Exit:
+Typed accessibility nodes and actions remain renderer-neutral scene truth. A
+native macOS accessibility adapter and VoiceOver qualification are explicitly
+deferred; this slice does not claim platform projection that does not exist.
 
-- every built-in is a complete coherent theme;
-- high-contrast text reaches the documented 7:1 contract;
-- every interactive/state surface has a semantic native description;
-- font scaling, focus, keyboard, and reduced-motion checks pass; and
-- the accessibility/theme matrix and full gate pass.
+Close:
 
-### Phase 8 — Aggregate Acceptance And Phase Close
+- review representative dark, light, and high-contrast displayed surfaces;
+- run focused semantic, interaction, rendering, and contrast checks for the
+  seams changed here;
+- run one aggregate architecture/interaction/rendering review;
+- synchronize the active plans, implementation docs, verification record, and
+  project handoff;
+- run the authoritative `./ci/gate.sh`; and
+- commit the complete synchronized slice.
 
-Goal: prove the visual system as one production capability.
+### Retired Phase 8 Ceremony
 
-Work:
-
-- run the complete pairwise scenario matrix on Casey's reference Mac;
-- explicitly review and accept intentional baseline changes;
-- run scale 1.0 and 2.0, resize/scale stress, recovery, continuous output,
-  motion pacing, startup, frame preparation, and idle procedures;
-- run an aggregate architecture/interaction/rendering review;
-- correct findings and rerun affected evidence;
-- synchronize `PLAN.md`, decisions, rendering/interaction docs, verification,
-  README, repo structure, and the project handoff; and
-- run the final `./ci/gate.sh`.
-
-Exit:
-
-- text is delightful at Casey's normal settings;
-- layout, materials, hierarchy, focus, overlays, and workflow surfaces read as
-  one system;
-- keyboard, pointer, clipboard, IME, terminal semantics, and recovery remain
-  trustworthy;
-- the accepted pixel baselines and portable semantic gates agree;
-- performance and idle budgets pass or have an explicit accepted decision;
-- no known blocking visual defect remains; and
-- the synchronized capability family is committed.
+There is no standalone Phase 8. The former complete pairwise matrix, repeated
+unchanged performance/stress procedures, and rollout-style admission sequence
+were retired because they duplicated existing regression authority without
+improving the product. Resize, scale, recovery, motion, frame, and idle probes
+remain available and should run when their owning seam changes or focused
+evidence exposes risk.
 
 ## Verification Authority
 
 `docs/verification.md#visual-polish-verification` owns the standing visual
-procedure, pairwise matrix, contrast thresholds, fixed-reference baseline
-policy, motion checks, and performance budgets.
+procedure, contrast thresholds, fixed-reference baseline policy, motion
+checks, and performance budgets. Its scenario and probe catalog is a
+risk-driven regression toolbox, not a requirement to rerun every permutation
+after an unrelated change.
 
 For every rendered capability family:
 
 1. run focused semantic and native-plan tests;
 2. run the representative displayed scenarios;
 3. accept intentional baseline changes explicitly;
-4. run `./ci/native-frontend.sh`;
+4. run only additional regression probes owned by the changed seam;
 5. synchronize active docs and handoff;
 6. run `./ci/gate.sh` after the final documentation changes;
 7. inspect `git diff --check` and `git status --short`; and
@@ -775,8 +773,6 @@ Defer until the complete system above succeeds without them:
 
 ## Immediate Next Action
 
-Complete Phase 6 only: run and explicitly accept the representative native
-motion matrix on the MacBook Pro built-in Retina display, record the final
-motion/frame/idle evidence, synchronize the handoff, and pass the complete
-repository gate. Begin Phase 7 only after that evidence closes Phase 6. Do not
-pull installer, release, rollout, or public presentation work forward.
+Begin the named task and dev-server recipe catalog in `PLAN.md`. Do not pull
+native VoiceOver qualification, installer, release, rollout, or public
+presentation work forward.

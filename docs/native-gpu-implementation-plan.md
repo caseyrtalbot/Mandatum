@@ -5,8 +5,9 @@ production shell and renderer into the workspace. Work 3 completed with a
 negative typography verdict. The accepted typography foundation is now
 implemented, displayed, and backed by the bounded Work 4 shaping cache. Work 5
 made native Casey's local default. Production-grade native in-app visual polish
-is active: visual Phase 6 is accepted and Phase 7 theme/accessibility
-completion is next.
+is complete: visual Phase 6 is accepted, and the final physical theme,
+UI-metric, and overlay-control improvements closed without restoring a
+separate Phase 7/8 ceremony.
 
 ## Product Direction
 
@@ -17,9 +18,10 @@ feel, living outside the terminal.
 - Daily-driver quality for Casey on known macOS hardware is the adoption bar.
 - The terminal frontend is a maintained tool for SSH, headless use, recovery,
   and an explicit escape hatch.
-- Native in-app visual polish and richer workflow surfaces are the next ordered
-  product work, specified in
+- Native in-app visual polish and richer workflow surfaces are complete as
+  specified in
   [`docs/visual-polish-plan.md`](visual-polish-plan.md).
+- Named task and dev-server recipes are the next ordered product family.
 - Installer, release, rollout, archives, public-GitHub presentation, and public
   visual materials remain shelved for a later distribution phase.
 
@@ -65,12 +67,17 @@ Standing procedures and current dated runs live in
 
 ## Known Implementation Gaps
 
-The planned local-launcher gap is closed. The remaining visible gap is that the
-native product still needs a coherent production-grade visual system and richer
-typed workflow presentation. Concrete functional failures found through daily
-native use remain hardening work at their smallest owning seam; they are not
-reasons to restore the retired admission ceremony or pull forward the shelved
-distribution and public-presentation phase.
+The planned local-launcher gap is closed. The coherent native visual system and
+richer typed workflow presentation are implemented through one final
+synchronized finishing slice. The remaining bounded physical debt is the
+one-row pane title rail: reaching the intended 24–28 logical pixels requires an
+explicit PTY/layout contract rather than silently consuming terminal geometry.
+A native macOS accessibility adapter and VoiceOver qualification are deferred;
+typed scene semantics, keyboard operation, and non-color cues remain. Concrete
+functional failures found through daily native use remain hardening work at
+their smallest owning seam; they are not reasons to restore the retired
+admission ceremony or pull forward the shelved distribution and
+public-presentation phase.
 
 ## Work 1 — Reorder Startup — Complete
 
@@ -339,7 +346,7 @@ That constraint governed Work 5 and remains part of its completed history. The
 subsequent product decision advances native in-app polish as its own phase while
 keeping distribution and public materials deferred.
 
-## Native Visual Polish Phase — Active
+## Native Visual Polish Phase — Complete
 
 The complete ordered phase is
 [`docs/visual-polish-plan.md`](visual-polish-plan.md). It treats visual quality
@@ -351,11 +358,23 @@ as a cornerstone capability of Casey's daily-driver product:
 - coherent overlays and orientation surfaces;
 - richer typed task, agent, approval, and artifact presentation;
 - fluid geometry and purposeful motion with reduced-motion behavior; and
-- accessibility and displayed acceptance on Casey's actual native surface.
+- typed accessibility semantics, keyboard/non-color cues, and displayed
+  acceptance on Casey's actual native surface.
 
 The architecture remains unchanged: `WorkspaceScene` owns product meaning and
 layout, richer native presentation enters through typed `mandatum-scene`
 extensions, and `CellProgram` remains the terminal-parity path.
+
+The finishing slice completes coherent light and high-contrast UI and terminal
+palettes; applies per-role UI metrics and proportional advances while
+preserving exact terminal metrics; gives overlay controls two-row,
+at-least-28-logical-pixel painted and interactive targets; and passes a
+displayed 18 pt unclipped smoke. The pane title rail remains one row because
+changing it safely requires an explicit PTY/layout contract. A native macOS
+accessibility adapter and VoiceOver qualification are deferred rather than
+claimed. The former standalone Phase 8 ceremony is retired; focused evidence,
+one aggregate review, synchronized docs, and the authoritative gate close the
+single finishing slice.
 
 Visual-phase exit checks:
 
@@ -407,11 +426,10 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Execute Phase 7 of
-[`docs/visual-polish-plan.md`](visual-polish-plan.md): complete the built-in
-theme, contrast, scaling, keyboard, focus, and reduced-motion matrix without
-expanding into the full cross-product. Continue daily-driving the native
-launcher; if another concrete functional failure appears, reproduce it, fix
-the smallest owning product seam, and add a regression. Do not pull Phase 8
-integration, installer, updater, release workflow, archives, rollout,
-public-GitHub presentation, or public visual materials forward.
+Begin the named task and dev-server recipe catalog in `PLAN.md`: project-local
+build, test, lint, and server recipes with duration, cwd, start time, port, and
+health facts. Continue daily-driving the native launcher; if another concrete
+functional failure appears, reproduce it, fix the smallest owning product
+seam, and add a regression. Do not pull native VoiceOver qualification,
+installer, updater, release workflow, archives, rollout, public-GitHub
+presentation, or public visual materials forward.

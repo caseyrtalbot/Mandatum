@@ -155,7 +155,10 @@ needed (a session row switches without changing that session's focus).
 Esc closes. The footer names these keys and carries a legend for the
 glyphs actually on screen (`▸ session · ❯ terminal · ▶ task · ◆ agent · ≡
 status · ● focused`), generated from the same table the rows draw from so
-it cannot drift; the full legend also lives in the help overlay.
+it cannot drift; the full legend also lives in the help overlay. Each visible
+row and the footer occupy a two-terminal-row control block. The native
+material, semantic presentation node, and pointer target share that rectangle,
+so either half of a row activates the same item.
 
 ## Execution Timeline
 
@@ -219,6 +222,12 @@ evicted or moved by new output since the snapshot, the status says so
 instead of pretending. Enter on a timeline hit opens the timeline overlay
 positioned at that entry. Esc returns. The footer names the keys.
 
+Filtered overlays use the same two-row geometry for their filter input, every
+visible result, and their footer. The selected-aware window keeps the current
+item visible when the larger controls reduce list capacity. Empty-result text
+is painted only in the first available item block, never over the filter
+input.
+
 ## Copy, Search, And Scrollback
 
 Terminal panes need:
@@ -260,7 +269,10 @@ On the native surface the header and status are quiet material rails, and
 attention segments are typed outlined chips with waiting/failure tone. Pane
 title rails carry typed kind/state badges. The focused pane adds a compact
 two-logical-pixel leading tick plus focused title color and bold weight; the
-literal `focused` terminal fallback remains the non-color cue.
+literal `focused` terminal fallback remains the non-color cue. Pane title rails
+still occupy one terminal row. Giving them a taller independent rail remains a
+pane-layout/PTY contract debt; it cannot be done honestly by overlapping or
+shrinking terminal content in the renderer.
 
 The status strip below stays the app's own voice: the last status message
 plus the permanent control hint (palette chord, right-click menu).
@@ -369,6 +381,15 @@ viewport scrim. All use the same raised shell, bands, soft selected row,
 leading focus indicator, and right-aligned key hints. Context Menu retains the
 exact constrained shell from the last presented scene for chrome-click
 handling, so a visible border near an edge is never mistaken for click-away.
+Filtered overlays and Prompt reserve two-row input/footer blocks, visible
+filtered results reserve two-row item blocks, and Session Map and Context Menu
+use the same two-row item convention. Paint, native presentation, and hit
+testing consume the same rectangles: adjacent targets are disjoint and each is
+at least 28 logical pixels high at both the default native font and the
+maintained 18-point setting. These rows belong only to the floating overlay;
+pane content rectangles, terminal viewport mappings, and PTY dimensions do not
+change. Prompt preedit and commit stay anchored to the full input block, and
+empty states cannot overwrite that input.
 The first-run card keeps live keys, descriptions, and dismissal guidance as
 separate scene fields: keys are accented and bold, descriptions are normal,
 and the dismissal line is dim.
@@ -408,10 +429,25 @@ native-only font family/size settings, keeps left Option for dead-key
 composition and right Option for terminal Meta, and routes renderer-neutral
 preedit/commit/cancel to the active text surface. The Ghostty comparison found
 the actual-font loading, palette ownership, and shaping-unit defects. The
-accepted path is a pinned bundled primary with strict observable overrides,
-theme-owned native terminal colors, and clipped cell-aware row runs; implement
-that contract before the bounded shaping cache described in the
-[native GPU implementation plan](native-gpu-implementation-plan.md).
+implemented path is a pinned bundled primary with strict observable overrides,
+complete theme-owned native terminal palettes, clipped cell-aware row runs,
+and a bounded shaping cache. `NativeTextScope` metric roles now control the
+face, point size, and line box of app-owned text while semantic cell bold and
+italic remain additive. One occupied row centers in its semantic rectangle;
+multirow scopes use nonoverlapping proportional row bands. Horizontal origins
+and clips remain terminal-grid exact. App-owned advance scales with the role
+font size relative to the configured terminal font; terminal rows remain exact
+to that configured metric.
 
-Descriptive labels and platform accessibility hooks remain valid native
-enhancements, but they are not prerequisites for Casey's daily use.
+The maintained large-font display check used 18 points from clean commit
+`8092f7c`, a 1600x1200 client surface, backing scale 2.0, and the MacBook Pro
+built-in Retina display. The dense workspace showed no clipping or overlap,
+and the previous app-owned fallback to one global terminal metric was gone.
+
+**Platform accessibility boundary.** Native macOS accessibility projection,
+including VoiceOver support, is deferred and is not claimed as supported.
+Renderer-neutral typed semantics and actions remain in the scene, and the
+complete keyboard routes and non-color focus/state cues above remain the
+current accessible interaction contract. A future platform adapter may project
+those existing nodes into macOS accessibility APIs without moving product
+meaning into the renderer.

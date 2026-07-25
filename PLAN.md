@@ -11,7 +11,8 @@ feel. The native wgpu frontend is the product. The terminal frontend is a
 maintained tool for SSH, headless use, recovery, and an explicit escape hatch.
 
 Daily-driver quality for Casey on known macOS hardware is the adoption bar.
-Production-grade native in-app visual polish is now the next product phase.
+Production-grade native in-app visual polish is complete; the next product
+family is named task and dev-server recipes.
 Installer, release, rollout, public-GitHub presentation, and public visual
 materials remain shelved for a later distribution phase. Latency, idle, resize,
 recovery, and fault probes remain regression checks, not permission gates.
@@ -105,7 +106,7 @@ command, so the local daily-driver choice does not mutate the installer,
 updater, release workflow, archives, rollout, public GitHub presentation, or
 visual materials. Daily use now sets the functional hardening queue.
 
-### 6. Production-grade native visual polish — active
+### 6. Production-grade native visual polish — complete
 
 Native in-app visual polish is a cornerstone product capability, not a public
 release accessory. The ordered phase covers typography hierarchy, pane
@@ -159,13 +160,25 @@ schedules no transition frames. The displayed approval-arrival start,
 midpoint, end, and reduced states were reviewed and accepted from the clean
 MacBook Pro reference capture. Three-run median motion p95 was 1.19 display
 periods with 0.34% of intervals over two periods; static idle median was 0.067%
-of one core with zero redraws and presents. Phase 7 — Theme And Accessibility
-Completion — is next.
+of one core with zero redraws and presents.
 
-Known physical debt remains deliberately bounded: pane title rails and overlay
-rows still inherit one terminal text row rather than their final native
-vertical spacing. Concrete functional failures found through daily use remain
-valid hardening work at their smallest owning seam.
+The final finishing slice completes coherent light and high-contrast UI and
+terminal palettes, projects typed UI roles through their own metrics and
+proportional advances while terminal text retains exact terminal metrics, and
+gives overlay controls two-row, at-least-28-logical-pixel painted and
+interactive targets. A displayed 18 pt smoke remains unclipped. Typed
+accessibility semantics, keyboard operation, and non-color state cues remain
+part of the shared scene contract; a native macOS accessibility adapter and
+VoiceOver qualification are explicitly deferred rather than claimed. The
+former standalone Phase 8 acceptance ceremony is retired: focused evidence,
+one aggregate review, synchronized documents, and the authoritative gate close
+this one slice without recreating a rollout phase.
+
+Known physical debt remains deliberately bounded: pane title rails still
+inherit one terminal text row rather than the specified 24–28 logical pixels.
+Expanding that rail requires an explicit PTY/layout contract rather than
+silently consuming terminal geometry. Concrete functional failures found
+through daily use remain valid hardening work at their smallest owning seam.
 
 ### Distribution and public presentation — shelved
 

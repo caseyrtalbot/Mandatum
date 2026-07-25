@@ -179,10 +179,10 @@ Use `spikes/frontend-wgpu/scripts/typography-corpus.sh` through each terminal's
 real PTY path. Before treating the windows as matched, prove the requested face
 resolved in both applications and record the actual foreground, background,
 ANSI palette, physical display, refresh rate, and backing scale. A structurally
-valid family name or a visible fallback is not matched-font evidence. If the
-active hardware cannot produce a live backing-scale transition, the displayed
-matrix remains incomplete until suitable hardware is available; do not
-substitute a lab probe.
+valid family name or a visible fallback is not matched-font evidence. When a
+font-resolution or scale-transition seam changes, exercise that seam on
+suitable hardware; otherwise record the actual scale and do not imply that a
+single-scale smoke proves a live transition.
 
 Record the displayed evidence and a direct verdict: the glyphon/cosmic-text
 stack can delight, or a focused stack decision is required before broader
@@ -190,42 +190,34 @@ visual-identity investment.
 
 ## Visual Polish Verification
 
-Visual polish is production work for the native daily driver. A visual
-capability family is not complete from screenshot inspection alone. It needs
-three complementary kinds of evidence:
+Visual polish is production work for the native daily driver. Verification is
+risk-driven and follows the seam that changed. Use:
 
-1. portable semantic, geometry, and color-contract tests;
-2. fixed-reference macOS pixel baselines from the real native window; and
-3. a representative displayed matrix with resize, motion, and performance
-   evidence.
+1. focused portable semantic, geometry, color, shaping, or input tests for the
+   changed contract;
+2. representative real-window captures when pixels changed; and
+3. performance, resize, motion, idle, recovery, or fault probes only when the
+   owning seam changed or focused evidence exposes a credible regression.
 
-These are completion checks for changes to native presentation, not a return to
-the retired native-admission ceremony. Do not claim any check below until its
-command, capture, or observation actually ran.
+The ordinary full repository gate runs once after source, accepted evidence,
+and active documentation are synchronized. A failed or noisy focused check can
+justify escalation; phase history, a broad matrix, or the mere existence of a
+probe cannot. Do not claim a check until its command, capture, or observation
+actually ran.
 
-The requirements activate with the capability that implements them:
-
-- Phase 1 records the current visual baselines and known failures. Its hard
-  requirements are catalog determinism, capture/diff tool correctness,
-  explicit baseline acceptance, no regression from existing semantic gates,
-  and the ordinary full repository gate.
-- Phase 2 makes the app-owned contrast thresholds and native presentation-plan
-  contracts hard.
-- Phases 3-5 make their changed geometry, material, overlay, and workflow
-  baselines hard while unchanged scenarios remain no-regression checks.
-- Phase 6 makes motion, redraw/present-count, frame-pacing, and static-idle
-  requirements hard after adding the required evidence fields.
-- Phase 7 makes complete light/high-contrast and native accessibility checks
-  hard.
-
-Do not block Phase 1 because the baseline accurately records a defect that a
-later named phase exists to fix.
+Theme completeness means coherent built-in palettes and tested app-owned
+contrast pairs. It does not imply platform accessibility projection. The scene
+retains typed accessibility nodes/actions, keyboard operation, focus cues, and
+non-color state cues; native macOS projection and VoiceOver support must be
+claimed only after that platform bridge exists and is exercised.
 
 ### Portable Semantic, Geometry, And Contrast Gates
 
-Run the focused scene, app, and native-renderer tests before displayed work, then
-run `./ci/native-frontend.sh` and the authoritative `./ci/gate.sh` after the
-complete capability family and synchronized documentation are ready.
+Run the focused scene, app, and native-renderer tests before displayed work.
+Use `./ci/native-frontend.sh` during development only when its aggregate scope
+adds useful evidence. After the capability family and synchronized
+documentation are ready, run the authoritative `./ci/gate.sh` once; it already
+includes the native frontend gate.
 
 Portable tests must prove:
 
@@ -276,7 +268,7 @@ Extend the existing deterministic seams rather than replacing them:
 - `spikes/frontend-wgpu/tests/host_wake.rs` for real `FrontendHost` scenes
   reaching the native render plan.
 
-### Representative Scenario Matrix
+### Representative Scenario Selection
 
 Maintain one deterministic visual-scenario catalog driven through
 `FrontendHost` and neutral input. Handcrafted renderer-only state may exercise
@@ -299,7 +291,7 @@ native-plan gate. The canonical `narrow` recipe creates deliberately narrow
 pane geometry inside the fixed 102 x 35 scene; it does not change the
 fixed-reference client size.
 
-The catalog should contain:
+The catalog contains:
 
 - the shared typography corpus with ANSI/true color, all styles, ligatures,
   fallback scripts, CJK, combining text, emoji, cursor, and selection;
@@ -313,15 +305,11 @@ The catalog should contain:
 - a narrow/minimum-usable frame; and
 - a restored workspace.
 
-Avoid the full cross-product. Use this pairwise matrix:
-
-- every scenario at the accepted primary theme, bundled JetBrains Mono 13,
-  backing scale 2.0, and one fixed normal window;
-- the color-role sampler, dense workspace, and Palette in every built-in theme;
-- typography, dense workspace, and artifacts at backing scales 1.0 and 2.0;
-- dense workspace and Palette at narrow, normal, and wide sizes; and
-- attention at the start, midpoint, and end of motion plus its reduced-motion
-  state.
+Select the smallest set that visibly exercises the changed presentation seam.
+For a palette change, sample each affected built-in theme on the dense
+workspace and Palette. For geometry or hierarchy, use the representative state
+that owns that geometry plus one realistic font/scale smoke when needed.
+Unchanged catalog entries do not require recapture.
 
 ### Fixed-Reference Mac Visual Baselines
 
@@ -403,13 +391,14 @@ change requires:
 1. a human side-by-side review of baseline, candidate, and diff;
 2. an explicit baseline-acceptance command or flag;
 3. a short rationale naming the intended visual change;
-4. unchanged unrelated scenario baselines; and
+4. focused portable coverage for the changed seam; and
 5. a dated evidence-ledger entry after the accepted images and code are in
    their final state.
 
 A fuzzy threshold cannot approve a font, palette, spacing, material, or
 hierarchy change by itself. Portable semantic or contrast failure blocks
-baseline acceptance.
+baseline acceptance. After explicit acceptance, do not rerun the same
+comparison merely to obtain identity against the just-written baseline.
 
 ### Motion And Reduced Motion
 
@@ -432,11 +421,12 @@ Any new transition joins that test's "no unguarded motion" contract and the
 displayed matrix. Prefer short 120-180 ms state transitions; looping decorative
 motion is not visual polish.
 
-### Resize, Frame, Startup, And Idle Budgets
+### Resize, Frame, Startup, And Idle Regression Tools
 
-Use the existing excluded native lab for structured evidence. Freeze a
-three-run median on the fixed reference Mac before judging a visual capability
-family; record raw JSON, not only the summary.
+Use the existing excluded native lab when a change owns one of these seams or
+focused evidence makes a regression plausible. Record raw JSON, not only the
+summary. Do not repeat a completed resize storm, motion/idle series, recovery
+suite, or startup series for unrelated palette, spacing, or typography work.
 
 Resize and scale:
 
@@ -452,7 +442,8 @@ Resize and scale:
     --font-size 13
   ```
 
-- run 1,000 resize/scale actions at a 16 ms requested cadence;
+- the 1,000-action form is the full stress probe, not a standing visual-polish
+  completion ritual;
 - require the stress report to complete with zero action, cadence, or present
   misses and no unexpected surface/device recovery;
 - capture minimum, narrow, normal, wide, and 1.0->2.0->1.0 checkpoints;
@@ -461,14 +452,7 @@ Resize and scale:
 - require renderer buffers, raster retention, and shaping-cache high-water
   values to remain within their existing hard bounds.
 
-Before plateau becomes a Phase 6 hard claim, extend the lab JSON with
-timestamped `resource_samples` at least once per second and at the final 80%,
-90%, and 100% stress checkpoints. Quad/raster/text buffer capacities must not
-increase during the final 20% of the workload. Cache entries and accounted
-bytes may move under eviction but must stay within their independent hard
-ceilings; they are not mislabeled as a monotonic plateau.
-
-Frame preparation uses three runs of:
+Frame preparation can use:
 
 ```sh
 cargo run --release \
@@ -480,10 +464,11 @@ cargo run --release \
   --font-size 13
 ```
 
-at the established 1600x1200, scale-2, 102x35 reference fixture. Both limits
-are mandatory: p95 must be at or below 8 ms and at or below
-`baseline_p95 * 1.25 + 0.5 ms`. A documented decision may accept a known cost;
-silently changing the baseline may not. Report shaping separately so a richer
+Use the established 1600x1200, scale-2, 102x35 reference fixture for comparison
+authority. A single current-surface run is only a sanity check and must be
+labeled with its actual scale and geometry. Escalate to a repeated reference
+series when it nears or exceeds the 8 ms p95 regression line or when shaping
+work needs comparison authority. Report shaping separately so a richer
 material cannot hide a text regression.
 
 Phase 6 adds the lab argument
@@ -494,7 +479,7 @@ that five-second exercise, use the detected refresh period:
 p95 present interval must stay within 1.2 times one display period, with fewer
 than 1% of frames exceeding two periods.
 
-For idle behavior, Phase 6 adds lab arguments `--warmup-seconds 5` and
+For idle behavior, the lab supports `--warmup-seconds 5` and
 `--idle-measure-seconds 30` plus JSON
 `idle_window.{duration_ms,process_cpu_ms,redraw_count,present_count}`. Build the
 release lab once, then take the median of three runs of:
@@ -513,7 +498,6 @@ lab's isolated no-restore harness, and the `calm-terminal` scenario must use
 the catalog's fixed shell/output state rather than the caller's current
 directory or workspace.
 
-- process CPU must stay at or below 1.5% of one core;
 - process CPU must stay at or below 1.5% of one core;
 - a change may not add more than 0.25 percentage points without a documented
   decision;
@@ -858,6 +842,38 @@ developer unfamiliar with the current implementation can identify:
   0/0, and 0/0; the medians were 0.067% and 0/0, improving on the prior 0.93%
   reference rather than consuming the 0.25-point regression allowance. The
   synchronized final `./ci/gate.sh` ended `GATE GREEN`.
+- **2026-07-25:** the native visual-polish finishing slice completed its
+  focused source and displayed review before the final synchronized repository
+  gate. Three independent cold reviews found an overlay empty-state overwrite,
+  lost semantic emphasis, line-box clipping/overlap, and an invisible light
+  ANSI 15 value; each defect was corrected. The synthetic hardcoded 18-point
+  test was removed in favor of real displayed evidence. From clean provisional
+  capture commit `95d9d74`, six captures were serialized across
+  `dense-workspace` and `palette` in `mandatum-dark`, `mandatum-light`, and
+  `mandatum-high-contrast`. All six were visually reviewed. Only the two
+  changed dark references were accepted: before acceptance, dense-workspace
+  measured SSIM `0.6264913090`, changed-pixel fraction `0.8773026042`
+  (`1,684,421 / 1,920,000`), while Palette measured SSIM `0.7299262968`,
+  changed-pixel fraction `0.7008130208` (`1,345,561 / 1,920,000`). No
+  post-accept identity comparison was run because it would only compare the
+  candidate with the baseline just written. An earlier dark dense candidate
+  exposed multirow overlap and was rejected before the fix. An earlier
+  high-contrast capture overlapped an 18-point window, was invalidated, and was
+  rerun serially rather than recorded as evidence.
+- **2026-07-25:** the final 18-point smoke from clean provisional commit
+  `8092f7c` used the real M4 Pro/Metal route on the MacBook Pro built-in Retina
+  display at backing scale 2, 1600×1200 physical pixels, 74×25 cells, and
+  120 Hz. It passed visual review with no clipping or overlap, zero app-owned
+  `AdvanceMismatch` diagnostics, a 90-entry shaping cache with 662 hits and
+  114 misses, and first usable frame at 605.5 ms. Remaining fallback
+  diagnostics were terminal Unicode fallback only. One final-code,
+  current-surface scale-1 frame-preparation sanity run produced 401 samples:
+  whole-frame p50 `3.408666 ms`, p95 `3.998792 ms`; shaping p50
+  `0.055083 ms`, p95 `0.072833 ms`. It is below the 8 ms regression line but
+  is not mislabeled as the scale-2 three-run reference authority. Motion,
+  idle, recovery, and 1,000-resize probes were not repeated because their
+  owning seams did not change. The final synchronized `./ci/gate.sh` ended
+  `GATE GREEN`.
 
 ## Completion Rule
 

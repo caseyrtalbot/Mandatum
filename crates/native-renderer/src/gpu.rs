@@ -23,8 +23,8 @@ use mandatum_scene::{
 use winit::window::Window;
 
 use crate::row_run::{
-    LayoutGlyphFacts, LayoutRunFacts, ResolvedGlyphStyle, RowRun, RowRunAdmission,
-    RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, RowRunStyleRange, admit_layout,
+    LayoutGlyphFacts, LayoutRunFacts, NativeTextGeometry, ResolvedGlyphStyle, RowRun,
+    RowRunAdmission, RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, admit_layout,
     anchored_fallback_runs, build_row_runs, split_at_span,
 };
 use crate::shaping_cache::{ShapingCache, ShapingCacheContext, ShapingCacheKey};
@@ -1341,7 +1341,7 @@ fn prepare_cell_program(
                 TextPaintScopeKind::PaneDecoration | TextPaintScopeKind::OverlayDecoration
             )
         });
-    apply_native_text_scope_colors(&mut plan.runs, program, scene, presentation_plan)?;
+    apply_native_text_scopes(&mut plan.runs, scene, presentation_plan)?;
     apply_modal_scrim_to_base_text(&mut plan.runs, presentation_plan);
     enforce_resource_limit("text buffers", plan.runs.len(), MAX_GPU_TEXT_BUFFERS)?;
     Ok(PreparedCellProgram {
@@ -1390,22 +1390,115 @@ fn composite_scrim(base: [u8; 4], scrim: [u8; 4]) -> [u8; 4] {
     ]
 }
 
-fn apply_native_text_scope_colors(
-    rows: &mut [RowRun],
-    program: &CellProgram,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProjectedNativeText {
+    scope_index: usize,
+    cell_rect: SceneRect,
+    color: [u8; 4],
+    metrics: crate::NativeTextMetricIdentity,
+    geometry: NativeTextGeometry,
+}
+
+fn add_native_face(style: &mut ResolvedGlyphStyle, face: crate::NativeFontFace) {
+    match face {
+        crate::NativeFontFace::Regular => {}
+        crate::NativeFontFace::Bold => style.bold = true,
+        crate::NativeFontFace::Italic => style.italic = true,
+        crate::NativeFontFace::BoldItalic => {
+            style.bold = true;
+            style.italic = true;
+        }
+    }
+}
+
+fn projected_row_geometry(
+    projection: ProjectedNativeText,
+    cell_y: u16,
+    multirow: bool,
+) -> Result<NativeTextGeometry, SceneCompileError> {
+    if !multirow {
+        return Ok(projection.geometry);
+    }
+    let relative_row = cell_y.checked_sub(projection.cell_rect.y).ok_or(
+        SceneCompileError::InvalidTextProgram("native text row precedes its scope"),
+    )?;
+    if relative_row >= projection.cell_rect.height {
+        return Err(SceneCompileError::InvalidTextProgram(
+            "native text row escapes its scope",
+        ));
+    }
+    let row_count = u128::from(projection.cell_rect.height);
+    let total_height = u128::from(projection.geometry.logical_rect.size.height_units());
+    let band_start = total_height
+        .saturating_mul(u128::from(relative_row))
+        / row_count;
+    let band_end = total_height
+        .saturating_mul(u128::from(relative_row) + 1)
+        / row_count;
+    let band_start = u64::try_from(band_start).map_err(|_| {
+        SceneCompileError::InvalidTextProgram("native text row geometry overflows")
+    })?;
+    let band_end = u64::try_from(band_end).map_err(|_| {
+        SceneCompileError::InvalidTextProgram("native text row geometry overflows")
+    })?;
+    let band_height = band_end.checked_sub(band_start).ok_or(
+        SceneCompileError::InvalidTextProgram("native text row geometry is inverted"),
+    )?;
+    if band_height == 0 {
+        return Err(SceneCompileError::InvalidTextProgram(
+            "native text row geometry is empty",
+        ));
+    }
+    let band_y = projection
+        .geometry
+        .logical_rect
+        .origin
+        .y_units()
+        .checked_add_unsigned(band_start)
+        .ok_or(SceneCompileError::InvalidTextProgram(
+            "native text row geometry overflows",
+        ))?;
+    Ok(NativeTextGeometry {
+        logical_rect: LogicalRect::from_units(
+            projection.geometry.logical_rect.origin.x_units(),
+            band_y,
+            projection.geometry.logical_rect.size.width_units(),
+            band_height,
+        ),
+        clip: projection.geometry.clip,
+    })
+}
+
+fn apply_native_text_scopes(
+    rows: &mut Vec<RowRun>,
     scene: &WorkspaceScene,
     plan: &NativePresentationPlan,
 ) -> Result<(), SceneCompileError> {
     let cell_count = usize::from(scene.size.width)
         .checked_mul(usize::from(scene.size.height))
         .unwrap_or(0);
-    let mut colors = vec![None; cell_count];
-    let text_scopes = plan.commands().iter().filter_map(|command| match command {
-        NativePlanCommand::Text(scope) => scope.cell_rect.map(|rect| (rect, scope.color.to_array())),
-        _ => None,
-    });
+    let mut projections = vec![None; cell_count];
+    let mut scope_occupied_rows = Vec::<Vec<u16>>::new();
     let mut aggregate_cells = 0usize;
-    for (rect, color) in text_scopes {
+    for scope in plan.commands().iter().filter_map(|command| match command {
+        NativePlanCommand::Text(scope) => Some(scope),
+        _ => None,
+    }) {
+        let Some(rect) = scope.cell_rect else {
+            continue;
+        };
+        let scope_index = scope_occupied_rows.len();
+        scope_occupied_rows.push(Vec::new());
+        let projection = ProjectedNativeText {
+            scope_index,
+            cell_rect: rect,
+            color: scope.color.to_array(),
+            metrics: scope.metrics,
+            geometry: NativeTextGeometry {
+                logical_rect: scope.logical_rect,
+                clip: scope.clip,
+            },
+        };
         let area = usize::from(rect.width).saturating_mul(usize::from(rect.height));
         aggregate_cells = aggregate_cells.saturating_add(area);
         enforce_resource_limit(
@@ -1416,49 +1509,93 @@ fn apply_native_text_scope_colors(
         for y in rect.y..rect.bottom().min(scene.size.height) {
             let row = usize::from(y) * usize::from(scene.size.width);
             for x in rect.x..rect.right().min(scene.size.width) {
-                colors[row + usize::from(x)] = Some(color);
+                projections[row + usize::from(x)] = Some(projection);
             }
         }
     }
 
     let frame_width = usize::from(scene.size.width);
-    for row in rows {
-        let original = row.style_ranges.clone();
-        let mut ranges: Vec<RowRunStyleRange> = Vec::with_capacity(row.byte_cells.len());
+    let mut rows_with_spans = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        let mut spans = Vec::with_capacity(row.byte_cells.len());
         for span in &row.byte_cells {
-            let mut style = original
-                .iter()
-                .find(|range| {
-                    range.bytes.start <= span.bytes.start && span.bytes.end <= range.bytes.end
-                })
-                .map(|range| range.style)
-                .unwrap_or(row.glyph_style);
-            let x = row.x.saturating_add(span.cells.start);
-            let index = usize::from(row.y)
-                .checked_mul(frame_width)
-                .and_then(|base| base.checked_add(usize::from(x)));
-            if !program.cell_at(x, row.y).is_some_and(|cell| cell.cursor)
-                && let Some(color) = index.and_then(|index| colors.get(index)).copied().flatten()
-            {
-                style.foreground = color;
+            let first_x = row.x.checked_add(span.cells.start).ok_or(
+                SceneCompileError::InvalidTextProgram("native text projection overflows row"),
+            )?;
+            let last_x = row.x.checked_add(span.cells.end).ok_or(
+                SceneCompileError::InvalidTextProgram("native text projection overflows row"),
+            )?;
+            let mut projection = None;
+            for x in first_x..last_x {
+                let index = usize::from(row.y)
+                    .checked_mul(frame_width)
+                    .and_then(|base| base.checked_add(usize::from(x)));
+                let cell_projection = index
+                    .and_then(|index| projections.get(index))
+                    .copied()
+                    .flatten();
+                if x == first_x {
+                    projection = cell_projection;
+                } else if projection != cell_projection {
+                    return Err(SceneCompileError::InvalidTextProgram(
+                        "native text scope splits a grapheme cell span",
+                    ));
+                }
             }
-            if let Some(previous) = ranges.last_mut()
-                && previous.style == style
-                && previous.bytes.end == span.bytes.start
-            {
-                previous.bytes.end = span.bytes.end;
-            } else {
-                ranges.push(RowRunStyleRange {
-                    bytes: span.bytes.clone(),
-                    style,
-                });
+            spans.push(projection);
+        }
+        for projection in spans.iter().flatten() {
+            let occupied = &mut scope_occupied_rows[projection.scope_index];
+            if occupied.last().copied() != Some(row.y) {
+                occupied.push(row.y);
             }
         }
-        if !ranges.is_empty() {
-            row.glyph_style = ranges[0].style;
-            row.style_ranges = ranges;
+        rows_with_spans.push((row, spans));
+    }
+
+    let mut projected = Vec::with_capacity(rows_with_spans.len());
+    for (row, spans) in rows_with_spans {
+        let mut remaining = Some(row);
+        let mut span_start = 0usize;
+        while span_start < spans.len() {
+            let projection = spans[span_start];
+            let segment_len = spans[span_start..]
+                .iter()
+                .take_while(|candidate| **candidate == projection)
+                .count();
+            let rest = remaining
+                .take()
+                .expect("projected span segments retain a remainder");
+            let mut segment = if segment_len == rest.byte_cells.len() {
+                rest
+            } else {
+                let (left, right) = split_at_span(&rest, segment_len).map_err(text_program_error)?;
+                remaining = Some(right);
+                left
+            };
+            if let Some(projection) = projection {
+                segment.native_metrics = Some(projection.metrics);
+                segment.native_geometry = Some(projected_row_geometry(
+                    projection,
+                    segment.y,
+                    scope_occupied_rows[projection.scope_index].len() > 1,
+                )?);
+                if !segment.cursor {
+                    segment.glyph_style.foreground = projection.color;
+                }
+                add_native_face(&mut segment.glyph_style, projection.metrics.style.face);
+                for range in &mut segment.style_ranges {
+                    if !segment.cursor {
+                        range.style.foreground = projection.color;
+                    }
+                    add_native_face(&mut range.style, projection.metrics.style.face);
+                }
+            }
+            projected.push(segment);
+            span_start += segment_len;
         }
     }
+    *rows = projected;
     Ok(())
 }
 
@@ -1536,6 +1673,130 @@ struct CachedShaping {
 struct ShapedRow {
     row: RowRun,
     buffer: ShapedBuffer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RowShapingProfile {
+    metrics: Metrics,
+    cell_advance: f32,
+    metric_generation: u64,
+    metric_slot: u8,
+}
+
+fn row_shaping_profile(
+    row: &RowRun,
+    terminal_metrics: Metrics,
+    terminal_cell_advance: f32,
+    scale: f32,
+) -> RowShapingProfile {
+    let Some(identity) = row.native_metrics else {
+        return RowShapingProfile {
+            metrics: terminal_metrics,
+            cell_advance: terminal_cell_advance,
+            metric_generation: 0,
+            metric_slot: 0,
+        };
+    };
+    let metrics = Metrics::new(
+        f32::from(identity.style.point_size_x64) / 64.0 * scale,
+        identity.style.line_height_units as f32 / 64.0 * scale,
+    );
+    RowShapingProfile {
+        metrics,
+        cell_advance: terminal_cell_advance * (metrics.font_size / terminal_metrics.font_size),
+        metric_generation: identity.generation,
+        metric_slot: identity.role as u8,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RowTextAreaGeometry {
+    left: f32,
+    top: f32,
+    bounds: TextBounds,
+}
+
+fn row_text_area_geometry(
+    row: &RowRun,
+    profile: RowShapingProfile,
+    cell_width: f32,
+    cell_height: f32,
+    scale: f32,
+    surface_width: u32,
+    surface_height: u32,
+) -> RowTextAreaGeometry {
+    let left = f32::from(row.x) * cell_width;
+    let cell_top = f32::from(row.y) * cell_height;
+    let cell_clip = row
+        .clipped_cell_bounds()
+        .unwrap_or_else(|| SceneRect::new(row.x, row.y, row.width, 1));
+    let cell_bounds = glyph_text_bounds(
+        cell_clip.x,
+        cell_clip.y,
+        cell_clip.width,
+        cell_width,
+        cell_height,
+        surface_width,
+        surface_height,
+    );
+    let Some(geometry) = row.native_geometry else {
+        return RowTextAreaGeometry {
+            left,
+            top: cell_top,
+            bounds: cell_bounds,
+        };
+    };
+    let Some(logical_rect) = logical_rect_to_physical(geometry.logical_rect, scale) else {
+        return RowTextAreaGeometry {
+            left,
+            top: cell_top,
+            bounds: cell_bounds,
+        };
+    };
+    let Some(node_scissor) =
+        logical_clip_to_scissor(geometry.logical_rect, scale, surface_width, surface_height)
+    else {
+        return RowTextAreaGeometry {
+            left,
+            top: cell_top,
+            bounds: cell_bounds,
+        };
+    };
+    let Some(scope_scissor) =
+        logical_clip_to_scissor(geometry.clip, scale, surface_width, surface_height)
+    else {
+        return RowTextAreaGeometry {
+            left,
+            top: cell_top,
+            bounds: cell_bounds,
+        };
+    };
+    let Some(vertical_clip) = intersect_scissors(node_scissor, scope_scissor) else {
+        return RowTextAreaGeometry {
+            left,
+            top: cell_top,
+            bounds: cell_bounds,
+        };
+    };
+    let centered_top =
+        logical_rect.y + ((logical_rect.height - profile.metrics.line_height).max(0.0) / 2.0);
+    let semantic_left = i32::try_from(vertical_clip.0).unwrap_or(i32::MAX);
+    let semantic_top = i32::try_from(vertical_clip.1).unwrap_or(i32::MAX);
+    let semantic_right =
+        i32::try_from(vertical_clip.0.saturating_add(vertical_clip.2)).unwrap_or(i32::MAX);
+    let semantic_bottom =
+        i32::try_from(vertical_clip.1.saturating_add(vertical_clip.3)).unwrap_or(i32::MAX);
+
+    RowTextAreaGeometry {
+        left,
+        top: centered_top,
+        bounds: TextBounds {
+            left: cell_bounds.left.max(semantic_left),
+            top: semantic_top,
+            right: cell_bounds.right.min(semantic_right),
+            bottom: semantic_bottom,
+        },
+    }
 }
 
 #[derive(Debug)]
@@ -2659,16 +2920,16 @@ impl GpuText {
         self.shaping_cache_palette = Some(palette);
     }
 
-    fn shaping_cache_context(&self, metrics: Metrics) -> ShapingCacheContext {
+    fn shaping_cache_context(&self, profile: RowShapingProfile) -> ShapingCacheContext {
         ShapingCacheContext {
             font_generation: self.font_profile.generation(),
             scale_generation: self.scale_generation,
-            metric_generation: 0,
-            metric_slot: 0,
+            metric_generation: profile.metric_generation,
+            metric_slot: profile.metric_slot,
             renderer_config_generation: SHAPING_POLICY_GENERATION,
-            font_size_bits: metrics.font_size.to_bits(),
-            line_height_bits: metrics.line_height.to_bits(),
-            cell_width_bits: self.cell_w.to_bits(),
+            font_size_bits: profile.metrics.font_size.to_bits(),
+            line_height_bits: profile.metrics.line_height.to_bits(),
+            cell_width_bits: profile.cell_advance.to_bits(),
             cell_height_bits: self.cell_h.to_bits(),
         }
     }
@@ -2698,17 +2959,20 @@ impl GpuText {
     fn shape_row_runs(
         &mut self,
         initial: Vec<RowRun>,
-        metrics: Metrics,
+        terminal_metrics: Metrics,
     ) -> Result<Vec<ShapedRow>, GpuRenderError> {
         let mut pending = initial
             .into_iter()
             .map(|run| (run, false))
             .collect::<VecDeque<_>>();
         let mut accepted = Vec::new();
-        let cache_context = self.shaping_cache_context(metrics);
 
         while let Some((run, forced_anchor)) = pending.pop_front() {
             enforce_text_buffer_work_limit(accepted.len(), pending.len(), 1)?;
+            let profile =
+                row_shaping_profile(&run, terminal_metrics, self.cell_w, self.scale);
+            let metrics = profile.metrics;
+            let cache_context = self.shaping_cache_context(profile);
 
             let cache_key = shaping_cache_key_for_candidate(
                 self.shaping_cache_enabled,
@@ -2733,13 +2997,18 @@ impl GpuText {
                 .ensure_len(buffer_index + 1, &mut self.font_system, metrics);
             let (layout, observations) = {
                 let buffer = &mut self.row_buffers.rows[buffer_index];
+                let buffer_height = if run.native_metrics.is_some() {
+                    metrics.line_height
+                } else {
+                    self.cell_h
+                };
                 shape_row_buffer(
                     buffer,
                     &run,
                     &mut self.font_system,
                     metrics,
-                    self.cell_w,
-                    self.cell_h,
+                    profile.cell_advance,
+                    buffer_height,
                     &self.font_family,
                 );
                 layout_facts_and_observations(buffer, &run)
@@ -2752,7 +3021,7 @@ impl GpuText {
             } else {
                 // Font metrics are already scaled to physical pixels and
                 // TextArea uses scale 1.0, so layout facts are physical here.
-                admit_layout(&run, &layout, self.cell_w, 1.0)
+                admit_layout(&run, &layout, profile.cell_advance, 1.0)
             };
             match admission {
                 RowRunAdmission::Accepted => {
@@ -2987,29 +3256,25 @@ impl GpuText {
         );
 
         let text_areas = rows.iter().map(|row| {
-            let left = f32::from(row.row.x) * self.cell_w;
-            let top = f32::from(row.row.y) * self.cell_h;
-            let clip = row
-                .row
-                .clipped_cell_bounds()
-                .unwrap_or_else(|| SceneRect::new(row.row.x, row.row.y, row.row.width, 1));
+            let profile = row_shaping_profile(&row.row, metrics, self.cell_w, self.scale);
+            let area = row_text_area_geometry(
+                &row.row,
+                profile,
+                self.cell_w,
+                self.cell_h,
+                self.scale,
+                self.config.width,
+                self.config.height,
+            );
             TextArea {
                 buffer: match &row.buffer {
                     ShapedBuffer::Shared(buffer) => buffer.as_ref(),
                     ShapedBuffer::RowPool(index) => &self.row_buffers.rows[*index],
                 },
-                left,
-                top,
+                left: area.left,
+                top: area.top,
                 scale: 1.0,
-                bounds: glyph_text_bounds(
-                    clip.x,
-                    clip.y,
-                    clip.width,
-                    self.cell_w,
-                    self.cell_h,
-                    self.config.width,
-                    self.config.height,
-                ),
+                bounds: area.bounds,
                 default_color: GColor::rgb(
                     frame_colors.default_foreground[0],
                     frame_colors.default_foreground[1],
@@ -3910,6 +4175,242 @@ mod tests {
             theme.ui.palette.agent_identity.to_array(),
             "the aligned badge cell rect must override the title rail glyph tone"
         );
+    }
+
+    #[test]
+    fn app_owned_text_uses_scope_metrics_without_changing_terminal_metrics() {
+        let terminal = PaneContent::Terminal(TerminalSurface {
+            rows: vec![vec![SceneCell::grapheme(
+                "X",
+                mandatum_scene::SceneCellStyle::default(),
+            )]],
+            ..TerminalSurface::default()
+        });
+        let mut scene = scene(vec![pane(PaneSceneKind::Terminal, terminal)]);
+        let pane_id = scene.panes[0].id.clone();
+        let header_rect = scene.header.area;
+        let title_rect = SceneRect::new(0, 1, scene.size.width, 1);
+        let make_node = |id: PresentationNodeId,
+                         role: PresentationNodeRole,
+                         state: PresentationNodeState,
+                         rect: SceneRect| PresentationNode {
+            id,
+            parent: None,
+            role,
+            state,
+            logical_rect: LogicalRect::from_units(
+                i64::from(rect.x) * 8 * 64,
+                i64::from(rect.y) * 20 * 64,
+                u64::from(rect.width) * 8 * 64,
+                u64::from(rect.height) * 20 * 64,
+            ),
+            cell_rect: Some(rect),
+            terminal_projection: TerminalProjection::CellRegions(vec![rect]),
+        };
+        scene.presentation.nodes = vec![
+            make_node(
+                PresentationNodeId::workspace(WorkspaceNodePart::Header),
+                PresentationNodeRole::Header,
+                PresentationNodeState::default(),
+                header_rect,
+            ),
+            make_node(
+                PresentationNodeId::pane(pane_id, PaneNodePart::Title),
+                PresentationNodeRole::PaneTitle,
+                PresentationNodeState {
+                    focused: true,
+                    ..PresentationNodeState::default()
+                },
+                title_rect,
+            ),
+        ];
+        scene.presentation.nodes[0].logical_rect =
+            LogicalRect::from_units(0, 0, 640 * 64, 40 * 64);
+        scene.presentation.viewport = Some(
+            ViewportMetrics::new(
+                LogicalSize::from_units(640 * 64, 480 * 64),
+                PhysicalSize::new(1_280, 960),
+                BackingScale::new(2.0).unwrap(),
+                LogicalSize::from_units(8 * 64, 20 * 64),
+            )
+            .unwrap(),
+        );
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+        )
+        .unwrap();
+
+        let header = translated
+            .rows
+            .iter()
+            .find(|run| run.paint_scope.kind == TextPaintScopeKind::Header)
+            .expect("header row");
+        assert_eq!(
+            header.native_metrics,
+            Some(
+                prepared
+                    .presentation_plan()
+                    .commands()
+                    .iter()
+                    .find_map(|command| match command {
+                        NativePlanCommand::Text(scope)
+                            if scope.metrics.role == crate::NativeTextMetricRole::Title =>
+                        {
+                            Some(scope.metrics)
+                        }
+                        _ => None,
+                    })
+                    .expect("title metric scope")
+            )
+        );
+        assert!(header.glyph_style.bold);
+        assert!(!header.glyph_style.italic);
+        assert_eq!(
+            header.clipped_cell_bounds(),
+            Some(SceneRect::new(
+                header.x,
+                header.y,
+                header.width,
+                1
+            ))
+        );
+
+        let terminal = translated
+            .rows
+            .iter()
+            .find(|run| run.paint_scope.kind == TextPaintScopeKind::PaneContent)
+            .expect("terminal output row");
+        assert_eq!(
+            terminal.native_metrics, None,
+            "child terminal output keeps the renderer's configured terminal metrics"
+        );
+
+        let configured_terminal = Metrics::new(36.0, 47.0);
+        let header_profile = row_shaping_profile(header, configured_terminal, 18.0, 2.0);
+        assert_eq!(header_profile.metrics, Metrics::new(26.0, 36.0));
+        assert_eq!(header_profile.cell_advance, 13.0);
+        assert_eq!(
+            header_profile.metric_generation,
+            header.native_metrics.unwrap().generation
+        );
+        assert_eq!(
+            header_profile.metric_slot,
+            crate::NativeTextMetricRole::Title as u8
+        );
+        let header_area =
+            row_text_area_geometry(header, header_profile, 18.0, 47.0, 2.0, 1_280, 960);
+        assert_eq!(header_area.top, 22.0);
+        assert_eq!((header_area.bounds.top, header_area.bounds.bottom), (0, 80));
+        let mut right_aligned = header.clone();
+        right_aligned.x = 60;
+        let right_aligned_area =
+            row_text_area_geometry(&right_aligned, header_profile, 18.0, 47.0, 2.0, 1_280, 960);
+        assert_eq!(
+            right_aligned_area.left, 1_080.0,
+            "semantic alignment keeps the declared terminal-grid start"
+        );
+
+        let terminal_profile = row_shaping_profile(terminal, configured_terminal, 18.0, 2.0);
+        assert_eq!(terminal_profile.metrics, configured_terminal);
+        assert_eq!(terminal_profile.cell_advance, 18.0);
+        assert_eq!(terminal_profile.metric_generation, 0);
+        assert_eq!(terminal_profile.metric_slot, 0);
+        let terminal_area =
+            row_text_area_geometry(terminal, terminal_profile, 18.0, 47.0, 2.0, 1_280, 960);
+        assert_eq!(terminal_area.top, f32::from(terminal.y) * 47.0);
+        assert_eq!(
+            terminal_area.bounds.bottom - terminal_area.bounds.top,
+            47
+        );
+    }
+
+    #[test]
+    fn native_role_faces_add_to_cell_emphasis_instead_of_erasing_it() {
+        let mut style = ResolvedGlyphStyle {
+            foreground: [1, 2, 3, 255],
+            bold: true,
+            italic: true,
+            underline: false,
+            strikethrough: false,
+        };
+
+        add_native_face(&mut style, crate::NativeFontFace::Regular);
+
+        assert!(style.bold);
+        assert!(style.italic);
+    }
+
+    #[test]
+    fn multirow_native_scope_preserves_distinct_nonoverlapping_row_tops() {
+        let terminal = PaneContent::Terminal(TerminalSurface {
+            rows: vec![
+                vec![SceneCell::grapheme(
+                    "X",
+                    mandatum_scene::SceneCellStyle::default(),
+                )],
+                vec![SceneCell::grapheme(
+                    "Y",
+                    mandatum_scene::SceneCellStyle::default(),
+                )],
+            ],
+            ..TerminalSurface::default()
+        });
+        let scene = scene(vec![pane(PaneSceneKind::Terminal, terminal)]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let inner = layout::pane_inner_rect(scene.panes[0].area);
+        let logical_rect = LogicalRect::from_units(
+            i64::from(inner.x) * 8 * 64,
+            i64::from(inner.y) * 20 * 64,
+            8 * 64,
+            40 * 64,
+        );
+        let metrics = crate::NativeTextMetricSet::from_theme(&theme, 77)
+            .identity(crate::NativeTextMetricRole::Body);
+        let plan = NativePresentationPlan::from_resolved_commands(
+            vec![NativePlanCommand::Text(crate::NativeTextScope {
+                node_id: PresentationNodeId::workspace(WorkspaceNodePart::Header),
+                logical_rect,
+                cell_rect: Some(SceneRect::new(inner.x, inner.y, 1, 2)),
+                clip: logical_rect,
+                color: theme.ui.palette.text_primary,
+                metrics,
+                z_order: 0,
+            })],
+            Vec::new(),
+        );
+        let translated =
+            prepare_cell_program(prepared.cell_program(), &scene, &theme, &plan).unwrap();
+        let first = translated
+            .rows
+            .iter()
+            .find(|row| row.text == "X")
+            .expect("first scoped row");
+        let second = translated
+            .rows
+            .iter()
+            .find(|row| row.text == "Y")
+            .expect("second scoped row");
+        let terminal_metrics = Metrics::new(30.0, 40.0);
+        let first_profile = row_shaping_profile(first, terminal_metrics, 16.0, 2.0);
+        let second_profile = row_shaping_profile(second, terminal_metrics, 16.0, 2.0);
+        let first_area =
+            row_text_area_geometry(first, first_profile, 16.0, 40.0, 2.0, 1_280, 960);
+        let second_area =
+            row_text_area_geometry(second, second_profile, 16.0, 40.0, 2.0, 1_280, 960);
+
+        assert!(first_area.top < second_area.top);
+        assert!(
+            first_area.top + first_profile.metrics.line_height <= second_area.top,
+            "multirow line boxes must not overlap: {first_area:?} then {second_area:?}"
+        );
+        assert!(first_area.bounds.bottom <= second_area.bounds.top);
     }
 
     #[test]

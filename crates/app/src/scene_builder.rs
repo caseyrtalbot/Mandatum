@@ -545,7 +545,7 @@ fn push_overlay_band_nodes(
             | OverlayScene::Help(_)
     ) && !inner.is_empty()
     {
-        let input = SceneRect::new(inner.x, inner.y, inner.width, 1);
+        let input = layout::filtered_overlay_input_rect(inner);
         nodes.push(presentation_cell_logical_node(
             PresentationNodeId::overlay(kind, OverlayNodePart::Input),
             Some(overlay_id.clone()),
@@ -562,19 +562,10 @@ fn push_overlay_band_nodes(
     let footer = match overlay {
         OverlayScene::Palette(_)
         | OverlayScene::Timeline(_)
-        | OverlayScene::SessionMap(_)
         | OverlayScene::Prompt(_)
         | OverlayScene::Search(_)
-        | OverlayScene::Help(_)
-            if inner.height > 1 =>
-        {
-            Some(SceneRect::new(
-                inner.x,
-                inner.bottom().saturating_sub(1),
-                inner.width,
-                1,
-            ))
-        }
+        | OverlayScene::Help(_) => layout::filtered_overlay_footer_rect(inner),
+        OverlayScene::SessionMap(_) => layout::footer_only_overlay_footer_rect(inner),
         OverlayScene::Welcome(welcome) => {
             let row = welcome.entries.len().saturating_add(3) as u16;
             (row < inner.height).then_some(SceneRect::new(
@@ -605,12 +596,9 @@ fn push_overlay_band_nodes(
             layout::palette_item_window(inner, help.items.len(), help.selected).enumerate()
         {
             let item = &help.items[index];
-            let cell_rect = SceneRect::new(
-                inner.x,
-                inner.y.saturating_add(1 + row as u16),
-                inner.width,
-                1,
-            );
+            let Some(cell_rect) = layout::palette_item_rect(inner, row) else {
+                continue;
+            };
             nodes.push(presentation_cell_logical_node(
                 PresentationNodeId::overlay_item(OverlayKind::Help, item.key.clone()),
                 Some(overlay_id.clone()),
@@ -1979,17 +1967,25 @@ fn hit_targets(
             let inner = layout::pane_inner_rect(palette.area);
             let window = layout::palette_item_window(inner, palette.items.len(), palette.selected);
             for (row, index) in window.enumerate() {
+                let Some(rect) = layout::palette_item_rect(inner, row) else {
+                    continue;
+                };
                 targets.push(HitTarget {
-                    rect: SceneRect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1),
+                    rect,
                     kind: HitTargetKind::PaletteItem(index),
                 });
             }
         }
         Some(OverlayScene::ContextMenu(menu)) => {
             let inner = layout::pane_inner_rect(menu.area);
-            for index in 0..menu.items.len().min(usize::from(inner.height)) {
+            let window =
+                layout::context_menu_item_window(inner, menu.items.len(), Some(menu.selected));
+            for (row, index) in window.enumerate() {
+                let Some(rect) = layout::context_menu_item_rect(inner, row) else {
+                    continue;
+                };
                 targets.push(HitTarget {
-                    rect: SceneRect::new(inner.x, inner.y + index as u16, inner.width, 1),
+                    rect,
                     kind: HitTargetKind::ContextMenuItem(index),
                 });
             }
@@ -2001,8 +1997,11 @@ fn hit_targets(
             let window =
                 layout::palette_item_window(inner, timeline.items.len(), timeline.selected);
             for (row, index) in window.enumerate() {
+                let Some(rect) = layout::palette_item_rect(inner, row) else {
+                    continue;
+                };
                 targets.push(HitTarget {
-                    rect: SceneRect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1),
+                    rect,
                     kind: HitTargetKind::TimelineItem(index),
                 });
             }
@@ -2013,8 +2012,11 @@ fn hit_targets(
             let inner = layout::pane_inner_rect(search.area);
             let window = layout::palette_item_window(inner, search.items.len(), search.selected);
             for (row, index) in window.enumerate() {
+                let Some(rect) = layout::palette_item_rect(inner, row) else {
+                    continue;
+                };
                 targets.push(HitTarget {
-                    rect: SceneRect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1),
+                    rect,
                     kind: HitTargetKind::SearchItem(index),
                 });
             }
@@ -2023,8 +2025,11 @@ fn hit_targets(
             let inner = layout::pane_inner_rect(map.area);
             let window = layout::session_map_item_window(inner, map.rows.len(), Some(map.selected));
             for (row, index) in window.enumerate() {
+                let Some(rect) = layout::session_map_item_rect(inner, row) else {
+                    continue;
+                };
                 targets.push(HitTarget {
-                    rect: SceneRect::new(inner.x, inner.y + row as u16, inner.width, 1),
+                    rect,
                     kind: HitTargetKind::SessionMapRow(index),
                 });
             }
@@ -2331,6 +2336,13 @@ mod tests {
     fn filtered_palette_items_keep_semantic_identity_when_position_changes() {
         let mut state = AppState::new(config(false));
         state.handle_event(InputEvent::Key(Key::ctrl('p')));
+        state.handle_event(InputEvent::Key(Key::new(
+            KeyCode::Char('s'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        )));
         let first = build_workspace_scene_with_viewport(&state, viewport(1.0));
         let split_id = first
             .presentation
@@ -2341,13 +2353,6 @@ mod tests {
             .id
             .clone();
 
-        state.handle_event(InputEvent::Key(Key::new(
-            KeyCode::Char('s'),
-            Modifiers {
-                shift: true,
-                ..Modifiers::NONE
-            },
-        )));
         for character in ['p', 'l', 'i', 't'] {
             state.handle_event(InputEvent::Key(Key::plain(KeyCode::Char(character))));
         }
@@ -2400,6 +2405,20 @@ mod tests {
         assert_eq!(
             mapping.logical_point_to_child_cell(viewport(2.0), outside),
             None
+        );
+
+        let mapping_before_overlay = mapping.clone();
+        state.handle_event(InputEvent::Key(ctrl('p')));
+        let overlay_scene = build_workspace_scene_with_viewport(&state, viewport(2.0));
+        let mapping_with_overlay = overlay_scene
+            .presentation
+            .terminal_viewports
+            .iter()
+            .find(|mapping| mapping.pane_id == PaneId::new("pane-1"))
+            .expect("overlay cannot replace terminal viewport geometry");
+        assert_eq!(
+            mapping_with_overlay, &mapping_before_overlay,
+            "overlay row stride is presentation-only and cannot resize the PTY viewport"
         );
     }
 
@@ -2608,7 +2627,7 @@ mod tests {
         assert!(!item_targets.is_empty());
         assert_eq!(
             item_targets[0].rect,
-            SceneRect::new(inner.x, inner.y + 1, inner.width, 1)
+            layout::palette_item_rect(inner, 0).expect("first palette row")
         );
     }
 
@@ -2687,7 +2706,40 @@ mod tests {
         let unpadded = viewport.logical_rect_for_cells(cell_target.rect);
         assert!(selected.logical_rect.origin.x_units() > unpadded.origin.x_units());
         assert!(selected.logical_rect.right_units() < unpadded.right_units());
-
+        assert_eq!(cell_target.rect.height, layout::OVERLAY_CONTROL_ROWS);
+        assert!(
+            selected.logical_rect.size.height_units() >= 28 * 64,
+            "default native overlay controls meet the product pointer minimum"
+        );
+        let mut item_targets = palette_scene
+            .presentation
+            .logical_hit_targets
+            .iter()
+            .filter(|target| matches!(target.kind, HitTargetKind::PaletteItem(_)))
+            .collect::<Vec<_>>();
+        item_targets.sort_by_key(|target| target.logical_rect.origin.y_units());
+        for pair in item_targets.windows(2) {
+            assert!(
+                pair[0].logical_rect.bottom_units() <= pair[1].logical_rect.origin.y_units(),
+                "adjacent overlay controls cannot overlap"
+            );
+        }
+        for role in [
+            PresentationNodeRole::TextInput,
+            PresentationNodeRole::OverlayFooter,
+        ] {
+            let band = palette_scene
+                .presentation
+                .nodes
+                .iter()
+                .find(|node| node.role == role)
+                .expect("overlay control band");
+            assert_eq!(
+                band.cell_rect.expect("cell projection").height,
+                layout::OVERLAY_CONTROL_ROWS
+            );
+            assert!(band.logical_rect.size.height_units() >= 28 * 64);
+        }
         let welcome_dir = FreshDir::new("phase-four-overlay-presentation");
         let mut welcome_state = AppState::new(welcome_dir.config());
         let welcome_scene = welcome_state.build_scene_with_viewport(viewport);
@@ -2764,6 +2816,25 @@ mod tests {
         };
         assert_eq!(prompt.input, "test objective");
         assert!(prompt.title.contains("Set agent objective"));
+
+        state.handle_event(InputEvent::Composition(
+            mandatum_scene::input::CompositionEvent::Preedit {
+                text: "界".to_owned(),
+                cursor: None,
+            },
+        ));
+        let scene = build_workspace_scene(&state, size);
+        let Some(OverlayScene::Prompt(prompt)) = &scene.overlay else {
+            panic!("prompt overlay stays open during composition");
+        };
+        let input_block = layout::filtered_overlay_input_rect(layout::pane_inner_rect(prompt.area));
+        let text_input = scene.text_input.expect("prompt owns its IME target");
+        assert_eq!(text_input.area.y, input_block.y);
+        assert_eq!(text_input.area.height, 1);
+        assert_eq!(
+            text_input.preedit.map(|preedit| preedit.text),
+            Some("界".to_owned())
+        );
     }
 
     /// A unique empty project dir per test, removed on drop.
@@ -3263,7 +3334,7 @@ mod tests {
         let inner = layout::pane_inner_rect(search.area);
         assert!(scene.hit_targets.iter().any(|target| {
             target.kind == HitTargetKind::SearchItem(0)
-                && target.rect == SceneRect::new(inner.x, inner.y + 1, inner.width, 1)
+                && target.rect == layout::palette_item_rect(inner, 0).expect("first search row")
         }));
     }
 

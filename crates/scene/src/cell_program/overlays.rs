@@ -41,12 +41,12 @@ impl Compiler {
         if inner.is_empty() {
             return;
         }
-        for (index, item) in menu
-            .items
-            .iter()
-            .take(usize::from(inner.height))
-            .enumerate()
-        {
+        let window = layout::context_menu_item_window(inner, menu.items.len(), Some(menu.selected));
+        for (row, index) in window.enumerate() {
+            let item = &menu.items[index];
+            let Some(block) = layout::context_menu_item_rect(inner, row) else {
+                continue;
+            };
             let selected = menu.selected == index;
             let line_style = selected_item_style(surface, selected, theme);
             let label = format!(" {}", item.label);
@@ -55,7 +55,7 @@ impl Compiler {
             let label_width = usize::from(inner.width)
                 .saturating_sub(hint_width.saturating_add(2))
                 .max(1);
-            let y = inner.y.saturating_add(index as u16);
+            let y = block.y;
             let label_area = SceneRect::new(inner.x, y, label_width as u16, 1);
             let mut column = 0usize;
             for grapheme in label.graphemes(true) {
@@ -99,15 +99,18 @@ impl Compiler {
             return;
         }
         self.paint_input(
-            inner,
+            layout::filtered_overlay_input_rect(inner),
             &timeline.query,
             "type to filter · pane:<id> kind:<family> since:<5m>",
             surface,
         );
-        if timeline.items.is_empty() && inner.height > 1 {
+        if let (true, Some(empty)) = (
+            timeline.items.is_empty(),
+            layout::palette_item_rect(inner, 0),
+        ) {
             self.paint_text_row(
-                inner,
-                1,
+                empty,
+                0,
                 " no matching events",
                 SceneCellStyle {
                     dim: true,
@@ -118,10 +121,13 @@ impl Compiler {
         for (row, index) in
             layout::palette_item_window(inner, timeline.items.len(), timeline.selected).enumerate()
         {
+            let Some(block) = layout::palette_item_rect(inner, row) else {
+                continue;
+            };
             let item = &timeline.items[index];
             let selected = timeline.selected == Some(index);
             let line_style = selected_item_style(surface, selected, theme);
-            let y = inner.y.saturating_add(1).saturating_add(row as u16);
+            let y = block.y;
             let mut column = 0usize;
             for grapheme in format!(" {} ", item.glyph).graphemes(true) {
                 self.paint_overlay_grapheme(inner, &mut column, y, grapheme, line_style, selected);
@@ -143,7 +149,9 @@ impl Compiler {
                 self.paint_overlay_grapheme(inner, &mut column, y, grapheme, line_style, selected);
             }
         }
-        self.paint_overlay_footer(inner, &timeline.footer, surface);
+        if let Some(footer) = layout::filtered_overlay_footer_rect(inner) {
+            self.paint_overlay_footer(footer, &timeline.footer, surface);
+        }
     }
 
     fn paint_search(&mut self, search: &SearchOverlay, theme: &Theme) {
@@ -153,20 +161,21 @@ impl Compiler {
             return;
         }
         self.paint_input(
-            inner,
+            layout::filtered_overlay_input_rect(inner),
             &search.query,
             "type to search output · pane:<title> kind:<terminal|task|agent|timeline>",
             surface,
         );
-        if search.items.is_empty() && inner.height > 1 {
+        if let (true, Some(empty)) = (search.items.is_empty(), layout::palette_item_rect(inner, 0))
+        {
             let calm = if search.query.trim().is_empty() {
                 " searching this session's pane output and timeline (snapshot)"
             } else {
                 " no matches"
             };
             self.paint_text_row(
-                inner,
-                1,
+                empty,
+                0,
                 calm,
                 SceneCellStyle {
                     dim: true,
@@ -179,6 +188,9 @@ impl Compiler {
         for (row, index) in
             layout::palette_item_window(inner, search.items.len(), search.selected).enumerate()
         {
+            let Some(block) = layout::palette_item_rect(inner, row) else {
+                continue;
+            };
             let item = &search.items[index];
             let source = if previous_source == Some(item.source.as_str()) {
                 " ".repeat(display_width(&item.source))
@@ -188,7 +200,7 @@ impl Compiler {
             previous_source = Some(item.source.as_str());
             let selected = search.selected == Some(index);
             let line_style = selected_item_style(surface, selected, theme);
-            let y = inner.y.saturating_add(1).saturating_add(row as u16);
+            let y = block.y;
             let mut column = 0usize;
             for grapheme in format!(" {source}  ").graphemes(true) {
                 self.paint_overlay_grapheme(
@@ -217,7 +229,9 @@ impl Compiler {
                 scalar_position += scalar_len;
             }
         }
-        self.paint_overlay_footer(inner, &search.footer, surface);
+        if let Some(footer) = layout::filtered_overlay_footer_rect(inner) {
+            self.paint_overlay_footer(footer, &search.footer, surface);
+        }
     }
 
     fn paint_session_map(&mut self, map: &SessionMapOverlay, theme: &Theme) {
@@ -225,10 +239,13 @@ impl Compiler {
         for (row, index) in
             layout::session_map_item_window(inner, map.rows.len(), Some(map.selected)).enumerate()
         {
+            let Some(block) = layout::session_map_item_rect(inner, row) else {
+                continue;
+            };
             let item = &map.rows[index];
             let selected = map.selected == index;
             let line_style = selected_item_style(surface, selected, theme);
-            let y = inner.y.saturating_add(row as u16);
+            let y = block.y;
             let marker = if item.focused {
                 SESSION_MAP_FOCUS_GLYPH
             } else {
@@ -276,7 +293,9 @@ impl Compiler {
                 }
             }
         }
-        self.paint_overlay_footer(inner, &map.footer, surface);
+        if let Some(footer) = layout::footer_only_overlay_footer_rect(inner) {
+            self.paint_overlay_footer(footer, &map.footer, surface);
+        }
     }
 
     fn paint_prompt(&mut self, prompt: &PromptOverlay, theme: &Theme) {
@@ -284,12 +303,13 @@ impl Compiler {
         if inner.is_empty() {
             return;
         }
-        self.paint_text_row(inner, 0, "> ", surface);
+        let input = layout::filtered_overlay_input_rect(inner);
+        self.paint_text_row(input, 0, "> ", surface);
         self.paint_text(
             SceneRect::new(
-                inner.x.saturating_add(2),
-                inner.y,
-                inner.width.saturating_sub(2),
+                input.x.saturating_add(2),
+                input.y,
+                input.width.saturating_sub(2),
                 1,
             ),
             &prompt.input,
@@ -301,11 +321,13 @@ impl Compiler {
         let mut cursor = ProgramCell::glyph(' ', surface);
         cursor.cursor = true;
         self.paint_cell(
-            inner.x.saturating_add(cursor_column as u16),
-            inner.y,
+            input.x.saturating_add(cursor_column as u16),
+            input.y,
             cursor,
         );
-        self.paint_overlay_footer(inner, &prompt.footer, surface);
+        if let Some(footer) = layout::filtered_overlay_footer_rect(inner) {
+            self.paint_overlay_footer(footer, &prompt.footer, surface);
+        }
     }
 
     fn paint_help(&mut self, help: &HelpOverlay, theme: &Theme) {
@@ -313,11 +335,16 @@ impl Compiler {
         if inner.is_empty() {
             return;
         }
-        self.paint_input(inner, &help.query, "type to filter the keymap", surface);
-        if help.items.is_empty() && inner.height > 1 {
+        self.paint_input(
+            layout::filtered_overlay_input_rect(inner),
+            &help.query,
+            "type to filter the keymap",
+            surface,
+        );
+        if let (true, Some(empty)) = (help.items.is_empty(), layout::palette_item_rect(inner, 0)) {
             self.paint_text_row(
-                inner,
-                1,
+                empty,
+                0,
                 " no matching entries",
                 SceneCellStyle {
                     dim: true,
@@ -328,10 +355,13 @@ impl Compiler {
         for (row, index) in
             layout::palette_item_window(inner, help.items.len(), help.selected).enumerate()
         {
+            let Some(block) = layout::palette_item_rect(inner, row) else {
+                continue;
+            };
             let item = &help.items[index];
             let selected = help.selected == Some(index);
             let line_style = selected_item_style(surface, selected, theme);
-            let y = inner.y.saturating_add(1).saturating_add(row as u16);
+            let y = block.y;
             let label = if item.heading {
                 format!(" {}", item.label)
             } else {
@@ -380,7 +410,9 @@ impl Compiler {
                 }
             }
         }
-        self.paint_overlay_footer(inner, &help.footer, surface);
+        if let Some(footer) = layout::filtered_overlay_footer_rect(inner) {
+            self.paint_overlay_footer(footer, &help.footer, surface);
+        }
     }
 
     fn paint_welcome(&mut self, welcome: &WelcomeOverlay, theme: &Theme) {
@@ -511,13 +543,13 @@ impl Compiler {
         );
     }
 
-    fn paint_overlay_footer(&mut self, inner: SceneRect, footer: &str, surface: SceneCellStyle) {
-        if inner.height <= 1 {
+    fn paint_overlay_footer(&mut self, area: SceneRect, footer: &str, surface: SceneCellStyle) {
+        if area.is_empty() {
             return;
         }
         self.paint_text_row(
-            inner,
-            usize::from(inner.height.saturating_sub(1)),
+            area,
+            0,
             &format!(" {footer}"),
             SceneCellStyle {
                 dim: true,
@@ -534,16 +566,19 @@ impl Compiler {
         }
 
         self.paint_input(
-            inner,
+            layout::filtered_overlay_input_rect(inner),
             &palette.query,
             "letters run their key · shift+letter to search",
             surface,
         );
 
-        if palette.items.is_empty() && inner.height > 1 {
+        if let (true, Some(empty)) = (
+            palette.items.is_empty(),
+            layout::palette_item_rect(inner, 0),
+        ) {
             self.paint_text_row(
-                inner,
-                1,
+                empty,
+                0,
                 " no matching commands",
                 SceneCellStyle {
                     dim: true,
@@ -555,6 +590,9 @@ impl Compiler {
         for (row, index) in
             layout::palette_item_window(inner, palette.items.len(), palette.selected).enumerate()
         {
+            let Some(block) = layout::palette_item_rect(inner, row) else {
+                continue;
+            };
             let item = &palette.items[index];
             let selected = palette.selected == Some(index);
             let mut line_style = surface;
@@ -566,7 +604,7 @@ impl Compiler {
                 line_style.inverse = true;
             }
 
-            let y = inner.y.saturating_add(1).saturating_add(row as u16);
+            let y = block.y;
             let hint_width = item
                 .key_hint
                 .as_deref()
@@ -637,10 +675,10 @@ impl Compiler {
             }
         }
 
-        if inner.height > 1 {
+        if let Some(footer) = layout::filtered_overlay_footer_rect(inner) {
             self.paint_text_row_marked(
-                inner,
-                usize::from(inner.height.saturating_sub(1)),
+                footer,
+                0,
                 &format!(" {}", palette.footer),
                 SceneCellStyle {
                     dim: true,

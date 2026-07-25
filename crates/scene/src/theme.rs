@@ -692,7 +692,7 @@ fn mandatum_dark() -> Theme {
 fn mandatum_light() -> Theme {
     Theme {
         name: "mandatum-light".to_owned(),
-        terminal_palette: TerminalPalette::default(),
+        terminal_palette: light_terminal_palette(),
         ui: UiTokens {
             palette: light_palette(),
             ..UiTokens::default()
@@ -700,8 +700,8 @@ fn mandatum_light() -> Theme {
         focus_title: SceneColor::Ansi(4), // blue
         pane_border: SceneColor::Ansi(7), // gray
         pane_title: SceneColor::Default,
-        header: SceneColor::Ansi(0),                  // black
-        header_background: SceneColor::Ansi(7),       // gray
+        header: SceneColor::Ansi(0), // near-black
+        header_background: SceneColor::Rgb(0xe9, 0xed, 0xf2),
         status: SceneColor::Ansi(8),                  // dark gray
         attention: SceneColor::Ansi(1),               // red
         palette_border: SceneColor::Ansi(4),          // blue
@@ -720,7 +720,7 @@ fn mandatum_light() -> Theme {
 fn mandatum_high_contrast() -> Theme {
     Theme {
         name: "mandatum-high-contrast".to_owned(),
-        terminal_palette: TerminalPalette::default(),
+        terminal_palette: high_contrast_terminal_palette(),
         ui: UiTokens {
             palette: high_contrast_palette(),
             ..UiTokens::default()
@@ -737,7 +737,7 @@ fn mandatum_high_contrast() -> Theme {
         attention: SceneColor::Ansi(9),
         palette_border: SceneColor::Ansi(15),
         overlay_foreground: SceneColor::Ansi(15), // white
-        overlay_background: SceneColor::Ansi(4),  // blue modal surface
+        overlay_background: SceneColor::Rgb(0x00, 0x20, 0x60),
         palette_selection: SceneColor::Default,
         selection_highlight: SceneColor::Default,
         agent_running: SceneColor::Ansi(10),  // bright green
@@ -745,6 +745,56 @@ fn mandatum_high_contrast() -> Theme {
         agent_failed: SceneColor::Ansi(9),    // bright red
         agent_complete: SceneColor::Ansi(14), // bright cyan
         agent_idle: SceneColor::Ansi(15),
+    }
+}
+
+const fn light_terminal_palette() -> TerminalPalette {
+    TerminalPalette {
+        foreground: [0x1b, 0x24, 0x30],
+        background: [0xff, 0xff, 0xff],
+        ansi: [
+            [0x1b, 0x24, 0x30],
+            [0xb4, 0x23, 0x3b],
+            [0x17, 0x66, 0x3c],
+            [0x7a, 0x4b, 0x00],
+            [0x1d, 0x5f, 0xd1],
+            [0x67, 0x42, 0xa0],
+            [0x00, 0x6b, 0x70],
+            [0x80, 0x8b, 0x9c],
+            [0x46, 0x54, 0x67],
+            [0xcf, 0x33, 0x4c],
+            [0x1e, 0x7a, 0x4b],
+            [0x8f, 0x5b, 0x00],
+            [0x32, 0x69, 0xd2],
+            [0x7c, 0x52, 0xb7],
+            [0x00, 0x77, 0x7c],
+            [0x6e, 0x77, 0x85],
+        ],
+    }
+}
+
+const fn high_contrast_terminal_palette() -> TerminalPalette {
+    TerminalPalette {
+        foreground: [0xff, 0xff, 0xff],
+        background: [0x00, 0x00, 0x00],
+        ansi: [
+            [0x00, 0x00, 0x00],
+            [0xff, 0x6b, 0x6b],
+            [0x5c, 0xff, 0x9d],
+            [0xff, 0xff, 0x00],
+            [0x78, 0xa9, 0xff],
+            [0xff, 0x9f, 0xff],
+            [0x66, 0xff, 0xff],
+            [0xe6, 0xe6, 0xe6],
+            [0x80, 0x80, 0x80],
+            [0xff, 0x6b, 0x6b],
+            [0x5c, 0xff, 0x9d],
+            [0xff, 0xff, 0x00],
+            [0x78, 0xa9, 0xff],
+            [0xff, 0x9f, 0xff],
+            [0x66, 0xff, 0xff],
+            [0xff, 0xff, 0xff],
+        ],
     }
 }
 
@@ -991,6 +1041,52 @@ mod tests {
     }
 
     #[test]
+    fn light_and_high_contrast_terminal_projection_meet_app_owned_contrast_contract() {
+        for name in ["mandatum-light", "mandatum-high-contrast"] {
+            let theme = Theme::builtin(name).unwrap();
+            let text_minimum = if name == "mandatum-high-contrast" {
+                7_000
+            } else {
+                4_500
+            };
+            let terminal_background =
+                resolve_scene_color(&theme, SceneColor::Default, PaletteDefault::Background);
+            let header_background =
+                resolve_scene_color(&theme, theme.header_background, PaletteDefault::Background);
+            let overlay_background =
+                resolve_scene_color(&theme, theme.overlay_background, PaletteDefault::Background);
+
+            for (pair_name, foreground, background) in [
+                (
+                    "terminal default text",
+                    SceneColor::Default,
+                    terminal_background,
+                ),
+                ("pane title", theme.pane_title, terminal_background),
+                ("focused pane title", theme.focus_title, terminal_background),
+                ("header", theme.header, header_background),
+                ("header attention", theme.attention, header_background),
+                ("status", theme.status, terminal_background),
+                ("overlay text", theme.overlay_foreground, overlay_background),
+                ("running state", theme.agent_running, terminal_background),
+                ("waiting state", theme.agent_waiting, terminal_background),
+                ("failure state", theme.agent_failed, terminal_background),
+                ("complete state", theme.agent_complete, terminal_background),
+                ("idle state", theme.agent_idle, terminal_background),
+            ] {
+                assert_scene_contrast(&theme, pair_name, foreground, background, text_minimum);
+            }
+
+            for (pair_name, foreground, background) in [
+                ("pane border", theme.pane_border, terminal_background),
+                ("palette border", theme.palette_border, overlay_background),
+            ] {
+                assert_scene_contrast(&theme, pair_name, foreground, background, 3_000);
+            }
+        }
+    }
+
+    #[test]
     fn every_builtin_name_resolves_and_unknown_names_do_not() {
         for name in Theme::BUILTIN_NAMES {
             let theme = Theme::builtin(name).expect("builtin theme exists");
@@ -1012,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn every_builtin_starts_with_the_native_compatibility_palette() {
+    fn builtins_own_theme_specific_terminal_palettes_without_changing_dark() {
         let expected = TerminalPalette::default();
         assert_eq!(expected.foreground, [220, 220, 224]);
         assert_eq!(expected.background, [18, 18, 22]);
@@ -1037,13 +1133,51 @@ mod tests {
                 [255, 255, 255],
             ]
         );
-        for name in Theme::BUILTIN_NAMES {
-            assert_eq!(
-                Theme::builtin(name).unwrap().terminal_palette,
-                expected,
-                "{name} must not change native pixels when palette ownership lands"
-            );
-        }
+        let dark = Theme::builtin("mandatum-dark").unwrap().terminal_palette;
+        let light_theme = Theme::builtin("mandatum-light").unwrap();
+        let light = light_theme.terminal_palette;
+        let high_contrast_theme = Theme::builtin("mandatum-high-contrast").unwrap();
+        let high_contrast = high_contrast_theme.terminal_palette;
+
+        assert_eq!(dark, expected);
+        assert_ne!(light, dark);
+        assert_ne!(high_contrast, dark);
+        assert_ne!(high_contrast, light);
+
+        let light_ui = light_theme.ui.palette;
+        assert_eq!(light.foreground, rgb(light_ui.text_primary));
+        assert_eq!(light.background, rgb(light_ui.pane_surface));
+        assert_eq!(light.ansi[1], rgb(light_ui.failure));
+        assert_eq!(light.ansi[2], rgb(light_ui.running));
+        assert_eq!(light.ansi[3], rgb(light_ui.waiting));
+        assert_eq!(light.ansi[4], rgb(light_ui.focus));
+        assert_eq!(light.ansi[5], rgb(light_ui.agent_identity));
+        assert_eq!(light.ansi[6], rgb(light_ui.complete));
+
+        let high_contrast_ui = high_contrast_theme.ui.palette;
+        assert_eq!(high_contrast.foreground, rgb(high_contrast_ui.text_primary));
+        assert_eq!(high_contrast.background, rgb(high_contrast_ui.pane_surface));
+        assert_eq!(high_contrast.ansi[9], rgb(high_contrast_ui.failure));
+        assert_eq!(high_contrast.ansi[10], rgb(high_contrast_ui.running));
+        assert_eq!(high_contrast.ansi[11], rgb(high_contrast_ui.waiting));
+        assert_eq!(high_contrast.ansi[11], rgb(high_contrast_ui.focus));
+        assert_eq!(high_contrast.ansi[13], rgb(high_contrast_ui.agent_identity));
+        assert_eq!(high_contrast.ansi[14], rgb(high_contrast_ui.complete));
+    }
+
+    #[test]
+    fn light_terminal_bright_white_remains_legible_on_the_default_background() {
+        let theme = Theme::builtin("mandatum-light").unwrap();
+        let background = theme.terminal_palette.background;
+
+        assert_ne!(theme.terminal_palette.ansi[15], background);
+        assert_scene_contrast(
+            &theme,
+            "ANSI bright white",
+            SceneColor::Ansi(15),
+            background,
+            4_500,
+        );
     }
 
     #[test]
@@ -1081,5 +1215,68 @@ mod tests {
             assert_ne!(theme.overlay_background, SceneColor::Default);
             assert_ne!(theme.overlay_background, theme.header_background);
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum PaletteDefault {
+        Foreground,
+        Background,
+    }
+
+    fn assert_scene_contrast(
+        theme: &Theme,
+        pair_name: &str,
+        foreground: SceneColor,
+        background: [u8; 3],
+        minimum_ratio_milli: u32,
+    ) {
+        let foreground = resolve_scene_color(theme, foreground, PaletteDefault::Foreground);
+        let actual_ratio_milli = contrast_ratio_milli(ui_color(foreground), ui_color(background));
+        assert!(
+            actual_ratio_milli >= minimum_ratio_milli,
+            "{} {pair_name}: expected at least {:.1}:1, got {:.3}:1",
+            theme.name,
+            minimum_ratio_milli as f64 / 1_000.0,
+            actual_ratio_milli as f64 / 1_000.0
+        );
+    }
+
+    fn resolve_scene_color(theme: &Theme, color: SceneColor, default: PaletteDefault) -> [u8; 3] {
+        match color {
+            SceneColor::Default => match default {
+                PaletteDefault::Foreground => theme.terminal_palette.foreground,
+                PaletteDefault::Background => theme.terminal_palette.background,
+            },
+            SceneColor::Ansi(index @ 0..=15) => theme.terminal_palette.ansi[index as usize],
+            SceneColor::Ansi(index) | SceneColor::Indexed(index) => indexed_color(index),
+            SceneColor::Rgb(red, green, blue) => [red, green, blue],
+        }
+    }
+
+    fn indexed_color(index: u8) -> [u8; 3] {
+        match index {
+            0..=15 => TerminalPalette::default().ansi[index as usize],
+            16..=231 => {
+                let cube = index - 16;
+                let component = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
+                [
+                    component(cube / 36),
+                    component((cube % 36) / 6),
+                    component(cube % 6),
+                ]
+            }
+            232..=255 => {
+                let gray = 8 + (index - 232) * 10;
+                [gray, gray, gray]
+            }
+        }
+    }
+
+    const fn ui_color(rgb: [u8; 3]) -> UiColor {
+        UiColor::rgb(rgb[0], rgb[1], rgb[2])
+    }
+
+    const fn rgb(color: UiColor) -> [u8; 3] {
+        [color.red, color.green, color.blue]
     }
 }

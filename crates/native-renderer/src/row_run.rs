@@ -8,9 +8,11 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use mandatum_scene::{
-    CellOccupancy, CellProgram, CellSelection, ProgramCell, SceneCellStyle, SceneRect,
+    CellOccupancy, CellProgram, CellSelection, LogicalRect, ProgramCell, SceneCellStyle, SceneRect,
     TextPaintScope,
 };
+
+use crate::NativeTextMetricIdentity;
 
 /// Palette-resolved attributes that may affect shaped glyph output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +56,18 @@ pub struct RowRun {
     pub selection: Option<CellSelection>,
     pub cursor: bool,
     pub paint_scope: TextPaintScope,
+    /// Native interface metric identity projected onto this complete shaping
+    /// unit. Child-terminal rows retain `None` and use renderer settings.
+    pub native_metrics: Option<NativeTextMetricIdentity>,
+    /// Semantic line-box bounds and clip for app-owned interface text.
+    /// Child-terminal rows retain `None` and remain cell-exact.
+    pub native_geometry: Option<NativeTextGeometry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeTextGeometry {
+    pub logical_rect: LogicalRect,
+    pub clip: LogicalRect,
 }
 
 impl RowRun {
@@ -227,6 +241,8 @@ fn new_run(
         selection: input.cell.selection,
         cursor: input.cell.cursor,
         paint_scope: input.scope,
+        native_metrics: None,
+        native_geometry: None,
     })
 }
 
@@ -581,6 +597,8 @@ fn slice_run(run: &RowRun, spans: Range<usize>) -> Result<RowRun, RowRunBuildErr
         selection: run.selection,
         cursor: run.cursor,
         paint_scope: run.paint_scope,
+        native_metrics: run.native_metrics,
+        native_geometry: run.native_geometry,
     })
 }
 

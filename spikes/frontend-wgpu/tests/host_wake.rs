@@ -791,8 +791,18 @@ fn real_host_context_menu_reaches_the_gpu_render_plan() {
     let Some(OverlayScene::ContextMenu(menu)) = &snapshot.scene.overlay else {
         panic!("neutral right-click did not produce the real context-menu scene");
     };
-    assert_eq!(menu.area.x, pane_body.rect.x);
-    assert_eq!(menu.area.y, pane_body.rect.y);
+    assert_eq!(
+        menu.area,
+        layout::context_menu_rect(
+            pane_body.rect.x,
+            pane_body.rect.y,
+            menu.area.width,
+            (menu.items.len() as u16)
+                .saturating_mul(layout::OVERLAY_CONTROL_ROWS)
+                .saturating_add(2),
+            frame_size,
+        )
+    );
     assert_eq!(menu.selected, 0);
     assert_eq!(menu.items[0].label, "Command palette");
 
@@ -1070,9 +1080,9 @@ fn real_host_search_reaches_the_gpu_render_plan() {
     assert!(search.footer.contains("enter jump"));
     assert!(search.footer.contains("esc close"));
     let inner = layout::pane_inner_rect(search.area);
+    let first_item = layout::palette_item_rect(inner, 0).expect("search item block");
     assert!(snapshot.scene.hit_targets.iter().any(|target| {
-        target.kind == HitTargetKind::SearchItem(0)
-            && target.rect == SceneRect::new(inner.x, inner.y + 1, inner.width, 1)
+        target.kind == HitTargetKind::SearchItem(0) && target.rect == first_item
     }));
 
     let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)

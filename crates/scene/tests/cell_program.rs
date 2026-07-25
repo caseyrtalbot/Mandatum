@@ -334,7 +334,7 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     let pane_id = PaneId::new("pane-1");
     let overlay_area = SceneRect::new(10, 4, 40, 10);
     let item_target = HitTarget {
-        rect: SceneRect::new(11, 6, 38, 1),
+        rect: SceneRect::new(11, 7, 38, 2),
         kind: HitTargetKind::PaletteItem(0),
     };
     let scene = WorkspaceScene {
@@ -448,7 +448,7 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     assert!(placeholder.style.dim);
     assert!(!placeholder.cursor);
 
-    assert_eq!(item_target.rect, SceneRect::new(11, 6, 38, 1));
+    assert_eq!(item_target.rect, SceneRect::new(11, 7, 38, 2));
     let matched = program
         .cell_at(item_target.rect.x + 1, item_target.rect.y)
         .expect("matched label cell aligned with PaletteItem target");
@@ -460,21 +460,21 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     assert_eq!(matched.selection, Some(CellSelection::Item));
 
     let key_hint = program
-        .cell_at(item_target.rect.right().saturating_sub(1), 6)
+        .cell_at(item_target.rect.right().saturating_sub(1), 7)
         .expect("right-aligned palette key hint");
     assert_eq!(key_hint.occupancy, CellOccupancy::Grapheme('v'.to_string()));
     assert!(key_hint.style.dim);
 
-    let detail = program.cell_at(24, 6).expect("palette detail");
+    let detail = program.cell_at(24, 7).expect("palette detail");
     assert_eq!(detail.occupancy, CellOccupancy::Grapheme('l'.to_string()));
     assert!(detail.style.dim);
 
-    let disabled = program.cell_at(12, 7).expect("disabled palette row");
+    let disabled = program.cell_at(12, 9).expect("disabled palette row");
     assert_eq!(disabled.occupancy, CellOccupancy::Grapheme('S'.to_string()));
     assert!(disabled.style.dim);
     assert_eq!(disabled.selection, None);
 
-    let footer = program.cell_at(12, 12).expect("palette footer");
+    let footer = program.cell_at(12, 11).expect("palette footer");
     assert_eq!(footer.occupancy, CellOccupancy::Grapheme('e'.to_string()));
     assert!(footer.style.dim);
 
@@ -715,7 +715,7 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     let theme = remaining_overlay_theme();
 
     let context_target = HitTarget {
-        rect: SceneRect::new(6, 4, 48, 1),
+        rect: SceneRect::new(6, 4, 48, 2),
         kind: HitTargetKind::ContextMenuItem(0),
     };
     let context = scene_with_overlay(
@@ -739,9 +739,16 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
         .expect("right-aligned context chord");
     assert_eq!(chord.occupancy, CellOccupancy::Grapheme('c'.to_string()));
     assert!(chord.style.dim);
+    assert_eq!(
+        program
+            .cell_at(context_target.rect.x + 1, context_target.rect.y + 1)
+            .expect("context row breathing space")
+            .occupancy,
+        CellOccupancy::Grapheme(" ".to_owned())
+    );
 
     let timeline_target = HitTarget {
-        rect: SceneRect::new(6, 5, 48, 1),
+        rect: SceneRect::new(6, 6, 48, 2),
         kind: HitTargetKind::TimelineItem(0),
     };
     let timeline = scene_with_overlay(
@@ -767,7 +774,7 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
         .expect("timeline glyph inside its hit target");
     assert_eq!(glyph.occupancy, CellOccupancy::Grapheme('▶'.to_string()));
     assert_eq!(glyph.selection, Some(CellSelection::Item));
-    let timestamp = program.cell_at(13, 5).expect("timeline timestamp");
+    let timestamp = program.cell_at(13, 6).expect("timeline timestamp");
     assert_eq!(
         timestamp.occupancy,
         CellOccupancy::Grapheme('2'.to_string())
@@ -779,10 +786,10 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
             .expect("timeline query cursor")
             .cursor
     );
-    assert!(program.cell_at(7, 13).expect("timeline footer").style.dim);
+    assert!(program.cell_at(7, 12).expect("timeline footer").style.dim);
 
     let search_target = HitTarget {
-        rect: SceneRect::new(6, 6, 48, 1),
+        rect: SceneRect::new(6, 8, 48, 2),
         kind: HitTargetKind::SearchItem(1),
     };
     let search = scene_with_overlay(
@@ -811,10 +818,10 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
         vec![search_target.clone()],
     );
     let program = compile_cell_program(&search, &theme);
-    let source = program.cell_at(7, 5).expect("first grouped source");
+    let source = program.cell_at(7, 6).expect("first grouped source");
     assert_eq!(source.occupancy, CellOccupancy::Grapheme('s'.to_string()));
     assert!(source.style.dim);
-    let elided_source = program.cell_at(7, 6).expect("repeated source elision");
+    let elided_source = program.cell_at(7, 8).expect("repeated source elision");
     assert_eq!(
         elided_source.occupancy,
         CellOccupancy::Grapheme(' '.to_string())
@@ -828,7 +835,7 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     assert_eq!(matched.selection, Some(CellSelection::Item));
 
     let map_target = HitTarget {
-        rect: SceneRect::new(6, 5, 48, 1),
+        rect: SceneRect::new(6, 6, 48, 2),
         kind: HitTargetKind::SessionMapRow(1),
     };
     let map = scene_with_overlay(
@@ -864,10 +871,10 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
         .expect("focused map row inside its hit target");
     assert_eq!(focus.occupancy, CellOccupancy::Grapheme('●'.to_string()));
     assert_eq!(focus.selection, Some(CellSelection::Item));
-    let state = program.cell_at(18, 5).expect("session-map state");
+    let state = program.cell_at(18, 6).expect("session-map state");
     assert_eq!(state.occupancy, CellOccupancy::Grapheme('r'.to_string()));
     assert!(state.style.dim);
-    assert!(program.cell_at(7, 13).expect("map footer").style.dim);
+    assert!(program.cell_at(7, 12).expect("map footer").style.dim);
 }
 
 #[test]
@@ -894,7 +901,7 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
         CellOccupancy::Grapheme('f'.to_string())
     );
     assert!(program.cell_at(11, 4).expect("prompt cursor").cursor);
-    assert!(program.cell_at(7, 13).expect("prompt footer").style.dim);
+    assert!(program.cell_at(7, 12).expect("prompt footer").style.dim);
 
     let help = scene_with_overlay(
         OverlayScene::Help(HelpOverlay {
@@ -921,18 +928,18 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
     );
     let program = compile_cell_program(&help, &theme);
     assert!(program.cell_at(10, 4).expect("help query cursor").cursor);
-    let heading = program.cell_at(7, 5).expect("help heading");
+    let heading = program.cell_at(7, 6).expect("help heading");
     assert_eq!(heading.occupancy, CellOccupancy::Grapheme('L'.to_string()));
     assert!(heading.style.bold);
-    let entry = program.cell_at(9, 6).expect("help entry");
+    let entry = program.cell_at(9, 8).expect("help entry");
     assert_eq!(entry.occupancy, CellOccupancy::Grapheme('S'.to_string()));
     assert_eq!(entry.selection, Some(CellSelection::Item));
     let keys = program
-        .cell_at(area.right().saturating_sub(1 + 6), 6)
+        .cell_at(area.right().saturating_sub(1 + 6), 8)
         .expect("right-aligned help key hint");
     assert_eq!(keys.occupancy, CellOccupancy::Grapheme('c'.to_string()));
     assert!(keys.style.dim);
-    assert!(program.cell_at(7, 13).expect("help footer").style.dim);
+    assert!(program.cell_at(7, 12).expect("help footer").style.dim);
 
     let welcome = scene_with_overlay(
         OverlayScene::Welcome(WelcomeOverlay {
@@ -1346,6 +1353,60 @@ fn every_degenerate_overlay_keeps_content_inside_its_true_border() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn filtered_overlay_empty_state_never_overwrites_the_reserved_input_block() {
+    let area = SceneRect::new(5, 3, 50, 6);
+    let overlays = vec![
+        OverlayScene::Palette(PaletteOverlay {
+            area,
+            query: "query".to_owned(),
+            item_keys: Vec::new(),
+            items: Vec::new(),
+            selected: None,
+            footer: "footer".to_owned(),
+        }),
+        OverlayScene::Timeline(TimelineOverlay {
+            area,
+            query: "query".to_owned(),
+            item_keys: Vec::new(),
+            items: Vec::new(),
+            selected: None,
+            skipped_malformed: 0,
+            footer: "footer".to_owned(),
+        }),
+        OverlayScene::Search(SearchOverlay {
+            area,
+            query: "query".to_owned(),
+            item_keys: Vec::new(),
+            items: Vec::new(),
+            selected: None,
+            overflow: 0,
+            footer: "footer".to_owned(),
+        }),
+        OverlayScene::Help(HelpOverlay {
+            area,
+            query: "query".to_owned(),
+            items: Vec::new(),
+            selected: None,
+            footer: "footer".to_owned(),
+        }),
+    ];
+
+    for overlay in overlays {
+        let program = compile_cell_program(
+            &scene_with_overlay(overlay, Vec::new()),
+            &remaining_overlay_theme(),
+        );
+        assert_eq!(
+            program
+                .cell_at(area.x + 1, area.y + 2)
+                .expect("reserved input breathing row")
+                .occupancy,
+            CellOccupancy::Grapheme(" ".to_owned())
+        );
     }
 }
 

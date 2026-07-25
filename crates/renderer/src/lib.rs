@@ -950,8 +950,8 @@ mod tests {
             .position(|row| row.contains("1 test failed"))
             .expect("first hit rendered");
         assert!(rows[first].contains("shell · pane-1 (terminal)"));
-        assert!(rows[first + 1].contains("FAILED tests::flaky"));
-        assert!(!rows[first + 1].contains("shell · pane-1 (terminal)"));
+        assert!(rows[first + 2].contains("FAILED tests::flaky"));
+        assert!(!rows[first + 2].contains("shell · pane-1 (terminal)"));
     }
 
     #[test]
@@ -1015,7 +1015,7 @@ mod tests {
     fn context_menu_renders_rows_selection_and_right_aligned_hints() {
         let mut with_menu = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
         with_menu.overlay = Some(OverlayScene::ContextMenu(ContextMenuOverlay {
-            area: SceneRect::new(10, 2, 26, 5),
+            area: SceneRect::new(10, 2, 26, 8),
             item_keys: Vec::new(),
             items: vec![
                 ContextMenuEntry::new("Zoom pane", "ctrl+p z"),
@@ -1030,8 +1030,8 @@ mod tests {
 
         // Rows render inside the border with their hints right-aligned.
         assert!(rows[3].contains("Zoom pane"));
-        assert!(rows[4].contains("Close pane"));
-        assert!(rows[5].contains("Copy selection"));
+        assert!(rows[5].contains("Close pane"));
+        assert!(rows[7].contains("Copy selection"));
         // Columns are char positions, not byte offsets (border glyphs are
         // multibyte).
         let hint_byte = rows[3].rfind("ctrl+p z").expect("hint rendered");
@@ -1040,7 +1040,7 @@ mod tests {
         assert_eq!(hint_end as u16, inner_right);
 
         // The selected row is reversed; unselected rows are not.
-        let selected_cell = buffer.cell((12u16, 4u16)).unwrap();
+        let selected_cell = buffer.cell((12u16, 5u16)).unwrap();
         assert!(selected_cell.modifier.contains(Modifier::REVERSED));
         let unselected_cell = buffer.cell((12u16, 3u16)).unwrap();
         assert!(!unselected_cell.modifier.contains(Modifier::REVERSED));

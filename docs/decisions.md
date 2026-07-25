@@ -3263,3 +3263,70 @@ explicit reference acceptance, and the complete repository gate are recorded
 in `docs/verification.md`. The real Metal approval-arrival matrix was captured
 from clean source commit `4732ba8` on the MacBook Pro built-in Retina display;
 three-run medians met the motion and idle budgets.
+
+## Native Visual Polish Closes With Physical Improvements And Risk-Driven Evidence
+
+Status: accepted (2026-07-25)
+
+Decision: close the native visual-polish program with one finishing slice that
+improves the product rather than creating a Phase 7/8 qualification ceremony.
+The slice completes coherent light and high-contrast terminal palettes, applies
+typed interface metrics through native shaping, gives overlay controls a
+scene-owned two-cell rhythm and matching hit targets, and validates a realistic
+18-point usage envelope. Dark remains the flagship theme.
+
+Native macOS accessibility projection and VoiceOver support are explicitly
+deferred. Mandatum retains keyboard operation, non-color state cues, focus
+semantics, and dependency-free typed accessibility nodes/actions, but those
+contracts are not described as platform accessibility until a same-frame
+AppKit projection and action route exist. Pane title rails also remain one cell
+high because increasing them without a new layout contract would consume or
+overlap PTY geometry; the finishing slice does not hide that boundary behind a
+nominal spacing target.
+
+Context: the prior plan still described complete theme/accessibility parity and
+a separate integration phase even though the accepted native-first decision
+had retired those admission gates. Meanwhile, app-owned text still shared the
+terminal metric in the GPU path, overlay controls inherited one compressed
+terminal row, and the non-dark terminal palettes were incomplete. Those are
+visible daily-driver defects. Repeating motion, idle, recovery, 1,000-resize,
+or full-catalog screenshot programs would not test their owning seams.
+
+Rationale: verification earns its cost only when it can change a decision.
+Portable tests should exercise changed contracts, displayed captures should
+cover representative changed pixels, and specialized probes should run only
+for the subsystem they measure. A freshly accepted baseline does not gain
+confidence from an immediate identity comparison against itself. Native
+VoiceOver work is a real platform feature, not a checkbox that can be satisfied
+by typed scene data alone.
+
+Consequences:
+
+- light and high-contrast are coherent built-in themes with app-owned contrast
+  coverage, while arbitrary child-terminal ANSI combinations remain outside
+  Mandatum's contrast guarantee;
+- native app chrome can use its declared role-specific metrics without changing
+  terminal output metrics or widening the font-family boundary;
+- overlay item, input, and footer controls use full two-cell logical targets,
+  while pane title-rail height remains named debt;
+- the six displayed checks are limited to dense workspace and Palette across
+  dark, light, and high-contrast, with only changed dark references accepted;
+- no post-accept SSIM identity rerun, 29-cell cross-product, repeated Phase 6
+  motion/idle/recovery evidence, or unrelated 1,000-resize stress is required;
+- a focused frame-preparation sanity check may trigger deeper profiling but is
+  not relabeled as three-run fixed-reference authority;
+- Phase 8 remains retired, and the next product family is named task and
+  dev-server recipes rather than another visual-polish ceremony; and
+- installer, updater, release, rollout, and public-presentation work remain
+  shelved.
+
+Verification: three independent cold reviews found and drove corrections for
+an overlay empty-state overwrite, semantic-emphasis erasure, line-box
+clipping/overlap, and an invisible light ANSI 15 value. Six serialized native
+captures and the final 18-point Metal smoke were visually reviewed; one
+contaminated concurrent capture and one overlapping candidate were rejected
+and rerun after correction. Focused source suites and a current-surface
+frame-preparation sanity check passed. Exact capture diffs, diagnostics,
+measurements, and the intentionally scoped-out probes are recorded in
+`docs/verification.md`. The authoritative synchronized `./ci/gate.sh` ended
+`GATE GREEN`.
