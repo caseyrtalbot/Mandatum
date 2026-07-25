@@ -1477,6 +1477,7 @@ dependencies = [
  "serde",
  "sys-locale",
  "ttf-parser",
+ "unicode-script",
  "wgpu",
  "winit",
 ]

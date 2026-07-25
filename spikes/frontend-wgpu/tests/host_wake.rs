@@ -1199,7 +1199,13 @@ fn real_host_welcome_reaches_the_gpu_render_plan() {
 #[test]
 fn real_host_pty_output_wakes_without_polling_and_reaches_a_frame() {
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    // A real project directory: the default empty project path is not a
+    // directory, and spawn rejects a nonexistent cwd instead of silently
+    // substituting $HOME.
+    let project = DisposableProject::new("pty-output-wake");
     let config = AppConfig {
+        project_path: project.path.clone(),
+        workspace_file: project.path.join("workspace.json"),
         shell_program: "/bin/cat".to_owned(),
         spawn_pty: true,
         ..AppConfig::default()
@@ -1260,8 +1266,13 @@ fn real_host_pty_output_wakes_without_polling_and_reaches_a_frame() {
 #[test]
 fn real_host_task_pane_reaches_the_gpu_render_plan() {
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+    // Tasks run in the project directory and do not degrade on a dead cwd,
+    // so the default empty project path can never produce task output.
+    let project = DisposableProject::new("task-render-plan");
     let mut host = FrontendHost::new_with_wake_callback(
         AppConfig {
+            project_path: project.path.clone(),
+            workspace_file: project.path.join("workspace.json"),
             task_command: "printf TASK_PLAN_OK".to_owned(),
             spawn_pty: true,
             ..AppConfig::default()
