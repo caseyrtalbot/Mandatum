@@ -30,6 +30,14 @@ anything. It puts `Mandatum.app` in `/Applications` and a `mandatum`
 command in `~/.local/bin`, and that is the whole footprint. The same
 universal build runs on Apple Silicon and Intel Macs, macOS 11 or later.
 
+If your terminal can't find `mandatum` afterward, `~/.local/bin` is not
+on your PATH yet; the script will have said so. Add this line to
+`~/.zshrc` and open a new terminal:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 If you would rather click, download `Mandatum.app.zip` from the
 [latest release](https://github.com/caseyrtalbot/Mandatum/releases/latest).
 Release builds carry a SHA-256 checksum and an ad-hoc signature rather than
@@ -39,17 +47,16 @@ checksum itself and skips that dance.
 
 ## Use
 
+Run `mandatum` from any project directory:
+
 ```sh
-cd ~/code/my-project
 mandatum
 ```
 
-```text
-Opening Mandatum in /Users/you/code/my-project
-```
-
-The window opens on a shell in that project. Split it and run a task or a
-dev server beside it as the work grows. Later:
+The window opens on a shell right there. Prefer clicking? Launch
+Mandatum.app from Finder instead and it opens on your home directory.
+Split the window and run a task or a dev server beside it as the work
+grows. Later:
 
 ```sh
 mandatum update    # replace the app with the latest release
