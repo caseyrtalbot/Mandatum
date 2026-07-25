@@ -409,7 +409,7 @@ impl Default for UiMotionTokens {
         Self {
             press_hover: UiMotionToken::new(80, standard),
             focus_selection: UiMotionToken::new(120, standard),
-            overlay_enter: UiMotionToken::new(180, UiCubicBezier::new(160, 1_000, 300, 1_000)),
+            overlay_enter: UiMotionToken::new(120, UiCubicBezier::new(160, 1_000, 300, 1_000)),
             overlay_exit: UiMotionToken::new(110, UiCubicBezier::new(400, 0, 1_000, 1_000)),
             pane_change: UiMotionToken::new(140, standard),
             direct: UiMotionToken::direct(),
@@ -996,7 +996,7 @@ mod tests {
 
         assert_eq!(ui.motion.press_hover.duration_ms, 80);
         assert_eq!(ui.motion.focus_selection.duration_ms, 120);
-        assert_eq!(ui.motion.overlay_enter.duration_ms, 180);
+        assert_eq!(ui.motion.overlay_enter.duration_ms, 120);
         assert_eq!(ui.motion.overlay_exit.duration_ms, 110);
         assert_eq!(ui.motion.pane_change.duration_ms, 140);
         assert_eq!(ui.motion.direct.duration_ms, 0);

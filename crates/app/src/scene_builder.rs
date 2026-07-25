@@ -308,17 +308,9 @@ fn scene_presentation(
 
     // Independent emphasis and family motion are both semantic eligibility.
     // The renderer gives presence-changing family transitions precedence and
-    // uses Focus/Selection for stable-surface emphasis changes.
-    if motion_policy.allows(TransitionRole::Selection) {
-        for node in nodes.iter().filter(|node| node.state.selected) {
-            push_unique_transition(
-                &mut transition_targets,
-                node.id.clone(),
-                TransitionRole::Selection,
-                TransitionProperty::Scale,
-            );
-        }
-    }
+    // uses Focus for stable-surface emphasis changes. Selection deliberately
+    // emits no transition: a highlight that tracks the pointer or key repeat
+    // must land whole on the next frame, not ease toward it.
     if motion_policy.allows(TransitionRole::ApprovalArrival) {
         for pane in panes {
             let Some(sequence) = state.approval_arrival_sequence(&pane.id) else {
@@ -3111,7 +3103,10 @@ mod tests {
             .map(|target| target.role)
             .collect::<Vec<_>>();
         assert!(roles.contains(&TransitionRole::Overlay));
-        assert!(roles.contains(&TransitionRole::Selection));
+        assert!(
+            !roles.contains(&TransitionRole::Selection),
+            "selection tracks the pointer and key repeat, so it never eases"
+        );
         let overlay_scene = overlay.overlay.as_ref().expect("palette is open");
         let overlay_root =
             PresentationNodeId::overlay(overlay_scene.kind(), OverlayNodePart::Surface);
@@ -3152,13 +3147,12 @@ mod tests {
             .find(|node| node.state.selected)
             .expect("palette has a selected item");
         assert!(
-            overlay
+            !overlay
                 .presentation
                 .transition_targets
                 .iter()
-                .any(|target| {
-                    target.node_id == selected.id && target.role == TransitionRole::Selection
-                })
+                .any(|target| target.role == TransitionRole::Selection),
+            "the selected row lands whole on the next frame, never eased"
         );
         assert!(
             overlay
@@ -3195,12 +3189,12 @@ mod tests {
         }));
         let menu = state.build_scene(size);
         assert!(matches!(menu.overlay, Some(OverlayScene::ContextMenu(_))));
-        assert!(menu.presentation.transition_targets.iter().any(|target| {
-            matches!(
-                target.role,
-                TransitionRole::Overlay | TransitionRole::Selection
-            )
-        }));
+        assert!(
+            menu.presentation
+                .transition_targets
+                .iter()
+                .any(|target| target.role == TransitionRole::Overlay)
+        );
 
         state.handle_event(InputEvent::Resize(SceneSize::new(120, 40)));
 
