@@ -1604,9 +1604,12 @@ fn every_visual_scenario_reaches_its_typed_state_and_gpu_render_plan() {
                 );
                 assert_cell_program_contains(&prepared, layout::pane_inner_rect(pane.area), "Bold");
                 assert!(snapshot.scene.copy_mode);
-                assert!(prepared.cell_program().cells().any(|(_, _, cell)| {
-                    cell.selection == Some(CellSelection::Terminal)
-                }));
+                assert!(
+                    prepared
+                        .cell_program()
+                        .cells()
+                        .any(|(_, _, cell)| { cell.selection == Some(CellSelection::Terminal) })
+                );
                 assert!(
                     prepared
                         .cell_program()

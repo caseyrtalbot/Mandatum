@@ -1,6 +1,6 @@
 # Native Visual Polish Plan
 
-Status: accepted direction; Phase 1 implementation in progress (2026-07-24)
+Status: Phase 1 complete; Phase 2 next (2026-07-24)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -357,7 +357,7 @@ demanding byte-identical compositor capture colors.
 
 Do not redesign pixels in this phase.
 
-Implementation status (2026-07-24):
+Completion status (2026-07-24):
 
 - the 11-scenario catalog now prepares durable fixtures through
   `mandatum-core`, drives the real `FrontendHost` with neutral input, and
@@ -374,9 +374,19 @@ Implementation status (2026-07-24):
 - `visual-diff compare` is read-only, and `visual-diff accept` requires a
   nonblank reason and refuses dirty candidate metadata;
 - the live-slice displayed route launches `mandatum-native`; and
-- fixed-reference baseline images remain pending because the only active
-  display during this implementation run was `LG ULTRAGEAR+` at backing scale
-  1.0. Upscaling that capture is not accepted evidence.
+- all 11 fixed-reference images and metadata records were captured from clean
+  source commit `ebd7ee4` on `LG ULTRAGEAR+` at genuine backing scale 2.0,
+  1600 x 1200 physical / 800 x 600 logical / 102 x 35 scene, 60 Hz, Apple M4
+  Pro / Metal, and bundled JetBrains Mono 13;
+- visual review caught and corrected a lab startup-order defect that dismissed
+  the context-menu scenario, then confirmed Typography selection/cursor,
+  filtered/disabled/overflow Palette, and artifact overlay occlusion before
+  acceptance;
+- every baseline was explicitly accepted with the recorded reason
+  `Initial Phase 1 fixed-reference baseline after visual review`; and
+- strict comparison of every accepted baseline against its reviewed candidate
+  returned SSIM 1.0, zero changed pixels, and zero masked pixels across
+  1,920,000 compared pixels per scenario.
 
 The canonical `narrow` baseline means narrow pane geometry inside the same
 fixed 1600 x 1200 / scale-2 / 102 x 35 reference surface. Smaller-window

@@ -105,7 +105,7 @@ command, so the local daily-driver choice does not mutate the installer,
 updater, release workflow, archives, rollout, public GitHub presentation, or
 visual materials. Daily use now sets the functional hardening queue.
 
-### 6. Production-grade native visual polish — next
+### 6. Production-grade native visual polish — active
 
 Native in-app visual polish is a cornerstone product capability, not a public
 release accessory. The ordered phase covers typography hierarchy, pane
@@ -114,11 +114,12 @@ artifact/workflow surfaces, fluid resize, purposeful transitions, and
 accessibility. It preserves `CellProgram` terminal parity and introduces richer
 native presentation only through typed scene contracts.
 
-The first slice is Phase 1 of
-[docs/visual-polish-plan.md](docs/visual-polish-plan.md): establish the visual
-acceptance and representative-scenario contract before changing pixels.
-Concrete functional failures found through daily use remain valid hardening
-work at their smallest owning seam.
+Phase 1 of [docs/visual-polish-plan.md](docs/visual-polish-plan.md) established
+the visual acceptance contract, deterministic scenario catalog, fixed-reference
+capture/diff workflow, and accepted current-surface baselines without changing
+production pixels. Phase 2 — Token And Native Presentation Foundation — is the
+next bounded slice. Concrete functional failures found through daily use remain
+valid hardening work at their smallest owning seam.
 
 ### Distribution and public presentation — shelved
 

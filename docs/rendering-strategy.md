@@ -186,6 +186,12 @@ and `visual-diff` owns read-only comparison plus explicit human acceptance.
 Neither capture nor comparison derives product meaning or changes production
 renderer behavior.
 
+The accepted Phase 1 reference set lives under
+`spikes/frontend-wgpu/visual-baselines/casey-m4pro-metal-scale2/`. Its 11
+baseline/metadata pairs record the current native surface from clean source
+commit `ebd7ee4`; later presentation work compares against these files and may
+replace them only through explicit reviewed acceptance.
+
 ## Resize And Rewrap
 
 Lines wrapped at a narrow width stay wrapped after the terminal grows

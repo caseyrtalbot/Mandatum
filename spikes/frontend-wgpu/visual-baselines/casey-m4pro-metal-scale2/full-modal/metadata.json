@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "profile": "casey-m4pro-metal-scale2",
+  "scenario": "full-modal",
+  "theme": "mandatum-dark",
+  "captured_at": "2026-07-25T01:00:16Z",
+  "surface": {
+    "logical_width": 800,
+    "logical_height": 600,
+    "physical_width": 1600,
+    "physical_height": 1200,
+    "backing_scale": 2.0
+  },
+  "scene": {
+    "columns": 102,
+    "rows": 35
+  },
+  "font": {
+    "source": "bundled",
+    "family": "JetBrains Mono",
+    "size": 13.0,
+    "faces": [
+      "Regular",
+      "Bold",
+      "Italic",
+      "BoldItalic"
+    ]
+  },
+  "display": {
+    "id": "3",
+    "name": "LG ULTRAGEAR+",
+    "refresh_hz": 60.0
+  },
+  "gpu": {
+    "name": "Apple M4 Pro",
+    "backend": "Metal",
+    "device_type": "integrated"
+  },
+  "source": {
+    "commit": "ebd7ee4a19b164161fc89558eebe3a58e35df51b",
+    "dirty": false
+  },
+  "build": {
+    "profile": "debug",
+    "executable": "/Users/caseytalbot/Projects/mandatum/spikes/frontend-wgpu/target/debug/mandatum-native-lab"
+  },
+  "capture": {
+    "api": "ScreenCaptureKit",
+    "color_space": "srgb",
+    "pixel_format": "rgba8-unpremultiplied",
+    "client_surface": true,
+    "shows_cursor": false,
+    "includes_shadow": false
+  },
+  "fallback_regions": [],
+  "acceptance": {
+    "reason": "Initial Phase 1 fixed-reference baseline after visual review",
+    "accepted_at_unix_seconds": 1784941262
+  }
+}

@@ -2973,12 +2973,13 @@ Canonical `narrow` is narrow pane geometry inside the same fixed
 belong to the later pairwise matrix.
 
 Context: Phase 1 implemented the real-host catalog and fixed capture/diff
-interfaces while the only active display was `LG ULTRAGEAR+` at backing scale
-1.0. ScreenCaptureKit can resample output dimensions, but those pixels do not
-prove the accepted scale-2 font rasterization, rounding, or compositor path.
-Treating that file as the fixed baseline would make exact metadata dishonest.
-The plan also named `narrow` while requiring one fixed surface for every
-canonical baseline, so the scenario needed one unambiguous interpretation.
+interfaces while the initial capture attempt saw only `LG ULTRAGEAR+` at
+backing scale 1.0. ScreenCaptureKit can resample output dimensions, but those
+pixels do not prove the accepted scale-2 font rasterization, rounding, or
+compositor path. Treating that file as the fixed baseline would make exact
+metadata dishonest. The plan also named `narrow` while requiring one fixed
+surface for every canonical baseline, so the scenario needed one unambiguous
+interpretation.
 
 Rationale: reference artifacts are valuable only when their environmental
 identity is true. A fail-closed preflight turns a missing display condition
@@ -2997,10 +2998,15 @@ Consequences:
 - `accept` requires a nonblank rationale, rejects a dirty source record, and
   never replaces the optional mask implicitly;
 - no scale-1 baseline is accepted for the fixed profile; and
-- Phase 1 remains incomplete until all 11 fixed-reference baselines are
-  captured and explicitly accepted from a clean source commit.
+- Phase 1 closed only after all 11 fixed-reference baselines were captured and
+  explicitly accepted from clean source commit `ebd7ee4`.
 
 Verification: the portable catalog and visual-diff tests passed, the Swift
-capture script typechecked, the lab displayed `calm-terminal` successfully,
-and the fixed-profile capture command refused the active scale-1 display
-before writing a candidate.
+capture script typechecked, and the fixed-profile capture command first
+refused the active scale-1 display before writing a candidate. After the LG
+display entered its genuine 1720 x 720 logical / scale-2 mode, all 11
+1600 x 1200 client-surface images recorded the fixed metadata contract from
+clean source commit `ebd7ee4`; explicit acceptance succeeded and every strict
+comparison returned SSIM 1.0 with zero changed or masked pixels. Visual review
+also caught a missing context-menu capture before acceptance; the lab now
+defers scenario driving until initial native geometry settles.

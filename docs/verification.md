@@ -739,6 +739,18 @@ developer unfamiliar with the current implementation can identify:
   `LG ULTRAGEAR+` display because its live backing scale was 1.0. No baseline
   was captured, accepted, or claimed from resampled pixels; Phase 1 remains
   open until a genuine scale-2 display or mode is active.
+- **2026-07-24:** Phase 1 then used the LG display's genuine 1720 x 720
+  logical / backing-scale-2 mode to capture all 11 fixed 1600 x 1200
+  client-surface scenarios from clean source commit `ebd7ee4`. Visual review
+  rejected the first set because the context-menu scenario had been dismissed
+  by initial window geometry; the harness now waits for that geometry to
+  settle before driving product state. The reviewed set visibly includes
+  Typography selection/cursor, filtered/disabled/overflow Palette state,
+  context menu, and artifact overlay occlusion. Every image was explicitly
+  accepted with a nonblank reason. All 11 strict comparisons returned SSIM
+  1.0, zero changed pixels, zero masked pixels, and 1,920,000 compared pixels.
+  The LG display was then restored to its 3440 x 1440 default and independently
+  reported backing scale 1.0.
 
 ## Completion Rule
 

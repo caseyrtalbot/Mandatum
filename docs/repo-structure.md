@@ -188,8 +188,9 @@ history (see docs/workflows.md for what remains unbuilt here).
 spikes/frontend-wgpu/   excluded mandatum-native-lab measurement, stress,
                         fault, and deterministic visual-scenario harness;
                         ScreenCaptureKit capture, explicit visual-diff
-                        acceptance, terminal latency, typography-corpus tools,
-                        and frozen RESULTS.md
+                        acceptance, tracked fixed-reference visual baselines,
+                        terminal latency, typography-corpus tools, and frozen
+                        RESULTS.md
 examples/live-slice/    driven native demo workspace for the stranger test
 ```
 
