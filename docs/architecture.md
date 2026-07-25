@@ -312,6 +312,15 @@ parsing glyphs or remapping semantic roles. Tiled panes and separators precede
 floating panes in scene order; floating shells own their rounded boundary and
 raised shadows, with later floats occluding earlier shadow fragments.
 
+Phase 4 extends the same contract to the complete overlay family. The scene
+declares Modal, Welcome, and Context Menu presentation grammar plus title,
+input, footer, and stable item nodes. The native plan resolves those nodes into
+scrim, raised shell, band, soft selection, and leading-indicator materials.
+Overlay border glyphs remain an honest terminal fallback under a typed
+`OverlayDecoration` scope and are suppressed only by the native adapter.
+Context Menu chrome clicks use the exact constrained area retained from the
+presented scene, so paint and interaction cannot recompute different geometry.
+
 Accessibility meaning remains dependency-free in `mandatum-scene`.
 `AccessibilityNode` uses scene-owned roles, labels, values, state, bounds, and
 the same `PresentationNodeId`; AccessKit, AppKit, winit, and other platform

@@ -3121,3 +3121,39 @@ evidence and bounded plan/resource tests remain the regression guard. The
 display was restored and verified at 3440 x 1440 / scale 1 / 60 Hz. The
 synchronized final gate and completion commit are recorded in
 `docs/verification.md`.
+
+## Overlay Family Uses One Typed Material Stack And Three Interaction Grammars
+
+Status: accepted and displayed (2026-07-24)
+
+Decision: Palette, Timeline, Session Map, Prompt, Search, Help, Welcome, and
+Context Menu share one scene-owned overlay family. Modal surfaces use the
+shared scrim and raised shell; Welcome keeps its non-modal dismissal behavior;
+Context Menu remains anchored without a viewport scrim. Stable semantic item
+keys, constrained geometry, inset bands, soft selection, a leading indicator,
+and right-aligned hints cross the typed presentation boundary.
+
+Rationale: implementing one overlay at a time would preserve visible drift and
+invite renderer-side inference. The Phase 2 presentation contract already
+provides stable identity, logical geometry, ordered materials, and exact hit
+targets, so the whole family can deepen without changing product state or
+weakening the terminal fallback.
+
+Consequences:
+
+- the GPU orders workspace paint, modal scrim, overlay depth/materials,
+  overlay cursor, and text explicitly;
+- `OverlayDecoration` suppresses terminal box glyphs on native without parsing
+  glyph content;
+- item labels/details/hints retain their compiled cell styling while native
+  selection material replaces inverse-video row backgrounds;
+- Context Menu click handling uses the exact constrained presented shell; and
+- the MacBook Pro built-in Retina display is the fixed reference for this and
+  subsequent visual work. One-cell vertical overlay rhythm remains documented
+  spacing debt.
+
+Verification: aggregate review found and the implementation corrected cursor
+layering, item recoloring, rounded-band overlap, constrained Context Menu hit
+geometry, degenerate shells, stable Help keys, and clipped key hints. The
+representative native matrix was reviewed and explicitly accepted from clean
+source commit `1988b0b`; the full repository gate ended `GATE GREEN`.

@@ -130,12 +130,18 @@ explicitly accepted. A fresh repeated performance series was intentionally
 scoped out when it stopped adding useful confidence; the bounded preparation
 tests and existing reference measurement remain the regression guard.
 
-Phase 4 — Overlay Family — is next because the still-flat Palette, Search,
-Timeline, Session Map, Help, Prompt, Welcome, and Context Menu are now the
-largest visible inconsistency. The smaller known shell debt is that pane title
-rails still occupy one 17-logical-pixel text row rather than the specified
-24–28-pixel rail. Concrete functional failures found through daily use remain
-valid hardening work at their smallest owning seam.
+Phase 4 — Overlay Family — is accepted. Palette, Search, Timeline, Session Map,
+Help, Prompt, Welcome, and Context Menu now share typed native shells, bands,
+selection, constraints, stable item identity, and right-aligned hints. Modal
+surfaces receive a scrim; Welcome and Context Menu retain their distinct
+non-modal and anchored grammars. The representative fixed references now use
+the MacBook Pro built-in Retina display as the reference surface.
+
+Phase 5 — Typed Task, Agent, Approval, And Artifact Surfaces — is next. Known
+physical debt remains deliberately bounded: pane title rails and overlay rows
+still inherit one terminal text row rather than their final native vertical
+spacing. Concrete functional failures found through daily use remain valid
+hardening work at their smallest owning seam.
 
 ### Distribution and public presentation — shelved
 

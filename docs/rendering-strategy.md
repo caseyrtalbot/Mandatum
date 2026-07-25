@@ -216,6 +216,16 @@ them only through explicit reviewed acceptance. The set includes the accepted
 typed rails, focus tick, badges, hairline separators, attention chips, and
 bounded floating material/shadow while retaining exact terminal paint.
 
+Phase 4 adds a separate native overlay material stack above workspace
+materials, terminal backgrounds, and raster artifacts: modal scrim, overlay
+shadow, raised shell, inset bands/soft selection/leading indicator, late
+overlay cursor quads, then text. Welcome omits the scrim; Context Menu stays
+anchored and also omits it. The Palette, full modal, Welcome, and
+artifact-plus-menu representative references are accepted from clean source
+commit `1988b0b` on the MacBook Pro built-in Retina display at backing scale
+2.0. Remaining scenarios keep their historical accepted evidence until their
+own pixels change; all new captures target the built-in display.
+
 ## Resize And Rewrap
 
 Lines wrapped at a narrow width stay wrapped after the terminal grows

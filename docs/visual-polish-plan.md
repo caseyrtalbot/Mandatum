@@ -1,6 +1,6 @@
 # Native Visual Polish Plan
 
-Status: Phase 3 accepted; Phase 4 Overlay Family next (2026-07-24)
+Status: Phase 4 Overlay Family accepted; Phase 5 next (2026-07-24)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -549,6 +549,19 @@ improvement to revisit deliberately.
 
 Goal: make every modal and menu feel like one system.
 
+Status: accepted and displayed on the MacBook Pro built-in Retina reference
+display. The shared typed surface, scrim grammar, constrained geometry, bands,
+soft selection, stable row identity, exact Context Menu hit geometry, and
+right-aligned key hints are implemented across all eight overlays. The
+representative `palette`, `full-modal`, `welcome`, and `artifacts` references
+were reviewed and explicitly accepted from clean source commit `1988b0b`; the
+complete repository gate reported `GATE GREEN`.
+
+Known physical debt: native overlay bands and rows still inherit one terminal
+text row rather than consuming the final `overlay_outer_padding` and
+`overlay_row_padding_y` vertical rhythm. This is visible spacing debt, not a
+second interaction or paint authority.
+
 Work:
 
 - add modal scrim where appropriate plus the shared raised shell, shadow,
@@ -700,8 +713,7 @@ Defer until the complete system above succeeds without them:
 
 ## Immediate Next Action
 
-Execute Phase 4 only: unify Palette, Search, Timeline, Session Map, Help,
-Prompt, Welcome, and Context Menu around the shared overlay material, geometry,
-selection, input, and footer system. Preserve exact clipping and shared
-scene-owned paint/hit geometry. Do not pull workflow cards, motion,
-accessibility projection, or public presentation forward.
+Execute Phase 5 only: replace flattened task, agent, approval, and artifact
+details with typed scene-owned workflow surfaces while preserving honest
+terminal fallbacks. Do not pull motion, accessibility projection, installer,
+release, rollout, or public presentation work forward.

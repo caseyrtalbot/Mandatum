@@ -325,8 +325,13 @@ widths, where no title text can survive, one accented corner cell preserves a
 visible focus signal without restoring a loud perimeter.
 
 **Layered surfaces.** Every overlay paints an explicit foreground/background
-surface inside its accent border, so palettes, maps, prompts, help, and the
-first-run card read as a layer above the workspace rather than another pane.
+surface inside its accent border. Palette, Timeline, Session Map, Prompt,
+Search, and Help are modal and dim the completed workspace with one shared
+scrim. Welcome remains non-modal, while Context Menu stays anchored without a
+viewport scrim. All use the same raised shell, bands, soft selected row,
+leading focus indicator, and right-aligned key hints. Context Menu retains the
+exact constrained shell from the last presented scene for chrome-click
+handling, so a visible border near an edge is never mistaken for click-away.
 The first-run card keeps live keys, descriptions, and dismissal guidance as
 separate scene fields: keys are accented and bold, descriptions are normal,
 and the dismissal line is dim.

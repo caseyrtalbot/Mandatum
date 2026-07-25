@@ -802,6 +802,20 @@ developer unfamiliar with the current implementation can identify:
   resource ceilings, and repository gate remain the regression checks. The LG
   was restored and independently verified at 3440 x 1440 / backing scale 1 /
   60 Hz before the synchronized final gate, which ended `GATE GREEN`.
+- **2026-07-24:** Phase 4 migrated all eight overlays onto one typed native
+  family. Focused and aggregate review corrected overlay cursor ordering and
+  contrast, item text preservation, rounded band insets, constrained Context
+  Menu hit geometry, stable Help identities, right-aligned clipped hints, and
+  degenerate shells. The representative `palette`, `full-modal`, `welcome`,
+  and `artifacts` matrix was captured through the real native Metal route from
+  clean source commit `1988b0b` on the MacBook Pro built-in Retina display at
+  800 x 600 logical / 1600 x 1200 physical / backing scale 2 / 120 Hz. Each
+  image was visually reviewed and explicitly accepted; repeated comparisons
+  returned SSIM 1.0, zero changed pixels, zero masked pixels, and 1,920,000
+  compared pixels. The complete repository gate, including the excluded lab
+  and all canonical scenario-plan tests, ended `GATE GREEN`. A broader fresh
+  performance series and unchanged-scenario recapture were intentionally
+  scoped out as overkill.
 
 ## Completion Rule
 
