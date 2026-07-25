@@ -774,7 +774,10 @@ developer unfamiliar with the current implementation can identify:
   seven, correction of the external compositor-state contamination. All 11
   accepted comparisons then returned SSIM 1.0, zero changed pixels, zero
   masked pixels, and 1,920,000 compared pixels. The display was restored and
-  verified at 3440 x 1440 / scale 1 / 60 Hz before the final gate.
+  verified at 3440 x 1440 / scale 1 / 60 Hz before the final gate. The
+  synchronized `./ci/gate.sh` run reported `GATE GREEN`; source commit
+  `6979318` and accepted-evidence commit `f300662` were then pushed to
+  `origin/main`.
 
 ## Completion Rule
 
