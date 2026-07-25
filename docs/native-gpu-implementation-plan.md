@@ -22,9 +22,10 @@ feel, living outside the terminal.
   specified in
   [`docs/visual-polish-plan.md`](visual-polish-plan.md).
 - Named task and dev-server recipes are the next ordered product family.
-- Public repository presentation and the signed native release pipeline are now
-  prepared separately. The first native release remains pending Apple signing
-  credentials and a successful notarized tag build.
+- Public distribution ships a universal `Mandatum.app` from tagged CI builds
+  with checksum verification and ad-hoc signing; no Apple credentials are
+  required to publish. See the "Distribution Ships One App Bundle And One
+  Launcher" decision.
 
 ## Product Roles
 

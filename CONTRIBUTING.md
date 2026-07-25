@@ -24,11 +24,27 @@ Run the native macOS application from source:
 cargo run -p mandatum-native --bin mandatum-native
 ```
 
-Run the terminal frontend:
+Run the terminal frontend (a development surface; it is not distributed):
 
 ```sh
 cargo run -p mandatum-app --bin mandatum
 ```
+
+Package a local `Mandatum.app` the same way the release pipeline does:
+
+```sh
+cargo build --release -p mandatum-native --bin mandatum-native
+cargo build --release -p mandatum-agent-runtime --bin mandatum-approval-bridge
+./packaging/package-app.sh \
+  --native target/release/mandatum-native \
+  --bridge target/release/mandatum-approval-bridge \
+  --version 0.0.0 \
+  --output dist
+```
+
+The release workflow builds both Mac architectures, joins them with `lipo`,
+and publishes a single universal `Mandatum.app.zip`; see
+`.github/workflows/release.yml`.
 
 ## Before opening a pull request
 

@@ -1,232 +1,130 @@
+<!-- register: readme -->
 <div align="center">
+
+<img src="docs/assets/icon.png" alt="Mandatum icon" width="128">
 
 # Mandatum
 
-**A GPU-native development workstation with a terminal soul.**
-
-Shells, tasks, long-running commands, and AI agents share one spatial session,
-with visible failures, shell-command approvals, an execution timeline, and
-durable workspace recovery.
+Mandatum is a macOS app for terminal-centered work. Shells and build tasks
+run as panes in one GPU-rendered workspace, with AI agents working beside
+them. A timeline records what every pane did. When an agent wants to run a
+shell command, it waits for your approval first.
 
 [![CI](https://github.com/caseyrtalbot/Mandatum/actions/workflows/ci.yml/badge.svg)](https://github.com/caseyrtalbot/Mandatum/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/caseyrtalbot/Mandatum)](https://github.com/caseyrtalbot/Mandatum/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust 1.96](https://img.shields.io/badge/rust-1.96-orange.svg)](rust-toolchain.toml)
-[![Platform: macOS](https://img.shields.io/badge/native-macOS-lightgrey.svg)](#install)
 
-<img src="docs/assets/hero-approval.svg" alt="Mandatum session with a shell, a failed task, a long-running command, and an agent waiting for approval" width="100%">
-
-*The maintained terminal frontend showing the same workspace model used by the
-native application.*
+<img src="docs/assets/workspace.png" alt="Mandatum workspace with three terminal panes, showing git history on the left with a cargo check and passing test run on the right" width="100%">
 
 </div>
 
-## Why Mandatum
-
-Modern development work is spread across shells, test runners, servers, and
-agents. Mandatum keeps those actors visible in one session so you can quickly
-answer:
-
-- What is running, and what failed?
-- Which command produced the failure?
-- Which agent is active, blocked, or waiting for approval?
-- What did the agent report changing?
-- What can I rerun, stop, restore, or search?
-
-Mandatum is not a chat wrapper or an editor replacement. It is a workstation
-around the terminal: raw terminal applications remain first-class while native
-structure makes concurrent work easier to supervise.
-
-## Highlights
-
-- **Spatial sessions:** tiled, stacked, floating, and zoomed panes for shells,
-  tasks, agents, and PNG artifact previews.
-- **Visible runtime state:** task exits, agent states, pending approvals, and
-  attention items appear where they matter.
-- **Agent approvals:** the default Claude connector pauses shell commands for
-  an explicit approve or reject decision. The approval bridge fails closed
-  when that gated protocol cannot complete.
-- **Execution timeline:** commands, task outcomes, agent state changes, and
-  approval decisions are recorded in a bounded, rotating timeline.
-- **Search and navigation:** fuzzy command palette, session map, generated
-  help, context menus, and session-wide output search.
-- **Durable intent:** layouts, pane intent, focus, agent summaries, and approval
-  history can survive restart. Live processes are never falsely presented as
-  restored.
-- **Terminal compatibility:** terminal input passes to the focused child unless
-  an explicit workspace command intercepts it.
-- **Native presentation:** the macOS application uses winit, wgpu, and a
-  bundled JetBrains Mono family, with dark, light, and high-contrast themes.
-
-| Command palette | Execution timeline |
-|:---:|:---:|
-| <img src="docs/assets/palette.svg" alt="Mandatum fuzzy command palette with matches, key hints, and unavailable-command explanations" width="100%"> | <img src="docs/assets/timeline.svg" alt="Mandatum execution timeline listing commands, task outcomes, agent state changes, and approvals" width="100%"> |
-
-| Session map | Generated help |
-|:---:|:---:|
-| <img src="docs/assets/session-map.svg" alt="Mandatum session map showing pane kinds, live states, focus, and floating panes" width="100%"> | <img src="docs/assets/help.svg" alt="Mandatum help overlay generated from the active command table and keymap" width="100%"> |
-
-## Status
-
-Mandatum is pre-release software. Public binaries currently target macOS on
-Apple Silicon and Intel.
-
-The repository is prepared to produce signed and Apple-notarized macOS binaries,
-but the first compatible native release has not yet been published. Until a
-signed release appears on [GitHub Releases](https://github.com/caseyrtalbot/Mandatum/releases),
-build the native application from source.
-
-Current limitations:
-
-- restored workspaces restore durable intent, not previously running processes;
-- one configured task command is available; named task and dev-server recipes
-  are not yet implemented;
-- artifact preview supports bounded project-relative PNG files, not general
-  documents or URLs; and
-- native macOS accessibility projection and VoiceOver support are not yet
-  implemented.
-
 ## Install
-
-### macOS release
-
-Once a compatible release is published, install the build for the current Mac
-from Terminal:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://raw.githubusercontent.com/caseyrtalbot/Mandatum/main/install.sh | sh
 ```
 
-The installer detects Apple Silicon or Intel, downloads the matching common and
-native archives, verifies both SHA-256 checksums, validates every binary's
-Developer ID signature against Mandatum's pinned Apple team, and installs three
-commands in `~/.local/bin`:
+The script verifies the release's SHA-256 checksum before it touches
+anything. It puts `Mandatum.app` in `/Applications` and a `mandatum`
+command in `~/.local/bin`, and that is the whole footprint. The same
+universal build runs on Apple Silicon and Intel Macs, macOS 11 or later.
+
+If you would rather click, download `Mandatum.app.zip` from the
+[latest release](https://github.com/caseyrtalbot/Mandatum/releases/latest).
+Release builds carry a SHA-256 checksum and an ad-hoc signature rather than
+Apple notarization, so a browser download warns on first launch; allow it
+under System Settings > Privacy & Security. The install script verifies the
+checksum itself and skips that dance.
+
+## Use
+
+```sh
+cd ~/code/my-project
+mandatum
+```
 
 ```text
-mandatum-native            GPU-native macOS application
-mandatum                   terminal frontend and update command
-mandatum-approval-bridge   agent approval helper
+Opening Mandatum in /Users/you/code/my-project
 ```
 
-Add `~/.local/bin` to `PATH`, then launch the native application from a project
-directory:
+The window opens on a shell in that project. Split it and run a task or a
+dev server beside it as the work grows. Later:
 
 ```sh
-cd /path/to/project
-mandatum-native
-```
-
-Release automation is configured to sign macOS binaries with a Developer ID
-certificate, enable the hardened runtime, and submit the signed binaries to
-Apple for notarization. Publishing fails if signing or notarization cannot
-complete. The download is an architecture-specific command archive rather than
-a `.app` bundle; the project does not claim a stapled or offline Gatekeeper
-ticket.
-
-To install somewhere else, set an absolute `MANDATUM_INSTALL_DIR`:
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/caseyrtalbot/Mandatum/main/install.sh \
-  | MANDATUM_INSTALL_DIR="$HOME/bin" sh
-```
-
-### Build from source
-
-Install [rustup](https://rustup.rs/), then:
-
-```sh
-git clone https://github.com/caseyrtalbot/Mandatum.git
-cd Mandatum
-cargo run --release -p mandatum-native --bin mandatum-native
-```
-
-The repository pins its Rust toolchain. Building the native application from
-source requires macOS. The native workstation can start from that single build,
-but gated agent sessions also require the separate approval bridge executable;
-agent launch fails closed when it cannot resolve an executable bridge beside
-Mandatum, on `PATH`, or through `MANDATUM_APPROVAL_BRIDGE`. To install both
-public commands and the bridge from the checkout:
-
-```sh
-cargo install --locked --path crates/native --bin mandatum-native
-cargo install --locked --path crates/app --bin mandatum
-cargo install --locked --path crates/agent-runtime \
-  --bin mandatum-approval-bridge
-```
-
-## Updates
-
-Compatible macOS releases update over the air through the terminal frontend:
-
-```sh
-mandatum update
+mandatum update    # replace the app with the latest release
 mandatum --version
 ```
 
-The updater downloads the latest published release, verifies its checksum, and
-refuses to replace a newer build with an older one. On macOS it replaces
-the `mandatum-native`, `mandatum`, and `mandatum-approval-bridge` set and
-restores the previous set if replacement fails. It does not require a GitHub
-account or a repository checkout.
+Updates verify checksums before touching the installed app, and they refuse
+downgrades.
 
-Updates follow published version tags, not every commit to `main`. Review the
-[release notes](https://github.com/caseyrtalbot/Mandatum/releases) before
-updating when reproducibility matters.
+## Around the workspace
 
-For an installation from before native archives were introduced, rerun the
-current one-line installer once. It downloads the complete macOS command set
-and applies the current checksum and Developer ID verification policy.
-
-## First run
-
-Open the command palette with `Control-P`. It lists every command, its current
-binding, and why an action is unavailable. Right-click opens the contextual
-command menu, and `F1` opens help generated from the active keymap.
-
-Useful defaults:
+Everything is reachable from the command palette, and the palette explains
+any command that is currently unavailable.
 
 | Keys | Action |
 |---|---|
-| `Control-P` | Open the command palette |
-| `Control-P`, then `n` / `v` / `s` | New terminal / split right / split down |
-| `Control-P`, then `b` / `r` | Run task / rerun focused task |
-| `Control-P`, then `/` / `m` | Open timeline / session map |
-| `Control-Shift-F` | Search session output |
-| `Control-P`, then `w` / `o` | Save / restore workspace |
-| `Control-Q` | Quit |
+| `Ctrl-P` | Command palette |
+| `Ctrl-P`, then `n` / `v` / `s` | New terminal / split right / split down |
+| `Ctrl-P`, then `b` / `r` | Run task / rerun focused task |
+| `Ctrl-P`, then `/` / `m` | Timeline / session map |
+| `Ctrl-Shift-F` | Search all session output |
+| `Ctrl-P`, then `w` / `o` | Save / restore workspace |
+| `Ctrl-Q` | Quit |
 
-Mandatum reads user configuration from
-`~/.config/mandatum/config.toml` and project overrides from
-`<project>/.mandatum/config.toml`. All commands are rebindable. See
-[the interaction model](docs/interaction-model.md) for the full behavior.
+| Command palette | Execution timeline |
+|:---:|:---:|
+| <img src="docs/assets/palette.png" alt="Mandatum command palette listing pane and layout commands with their keys" width="100%"> | <img src="docs/assets/timeline.png" alt="Mandatum timeline listing pane creations and dispatched commands with timestamps" width="100%"> |
 
-Agent panes use the Claude Code connector by default. Agent features therefore
-require a separately installed and authenticated `claude` CLI. The rest of the
-workstation does not require an agent connector. By default Mandatum gates
-shell commands; file reads and writes are auto-allowed. Approval scope is a
-connector policy, not a sandbox or a promise that every mutation waits.
+The timeline records what ran and how it exited, along with agent state
+changes and approval decisions, and you can filter it by pane or by time
+window. Saved workspaces restore layout and pane intent after a restart,
+down to focus and approval history. They do not resurrect processes that
+were running, and Mandatum never pretends otherwise.
 
-## Design and architecture
+Terminal panes are real terminals. Input goes to the focused child process
+unless you explicitly invoke a workspace command, so full-screen tools like
+vim and htop behave normally. Text renders in a bundled JetBrains Mono
+through a wgpu pipeline on Metal.
 
-Five executable invariants keep product state independent from its frontends,
-separate durable intent from live runtimes, isolate terminal parsing, and
-protect terminal input routing. Read
-[the Constitution](docs/constitution.md) for the short contract and
-[the architecture](docs/architecture.md) for implementation boundaries.
+## Agents
 
-Additional public documentation:
+Agent panes drive the [Claude Code CLI](https://code.claude.com), which you
+install and authenticate separately; the rest of the app works without it.
+When an agent wants to run a shell command, the pane pauses until you
+approve or reject it, and the decision lands in the timeline. File reads
+and writes go through automatically by default. This is a review gate
+rather than a sandbox: you are the one approving, so read what you approve.
 
-- [Product principles](docs/product-principles.md)
-- [Developer workflows](docs/workflows.md)
-- [Interaction model](docs/interaction-model.md)
-- [Frontend strategy](docs/frontend-platform.md)
-- [Repository structure](docs/repo-structure.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
+Mandatum is Latin for an order entrusted to someone else to carry out. The
+approval prompt is where you decide whether to entrust it.
+
+## Configuration
+
+User settings live in `~/.config/mandatum/config.toml`, per-project
+overrides in `<project>/.mandatum/config.toml`. Every key binding is
+rebindable, and `F1` shows help generated from the live keymap, so it never
+drifts from your bindings. Details are in
+[the interaction model](docs/interaction-model.md).
+
+## Status
+
+Mandatum is pre-release software. Current limits worth knowing before you
+adopt it:
+
+- one configured task command per project; named task and dev-server
+  recipes are not implemented yet;
+- artifact preview handles project-relative PNG files only;
+- VoiceOver projection for the native surface is not implemented yet.
+
+Building from source and the architecture docs, including the five
+invariants CI enforces on every commit, are covered in
+[CONTRIBUTING.md](CONTRIBUTING.md), [docs/constitution.md](docs/constitution.md),
+and [docs/architecture.md](docs/architecture.md).
 
 ## License
 
-Mandatum is licensed under the [Apache License 2.0](LICENSE). The bundled
-JetBrains Mono fonts retain their SIL Open Font License; provenance and license
-text live with the font assets.
+Apache-2.0, with the bundled JetBrains Mono fonts keeping their SIL Open
+Font License.

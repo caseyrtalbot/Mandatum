@@ -127,25 +127,31 @@ for name in sorted(workspace_names - NATIVE_FRONTEND_PACKAGES):
             f"a modeled {name} -> wgpu edge"
         )
 
-# Keep release/install surfaces on explicit target and artifact allowlists.
-# macOS ships the native product beside the terminal/recovery tool and approval
-# bridge; Linux remains terminal/headless only.
+# Keep release/install surfaces on an explicit shipping contract: releases
+# build only allowlisted binaries, package them into a single Mandatum.app
+# archive, and the installer keeps the user flow free of developer
+# machinery (no cargo, no certificates, no bridge knowledge).
 ALLOWED_RELEASE_TARGETS = {
-    ("mandatum-app", "mandatum"),
     ("mandatum-agent-runtime", "mandatum-approval-bridge"),
     ("mandatum-native", "mandatum-native"),
 }
-COMMON_RELEASE_BINARIES = {"mandatum", "mandatum-approval-bridge"}
-MACOS_RELEASE_BINARIES = COMMON_RELEASE_BINARIES | {"mandatum-native"}
+APP_BUNDLE_EXECUTABLES = {"Mandatum", "mandatum-approval-bridge"}
 release_path = ".github/workflows/release.yml"
 install_path = "install.sh"
+package_path = "packaging/package-app.sh"
 release_text = open(release_path).read()
 install_text = open(install_path).read()
+package_text = open(package_path).read()
+shipping_surfaces = (
+    (release_path, release_text),
+    (install_path, install_text),
+    (package_path, package_text),
+)
 for forbidden_ref in ("spikes/frontend-wgpu", "frontend-wgpu", "mandatum-frontend-wgpu-spike"):
-    for path, source in ((release_path, release_text), (install_path, install_text)):
+    for path, source in shipping_surfaces:
         if forbidden_ref in source:
             failures.append(
-                f"[NATIVE-DEPENDENCY-BOUNDARY] legacy shipping surface {path} "
+                f"[NATIVE-DEPENDENCY-BOUNDARY] shipping surface {path} "
                 f"references lab-only token {forbidden_ref!r}"
             )
 
@@ -171,95 +177,71 @@ if release_targets != ALLOWED_RELEASE_TARGETS:
         f"(allowed: {sorted(ALLOWED_RELEASE_TARGETS)})"
     )
 
-release_common_match = re.search(
-    r"common_release_binaries=\(([^)]*)\)", release_text
-)
-release_common = (
-    set(release_common_match.group(1).split()) if release_common_match else set()
-)
-if release_common != COMMON_RELEASE_BINARIES:
-    failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] common release binaries changed: "
-        f"{sorted(release_common)} (allowed: {sorted(COMMON_RELEASE_BINARIES)})"
-    )
-release_macos = release_common | (
-    {"mandatum-native"}
-    if 'native_archive="mandatum-native-${TARGET}.tar.gz"' in release_text
-    else set()
-)
-if release_macos != MACOS_RELEASE_BINARIES:
-    failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] macOS release binaries changed: "
-        f"{sorted(release_macos)} "
-        f"(allowed: {sorted(MACOS_RELEASE_BINARIES)})"
-    )
-
-installer_common_match = re.search(
-    r'common_release_binaries="([^"]+)"', install_text
-)
-installer_macos_match = re.search(
-    r'release_binaries="\$common_release_binaries ([^"]+)"', install_text
-)
-installer_common = (
-    set(installer_common_match.group(1).split()) if installer_common_match else set()
-)
-installer_macos_extra = (
-    set(installer_macos_match.group(1).split()) if installer_macos_match else set()
-)
-if installer_common != COMMON_RELEASE_BINARIES:
-    failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] common installer binaries changed: "
-        f"{sorted(installer_common)} (allowed: {sorted(COMMON_RELEASE_BINARIES)})"
-    )
-if installer_common | installer_macos_extra != MACOS_RELEASE_BINARIES:
-    failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] macOS installer binaries changed: "
-        f"{sorted(installer_common | installer_macos_extra)} "
-        f"(allowed: {sorted(MACOS_RELEASE_BINARIES)})"
-    )
-
-required_release_assertions = (
-    'if [[ "$RUNNER_OS" == "macOS" ]]',
-    'if [[ "$TARGET" == *-apple-darwin ]]',
-    'expected=$(printf \'%s\\n\' LICENSE "${common_release_binaries[@]}"',
-    "native_expected=$(printf '%s\\n' LICENSE mandatum-native",
-    'test "$actual" = "$expected"',
-    'test "$native_actual" = "$native_expected"',
-)
-for assertion in required_release_assertions:
-    if assertion not in release_text:
+# The release publishes exactly the app archive produced by the packaging
+# script, plus its checksum.
+for required_release_ref in (
+    "packaging/package-app.sh",
+    "Mandatum.app.zip",
+    "ditto -c -k",
+):
+    if required_release_ref not in release_text:
         failures.append(
-            "[NATIVE-DEPENDENCY-BOUNDARY] release target/archive assertion "
-            f"is missing: {assertion}"
+            "[NATIVE-DEPENDENCY-BOUNDARY] release no longer ships the packaged "
+            f"app archive (missing {required_release_ref!r})"
         )
-required_installer_assertions = (
-    "common_expected_members=$(printf '%s\\n' LICENSE $common_release_binaries",
-    "native_expected_members=$(printf '%s\\n' LICENSE mandatum-native",
-    'fetch_verified_archive "$common_archive_name" "$common_expected_members"',
-    'fetch_verified_archive "$native_archive_name" "$native_expected_members"',
-    '[ "$release_archive_members" = "$release_expected_members" ]',
-)
-for assertion in required_installer_assertions:
-    if assertion in install_text:
-        continue
+
+# The packaging script installs exactly the allowlisted executables into
+# Contents/MacOS, and the launcher rides in Contents/Resources.
+bundle_executables = set(re.findall(r'Contents/MacOS/([A-Za-z][A-Za-z-]*)"', package_text))
+if bundle_executables != APP_BUNDLE_EXECUTABLES:
     failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] installer archive assertion "
-        f"is missing: {assertion}"
+        "[NATIVE-DEPENDENCY-BOUNDARY] app bundle executables changed: "
+        f"{sorted(bundle_executables)} (allowed: {sorted(APP_BUNDLE_EXECUTABLES)})"
     )
-if install_text.count("for binary in $release_binaries; do") != 7:
+if 'Contents/Resources/mandatum"' not in package_text:
     failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] installer must validate members, "
-        "signatures, and installation completeness, then back up, stage, and "
-        "install only the selected platform binary allowlist"
+        "[NATIVE-DEPENDENCY-BOUNDARY] the app bundle no longer carries the "
+        "mandatum launcher at Contents/Resources/mandatum"
     )
-if '"${extract_dir}/${binary}" "${install_stage}/${binary}"' not in install_text:
+
+# Installer contract: one asset, checksum verified before extraction, no
+# developer machinery in the user flow, downgrades refused, and the
+# command that owns `mandatum update` installed last.
+if 'ASSET_NAME="Mandatum.app.zip"' not in install_text:
     failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] installer staging no longer follows "
-        "the selected binary allowlist"
+        "[NATIVE-DEPENDENCY-BOUNDARY] installer no longer installs the "
+        "Mandatum.app.zip release asset"
     )
-if 'mv -f "${install_stage}/mandatum" "${install_dir}/mandatum"' not in install_text:
+for developer_token in ("cargo", "rustup", "Developer ID", "mandatum-approval-bridge"):
+    if developer_token in install_text:
+        failures.append(
+            "[NATIVE-DEPENDENCY-BOUNDARY] installer leaks developer machinery "
+            f"into the user flow: {developer_token!r}"
+        )
+try:
+    checksum_index = install_text.index("shasum -a 256 -c")
+    extract_index = install_text.index("ditto -x -k")
+    if checksum_index > extract_index:
+        failures.append(
+            "[NATIVE-DEPENDENCY-BOUNDARY] installer must verify the checksum "
+            "before extracting the archive"
+        )
+except ValueError:
     failures.append(
-        "[NATIVE-DEPENDENCY-BOUNDARY] self-update owner must be installed last"
+        "[NATIVE-DEPENDENCY-BOUNDARY] installer lost checksum verification "
+        "or archive extraction"
+    )
+if "version_is_older" not in install_text:
+    failures.append(
+        "[NATIVE-DEPENDENCY-BOUNDARY] installer lost its downgrade refusal"
+    )
+if 'mv "${stage_dir}/Mandatum.app"' not in install_text \
+        or "install_launcher" not in install_text \
+        or install_text.index('mv "${stage_dir}/Mandatum.app"') \
+        > install_text.rindex("install_launcher"):
+    failures.append(
+        "[NATIVE-DEPENDENCY-BOUNDARY] self-update owner must be installed "
+        "after the app swap"
     )
 
 # ---- [L1-GATE] direct-dependency bans across the render seam ------------

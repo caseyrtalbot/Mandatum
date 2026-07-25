@@ -3448,3 +3448,58 @@ do not strand events, and PTY/agent producers retain the same app-owned sender.
 The live flood test proves quit and shutdown remain responsive while flow
 credits stay within the cap. The final synchronized `./ci/gate.sh` ended
 `GATE GREEN`.
+
+## Distribution Ships One App Bundle And One Launcher
+
+Context: the previous public contract shipped three raw command archives per
+platform, asked users to manage `mandatum`, `mandatum-native`, and
+`mandatum-approval-bridge` on `PATH`, and required Developer ID signing plus
+Apple notarization credentials that were never configured, so no native
+release could ever publish. The README led with Cargo, certificates, and
+bridge internals. That is a developer-toolchain contract wrapped around what
+is actually a desktop application.
+
+Decision: releases publish exactly one macOS artifact: a universal
+`Mandatum.app.zip` with a SHA-256 sidecar, assembled by
+`packaging/package-app.sh` from per-architecture CI builds joined with
+`lipo`. The bundle carries the approval bridge as a sibling of the app
+executable in `Contents/MacOS` (the connector already resolves siblings
+first) and a POSIX-sh launcher at `Contents/Resources/mandatum`. `install.sh`
+verifies the checksum, installs the app to `/Applications` (or
+`~/Applications`, or `MANDATUM_APP_DIR`), and copies the launcher to
+`~/.local/bin/mandatum` last, so a failed app swap leaves the previous
+updater usable. `mandatum` opens the app in the current directory;
+`mandatum update` re-runs the hosted installer, which refuses downgrades and
+restores the prior app if a swap fails. Binaries are ad-hoc signed; the
+project claims checksums and CI provenance, not notarization. The terminal
+frontend (`mandatum-app`'s `mandatum` binary) remains a development surface
+and is no longer distributed.
+
+Rationale: the user contract is download, open, update. Every removed
+concept (Cargo, toolchains, certificate pinning, bridge placement) was
+machinery the product should carry, not the user. Ad-hoc signing is honest
+about what exists today: the pinned-team verification path could never
+succeed without credentials, which made the old installer's strictness
+theater. Conformance now enforces the new surface: allowlisted release
+build targets, allowlisted bundle executables, checksum-before-extract, no
+developer tokens in the installer, and launcher-installed-last.
+
+Consequences:
+
+- pre-app installations cannot self-update across the format change (their
+  embedded updater looks for retired tar.gz assets); the migration path is
+  rerunning the one-line installer;
+- browser downloads hit a Gatekeeper warning because nothing is notarized;
+  the README documents the System Settings allowance and the installer path
+  that avoids quarantine entirely;
+- `ci/distribution-smoke.sh` now exercises the real packaging script,
+  fixture app bundles, launcher update, downgrade refusal, and swap
+  rollback; and
+- the release workflow needs no repository secrets.
+
+Verification: the distribution smoke passes locally (install, idempotent
+reinstall, launcher-driven update, downgrade refusal, swap rollback with
+restore), conformance passes against the new surfaces, and the packaged
+bundle launches with `--font-info` intact from inside `Mandatum.app`. The
+release pipeline's own smoke installs the published asset on both Mac
+architectures and exercises `mandatum update` end to end.

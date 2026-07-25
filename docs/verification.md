@@ -533,14 +533,17 @@ untrusted before it enters a mandate.
 
 ## Public Distribution Checks
 
-The public installer, updater, and release archives are product boundaries. Any
-change must rerun `ci/distribution-smoke.sh`, the distribution/update tests,
-archive membership and checksum checks, and the authoritative repository gate.
-The common archive must remain compatible with pre-native updaters; native
-macOS binaries ship in a separate per-architecture archive. A public release is
-not qualified until a real signed Apple Silicon and Intel build completes
-notarization and a fresh install verifies checksums, signatures, pinned Team ID,
-launch, and update behavior.
+The public installer, updater, and release artifact are product boundaries.
+Any change must rerun `ci/distribution-smoke.sh` (fixture app bundles built
+by the real packaging script: install, idempotent reinstall, launcher-driven
+update, downgrade refusal, and swap rollback), the conformance shipping
+checks, and the authoritative repository gate. The release ships one
+universal `Mandatum.app.zip` with a SHA-256 sidecar; the bundle carries the
+approval bridge beside the app executable and the launcher at
+`Contents/Resources/mandatum`. A public release is not qualified until the
+release workflow's smoke installs the published asset on Apple Silicon and
+Intel runners, verifies the checksum and ad-hoc signature, and exercises
+`mandatum update` against the live release.
 
 ## The Stranger Test
 

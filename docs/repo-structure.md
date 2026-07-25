@@ -12,12 +12,14 @@ LICENSE        Apache-2.0
 Cargo.toml     Rust workspace manifest + shared release version
 Cargo.lock     locked Rust dependencies
 rust-toolchain.toml  pinned gate toolchain
-install.sh     architecture-aware installer with checksum + macOS signer verification
+install.sh     checksum-verifying installer for Mandatum.app + the mandatum launcher
+packaging/     Info.plist template, app icon + generator, launcher script, and
+               the Mandatum.app assembly/signing script
 ci/            merge gate, distribution smoke, and native frontend maintenance
-.github/       GitHub Actions CI + signed/notarized macOS and terminal release
-               archives, Dependabot config, issue and PR templates
+.github/       GitHub Actions CI + the universal Mandatum.app release pipeline,
+               Dependabot config, issue and PR templates
 docs/          product and architecture specs
-docs/assets/   README interface frames
+docs/assets/   README screenshots captured from the running app
 crates/        implementation modules
 examples/      live-slice driven demo (the stranger-test scene)
 spikes/        excluded measurement, stress, fault, and terminal probes

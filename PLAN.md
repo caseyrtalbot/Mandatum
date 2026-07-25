@@ -38,23 +38,24 @@ The public limitations are equally explicit:
 
 ## Distribution
 
-Version `0.2.0` remains the latest published terminal-only release. The
-repository is prepared for the first native macOS release:
+Version `0.2.0` was the last split-archive, terminal-only release. The
+current contract ships the desktop application:
 
-- common archives retain the legacy `mandatum` and approval-bridge contract;
-- separate Apple Silicon and Intel native archives carry `mandatum-native`;
-- the installer verifies archive membership, SHA-256 checksums, Developer ID
-  signatures, and the pinned Apple Team ID before replacement;
-- partial multi-binary installs roll back to the previous set;
-- `mandatum update` consumes versioned GitHub Releases; and
-- release automation fails closed unless signing and Apple notarization
-  complete.
+- tagged releases publish one universal `Mandatum.app.zip` (Apple Silicon
+  and Intel) with a SHA-256 sidecar, assembled by
+  `packaging/package-app.sh` from per-architecture CI builds;
+- the approval bridge rides inside the bundle beside the app executable,
+  and the command-line launcher rides at `Contents/Resources/mandatum`;
+- `install.sh` verifies the checksum, installs the app to `/Applications`
+  (or `~/Applications`), and installs the `mandatum` launcher last;
+- `mandatum` opens the app in the current directory, and `mandatum update`
+  re-runs the hosted installer, which refuses downgrades and rolls back a
+  failed swap; and
+- binaries are ad-hoc signed, so publishing requires no Apple credentials
+  or repository secrets.
 
-Publishing the first compatible native release still requires the maintainer's
-Developer ID certificate and Apple notarization credentials in GitHub Actions.
-Until that release exists, the one-line installer safely falls back to the
-published terminal frontend and the native application can be built from
-source.
+The terminal frontend remains a development surface and is not distributed.
+See the "Distribution Ships One App Bundle And One Launcher" decision.
 
 ## Ordered Work
 

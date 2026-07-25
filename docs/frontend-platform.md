@@ -87,41 +87,32 @@ contract change.
 
 ## Distribution
 
-Tagged releases are prepared to publish separate Apple Silicon and Intel macOS
-artifacts. Each architecture has a common archive:
+Tagged releases publish one universal macOS artifact, `Mandatum.app.zip`,
+with a SHA-256 sidecar. The bundle layout is the shipping contract:
 
 ```text
-mandatum
-mandatum-approval-bridge
-LICENSE
+Mandatum.app/
+  Contents/Info.plist
+  Contents/MacOS/Mandatum                  (universal native binary)
+  Contents/MacOS/mandatum-approval-bridge  (resolved as a sibling)
+  Contents/Resources/mandatum              (command-line launcher)
+  Contents/Resources/Mandatum.icns
+  Contents/Resources/LICENSE
 ```
 
-and a native archive:
+`install.sh` verifies the checksum, installs the app to `/Applications` or
+`~/Applications`, and copies the launcher to `~/.local/bin/mandatum` after
+the app swap succeeds, so a failed swap leaves the previous updater in
+place. `mandatum` opens the app in the current directory; `mandatum update`
+re-runs the hosted installer, which refuses downgrades and restores the
+prior app when a replacement fails.
 
-```text
-mandatum-native
-LICENSE
-```
+Binaries are ad-hoc signed. The project claims checksum verification and CI
+provenance, not Apple notarization, so a browser-downloaded zip triggers a
+Gatekeeper warning while the installer path avoids quarantine entirely.
 
-Keeping the common archive's membership stable lets pre-native installations
-upgrade their terminal command and embedded installer without rejecting an
-unexpected file. The installer treats an equal version as current only when
-the complete selected platform set is present, so a terminal-only installation
-can acquire the native archive without a version bump or forced downgrade.
-
-The release workflow is configured to sign all three macOS binaries with a
-Developer ID Application certificate, enable the hardened runtime, and submit
-them to Apple for notarization. Missing credentials or an unsuccessful
-signing/notarization step fails publication.
-
-The installer detects the Mac architecture, verifies both release checksums,
-validates each binary's Developer ID signature against the pinned Apple Team
-ID, and installs all three commands. Newer `mandatum update` versions apply
-later published releases and restore the previous command set if replacement
-fails. The archives contain command-line binaries rather than a `.app` bundle,
-so the project does not claim stapled or offline Gatekeeper tickets.
-
-Public binary releases currently target Apple Silicon and Intel macOS. Other
+Public binary releases currently target Apple Silicon and Intel macOS. The
+terminal frontend is a development surface and is not distributed. Other
 platforms are outside the supported release path.
 
 ## Verification

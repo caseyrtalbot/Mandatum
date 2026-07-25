@@ -34,3 +34,13 @@ The default Claude connector gates shell commands and auto-allows file reads
 and writes. This policy is connector-dependent. The command-risk label shown
 with an approval is a heuristic for human review, not a sandbox or a security
 guarantee. Users remain responsible for reviewing commands before approval.
+
+## Release integrity
+
+Releases are built by GitHub Actions from the tagged commit and publish one
+macOS artifact, `Mandatum.app.zip`, with a SHA-256 sidecar. `install.sh` and
+`mandatum update` verify that checksum before installing and refuse to
+replace a newer installed version with an older release. Binaries are
+ad-hoc signed; the project does not currently claim Apple notarization or
+Developer ID identity, so checksum verification and CI provenance are the
+integrity boundary.
