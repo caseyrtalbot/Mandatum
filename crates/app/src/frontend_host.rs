@@ -95,14 +95,15 @@ impl FrontendHost {
     /// Whether the current presentation state makes pure pointer motion
     /// redraw-sensitive. The native shell compares this before and after
     /// routing motion so separator enter and leave both repaint. The tuple is
-    /// `(continuous_redraw, hovered_separator_identity)`.
-    pub fn pointer_move_redraw_state(&self) -> (bool, Option<usize>) {
+    /// `(continuous_redraw, hovered_separator_identity, overlay_row_identity)`.
+    pub fn pointer_move_redraw_state(&self) -> (bool, Option<usize>, Option<usize>) {
         if self.shutdown_complete {
-            (false, None)
+            (false, None, None)
         } else {
             (
                 self.app.pointer_move_needs_redraw(),
                 self.app.hovered_separator(),
+                self.app.hovered_overlay_row(),
             )
         }
     }

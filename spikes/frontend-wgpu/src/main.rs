@@ -2278,6 +2278,7 @@ impl App {
             || redraw_before.0
             || redraw_after.0
             || redraw_before.1 != redraw_after.1
+            || redraw_before.2 != redraw_after.2
         {
             self.request_redraw();
         }

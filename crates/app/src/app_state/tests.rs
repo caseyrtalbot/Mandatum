@@ -920,6 +920,35 @@ fn either_half_of_each_two_row_overlay_target_resolves_to_the_same_item() {
     }
 }
 
+#[test]
+fn palette_rows_track_pointer_hover_like_the_context_menu() {
+    let mut state = state();
+    state.handle_key(ctrl('p'));
+    let scene = state.build_scene(POINTER_FRAME);
+    let (index, rect) = scene
+        .hit_targets
+        .iter()
+        .find_map(|target| match target.kind {
+            HitTargetKind::PaletteItem(index) if index != 0 => Some((index, target.rect)),
+            _ => None,
+        })
+        .expect("palette exposes a row beyond the initial selection");
+
+    send_pointer(
+        &mut state,
+        pointer_event(PointerKind::Move, None, rect.x.saturating_add(1), rect.y),
+    );
+    assert_eq!(
+        state.palette.as_ref().expect("palette stays open").selected,
+        index,
+        "the highlight follows the pointer onto the row"
+    );
+    assert!(
+        state.build_scene(POINTER_FRAME).overlay.is_some(),
+        "hover only moves the highlight; rows run on press alone"
+    );
+}
+
 // State-aware menu labels: a zoomed pane's menu offers "Unzoom pane",
 // and docking/floating already flips its row — the menu never names an
 // action that would do the opposite of its label.

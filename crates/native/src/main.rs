@@ -83,10 +83,10 @@ fn next_native_window_title(current: &str, project_label: &str) -> Option<String
 
 fn pointer_input_needs_redraw(
     kind: PointerKind,
-    before: (bool, Option<usize>),
-    after: (bool, Option<usize>),
+    before: (bool, Option<usize>, Option<usize>),
+    after: (bool, Option<usize>, Option<usize>),
 ) -> bool {
-    kind != PointerKind::Move || before.0 || after.0 || before.1 != after.1
+    kind != PointerKind::Move || before.0 || after.0 || before.1 != after.1 || before.2 != after.2
 }
 
 fn logical_pointer_position(x: f64, y: f64, backing_scale: f32) -> Option<LogicalPoint> {

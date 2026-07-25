@@ -78,10 +78,12 @@ fn native_window_title_updates_only_when_scene_project_label_changes() {
 
 #[test]
 fn pointer_move_redraw_policy_tracks_host_owned_separator_hover() {
-    let quiet = (false, None);
-    let first_separator = (false, Some(0));
-    let second_separator = (false, Some(1));
-    let continuous = (true, None);
+    let quiet = (false, None, None);
+    let first_separator = (false, Some(0), None);
+    let second_separator = (false, Some(1), None);
+    let continuous = (true, None, None);
+    let first_overlay_row = (false, None, Some(0));
+    let second_overlay_row = (false, None, Some(1));
 
     assert!(!pointer_input_needs_redraw(PointerKind::Move, quiet, quiet));
     assert!(pointer_input_needs_redraw(
@@ -108,6 +110,14 @@ fn pointer_move_redraw_policy_tracks_host_owned_separator_hover() {
         continuous,
         continuous
     ));
+    assert!(
+        pointer_input_needs_redraw(PointerKind::Move, first_overlay_row, second_overlay_row),
+        "hover moving an overlay's selected row repaints"
+    );
+    assert!(
+        !pointer_input_needs_redraw(PointerKind::Move, first_overlay_row, first_overlay_row),
+        "motion within the same overlay row stays quiet"
+    );
     assert!(pointer_input_needs_redraw(PointerKind::Drag, quiet, quiet));
     assert!(pointer_input_needs_redraw(PointerKind::Down, quiet, quiet));
 }

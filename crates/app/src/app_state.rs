@@ -2622,11 +2622,17 @@ impl AppState {
         self.active_logical_pointer = None;
     }
 
-    /// Forward unbuttoned motion only when the child under the pointer asked
-    /// for any-event mouse reporting. Otherwise the workspace has no hover
-    /// behavior outside its modal context menu.
+    /// Rows of an open list overlay track the pointer the way the context
+    /// menu's do. Otherwise, forward unbuttoned motion only when the child
+    /// under the pointer asked for any-event mouse reporting; the workspace
+    /// itself hovers nothing but split separators.
     fn handle_pointer_move(&mut self, pointer: PointerEvent) -> bool {
         let target = self.pointer_target(pointer.column, pointer.row);
+        if let Some(target) = &target
+            && let Some(changed) = self.hover_list_overlay_row(&target.kind)
+        {
+            return changed;
+        }
         let next_hover = target.as_ref().and_then(|target| match target.kind {
             HitTargetKind::Separator { split_index, .. } => Some(split_index),
             _ => None,
@@ -2641,6 +2647,56 @@ impl AppState {
             _ => false,
         };
         hover_changed || forwarded
+    }
+
+    /// Move an open list overlay's selection to the row under the pointer.
+    /// Returns `None` when the hit is not a row of a currently open overlay,
+    /// which also covers a stale row target from a scene built before the
+    /// overlay closed.
+    fn hover_list_overlay_row(&mut self, kind: &HitTargetKind) -> Option<bool> {
+        match kind {
+            HitTargetKind::PaletteItem(index) => {
+                let palette = self.palette.as_mut()?;
+                let changed = palette.selected != *index;
+                palette.selected = *index;
+                Some(changed)
+            }
+            HitTargetKind::TimelineItem(index) => {
+                let view = self.timeline_view.as_mut()?;
+                let changed = view.selected != *index;
+                view.selected = *index;
+                Some(changed)
+            }
+            HitTargetKind::SearchItem(index) => {
+                let view = self.search_view.as_mut()?;
+                let changed = view.selected != *index;
+                view.selected = *index;
+                Some(changed)
+            }
+            HitTargetKind::SessionMapRow(index) => {
+                let map = self.session_map.as_mut()?;
+                let changed = map.selected != *index;
+                map.selected = *index;
+                Some(changed)
+            }
+            _ => None,
+        }
+    }
+
+    /// The selected row of whichever modal list overlay is open. Part of the
+    /// pointer-motion redraw identity beside separator hover, so a hover that
+    /// moves the highlight repaints without forcing a redraw per move.
+    pub(crate) fn hovered_overlay_row(&self) -> Option<usize> {
+        if let Some(palette) = &self.palette {
+            return Some(palette.selected);
+        }
+        if let Some(view) = &self.timeline_view {
+            return Some(view.selected);
+        }
+        if let Some(view) = &self.search_view {
+            return Some(view.selected);
+        }
+        self.session_map.as_ref().map(|map| map.selected)
     }
 
     /// The topmost hit target of the last built scene under a point: the
