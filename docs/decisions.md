@@ -2905,7 +2905,7 @@ route. The final displayed native check and repository gate are recorded in
 
 ## Native In-App Visual Polish Is The Next Product Phase
 
-Status: accepted; implementation not started (2026-07-24)
+Status: accepted; implementation in progress (2026-07-24)
 
 Decision: begin production-grade visual polish as the next native product
 phase. In-app typography, materials, hierarchy, density, focus, overlays,
@@ -2960,3 +2960,47 @@ the representative displayed scenario matrix when pixels change, and the full
 `./ci/gate.sh` after final documentation synchronization. Baseline images may
 change only through explicit human acceptance; CI must never auto-regenerate
 them.
+
+## Fixed-Reference Visual Evidence Fails Closed
+
+Status: accepted (2026-07-24)
+
+Decision: the `casey-m4pro-metal-scale2` profile means a genuinely scale-2
+native client and ScreenCaptureKit frame. The capture tool must refuse a
+scale-1 window or display rather than upscale it and relabel the result.
+Canonical `narrow` is narrow pane geometry inside the same fixed
+1600 x 1200 physical, 800 x 600 logical, 102 x 35 scene; smaller-window cases
+belong to the later pairwise matrix.
+
+Context: Phase 1 implemented the real-host catalog and fixed capture/diff
+interfaces while the only active display was `LG ULTRAGEAR+` at backing scale
+1.0. ScreenCaptureKit can resample output dimensions, but those pixels do not
+prove the accepted scale-2 font rasterization, rounding, or compositor path.
+Treating that file as the fixed baseline would make exact metadata dishonest.
+The plan also named `narrow` while requiring one fixed surface for every
+canonical baseline, so the scenario needed one unambiguous interpretation.
+
+Rationale: reference artifacts are valuable only when their environmental
+identity is true. A fail-closed preflight turns a missing display condition
+into an explicit operational prerequisite instead of a silent weakening of
+the evidence. Keeping every canonical image on one fixed surface makes
+metadata, comparison, and review coherent while still exercising narrow pane
+behavior.
+
+Consequences:
+
+- capture requires an active 2.0-backing-scale display with at least
+  800 x 600 logical pixels;
+- the scenario window and ScreenCaptureKit frame are validated independently;
+- candidates remain ignored local evidence until explicit acceptance;
+- `compare` writes no files;
+- `accept` requires a nonblank rationale, rejects a dirty source record, and
+  never replaces the optional mask implicitly;
+- no scale-1 baseline is accepted for the fixed profile; and
+- Phase 1 remains incomplete until all 11 fixed-reference baselines are
+  captured and explicitly accepted from a clean source commit.
+
+Verification: the portable catalog and visual-diff tests passed, the Swift
+capture script typechecked, the lab displayed `calm-terminal` successfully,
+and the fixed-profile capture command refused the active scale-1 display
+before writing a candidate.

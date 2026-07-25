@@ -174,6 +174,150 @@ It is an engine-side crate (deps: `mandatum-core`, serde, and pure Unicode
 segmentation/width policy only) and never depends on the terminal engine; the
 app's `scene_builder` converts engine grids into scene surfaces.
 
+### Phase 1 Native Presentation Contract Freeze
+
+Phase 1 of native visual polish freezes the following interface and invariants
+for Phase 2. This is a documentation contract only: Phase 1 does not add
+code-level geometry or accessibility wiring, change `FrontendHost::frame`,
+replace cell pointer input, populate a native presentation plan, or change any
+production pixel. `SceneRect`, `SceneSize`, existing hit targets,
+`CellProgram`, and the current native renderer remain the implemented path
+until Phase 2 lands the contract as one capability family.
+
+The Phase 2 scene interface will add these renderer-neutral value types:
+
+```text
+ViewportMetrics {
+  logical_size,
+  physical_size,
+  backing_scale,
+  measured_cell_metrics,
+}
+
+LogicalPoint
+LogicalSize
+LogicalRect
+
+PresentationNodeId
+PresentationNode {
+  id,
+  parent,
+  logical_rect,
+  cell_rect,
+  terminal_projection,
+}
+
+TerminalViewportMapping {
+  pane_id,
+  pty_size,
+  visible_cell_rect,
+  logical_rect,
+  first_visible_surface_row,
+}
+
+LogicalHitTarget {
+  node_id,
+  logical_rect,
+  kind,
+}
+
+AccessibilityNode {
+  id,
+  parent,
+  role,
+  label,
+  value,
+  state,
+  logical_rect,
+  supported_actions,
+}
+
+AccessibilityActionEvent {
+  scene_revision,
+  node_id,
+  action,
+}
+```
+
+`ViewportMetrics` is neutral shell input. The native shell supplies client
+logical size, client physical size, backing scale, and measured logical cell
+width and height as one coherent snapshot. The scene layer derives the cell
+grid and every cell/logical rectangle from that input. The native shell may
+translate platform physical coordinates into a neutral `LogicalPoint`; it may
+not derive pane cells, chrome geometry, PTY coordinates, or hit regions.
+
+Logical geometry uses half-open rectangles: left and top are included; right
+and bottom are excluded. Scene values must retain deterministic `Eq` and serde
+behavior. Raw `f32`/`f64` fields are therefore forbidden in logical geometry.
+`LogicalPoint`, `LogicalSize`, and `LogicalRect` use signed 1/64-logical-pixel
+fixed-point coordinates and non-negative fixed-point dimensions. Backing scale
+uses a validated serde wrapper with canonical bit identity: construction and
+deserialization reject zero, negative, NaN, and infinite values and normalize
+negative zero. Metrics reject zero/non-finite cell dimensions and a
+logical/physical/scale disagreement greater than one physical pixel. Conversion
+from measured floating-point font metrics happens once at the shell boundary;
+scene layout and identity never depend on repeated float rounding.
+
+`PresentationNodeId` is an opaque structural value, not a renderer-readable
+string. Its identity is durable owner identity plus a typed semantic part:
+workspace/header/status; pane id plus title/body/output; or overlay kind plus a
+stable item key supplied by the app. An id is unique within one scene and
+remains the same across resize, scale, theme, focus, selection, content, filter,
+and draw-order changes while the same semantic entity and part still exist.
+Frame revision, geometry, label text, vector index, filtered position, and
+paint order are forbidden identity inputs. A node may disappear only when its
+semantic entity or part disappears. Renderers compare ids but never parse or
+manufacture them.
+
+Every semantic `PresentationNode` carries both its scene-cell rectangle, when
+it occupies cells, and its scene-owned logical rectangle. It also carries an
+explicit `terminal_projection` naming the `CellProgram` cell region or regions
+that communicate the same product meaning. Native-only radius, shadow, scrim,
+elevation, and motion are non-semantic presentation primitives, not product
+nodes, and do not invent terminal content or accessibility nodes. A new native
+semantic component cannot ship without an honest terminal projection.
+
+`TerminalViewportMapping` is explicit per visible terminal or task-output
+surface. `pty_size` is the full child PTY grid; `visible_cell_rect` is the
+painted region in workspace-cell coordinates; `logical_rect` is the exact
+scene-owned logical region; and `first_visible_surface_row` maps the visible
+window back to terminal surface history. These values must not be conflated:
+task PTYs may retain the pane's full inner size while metadata reduces the
+visible output region. A logical point maps to a child cell only when it lies
+inside the mapping's half-open logical rectangle. Chrome, rails, padding, and
+insets never silently consume PTY rows or columns.
+
+Every pixel-space interactive surface has a `LogicalHitTarget` with the same
+stable node id and semantic target kind. Painted list rows and controls use the
+same scene layout calculation for their visual and hit rectangles. A target
+may intentionally be larger than a thin visible affordance, such as the
+six-logical-pixel target around a one-logical-pixel separator, but both
+rectangles are explicit scene data, clipped to the viewport, and tested
+together. Hit targets retain bottom-to-top ordering. Pane-body hover or motion
+cannot claim explicit chrome/overlay targets or interfere with child mouse
+reporting; only `TerminalViewportMapping` converts an admitted pane-body
+logical point to a child cell.
+
+Accessibility meaning remains dependency-free in `mandatum-scene`.
+`AccessibilityNode` uses scene-owned roles, labels, values, state, bounds, and
+the same `PresentationNodeId`; AccessKit, AppKit, winit, and other platform
+types stay in `mandatum-native`. The semantic hierarchy is workspace, then
+header/panes/status/active overlay, then their controls and items; paint-only
+decoration has no accessibility node. Phase 2 defines the dependency-free
+nodes and the neutral actions `Focus`, `Activate`, and `SetText`; the native
+platform projection remains Phase 7 work.
+
+An accessibility adapter sends `AccessibilityActionEvent`, never a command or
+direct mutation. The event includes the `FrameSnapshot` revision from which
+the platform node was projected. `FrontendHost` resolves it only through the
+action map retained for that same last successfully presented scene; a stale
+revision, missing node, or unsupported action is inert. This mirrors exact
+painted-snapshot hit testing while stable node identity preserves platform
+continuity across valid frames. Platform adapters do not own product routing,
+and presentation nodes, mappings, action maps, caches, focus bridges, and
+animation progress remain live state that is never serialized as durable
+workspace intent.
+
 ### Frontend Adapters
 
 Own rendering and platform input:

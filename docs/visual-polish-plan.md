@@ -1,6 +1,6 @@
 # Native Visual Polish Plan
 
-Status: accepted direction; implementation not started (2026-07-24)
+Status: accepted direction; Phase 1 implementation in progress (2026-07-24)
 
 This document is the ordered implementation authority for production-grade
 native in-app visual polish. `PLAN.md` owns the broader product sequence,
@@ -356,6 +356,32 @@ values are verified through the pure resolver/native-plan tests, not by
 demanding byte-identical compositor capture colors.
 
 Do not redesign pixels in this phase.
+
+Implementation status (2026-07-24):
+
+- the 11-scenario catalog now prepares durable fixtures through
+  `mandatum-core`, drives the real `FrontendHost` with neutral input, and
+  settles on typed semantic predicates;
+- the catalog's aggregate real-host test compiles every final scene through
+  the native renderer plan;
+- `docs/architecture.md` freezes the Phase 2 dual-geometry, stable identity,
+  terminal projection, logical hit-target, PTY mapping, and accessibility
+  contract without wiring it into production pixels;
+- the excluded lab accepts `--visual-scenario <id>` and presents a fixed,
+  undecorated client surface for ScreenCaptureKit;
+- `visual-regression.swift` fails closed unless the scenario window and
+  captured frame are genuinely backing scale 2.0;
+- `visual-diff compare` is read-only, and `visual-diff accept` requires a
+  nonblank reason and refuses dirty candidate metadata;
+- the live-slice displayed route launches `mandatum-native`; and
+- fixed-reference baseline images remain pending because the only active
+  display during this implementation run was `LG ULTRAGEAR+` at backing scale
+  1.0. Upscaling that capture is not accepted evidence.
+
+The canonical `narrow` baseline means narrow pane geometry inside the same
+fixed 1600 x 1200 / scale-2 / 102 x 35 reference surface. Smaller-window
+variants remain part of the later pairwise matrix and do not weaken the fixed
+metadata contract.
 
 Exit:
 

@@ -223,3 +223,16 @@ fn pressed_pointer_state_distinguishes_drag_and_resets() {
     assert_eq!(buttons.active(), None);
     assert!(buttons.all().is_empty());
 }
+
+#[test]
+fn live_slice_displayed_route_launches_the_native_product() {
+    let script = include_str!("../../../examples/live-slice/run.sh");
+    assert!(
+        script.contains("exec cargo run -q -p mandatum-native --bin mandatum-native"),
+        "the live-slice displayed route must launch the native product"
+    );
+    assert!(
+        !script.contains("exec cargo run -q -p mandatum-app"),
+        "the displayed live slice must not silently fall back to the terminal adapter"
+    );
+}

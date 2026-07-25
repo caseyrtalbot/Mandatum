@@ -177,6 +177,15 @@ motion, fixed-reference macOS baseline, resize, idle, and frame-preparation
 procedures in [verification.md](verification.md). Pixel baselines supplement
 semantic tests; they never replace them or update implicitly.
 
+Phase 1's deterministic acceptance catalog lives in
+`crates/app/src/visual_scenario.rs`: it prepares product fixtures through the
+core model and drives the real `FrontendHost` only with neutral input. The
+excluded native lab's `--visual-scenario` route displays those same scenes;
+`visual-regression.swift` captures a genuine fixed-reference client surface,
+and `visual-diff` owns read-only comparison plus explicit human acceptance.
+Neither capture nor comparison derives product meaning or changes production
+renderer behavior.
+
 ## Resize And Rewrap
 
 Lines wrapped at a narrow width stay wrapped after the terminal grows

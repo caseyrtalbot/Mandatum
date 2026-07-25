@@ -282,6 +282,23 @@ Maintain one deterministic visual-scenario catalog driven through
 `FrontendHost` and neutral input. Handcrafted renderer-only state may exercise
 an isolated boundary, but it cannot substitute for the real-host case.
 
+The current catalog implementation is `crates/app/src/visual_scenario.rs`.
+The excluded lab displays a catalog state with:
+
+```sh
+cargo run --manifest-path spikes/frontend-wgpu/Cargo.toml \
+  --bin mandatum-native-lab -- \
+  --visual-scenario calm-terminal \
+  --font-size 13 \
+  --exit-after 30
+```
+
+Every recipe must settle on its typed semantic predicate before the lab paints
+it. `spikes/frontend-wgpu/tests/host_wake.rs` is the aggregate real-host and
+native-plan gate. The canonical `narrow` recipe creates deliberately narrow
+pane geometry inside the fixed 102 x 35 scene; it does not change the
+fixed-reference client size.
+
 The catalog should contain:
 
 - the shared typography corpus with ANSI/true color, all styles, ligatures,
@@ -314,6 +331,43 @@ Apple Silicon Mac, bundled JetBrains Mono profile, exact theme, physical
 surface size, scene size, backing scale, display, refresh rate, commit, and
 build recorded beside each image. Do not include desktop pixels, window shadow,
 or an uncontrolled fallback font in the comparison.
+
+Capture one candidate with:
+
+```sh
+spikes/frontend-wgpu/scripts/visual-regression.swift capture \
+  --profile casey-m4pro-metal-scale2 \
+  --scenario calm-terminal
+```
+
+The capture command fails before launch when no active 2.0-backing-scale
+display can hold the 800 x 600 logical client. It also rejects a scenario
+window or ScreenCaptureKit frame whose live scale is not 2.0. ScreenCaptureKit
+resampling a scale-1 window is never relabeled as scale-2 evidence.
+
+Compare without writing files:
+
+```sh
+cargo run --manifest-path spikes/frontend-wgpu/Cargo.toml \
+  --bin visual-diff -- compare \
+  --profile casey-m4pro-metal-scale2 \
+  --scenario calm-terminal
+```
+
+After side-by-side human review, accept explicitly:
+
+```sh
+cargo run --manifest-path spikes/frontend-wgpu/Cargo.toml \
+  --bin visual-diff -- accept \
+  --profile casey-m4pro-metal-scale2 \
+  --scenario calm-terminal \
+  --reason "describe the intended visual change"
+```
+
+Candidates live under ignored `spikes/frontend-wgpu/visual-candidates/`.
+Accepted baselines alone live under tracked
+`spikes/frontend-wgpu/visual-baselines/`. Acceptance rejects dirty candidate
+metadata and never replaces `mask.json`.
 
 Keep baseline, current, and heatmap/diff images for every canonical case. Judge
 different pixel classes separately:
@@ -677,6 +731,14 @@ developer unfamiliar with the current implementation can identify:
   informed `docs/visual-polish-plan.md`; they are baseline planning evidence,
   not a claim that the planned visual system or its future baseline harness
   exists.
+- **2026-07-24:** Phase 1's portable catalog and tooling pass reached all 11
+  typed scenarios through the real `FrontendHost`, compiled them through the
+  native plan, typechecked the ScreenCaptureKit script, displayed
+  `calm-terminal` through the lab, and verified the live-slice native launch
+  route. The fixed-reference capture command then refused the only active
+  `LG ULTRAGEAR+` display because its live backing scale was 1.0. No baseline
+  was captured, accepted, or claimed from resampled pixels; Phase 1 remains
+  open until a genuine scale-2 display or mode is active.
 
 ## Completion Rule
 

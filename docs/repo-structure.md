@@ -185,11 +185,12 @@ history (see docs/workflows.md for what remains unbuilt here).
 ## Spikes And Examples
 
 ```text
-spikes/frontend-wgpu/   excluded mandatum-native-lab measurement, stress, and
-                        fault harness; terminal latency, symmetric
-                        ScreenCaptureKit, and typography-corpus tools; frozen
-                        RESULTS.md
-examples/live-slice/    driven demo workspace for the stranger test
+spikes/frontend-wgpu/   excluded mandatum-native-lab measurement, stress,
+                        fault, and deterministic visual-scenario harness;
+                        ScreenCaptureKit capture, explicit visual-diff
+                        acceptance, terminal latency, typography-corpus tools,
+                        and frozen RESULTS.md
+examples/live-slice/    driven native demo workspace for the stranger test
 ```
 
 ## Repo-Local Skills

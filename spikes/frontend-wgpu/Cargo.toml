@@ -12,6 +12,10 @@ default-run = "mandatum-native-lab"
 name = "mandatum-native-lab"
 path = "src/main.rs"
 
+[[bin]]
+name = "visual-diff"
+path = "src/bin/visual-diff.rs"
+
 # The native shell consumes the real shared host. mandatum-pty remains a
 # direct dependency only for the standalone tui_probe binary.
 [dependencies]
@@ -25,8 +29,6 @@ arboard = "3.6"
 pollster = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[dev-dependencies]
 png = "0.18"
 
 [profile.release]

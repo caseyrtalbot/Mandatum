@@ -6,11 +6,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mandatum_app::{AppConfig, FrameSnapshot, FrontendEffect, FrontendHost};
+use mandatum_app::{
+    AppConfig, FrameSnapshot, FrontendEffect, FrontendHost, VisualScenarioId,
+    prepare_visual_scenario,
+};
 use mandatum_native_renderer::{PreparedScene, prepare_scene};
 use mandatum_scene::{
-    ArtifactState, CellOccupancy, CellSelection, HitTargetKind, OverlayScene, PaneContent,
-    SceneRect, SceneSize, WorkspaceScene,
+    AgentStatus, ArtifactState, CellOccupancy, CellSelection, HitTargetKind, OverlayScene,
+    PaneContent, SceneRect, SceneSize, WorkspaceScene,
     input::{
         CompositionEvent, InputEvent, Key, KeyCode, Modifiers, PointerButton, PointerEvent,
         PointerKind, TextRange,
@@ -1561,4 +1564,187 @@ fn real_host_startup_restore_recreates_processes_then_resizes_and_quits_cleanly(
     assert!(restored.shutdown());
     assert!(!restored.shutdown());
     assert_eq!(restored.drain_runtime(), 0);
+}
+
+#[test]
+fn every_visual_scenario_reaches_its_typed_state_and_gpu_render_plan() {
+    let size = SceneSize::new(102, 35);
+
+    for id in VisualScenarioId::ALL {
+        let project = DisposableProject::new(&format!("visual-scenario-{}", id.as_str()));
+        let scenario = prepare_visual_scenario(id, &project.path)
+            .unwrap_or_else(|error| panic!("{id}: could not prepare fixture: {error}"));
+        let mut host = FrontendHost::new(scenario.app_config());
+        let snapshot = scenario
+            .drive(&mut host, size, Duration::from_secs(3))
+            .unwrap_or_else(|error| {
+                let last = host.frame(size);
+                let panes = last
+                    .scene
+                    .panes
+                    .iter()
+                    .map(|pane| format!("{}:{:?}", pane.id, pane.kind))
+                    .collect::<Vec<_>>();
+                panic!(
+                    "{id}: {error}; status={}; panes={panes:?}",
+                    last.scene.status.text
+                )
+            });
+        let prepared = prepare_scene(&snapshot.scene, &snapshot.theme)
+            .unwrap_or_else(|error| panic!("{id}: GPU render-plan preparation failed: {error}"));
+        assert_scene_reaches_cell_program(&prepared, &snapshot.scene);
+
+        match id {
+            VisualScenarioId::Typography => {
+                let (pane, _) = terminal_pane(&snapshot);
+                assert_cell_program_contains(
+                    &prepared,
+                    layout::pane_inner_rect(pane.area),
+                    "TYPOGRAPHY_CORPUS_READY",
+                );
+                assert_cell_program_contains(&prepared, layout::pane_inner_rect(pane.area), "Bold");
+                assert!(snapshot.scene.copy_mode);
+                assert!(prepared.cell_program().cells().any(|(_, _, cell)| {
+                    cell.selection == Some(CellSelection::Terminal)
+                }));
+                assert!(
+                    prepared
+                        .cell_program()
+                        .cells()
+                        .any(|(_, _, cell)| cell.cursor)
+                );
+            }
+            VisualScenarioId::CalmTerminal => {
+                let (pane, _) = terminal_pane(&snapshot);
+                assert_cell_program_contains(
+                    &prepared,
+                    layout::pane_inner_rect(pane.area),
+                    "CALM_TERMINAL_READY",
+                );
+            }
+            VisualScenarioId::DenseWorkspace => {
+                assert!(
+                    snapshot
+                        .scene
+                        .panes
+                        .iter()
+                        .any(|pane| matches!(pane.content, PaneContent::Terminal(_)))
+                );
+                assert!(
+                    snapshot
+                        .scene
+                        .panes
+                        .iter()
+                        .any(|pane| matches!(pane.content, PaneContent::Task(_)))
+                );
+                assert!(
+                    snapshot
+                        .scene
+                        .panes
+                        .iter()
+                        .any(|pane| matches!(pane.content, PaneContent::Agent(_)))
+                );
+                assert!(snapshot.scene.panes.iter().any(|pane| {
+                    matches!(
+                        &pane.content,
+                        PaneContent::Artifact(content)
+                            if matches!(content.state, ArtifactState::Ready(_))
+                    )
+                }));
+                assert_eq!(prepared.artifacts().len(), 1);
+            }
+            VisualScenarioId::Attention => {
+                assert!(snapshot.scene.panes.iter().any(|pane| {
+                    matches!(
+                        &pane.content,
+                        PaneContent::Task(task)
+                            if task.status_label.as_deref() == Some("failed: exit 3")
+                    )
+                }));
+                assert!(snapshot.scene.panes.iter().any(|pane| {
+                    matches!(
+                        &pane.content,
+                        PaneContent::Agent(agent)
+                            if agent.status_role == AgentStatus::WaitingForApproval
+                    )
+                }));
+                assert!(snapshot.scene.header.attention.len() >= 2);
+            }
+            VisualScenarioId::Palette => {
+                let Some(OverlayScene::Palette(palette)) = &snapshot.scene.overlay else {
+                    panic!("{id}: recipe did not reach the typed Palette overlay");
+                };
+                assert_eq!(palette.query, "E");
+                assert!(!palette.items.is_empty());
+                assert!(palette.selected.is_some());
+                assert!(palette.footer.contains("more"));
+            }
+            VisualScenarioId::FullModal => {
+                let Some(OverlayScene::Timeline(timeline)) = &snapshot.scene.overlay else {
+                    panic!("{id}: recipe did not reach the typed Timeline overlay");
+                };
+                assert!(!timeline.items.is_empty());
+                assert!(timeline.selected.is_some());
+            }
+            VisualScenarioId::Welcome => {
+                let Some(OverlayScene::Welcome(welcome)) = &snapshot.scene.overlay else {
+                    panic!("{id}: recipe did not reach the typed Welcome overlay");
+                };
+                assert!(!welcome.entries.is_empty());
+                assert!(!welcome.introduction.is_empty());
+            }
+            VisualScenarioId::ContextMenu => {
+                let Some(OverlayScene::ContextMenu(menu)) = &snapshot.scene.overlay else {
+                    panic!("{id}: recipe did not reach the typed ContextMenu overlay");
+                };
+                assert!(!menu.items.is_empty());
+                assert_eq!(menu.selected, 0);
+            }
+            VisualScenarioId::Artifacts => {
+                let ready = snapshot
+                    .scene
+                    .panes
+                    .iter()
+                    .filter(|pane| {
+                        matches!(
+                            &pane.content,
+                            PaneContent::Artifact(content)
+                                if matches!(content.state, ArtifactState::Ready(_))
+                        )
+                    })
+                    .count();
+                let failed = snapshot
+                    .scene
+                    .panes
+                    .iter()
+                    .filter(|pane| {
+                        matches!(
+                            &pane.content,
+                            PaneContent::Artifact(content)
+                                if matches!(content.state, ArtifactState::Failed { .. })
+                        )
+                    })
+                    .count();
+                assert_eq!(ready, 2);
+                assert_eq!(failed, 1);
+                assert!(matches!(
+                    snapshot.scene.overlay,
+                    Some(OverlayScene::ContextMenu(_))
+                ));
+            }
+            VisualScenarioId::Narrow => {
+                assert_eq!(snapshot.scene.panes.len(), 5);
+                assert!(snapshot.scene.panes.iter().all(|pane| {
+                    let inner = layout::pane_inner_rect(pane.area);
+                    inner.width > 0 && inner.height > 0
+                }));
+            }
+            VisualScenarioId::Restored => {
+                assert_eq!(snapshot.scene.panes.len(), 3);
+                assert!(snapshot.scene.status.text.contains("workspace restored"));
+            }
+        }
+
+        assert!(host.shutdown(), "{id}: host did not shut down once");
+    }
 }

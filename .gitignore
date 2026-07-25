@@ -12,3 +12,6 @@ coverage/
 
 # Mandatum's own runtime/session state when the app runs inside this repo
 .mandatum/
+
+# Local visual-regression candidates and generated review artifacts.
+spikes/frontend-wgpu/visual-candidates/

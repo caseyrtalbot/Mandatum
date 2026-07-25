@@ -59,4 +59,5 @@ launching Mandatum in the demo workspace...
 TXT
 
 cd "$DIR"
-exec cargo run -q -p mandatum-app --manifest-path "$REPO/Cargo.toml"
+exec cargo run -q -p mandatum-native --bin mandatum-native \
+  --manifest-path "$REPO/Cargo.toml"

@@ -15,7 +15,7 @@ The script writes the demo project (a flaky check script, a project
 `.mandatum/config.toml` selecting the deterministic fake agent connector),
 generates `.mandatum/workspace.json` through the real core API
 (`crates/app/examples/make_live_slice.rs`), prints the keystroke
-walkthrough, and launches Mandatum in that directory.
+walkthrough, and launches the native Mandatum product in that directory.
 
 `workspace.json` in this directory is a committed copy of the generated
 file for inspection; regenerate it with:

@@ -17,7 +17,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use mandatum_app::{AppConfig, FrontendEffect, FrontendHost};
+use mandatum_app::{
+    AppConfig, FrontendEffect, FrontendHost, PreparedVisualScenario, VisualScenarioId,
+    prepare_visual_scenario,
+};
 use mandatum_native_renderer::{
     GpuFaultInjection, GpuFaultInjectionResult, GpuFrameSkip, GpuRenderError, GpuRenderOutcome,
     GpuStartupError, GpuStartupErrorKind, GpuSurfaceRecovery, GpuText, NativeTextSettings,
@@ -56,6 +59,7 @@ const DEFAULT_SOAK_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_MEMORY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_MEASUREMENT_SAMPLES: usize = 200_000;
 const HEARTBEAT: Duration = Duration::from_millis(250);
+const VISUAL_SCENARIO_SETTLE_DELAY: Duration = Duration::from_millis(300);
 const EVENT_DRAIN_BUDGET: usize = 16;
 const IDLE_FRAME_CUTOFF_MS: f64 = 250.0;
 
@@ -110,6 +114,7 @@ struct Config {
     shaping_cache_enabled: bool,
     text_settings: NativeTextSettings,
     harness_project_path: Option<String>,
+    visual_scenario: Option<VisualScenarioId>,
 }
 
 fn parse_config() -> Result<Config, String> {
@@ -140,6 +145,7 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
         shaping_cache_enabled: true,
         text_settings: defaults,
         harness_project_path: None,
+        visual_scenario: None,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -215,6 +221,14 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
                     .ok_or_else(|| invalid_value(&arg, &value, "250..=60000 ms"))?;
             }
             "--disable-shaping-cache" => config.shaping_cache_enabled = false,
+            "--visual-scenario" => {
+                let value = required_value(&mut args, &arg)?;
+                config.visual_scenario = Some(
+                    value
+                        .parse::<VisualScenarioId>()
+                        .map_err(|error| error.to_string())?,
+                );
+            }
             "--inject-fault" => {
                 let value = required_value(&mut args, &arg)?;
                 config.fault = Some(match value.as_str() {
@@ -281,6 +295,17 @@ fn parse_config_from(args: impl IntoIterator<Item = String>) -> Result<Config, S
     if config.typing_bench && (config.flood || config.stress.is_some()) {
         return Err(
             "typing latency must run in isolation from flood and stress workloads".to_owned(),
+        );
+    }
+    if config.visual_scenario.is_some()
+        && (config.typing_bench
+            || config.flood
+            || config.stress.is_some()
+            || config.fault.is_some())
+    {
+        return Err(
+            "visual scenarios must run in isolation from measurement, stress, and fault workloads"
+                .to_owned(),
         );
     }
     Ok(config)
@@ -630,6 +655,7 @@ fn print_failure(
         shaping_cache_enabled: true,
         text_settings: fallback,
         harness_project_path: None,
+        visual_scenario: None,
     };
     let config = config.unwrap_or(&fallback_config);
     let evidence = RunEvidence {
@@ -824,6 +850,8 @@ struct App {
     scale_probe_applied: bool,
     window_focused: bool,
     ime_allowed: bool,
+    prepared_visual_scenario: Option<PreparedVisualScenario>,
+    visual_scenario_at: Option<Instant>,
 }
 
 impl App {
@@ -886,6 +914,8 @@ impl App {
             scale_probe_applied: false,
             window_focused: false,
             ime_allowed: false,
+            prepared_visual_scenario: None,
+            visual_scenario_at: None,
         }
     }
 
@@ -1621,6 +1651,34 @@ impl App {
         }
         let now = Instant::now();
         if self
+            .visual_scenario_at
+            .is_some_and(|visual_scenario_at| now >= visual_scenario_at)
+        {
+            self.visual_scenario_at = None;
+            let Some(prepared) = self.prepared_visual_scenario.take() else {
+                self.fail(
+                    "runtime",
+                    "visual_scenario",
+                    "scheduled visual scenario fixture was unavailable",
+                );
+                return false;
+            };
+            let Some(scene_size) = self.scene_size() else {
+                self.fail(
+                    "runtime",
+                    "visual_scenario",
+                    "fixed visual surface did not produce usable scene geometry",
+                );
+                return false;
+            };
+            if let Err(error) = prepared.drive(self.host_mut(), scene_size, Duration::from_secs(5))
+            {
+                self.fail("runtime", "visual_scenario", error.to_string());
+                return false;
+            }
+            self.request_redraw();
+        }
+        if self
             .scale_probe_at
             .is_some_and(|scale_probe_at| now >= scale_probe_at)
         {
@@ -1673,6 +1731,9 @@ impl App {
         if let Some(fault_at) = self.fault_at {
             next = next.min(fault_at);
         }
+        if let Some(visual_scenario_at) = self.visual_scenario_at {
+            next = next.min(visual_scenario_at);
+        }
         if self.config.typing_bench && self.injected < self.config.typing_samples {
             next = next.min(self.next_inject);
         }
@@ -1710,7 +1771,16 @@ impl ApplicationHandler<UserEvent> for App {
         let wake_proxy = self.wake_proxy.clone();
         let startup = start_after_preflight(
             || {
-                let attributes = Window::default_attributes().with_title("Mandatum GPU Host Spike");
+                let title = self.config.visual_scenario.map_or_else(
+                    || "Mandatum GPU Host Spike".to_owned(),
+                    |scenario| format!("Mandatum Visual {}", scenario.as_str()),
+                );
+                let mut attributes = Window::default_attributes().with_title(title);
+                if self.config.visual_scenario.is_some() {
+                    attributes = attributes
+                        .with_inner_size(PhysicalSize::new(1_600_u32, 1_200_u32))
+                        .with_decorations(false);
+                }
                 let window = event_loop.create_window(attributes).map_err(|error| {
                     GpuStartupError::no_display(format!("no window (headless?): {error}"))
                 })?;
@@ -1742,6 +1812,26 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
         gpu.set_shaping_cache_enabled(self.config.shaping_cache_enabled);
+        let prepared_visual_scenario = if let Some(scenario) = self.config.visual_scenario {
+            let fixture_root = self
+                .config
+                .harness_project_path
+                .as_deref()
+                .map(std::path::Path::new)
+                .expect("visual scenarios always use an isolated harness path");
+            match prepare_visual_scenario(scenario, fixture_root) {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {
+                    self.fail("startup", "visual_scenario", error.to_string());
+                    host.shutdown();
+                    self.print_summary();
+                    event_loop.exit();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         self.clipboard = match arboard::Clipboard::new() {
             Ok(clipboard) => Some(clipboard),
             Err(error) => {
@@ -1760,6 +1850,11 @@ impl ApplicationHandler<UserEvent> for App {
         self.resize_host();
 
         let ready = Instant::now();
+        self.prepared_visual_scenario = prepared_visual_scenario;
+        self.visual_scenario_at = self
+            .prepared_visual_scenario
+            .as_ref()
+            .map(|_| ready + VISUAL_SCENARIO_SETTLE_DELAY);
         self.next_heartbeat = ready + HEARTBEAT;
         self.next_memory_sample = ready;
         self.next_inject = ready + Duration::from_millis(400);
@@ -1885,6 +1980,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.refresh_mouse_cell();
                 self.resize_host();
+                if self.prepared_visual_scenario.is_some() {
+                    self.visual_scenario_at = Some(Instant::now() + VISUAL_SCENARIO_SETTLE_DELAY);
+                }
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -2238,7 +2336,11 @@ fn shift_meta_character(character: char) -> char {
 }
 
 fn uses_isolated_harness(config: &Config) -> bool {
-    config.typing_bench || config.flood || config.stress.is_some() || config.fault.is_some()
+    config.typing_bench
+        || config.flood
+        || config.stress.is_some()
+        || config.fault.is_some()
+        || config.visual_scenario.is_some()
 }
 
 fn app_config_for_run(config: &mut Config) -> std::io::Result<AppConfig> {
@@ -2254,14 +2356,20 @@ fn app_config_for_run(config: &mut Config) -> std::io::Result<AppConfig> {
         // `create_dir` fails on every pre-existing file, directory, or symlink;
         // a harness never reuses stale or attacker-prepared workspace state.
         fs::create_dir(&project_path)?;
-        let app_config = AppConfig {
-            workspace_name: "Mandatum GPU Harness".to_owned(),
-            workspace_file: project_path.join(".mandatum").join("workspace.json"),
-            project_path: project_path.clone(),
-            shell_program: "/bin/sh".to_owned(),
-            spawn_pty: true,
-            restore_on_startup: false,
-            ..AppConfig::default()
+        let app_config = if let Some(scenario) = config.visual_scenario {
+            prepare_visual_scenario(scenario, &project_path)
+                .map_err(std::io::Error::other)?
+                .app_config()
+        } else {
+            AppConfig {
+                workspace_name: "Mandatum GPU Harness".to_owned(),
+                workspace_file: project_path.join(".mandatum").join("workspace.json"),
+                project_path: project_path.clone(),
+                shell_program: "/bin/sh".to_owned(),
+                spawn_pty: true,
+                restore_on_startup: false,
+                ..AppConfig::default()
+            }
         };
         config.harness_project_path = Some(project_path.display().to_string());
         Ok(app_config)
@@ -2356,11 +2464,12 @@ mod tests {
     use super::{
         DEFAULT_MEMORY_INTERVAL, DEFAULT_SOAK_DURATION, FaultConfig, LifecycleEvidence,
         MemorySummary, MetricSummary, OutcomeEvidence, PlatformAction, PlatformEvidence,
-        PressedPointerButtons, RenderStageEvidence, RunEvidence, StressConfig, WorkloadEvidence,
-        configured_run_timeout, ime_event_is_accepted, key_for_platform_translation,
-        pane_geometry_is_suspended, parse_config_from, parse_font_family, parse_font_size,
-        parse_ps_rss_kib, parse_scale_delay, parse_scale_factor, run_exit_code,
-        scene_size_from_metrics, start_after_preflight, translate_ime, translate_key,
+        PressedPointerButtons, RenderStageEvidence, RunEvidence, StressConfig, VisualScenarioId,
+        WorkloadEvidence, configured_run_timeout, ime_event_is_accepted,
+        key_for_platform_translation, pane_geometry_is_suspended, parse_config_from,
+        parse_font_family, parse_font_size, parse_ps_rss_kib, parse_scale_delay,
+        parse_scale_factor, run_exit_code, scene_size_from_metrics, start_after_preflight,
+        translate_ime, translate_key,
     };
     use mandatum_scene::input::{
         CompositionEvent, InputEvent, Key as InputKey, KeyCode, Modifiers, TextRange,
@@ -2584,6 +2693,17 @@ mod tests {
         assert_eq!(fault.fault, Some(FaultConfig::DeviceLost));
         assert_eq!(fault.fault_after.as_millis(), 500);
 
+        let visual = parse_config_from(
+            ["--visual-scenario", "dense-workspace", "--exit-after", "30"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("canonical visual scenario");
+        assert_eq!(
+            visual.visual_scenario,
+            Some(VisualScenarioId::DenseWorkspace)
+        );
+
         for invalid in [
             vec!["--resize-count", "0"],
             vec!["--soak-seconds", "21601"],
@@ -2598,6 +2718,8 @@ mod tests {
             vec!["--scale-factor", "2"],
             vec!["--typing-bench", "--flood"],
             vec!["--typing-bench", "--resize-exercise"],
+            vec!["--visual-scenario", "dashboard"],
+            vec!["--visual-scenario", "palette", "--resize-exercise"],
         ] {
             assert!(
                 parse_config_from(invalid.into_iter().map(str::to_owned)).is_err(),
