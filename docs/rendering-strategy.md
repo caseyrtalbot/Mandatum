@@ -255,6 +255,14 @@ work, and retains static semantic emphasis. Pointer routing is suspended while
 pane or overlay hit-bearing geometry is visually between the scene-owned
 endpoint targets.
 
+The fixed-reference Phase 6 matrix freezes approval arrival at start,
+midpoint, end, and reduced-motion state only after the target frame has
+presented. The capture path retains the exact real-viewport snapshot and target
+instant across bounded surface retries, publishes readiness through the final
+window title, and fails closed rather than accepting a stale pre-checkpoint
+frame. All four references were accepted from clean source commit `4732ba8`
+on the MacBook Pro built-in Retina display.
+
 ## Resize And Rewrap
 
 Lines wrapped at a narrow width stay wrapped after the terminal grows

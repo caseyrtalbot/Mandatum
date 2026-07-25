@@ -3199,8 +3199,7 @@ strict comparisons returned SSIM 1.0 with zero changed or masked pixels.
 
 ## Motion Intent Is Typed And Runtime Polling Does Not Drive Paint
 
-Status: accepted architecture; displayed evidence and final gate pending
-(2026-07-24)
+Status: accepted architecture and displayed evidence (2026-07-25)
 
 Decision: Phase 6 adds motion as scene-owned typed eligibility plus
 renderer-local deterministic presentation progress. `SceneMotionPolicy`
@@ -3260,5 +3259,7 @@ Verification: focused deterministic source tests cover typed target
 construction, stable families, direct and reduced policy, start/mid/end,
 interruption, reversal, convergence, approval arrival, scheduling, redraw, and
 idle heartbeat behavior. Displayed motion evidence, final measured values,
-explicit reference acceptance, and the complete repository gate are not
-claimed here; `docs/verification.md` records them only after they run.
+explicit reference acceptance, and the complete repository gate are recorded
+in `docs/verification.md`. The real Metal approval-arrival matrix was captured
+from clean source commit `4732ba8` on the MacBook Pro built-in Retina display;
+three-run medians met the motion and idle budgets.

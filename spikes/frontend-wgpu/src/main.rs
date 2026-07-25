@@ -1784,10 +1784,7 @@ impl App {
                 if checkpoint_became_ready
                     && let (Some(window), Some(checkpoint)) = (&self.window, checkpoint)
                 {
-                    window.set_title(&format!(
-                        "Mandatum Visual {}",
-                        checkpoint.reference_id()
-                    ));
+                    window.set_title(&format!("Mandatum Visual {}", checkpoint.reference_id()));
                 }
                 self.present_count = self.present_count.saturating_add(1);
                 if self

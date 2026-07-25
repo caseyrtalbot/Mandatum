@@ -5,7 +5,8 @@ production shell and renderer into the workspace. Work 3 completed with a
 negative typography verdict. The accepted typography foundation is now
 implemented, displayed, and backed by the bounded Work 4 shaping cache. Work 5
 made native Casey's local default. Production-grade native in-app visual polish
-is active: visual Phase 3 is accepted and Phase 4's overlay family is next.
+is active: visual Phase 6 is accepted and Phase 7 theme/accessibility
+completion is next.
 
 ## Product Direction
 
@@ -406,11 +407,11 @@ Do not reintroduce these as adoption gates:
 
 ## Immediate Next Action
 
-Execute Phase 4 of
-[`docs/visual-polish-plan.md`](visual-polish-plan.md): migrate Palette, Search,
-Timeline, Session Map, Help, Prompt, Welcome, and Context Menu as one coherent
-overlay family. Continue daily-driving the native launcher; if another concrete
-functional failure appears, reproduce it, fix the smallest owning product seam,
-and add a regression. Do not pull workflow cards, motion, accessibility
-projection, installer, updater, release workflow, archives, rollout,
+Execute Phase 7 of
+[`docs/visual-polish-plan.md`](visual-polish-plan.md): complete the built-in
+theme, contrast, scaling, keyboard, focus, and reduced-motion matrix without
+expanding into the full cross-product. Continue daily-driving the native
+launcher; if another concrete functional failure appears, reproduce it, fix
+the smallest owning product seam, and add a regression. Do not pull Phase 8
+integration, installer, updater, release workflow, archives, rollout,
 public-GitHub presentation, or public visual materials forward.

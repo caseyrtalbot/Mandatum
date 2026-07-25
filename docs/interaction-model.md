@@ -347,6 +347,11 @@ While programmatic pane geometry or overlay scale is visually between stable
 endpoints, native pointer admission pauses so the user cannot act on geometry
 that differs from the scene-owned hit targets.
 
+The fixed-reference approval-arrival start, midpoint, end, and reduced states
+have been displayed and accepted. The reduced frame matches the stable end
+state without scheduling animation work; the motion sequence changes only
+native material geometry while text and input ownership remain direct.
+
 **Visible focus.** The focused pane title has its own theme color in all three
 built-in themes (bright blue in mandatum-dark; bright yellow in
 mandatum-high-contrast), reinforced bold, while the full perimeter stays on

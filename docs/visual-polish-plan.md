@@ -626,8 +626,9 @@ Completion status (2026-07-24):
 
 Goal: clarify change without adding visual noise or input risk.
 
-Status: source implemented; representative displayed motion evidence, explicit
-reference acceptance, and the final synchronized gate remain pending.
+Status: accepted; representative displayed motion evidence and explicit
+reference acceptance are complete. The final synchronized gate is recorded in
+`docs/verification.md`.
 
 Work:
 
@@ -676,10 +677,17 @@ Implementation status (2026-07-24):
   250 ms child-exit heartbeat, redraws for active motion or a changed scene
   generation, and suspends pointer admission while pane or overlay hit-bearing
   geometry is between stable endpoints; and
-- focused deterministic source tests are part of the implementation, but this
-  document does not claim the displayed motion matrix, final evidence
-  measurements, reference acceptance, or complete repository gate until those
-  runs are recorded in `docs/verification.md`.
+- focused deterministic source tests cover start, midpoint, end, interruption,
+  reversal, convergence, direct/reduced policy, redraw, and idle behavior;
+- `attention-motion-start`, `attention-motion-midpoint`,
+  `attention-motion-end`, and `attention-reduced` were captured from clean
+  source commit `4732ba8` on the MacBook Pro built-in Retina reference,
+  visually reviewed, and explicitly accepted with exact post-accept
+  comparisons;
+- the three-run median motion p95 was 1.19 display periods and the median
+  fraction over two periods was 0.34%; and
+- the three-run median static idle window used 0.067% of one core with zero
+  redraws and zero presents.
 
 ### Phase 7 — Theme And Accessibility Completion
 

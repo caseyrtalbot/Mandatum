@@ -833,6 +833,31 @@ developer unfamiliar with the current implementation can identify:
   SSIM 1.0, zero changed pixels, zero masked pixels, and 1,920,000 compared
   pixels. Unchanged scenarios and a fresh performance series were deliberately
   scoped out because Phase 5 changed only this representative workflow family.
+- **2026-07-25:** Phase 6 added scene-owned typed Focus, Selection, Overlay,
+  PaneGeometry, and ApprovalArrival intent plus renderer-local deterministic
+  progress, direct/reduced policy, motion deadlines independent from the
+  child-exit heartbeat, and pointer suspension during hit-bearing material
+  interpolation. Review of the first checkpoint candidates exposed a
+  fixed-reference projection defect: the retained arrival snapshot used a
+  compatibility 102×35 viewport, compressing native materials into the
+  upper-left while GPU-measured text stayed full-size. The checkpoint route now
+  retains the real `ViewportMetrics`, snapshot, and target instant across
+  bounded surface retries, freezes only after `Presented`, and publishes the
+  exact capture title only after that presentation so stale pixels fail closed.
+  From clean source commit `4732ba8`, `attention-motion-start`,
+  `attention-motion-midpoint`, `attention-motion-end`, and `attention-reduced`
+  were captured through the real native Metal route on the MacBook Pro
+  built-in Retina display at 800×600 logical / 1600×1200 physical / backing
+  scale 2 / 120 Hz. Each was visually reviewed and explicitly accepted;
+  repeated comparisons returned SSIM 1.0, zero changed pixels, zero masked
+  pixels, and 1,920,000 compared pixels. Three five-second motion runs reported
+  p95 intervals of 1.741, 1.186, and 1.191 display periods and fractions over
+  two periods of 2.21%, 0%, and 0.34%; the required three-run medians were
+  1.191 periods and 0.34%. Three 30-second post-warm-up idle windows reported
+  0.600%, 0.067%, and 0.067% of one core with redraw/present counts of 1/1,
+  0/0, and 0/0; the medians were 0.067% and 0/0, improving on the prior 0.93%
+  reference rather than consuming the 0.25-point regression allowance. The
+  synchronized final `./ci/gate.sh` ended `GATE GREEN`.
 
 ## Completion Rule
 

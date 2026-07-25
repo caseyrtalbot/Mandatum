@@ -118,10 +118,11 @@ The ordered work is:
 5. Make native Casey's local interactive default with an explicit terminal
    escape hatch — complete. Daily use now supplies concrete functional
    hardening work.
-6. Build the production-grade native in-app visual system — active. Phase 3's
-   workspace-shell/material/focus capability is implemented and accepted on
-   the native Metal route at backing scale 2. Phase 4's coherent overlay family
-   is next. The ordered capability families live in
+6. Build the production-grade native in-app visual system — active. Phase 6's
+   typed motion, reduced-motion, redraw, pacing, and idle capability is
+   implemented and accepted on the native Metal route at backing scale 2.
+   Phase 7 theme/accessibility completion is next. The ordered capability
+   families live in
    [`docs/visual-polish-plan.md`](visual-polish-plan.md).
 
 The authoritative detail is
@@ -141,9 +142,9 @@ accessibility/theme parity before daily use, and Phase 7/8 rollout ceremony.
 
 The ordered launcher and shaping-cache gaps are closed. Row damage remains
 unjustified by the measured preparation profile. Native in-app visual polish
-is active: Phase 3 is accepted, Phase 4 overlays are next, and the smaller
-known shell debt is the 17-logical-pixel pane title rail versus the intended
-24–28-pixel rail. Concrete failures found through daily use remain hardening
-work at their smallest owning seam. Installer, release, rollout, public-GitHub
-presentation, and public visual materials remain shelved for a separate
-distribution phase.
+is active: Phase 6 is accepted, Phase 7 theme/accessibility completion is next,
+and the smaller known shell debt is the 17-logical-pixel pane title rail versus
+the intended 24–28-pixel rail. Concrete failures found through daily use remain
+hardening work at their smallest owning seam. Installer, release, rollout,
+public-GitHub presentation, and public visual materials remain shelved for a
+separate distribution phase.

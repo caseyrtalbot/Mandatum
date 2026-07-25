@@ -143,9 +143,8 @@ rows, compact semantic badges, contained callouts, exact console regions, and
 stable artifact canvas/inspector geometry without native string parsing. The
 terminal fallback remains complete.
 
-Phase 6 — Motion And Fluid Geometry — is source-implemented and awaiting its
-representative displayed-motion evidence and final synchronized gate. Scene
-contracts carry typed Focus, Selection, Overlay, PaneGeometry, and
+Phase 6 — Motion And Fluid Geometry — is accepted. Scene contracts carry typed
+Focus, Selection, Overlay, PaneGeometry, and
 ApprovalArrival targets plus whole-frame reduced/direct policy. A deterministic
 renderer-local motion engine samples an injected monotonic instant; the native
 shell schedules its deadlines independently from the child-exit heartbeat and
@@ -156,8 +155,12 @@ remain direct. Pointer admission pauses while hit-bearing material geometry is
 between stable endpoints. Typing, pointer drag, live resize, and overlay close
 also stay direct. Overlay close does not retain an empty material shell after
 its scene-owned text disappears. Reduced motion snaps to product truth and
-schedules no transition frames. Phase 7 remains next only after Phase 6's
-displayed evidence and final gate complete.
+schedules no transition frames. The displayed approval-arrival start,
+midpoint, end, and reduced states were reviewed and accepted from the clean
+MacBook Pro reference capture. Three-run median motion p95 was 1.19 display
+periods with 0.34% of intervals over two periods; static idle median was 0.067%
+of one core with zero redraws and presents. Phase 7 — Theme And Accessibility
+Completion — is next.
 
 Known physical debt remains deliberately bounded: pane title rails and overlay
 rows still inherit one terminal text row rather than their final native
