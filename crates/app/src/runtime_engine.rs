@@ -1563,6 +1563,16 @@ mod tests {
 
     use super::*;
 
+    /// A fixture project path that really exists. Spawn rejects a
+    /// nonexistent cwd, so a hardcoded path that only exists as residue on
+    /// some machines makes these tests pass locally and fail on a fresh
+    /// runner.
+    fn fixture_project_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&path).expect("fixture project dir is creatable");
+        path
+    }
+
     #[test]
     fn runtime_tokens_are_monotonic_across_runtime_kinds() {
         let mut engine = RuntimeEngine::new();
@@ -1609,7 +1619,7 @@ mod tests {
 
     #[test]
     fn restore_before_geometry_reports_deferred_and_never_fresh() {
-        let project_path = PathBuf::from("/tmp/mandatum-runtime-engine-test");
+        let project_path = fixture_project_dir("mandatum-runtime-engine-test");
         let mut workspace = Workspace::new("test", project_path.clone());
         workspace
             .apply_action(CoreAction::CreateTaskPane {
@@ -1745,7 +1755,7 @@ mod tests {
     fn first_geometry_reconcile_updates_the_restore_epoch_once() {
         let mut workspace = Workspace::new(
             "test",
-            PathBuf::from("/tmp/mandatum-runtime-engine-first-size"),
+            fixture_project_dir("mandatum-runtime-engine-first-size"),
         );
         let pane_id = workspace.active_session().focused_pane_id().clone();
         let outgoing_session_id = workspace.active_session().id().clone();
@@ -1817,7 +1827,7 @@ mod tests {
     fn first_geometry_reconcile_batches_visible_and_hidden_terminal_facts() {
         let mut workspace = Workspace::new(
             "test",
-            PathBuf::from("/tmp/mandatum-runtime-engine-first-size-batch"),
+            fixture_project_dir("mandatum-runtime-engine-first-size-batch"),
         );
         workspace.apply_action(CoreAction::SplitRight).unwrap();
         let terminal_ids = workspace
@@ -1970,7 +1980,7 @@ mod tests {
 
     #[test]
     fn draft_and_completed_agents_have_no_recovery_action() {
-        let project_path = PathBuf::from("/tmp/mandatum-runtime-engine-actions");
+        let project_path = fixture_project_dir("mandatum-runtime-engine-actions");
         let mut workspace = Workspace::new("test", project_path.clone());
         workspace
             .apply_action(CoreAction::CreateAgentPane {
@@ -2030,7 +2040,7 @@ mod tests {
 
     #[test]
     fn inactive_agents_never_claim_a_recovery_action() {
-        let project_path = PathBuf::from("/tmp/mandatum-runtime-engine-inactive-agents");
+        let project_path = fixture_project_dir("mandatum-runtime-engine-inactive-agents");
         let mut workspace = Workspace::new("first", project_path.clone());
         let mut running = AgentPaneIntent::draft("running");
         running.status = AgentStatus::Running;
@@ -2092,7 +2102,7 @@ mod tests {
 
     #[test]
     fn explicit_restore_records_outgoing_live_runtime_as_detached() {
-        let project_path = PathBuf::from("/tmp/mandatum-runtime-engine-replace");
+        let project_path = fixture_project_dir("mandatum-runtime-engine-replace");
         let mut outgoing_workspace = Workspace::new("outgoing", project_path.clone());
         let outcome = outgoing_workspace
             .apply_action(CoreAction::CreateAgentPane {
@@ -2142,7 +2152,7 @@ mod tests {
 
     #[test]
     fn detached_facts_include_only_live_runtime_entries() {
-        let project_path = PathBuf::from("/tmp/mandatum-runtime-engine-live-facts");
+        let project_path = fixture_project_dir("mandatum-runtime-engine-live-facts");
         let mut workspace = Workspace::new("test", project_path.clone());
         workspace.apply_action(CoreAction::SplitRight).unwrap();
         let terminal_ids = workspace
@@ -2260,7 +2270,7 @@ mod tests {
 
     #[test]
     fn session_retirement_detaches_agents_and_records_the_transition() {
-        let project_path = PathBuf::from("/tmp/mandatum-runtime-engine-retire");
+        let project_path = fixture_project_dir("mandatum-runtime-engine-retire");
         let mut workspace = Workspace::new("test", project_path.clone());
         let mut intent = AgentPaneIntent::draft("wait for shutdown");
         intent.status = AgentStatus::Running;
