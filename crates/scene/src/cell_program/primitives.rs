@@ -181,8 +181,7 @@ impl Compiler {
             return;
         }
         self.remove_cell_span(x, y);
-        self.program.cells.insert((y, x), cell);
-        self.program.paint_scopes.insert((y, x), self.active_scope);
+        self.program.put_cell(x, y, cell, self.active_scope);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -206,7 +205,7 @@ impl Compiler {
                 x,
                 y,
                 ProgramCell {
-                    occupancy: CellOccupancy::Grapheme("\u{fffd}".to_owned()),
+                    occupancy: CellOccupancy::Char('\u{fffd}'),
                     style,
                     selection,
                     cursor,
@@ -220,20 +219,22 @@ impl Compiler {
         if width == 2 {
             self.remove_cell_span(x + 1, y);
         }
-        self.program.cells.insert(
-            (y, x),
+        self.program.put_cell(
+            x,
+            y,
             ProgramCell {
-                occupancy: CellOccupancy::Grapheme(grapheme),
+                occupancy: CellOccupancy::grapheme(grapheme),
                 style,
                 selection,
                 cursor,
                 raster_layer,
             },
+            self.active_scope,
         );
-        self.program.paint_scopes.insert((y, x), self.active_scope);
         if width == 2 {
-            self.program.cells.insert(
-                (y, x + 1),
+            self.program.put_cell(
+                x + 1,
+                y,
                 ProgramCell {
                     occupancy: CellOccupancy::WideContinuation,
                     style,
@@ -241,38 +242,32 @@ impl Compiler {
                     cursor,
                     raster_layer,
                 },
+                self.active_scope,
             );
-            self.program
-                .paint_scopes
-                .insert((y, x + 1), self.active_scope);
         }
     }
 
     fn remove_cell_span(&mut self, x: u16, y: u16) {
-        let Some(existing) = self.program.cells.get(&(y, x)) else {
+        let Some(existing) = self.program.cell_at(x, y) else {
             return;
         };
         match existing.occupancy {
             CellOccupancy::WideContinuation => {
                 if let Some(lead) = x.checked_sub(1) {
-                    self.program.cells.remove(&(y, lead));
-                    self.program.paint_scopes.remove(&(y, lead));
+                    self.program.clear_cell(lead, y);
                 }
             }
-            CellOccupancy::Grapheme(_) => {
+            CellOccupancy::Char(_) | CellOccupancy::Cluster(_) => {
                 if self
                     .program
-                    .cells
-                    .get(&(y, x.saturating_add(1)))
+                    .cell_at(x.saturating_add(1), y)
                     .is_some_and(|cell| matches!(cell.occupancy, CellOccupancy::WideContinuation))
                 {
-                    self.program.cells.remove(&(y, x.saturating_add(1)));
-                    self.program.paint_scopes.remove(&(y, x.saturating_add(1)));
+                    self.program.clear_cell(x.saturating_add(1), y);
                 }
             }
         }
-        self.program.cells.remove(&(y, x));
-        self.program.paint_scopes.remove(&(y, x));
+        self.program.clear_cell(x, y);
     }
 
     pub(super) fn mark_cursor(&mut self, x: u16, y: u16, style: SceneCellStyle) {
@@ -281,8 +276,7 @@ impl Compiler {
         }
         let lead = if self
             .program
-            .cells
-            .get(&(y, x))
+            .cell_at(x, y)
             .is_some_and(|cell| matches!(cell.occupancy, CellOccupancy::WideContinuation))
         {
             x.saturating_sub(1)
@@ -291,26 +285,25 @@ impl Compiler {
         };
         let wide = self
             .program
-            .cells
-            .get(&(y, lead.saturating_add(1)))
+            .cell_at(lead.saturating_add(1), y)
             .is_some_and(|cell| matches!(cell.occupancy, CellOccupancy::WideContinuation));
-        if let Some(cell) = self.program.cells.get_mut(&(y, lead)) {
+        if let Some(cell) = self.program.cell_mut(lead, y) {
             cell.cursor = true;
             cell.style = style;
         } else {
             let mut cursor = ProgramCell::glyph(' ', style);
             cursor.cursor = true;
-            self.program.cells.insert((y, lead), cursor);
+            self.program.put_cell(lead, y, cursor, self.active_scope);
         }
-        self.program
-            .paint_scopes
-            .insert((y, lead), self.active_scope);
-        if wide && let Some(cell) = self.program.cells.get_mut(&(y, lead + 1)) {
+        self.program.set_scope(lead, y, self.active_scope);
+        let mut marked_wide_continuation = false;
+        if wide && let Some(cell) = self.program.cell_mut(lead + 1, y) {
             cell.cursor = true;
             cell.style = style;
-            self.program
-                .paint_scopes
-                .insert((y, lead + 1), self.active_scope);
+            marked_wide_continuation = true;
+        }
+        if marked_wide_continuation {
+            self.program.set_scope(lead + 1, y, self.active_scope);
         }
     }
 }

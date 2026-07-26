@@ -3,11 +3,12 @@ use std::cell::RefCell;
 use mandatum_scene::input::{PointerButton, PointerKind};
 
 use super::{
-    ConfiguredFont, FontPreflightOutcome, PressedPointerButtons, VisualClock,
-    apply_renderer_scale_transition, font_request, launch_after_font_preflight,
-    logical_pointer_position, native_window_geometry, native_window_title,
-    next_native_window_title, next_scheduled_deadline, parse_launch_options,
-    pointer_input_needs_redraw, start_after_preflight,
+    ConfiguredFont, FontPreflightOutcome, HEARTBEAT, PressedPointerButtons, VisualClock,
+    WheelRemainderBank, accumulate_precise_wheel, apply_renderer_scale_transition, font_request,
+    launch_after_font_preflight, logical_pointer_position, native_window_geometry,
+    native_window_title, next_native_window_title, next_scheduled_deadline, parse_launch_options,
+    pointer_input_needs_redraw, render_can_be_skipped, skipped_render_retry_deadline,
+    start_after_preflight,
 };
 
 struct FixedVisualClock(std::time::Instant);
@@ -27,16 +28,95 @@ fn visual_clock_and_scheduler_keep_animation_independent_from_heartbeat() {
     let heartbeat = now + std::time::Duration::from_millis(250);
     let animation = now + std::time::Duration::from_millis(8);
     assert_eq!(
-        next_scheduled_deadline(heartbeat, Some(animation)),
+        next_scheduled_deadline(heartbeat, Some(animation), None, false),
         animation
     );
-    assert_eq!(next_scheduled_deadline(heartbeat, None), heartbeat);
+    assert_eq!(
+        next_scheduled_deadline(heartbeat, None, None, false),
+        heartbeat
+    );
     assert_eq!(
         next_scheduled_deadline(
             heartbeat,
-            Some(heartbeat + std::time::Duration::from_millis(10))
+            Some(heartbeat + std::time::Duration::from_millis(10)),
+            None,
+            false
         ),
         heartbeat
+    );
+}
+
+#[test]
+fn skipped_render_outcome_leads_to_a_scheduled_retry() {
+    // A Skipped outcome latches force_render but presents nothing, and no
+    // other path re-requests the frame; the retry deadline must arm the
+    // wake scheduler ahead of the heartbeat so the app resumes presenting
+    // (and accepting pointer input) without an unrelated scene change.
+    let now = std::time::Instant::now();
+    let retry = skipped_render_retry_deadline(now);
+    let heartbeat = now + HEARTBEAT;
+    assert!(
+        retry > now,
+        "the retry is deferred, never an immediate re-request that could \
+         tight-loop against a persistently timing-out surface"
+    );
+    assert!(retry < heartbeat, "the retry beats the heartbeat fallback");
+    assert_eq!(
+        next_scheduled_deadline(heartbeat, None, Some(retry), false),
+        retry,
+        "a pending retry arms the wake schedule"
+    );
+}
+
+#[test]
+fn occluded_window_arms_no_animation_or_retry_wake() {
+    // While occluded, repaints are suppressed, so an armed (or already
+    // expired) animation deadline would wake the loop hot at 100% CPU
+    // until de-occlusion; the wake schedule degrades to heartbeat-only.
+    let now = std::time::Instant::now();
+    let heartbeat = now + HEARTBEAT;
+    let expired_animation = now - std::time::Duration::from_millis(5);
+    assert_eq!(
+        next_scheduled_deadline(heartbeat, Some(expired_animation), None, true),
+        heartbeat,
+        "an expired motion deadline must not pin an already-elapsed wake"
+    );
+    let active_animation = now + std::time::Duration::from_millis(8);
+    assert_eq!(
+        next_scheduled_deadline(
+            heartbeat,
+            Some(active_animation),
+            Some(skipped_render_retry_deadline(now)),
+            true
+        ),
+        heartbeat,
+        "neither active motion nor a render retry arms a wake while occluded"
+    );
+    assert_eq!(
+        next_scheduled_deadline(heartbeat, Some(active_animation), None, false),
+        active_animation,
+        "a visible window still steps animation at its deadline"
+    );
+}
+
+#[test]
+fn repaints_are_skipped_only_when_nothing_could_have_changed_the_frame() {
+    // Idle: same generation, no motion, no forced repaint pending.
+    assert!(render_can_be_skipped(false, false, Some(7), 7));
+
+    // Any of the three conditions forces a render.
+    assert!(
+        !render_can_be_skipped(true, false, Some(7), 7),
+        "surface recovery / resize / scale / font / de-occlusion force a repaint"
+    );
+    assert!(
+        !render_can_be_skipped(false, true, Some(7), 7),
+        "active presentation motion renders even at an unchanged generation"
+    );
+    assert!(!render_can_be_skipped(false, false, Some(7), 8));
+    assert!(
+        !render_can_be_skipped(false, false, None, 7),
+        "nothing was ever presented, so nothing can be reused"
     );
 }
 
@@ -120,6 +200,80 @@ fn pointer_move_redraw_policy_tracks_host_owned_separator_hover() {
     );
     assert!(pointer_input_needs_redraw(PointerKind::Drag, quiet, quiet));
     assert!(pointer_input_needs_redraw(PointerKind::Down, quiet, quiet));
+}
+
+#[test]
+fn precise_wheel_accumulates_sub_row_travel_and_dispatches_whole_rows() {
+    let mut remainder = (0.0, 0.0);
+
+    // Slow trackpad scroll: 0.4 rows per event dispatches nothing twice,
+    // then the banked travel crosses one row.
+    assert_eq!(accumulate_precise_wheel(&mut remainder, (0.0, 0.4)), (0, 0));
+    assert_eq!(accumulate_precise_wheel(&mut remainder, (0.0, 0.4)), (0, 0));
+    assert_eq!(accumulate_precise_wheel(&mut remainder, (0.0, 0.4)), (0, 1));
+    assert!((remainder.1 - 0.2).abs() < 1e-9);
+
+    // A fast flick dispatches every whole row at once, keeping the fraction.
+    assert_eq!(accumulate_precise_wheel(&mut remainder, (0.0, 3.5)), (0, 3));
+    assert!((remainder.1 - 0.7).abs() < 1e-9);
+
+    // Both axes accumulate independently.
+    let mut remainder = (0.0, 0.0);
+    assert_eq!(
+        accumulate_precise_wheel(&mut remainder, (1.5, -2.25)),
+        (1, -2)
+    );
+    assert!((remainder.0 - 0.5).abs() < 1e-9);
+    assert!((remainder.1 - -0.25).abs() < 1e-9);
+}
+
+#[test]
+fn precise_wheel_direction_reversal_discards_the_banked_remainder() {
+    let mut remainder = (0.0, 0.0);
+    assert_eq!(accumulate_precise_wheel(&mut remainder, (0.0, 0.9)), (0, 0));
+
+    // Reversing direction must start from zero, not pay 0.9 rows of stale
+    // downward travel against the new upward motion.
+    assert_eq!(
+        accumulate_precise_wheel(&mut remainder, (0.0, -0.6)),
+        (0, 0)
+    );
+    assert!((remainder.1 - -0.6).abs() < 1e-9);
+    assert_eq!(
+        accumulate_precise_wheel(&mut remainder, (0.0, -0.6)),
+        (0, -1)
+    );
+
+    // The reset is per-axis: an x reversal leaves y's remainder alone.
+    let mut remainder = (0.7, 0.7);
+    assert_eq!(
+        accumulate_precise_wheel(&mut remainder, (-0.2, 0.2)),
+        (0, 0)
+    );
+    assert!((remainder.0 - -0.2).abs() < 1e-9);
+    assert!((remainder.1 - 0.9).abs() < 1e-9);
+}
+
+#[test]
+fn wheel_remainder_bank_never_pays_banked_travel_across_targets() {
+    let mut bank = WheelRemainderBank::default();
+
+    // 0.9 rows banked over one cell: no whole row dispatched yet.
+    assert_eq!(bank.accumulate((10, 10), (0.0, 0.9)), (0, 0));
+
+    // A layout or metrics transition (keyboard split/close/zoom, resize,
+    // scale or font change) can hand the same cell to a different pane;
+    // invalidation ensures the next 0.1-row tick does not pay a full row
+    // of another pane's travel against the new target.
+    bank.invalidate();
+    assert_eq!(bank.accumulate((10, 10), (0.0, 0.1)), (0, 0));
+
+    // Same cell, same target: travel keeps accumulating to a whole row.
+    assert_eq!(bank.accumulate((10, 10), (0.0, 0.9)), (0, 1));
+
+    // Moving to a different cell drops the bank on its own.
+    assert_eq!(bank.accumulate((10, 10), (0.0, 0.8)), (0, 0));
+    assert_eq!(bank.accumulate((11, 10), (0.0, 0.3)), (0, 0));
 }
 
 #[test]

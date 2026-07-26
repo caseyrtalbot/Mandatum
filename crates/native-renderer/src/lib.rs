@@ -3,6 +3,7 @@
 //! This crate depends on the neutral scene contract and paint/window crates
 //! only. PTY and terminal-parser crates cannot enter its dependency closure.
 
+mod box_drawing;
 mod font;
 mod motion;
 mod presentation_plan;

@@ -128,12 +128,23 @@ pub(crate) fn header_scene(state: &AppState, area: SceneRect) -> HeaderScene {
     let mut text = format!(" {} |", state.workspace().name());
     let mut attention = Vec::with_capacity(items.len());
     if items.is_empty() {
+        let pane_count = session.panes().len();
         text.push_str(&format!(
-            " {} · {} pane(s) · agent: {}",
+            " {} · {} {}",
             session.name(),
-            session.panes().len(),
-            state.agent_connector_label(),
+            pane_count,
+            if pane_count == 1 { "pane" } else { "panes" },
         ));
+        // The connector label is configuration, not activity: announce it
+        // only while an agent pane exists, so a workspace of plain terminals
+        // (which may host any CLI, including other agents) never claims one.
+        let has_agent_pane = session
+            .panes()
+            .iter()
+            .any(|(_, pane)| matches!(pane.kind(), PaneKind::Agent { .. }));
+        if has_agent_pane {
+            text.push_str(&format!(" · agent: {}", state.agent_connector_label()));
+        }
     } else {
         for (index, item) in items.into_iter().enumerate() {
             if index > 0 {

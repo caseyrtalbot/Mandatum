@@ -109,74 +109,72 @@ pub fn build_row_runs(
     program: &CellProgram,
     mut resolve: impl FnMut(&ProgramCell) -> ResolvedGlyphStyle,
 ) -> Result<RowRunPlan, RowRunBuildError> {
-    let cells = program
-        .scoped_cells()
-        .map(|(x, y, cell, scope)| RunInputCell {
-            x,
-            y,
-            cell: cell.clone(),
-            scope,
-        })
-        .collect::<Vec<_>>();
-    build_from_cells(&cells, &mut resolve)
+    build_from_cells(
+        program
+            .scoped_cells()
+            .map(|(x, y, cell, scope)| RunInputCell { x, y, cell, scope }),
+        &mut resolve,
+    )
 }
 
-#[derive(Clone, Debug)]
-struct RunInputCell {
+/// One borrowed run-planning input. Cells are read in place from the compiled
+/// program: run construction copies exactly the text and style facts each run
+/// keeps, never whole cells.
+#[derive(Clone, Copy, Debug)]
+struct RunInputCell<'a> {
     x: u16,
     y: u16,
-    cell: ProgramCell,
+    cell: &'a ProgramCell,
     scope: TextPaintScope,
 }
 
-fn build_from_cells(
-    cells: &[RunInputCell],
+fn build_from_cells<'a>(
+    cells: impl IntoIterator<Item = RunInputCell<'a>>,
     resolve: &mut impl FnMut(&ProgramCell) -> ResolvedGlyphStyle,
 ) -> Result<RowRunPlan, RowRunBuildError> {
     let mut plan = RowRunPlan::default();
     let mut pending: Option<RowRun> = None;
-    let mut index = 0usize;
+    let mut cells = cells.into_iter().peekable();
 
-    while let Some(input) = cells.get(index) {
+    while let Some(input) = cells.next() {
         if !input.scope.clip.contains(input.x, input.y) {
             flush(&mut pending, &mut plan.runs);
             plan.issues.push(RowRunBuildIssue::CellOutsidePaintClip {
                 x: input.x,
                 y: input.y,
             });
-            index += 1;
             continue;
         }
 
-        let CellOccupancy::Grapheme(grapheme) = &input.cell.occupancy else {
+        let mut scratch = [0u8; 4];
+        let Some(grapheme) = input.cell.occupancy.grapheme_str(&mut scratch) else {
             flush(&mut pending, &mut plan.runs);
             plan.issues.push(RowRunBuildIssue::OrphanWideContinuation {
                 x: input.x,
                 y: input.y,
             });
-            index += 1;
             continue;
         };
 
-        if !is_printable(input, grapheme) {
+        if !is_printable(&input, grapheme) {
             flush(&mut pending, &mut plan.runs);
-            index += 1;
             continue;
         }
 
-        let next = cells.get(index + 1);
-        let wide = next.is_some_and(|next| valid_wide_continuation(input, next));
+        let wide = cells
+            .peek()
+            .is_some_and(|next| valid_wide_continuation(&input, next));
         let decorated_space =
             grapheme == " " && (input.cell.style.underline || input.cell.style.strikethrough);
-        let glyph_style = resolve(&input.cell);
-        let candidate = new_run(input, grapheme, if wide { 2 } else { 1 }, glyph_style)?;
+        let glyph_style = resolve(input.cell);
+        let candidate = new_run(&input, grapheme, if wide { 2 } else { 1 }, glyph_style)?;
 
         if wide || decorated_space {
             flush(&mut pending, &mut plan.runs);
             plan.runs.push(candidate);
         } else if pending
             .as_ref()
-            .is_some_and(|run| can_append(run, input, glyph_style))
+            .is_some_and(|run| can_append(run, &input, glyph_style))
         {
             append_run(pending.as_mut().expect("pending row run"), grapheme)?;
         } else {
@@ -184,13 +182,15 @@ fn build_from_cells(
             pending = Some(candidate);
         }
 
-        index += if wide { 2 } else { 1 };
+        if wide {
+            cells.next();
+        }
     }
     flush(&mut pending, &mut plan.runs);
     Ok(plan)
 }
 
-fn is_printable(input: &RunInputCell, grapheme: &str) -> bool {
+fn is_printable(input: &RunInputCell<'_>, grapheme: &str) -> bool {
     if input.cell.raster_layer.is_some()
         || input.cell.style.hidden
         || grapheme.is_empty()
@@ -202,7 +202,7 @@ fn is_printable(input: &RunInputCell, grapheme: &str) -> bool {
     grapheme != " " || input.cell.style.underline || input.cell.style.strikethrough
 }
 
-fn valid_wide_continuation(lead: &RunInputCell, next: &RunInputCell) -> bool {
+fn valid_wide_continuation(lead: &RunInputCell<'_>, next: &RunInputCell<'_>) -> bool {
     next.y == lead.y
         && lead.x.checked_add(1) == Some(next.x)
         && matches!(next.cell.occupancy, CellOccupancy::WideContinuation)
@@ -215,7 +215,7 @@ fn valid_wide_continuation(lead: &RunInputCell, next: &RunInputCell) -> bool {
 }
 
 fn new_run(
-    input: &RunInputCell,
+    input: &RunInputCell<'_>,
     grapheme: &str,
     cell_width: u16,
     glyph_style: ResolvedGlyphStyle,
@@ -246,7 +246,7 @@ fn new_run(
     })
 }
 
-fn can_append(run: &RowRun, input: &RunInputCell, glyph_style: ResolvedGlyphStyle) -> bool {
+fn can_append(run: &RowRun, input: &RunInputCell<'_>, glyph_style: ResolvedGlyphStyle) -> bool {
     run.y == input.y
         && run.x.checked_add(run.width) == Some(input.x)
         && run.paint_scope == input.scope
@@ -702,6 +702,7 @@ mod tests {
                 attention: Vec::new(),
             },
             panes: vec![PaneScene {
+                content_revision: 0,
                 id: pane_id.clone(),
                 title: String::new(),
                 kind: PaneSceneKind::Terminal,
@@ -793,21 +794,25 @@ mod tests {
         let mut cells = program
             .scoped_cells()
             .filter(|(_, y, _, scope)| *y == 2 && scope.kind == TextPaintScopeKind::PaneContent)
-            .map(|(x, y, cell, scope)| RunInputCell {
-                x,
-                y,
-                cell: cell.clone(),
-                scope,
-            })
+            .map(|(x, y, cell, scope)| (x, y, cell.clone(), scope))
             .collect::<Vec<_>>();
-        cells[4].cell.cursor = true;
-        cells[3].cell.selection = Some(CellSelection::Terminal);
+        cells[4].2.cursor = true;
+        cells[3].2.selection = Some(CellSelection::Terminal);
         let mut raster = cells[1].clone();
-        raster.x = 20;
-        raster.cell.raster_layer = Some(1);
+        raster.0 = 20;
+        raster.2.raster_layer = Some(1);
         cells.push(raster);
 
-        let plan = build_from_cells(&cells, &mut glyph_style).unwrap();
+        let plan = build_from_cells(
+            cells.iter().map(|(x, y, cell, scope)| RunInputCell {
+                x: *x,
+                y: *y,
+                cell,
+                scope: *scope,
+            }),
+            &mut glyph_style,
+        )
+        .unwrap();
         let texts = plan
             .runs
             .iter()
@@ -1195,8 +1200,16 @@ mod tests {
             .expect("pane-content test cell");
         let mut cell = cell.clone();
         cell.occupancy = CellOccupancy::WideContinuation;
-        let plan =
-            build_from_cells(&[RunInputCell { x, y, cell, scope }], &mut glyph_style).unwrap();
+        let plan = build_from_cells(
+            [RunInputCell {
+                x,
+                y,
+                cell: &cell,
+                scope,
+            }],
+            &mut glyph_style,
+        )
+        .unwrap();
 
         assert!(plan.runs.iter().all(|run| !run.text.is_empty()));
         assert!(

@@ -1,8 +1,8 @@
 use super::TextPaintScopeKind;
 use super::{CellOccupancy, CellSelection, Compiler, ProgramCell};
 use crate::{
-    ArtifactState, PaneContent, PaneScene, PresentationTone, SceneCellStyle, SceneColor, SceneRect,
-    TerminalSurface, Theme, WorkflowNodePart, WorkflowRow, WorkflowRowRole,
+    ArtifactState, PaneBadgeKind, PaneContent, PaneScene, PresentationTone, SceneCellStyle,
+    SceneColor, SceneRect, TerminalSurface, Theme, WorkflowNodePart, WorkflowRow, WorkflowRowRole,
 };
 
 use super::primitives::{bordered_inner_rect, bounded_grapheme, display_width, foreground};
@@ -37,9 +37,54 @@ impl Compiler {
             pane.area.width.saturating_sub(2),
             pane.area.height.min(1),
         );
-        self.paint_text(title_area, &pane_title(pane), title_style);
+        let base_title = format!(" {} ", pane.title);
+        self.paint_text(title_area, &base_title, title_style);
+        let base_width = u16::try_from(display_width(&base_title)).unwrap_or(u16::MAX);
+        // First rail cell past the title's painted extent. Cells before it
+        // belong to the title in both frontends.
+        let title_end = title_area
+            .x
+            .saturating_add(base_width.min(title_area.width));
+        if pane.focused {
+            // The literal focus label is terminal-fallback chrome. Painting
+            // the same cells under the decoration scope lets native renderers
+            // drop the text while keeping cell content byte-identical; native
+            // focus is already cued by the focus bar and bold accent title.
+            let suffix_area = SceneRect::new(
+                title_area
+                    .x
+                    .saturating_add(base_width.min(title_area.width)),
+                title_area.y,
+                title_area.width.saturating_sub(base_width),
+                title_area.height,
+            );
+            self.set_text_scope(decoration_scope);
+            self.paint_text(suffix_area, "| focused ", title_style);
+            self.set_text_scope(chrome_scope);
+        }
         for (kind, rect) in pane.badge_rects() {
-            self.paint_text(rect, &format!(" {} ", kind.label()), title_style);
+            // The terminal kind label is terminal-fallback chrome: native
+            // renderers suppress its redundant chip, so painting the same
+            // cells under the decoration scope drops the glyph text natively
+            // while keeping cell content byte-identical. Non-terminal kind
+            // and state badges stay chrome-scoped; they carry information
+            // and keep their native chips.
+            if kind == PaneBadgeKind::Terminal {
+                // The title owns its painted extent in both frontends: a
+                // natively-dropped badge overwriting occupied title cells
+                // would truncate the fallback title while native showed a
+                // blank gap. The badge paints only when it sits entirely
+                // beyond the title's end and drops when the title needs the
+                // space.
+                if rect.x < title_end {
+                    continue;
+                }
+                self.set_text_scope(decoration_scope);
+                self.paint_text(rect, &format!(" {} ", kind.label()), title_style);
+                self.set_text_scope(chrome_scope);
+            } else {
+                self.paint_text(rect, &format!(" {} ", kind.label()), title_style);
+            }
         }
 
         let inner = bordered_inner_rect(pane.area);
@@ -149,12 +194,13 @@ impl Compiler {
                 };
                 let selected_here = surface.selection_contains(absolute_row, column as u16);
                 let cursor_here = surface.cursor_at(absolute_row, column as u16);
-                match &cell.occupancy {
-                    CellOccupancy::Grapheme(grapheme) => {
+                let mut scratch = [0u8; 4];
+                match cell.occupancy.grapheme_str(&mut scratch) {
+                    Some(source_grapheme) => {
                         let declared_wide = row.get(column + 1).is_some_and(|next| {
                             matches!(next.occupancy, CellOccupancy::WideContinuation)
                         });
-                        let (mut grapheme, measured_width) = bounded_grapheme(grapheme);
+                        let (mut grapheme, measured_width) = bounded_grapheme(source_grapheme);
                         let wide = measured_width == 2
                             && declared_wide
                             && column + 1 < usize::from(area.width);
@@ -177,8 +223,9 @@ impl Compiler {
                             None,
                         );
                     }
-                    CellOccupancy::WideContinuation => {
-                        // The leading cell paints this pair atomically.
+                    None => {
+                        // A wide continuation: the leading cell paints this
+                        // pair atomically.
                     }
                 }
             }
@@ -217,11 +264,6 @@ fn workflow_row_style(row: &WorkflowRow, theme: &Theme, pulse: bool) -> SceneCel
             || (row.role == WorkflowRowRole::Callout && row.tone == PresentationTone::Failure),
         ..SceneCellStyle::default()
     }
-}
-
-fn pane_title(pane: &PaneScene) -> String {
-    let focus = if pane.focused { " | focused" } else { "" };
-    format!(" {}{focus} ", pane.title)
 }
 
 fn fit_line(text: &str, width: u16) -> String {

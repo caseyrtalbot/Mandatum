@@ -48,12 +48,14 @@ pub(crate) fn session_map_rows(
             row: SessionMapRow {
                 depth: 0,
                 glyph: SESSION_GLYPH.to_owned(),
-                label: format!(
-                    "{} · {} · {} pane(s){active_mark}",
-                    session_id,
-                    session.name(),
-                    session.panes().len()
-                ),
+                label: {
+                    let pane_count = session.panes().len();
+                    let pane_word = if pane_count == 1 { "pane" } else { "panes" };
+                    format!(
+                        "{session_id} · {} · {pane_count} {pane_word}{active_mark}",
+                        session.name(),
+                    )
+                },
                 state: String::new(),
                 focused: false,
                 badges: String::new(),

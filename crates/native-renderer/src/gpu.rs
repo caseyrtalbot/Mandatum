@@ -2,7 +2,7 @@
 // backgrounds/selection/cursor/status, layered under GPU-rasterized glyphs
 // rendered by glyphon. All rendering is per-frame from WorkspaceScene.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,7 +28,9 @@ use crate::row_run::{
     RowRunAdmission, RowRunBuildError, RowRunBuildIssue, RowRunFallbackAction, admit_layout,
     anchored_fallback_runs, build_row_runs, partition_around_cluster, slice_run, split_at_span,
 };
-use crate::shaping_cache::{ShapingCache, ShapingCacheContext, ShapingCacheKey};
+use crate::shaping_cache::{
+    BorrowedShapingKey, ShapingCache, ShapingCacheContext, ShapingCacheKey,
+};
 
 const BASE_FONT_PT: f32 = 15.0;
 const MAX_GPU_PANES: usize = 256;
@@ -403,6 +405,61 @@ pub fn prepare_scene(
         artifacts,
         presentation_plan,
     })
+}
+
+/// Identity of every input a cached [`prepare_scene`] result was built under.
+///
+/// `prepare_scene` itself is a pure function of scene and theme; the caller's
+/// `scene_generation` stands in for scene content (the app guarantees equal
+/// generations denote an identical scene), and the theme participates by
+/// value. The renderer-side dimensions — surface size, scale, font identity,
+/// and cell metrics — are included so any renderer transition that interleaves
+/// with an unchanged app generation still forces a recompile. Derived
+/// `PartialEq` guarantees every field participates in the reuse decision.
+#[derive(Clone, Debug, PartialEq)]
+struct PreparedSceneKey {
+    scene_generation: u64,
+    /// Shared with the caller's snapshot: key construction is an `Arc` bump,
+    /// and `Arc`'s `PartialEq` still compares the full theme value.
+    theme: Arc<Theme>,
+    surface_width: u32,
+    surface_height: u32,
+    scale_bits: u32,
+    scale_generation: u64,
+    font_generation: u64,
+    font_size_bits: u32,
+    cell_width_bits: u32,
+    cell_height_bits: u32,
+}
+
+/// One retained scene compile plus the exact key it was built under.
+#[derive(Debug)]
+struct PreparedSceneCache {
+    key: PreparedSceneKey,
+    prepared: PreparedScene,
+}
+
+/// Take the retained compile only when the caller-declared generation and
+/// every renderer dimension match exactly. Any mismatch — or an absent caller
+/// generation — forces a recompile: a stale terminal frame is the worst
+/// failure class this cache could produce.
+fn reusable_prepared_scene(
+    cache: &mut Option<PreparedSceneCache>,
+    key: Option<&PreparedSceneKey>,
+) -> Option<PreparedScene> {
+    let key = key?;
+    let entry = cache.take()?;
+    (entry.key == *key).then_some(entry.prepared)
+}
+
+/// Retain a compile for the next frame. A keyless render clears the cache:
+/// its scene carried no reuse identity, so nothing may survive it.
+fn store_prepared_scene(
+    cache: &mut Option<PreparedSceneCache>,
+    key: Option<PreparedSceneKey>,
+    prepared: PreparedScene,
+) {
+    *cache = key.map(|key| PreparedSceneCache { key, prepared });
 }
 
 fn validate_scene_structure(scene: &WorkspaceScene) -> Result<(), SceneCompileError> {
@@ -855,7 +912,20 @@ fn native_frame_colors(theme: &Theme) -> NativeFrameColors {
 struct PreparedCellProgram {
     cells: Vec<(u16, u16, ResolvedCell, bool, TextPaintScopeKind, bool)>,
     rows: Vec<RowRun>,
+    /// Box-drawing/block-element cells intercepted before shaping. They are
+    /// emitted as quads at exact snapped cell bounds instead of glyphs.
+    box_glyphs: Vec<BoxDrawingCell>,
     issues: Vec<RowRunBuildIssue>,
+}
+
+/// One intercepted box-drawing cell, resolved to its final glyph color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BoxDrawingCell {
+    x: u16,
+    y: u16,
+    ch: char,
+    color: [u8; 4],
+    scope: TextPaintScopeKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -878,6 +948,9 @@ struct MaterialQuad {
     boundary_width: f32,
     blur_radius: f32,
     shadow: bool,
+    /// Geometry lies exactly on the physical pixel grid; the shader skips the
+    /// analytic AA ramp for these instances so edges stay hard.
+    snapped: bool,
 }
 
 impl MaterialQuad {
@@ -904,16 +977,31 @@ impl MaterialQuad {
             self.corner_radius,
             self.boundary_width,
             self.blur_radius,
-            if self.shadow { 1.0 } else { 0.0 },
+            // Fragment mode: 0 = analytic AA fill, 1 = shadow, 2 = snapped
+            // (no AA). Shadows are never snapped.
+            if self.shadow {
+                1.0
+            } else if self.snapped {
+                2.0
+            } else {
+                0.0
+            },
         ]);
     }
 }
 
+/// One physical pixel of extra fill geometry and scissor so the material
+/// shader's 0.75px outer AA band rasterizes instead of terminating at half
+/// alpha exactly on the shape edge.
+const MATERIAL_AA_INFLATE_PX: f32 = 1.0;
+
 fn prepare_material_quads(
     plan: &NativePresentationPlan,
+    moving_nodes: &HashSet<PresentationNodeId>,
     scale: f32,
     surface_width: u32,
     surface_height: u32,
+    surface_srgb: bool,
 ) -> Result<Vec<MaterialQuad>, SceneCompileError> {
     if !scale.is_finite() || scale <= 0.0 || surface_width == 0 || surface_height == 0 {
         return Ok(Vec::new());
@@ -985,12 +1073,13 @@ fn prepare_material_quads(
                         draw_rect,
                         shape_rect,
                         clip: visible_clip,
-                        fill: ui_color_f32(shadow.color),
+                        fill: ui_color_f32(shadow.color, surface_srgb),
                         boundary: [0.0; 4],
                         corner_radius: material.corner_radius_units as f32 / 64.0 * scale,
                         boundary_width: 0.0,
                         blur_radius,
                         shadow: true,
+                        snapped: false,
                     });
                     enforce_resource_limit(
                         "native material quad fragments",
@@ -1000,15 +1089,48 @@ fn prepare_material_quads(
                 }
             }
         }
+        // Static radius-0 materials snap to the physical pixel grid and skip
+        // AA entirely; everything else keeps the analytic AA edge and gains
+        // one pixel of draw/scissor headroom so the outer half of the AA band
+        // is no longer truncated. Motion-interpolated rects are never snapped
+        // or animations would visibly step.
+        let snap = material.corner_radius_units == 0
+            && !moving_nodes.contains(&material.node_id);
+        let (fill_draw_rect, fill_shape_rect, fill_clip) = if snap {
+            let rect = if is_separator_material(material.role) {
+                snap_separator_rect(shape_rect, material.role)
+            } else {
+                snap_pixel_rect(shape_rect)
+            };
+            // A snapped hairline may legitimately sit astride the fractional
+            // node clip; widen the scissor to cover the snapped rect. Both
+            // inputs are already clamped to the surface bounds.
+            let clip = pixel_rect_to_scissor(rect, surface_width, surface_height)
+                .map(|snapped_clip| union_scissors(clip, snapped_clip))
+                .unwrap_or(clip);
+            (rect, rect, clip)
+        } else {
+            let draw_rect = PixelRect {
+                x: shape_rect.x - MATERIAL_AA_INFLATE_PX,
+                y: shape_rect.y - MATERIAL_AA_INFLATE_PX,
+                width: shape_rect.width + MATERIAL_AA_INFLATE_PX * 2.0,
+                height: shape_rect.height + MATERIAL_AA_INFLATE_PX * 2.0,
+            };
+            (
+                draw_rect,
+                shape_rect,
+                expand_scissor(clip, 1, surface_width, surface_height),
+            )
+        };
         quads.push(MaterialQuad {
             role: material.role,
-            draw_rect: shape_rect,
-            shape_rect,
-            clip,
-            fill: ui_color_f32(material.color),
+            draw_rect: fill_draw_rect,
+            shape_rect: fill_shape_rect,
+            clip: fill_clip,
+            fill: ui_color_f32(material.color, surface_srgb),
             boundary: material
                 .boundary
-                .map(|boundary| ui_color_f32(boundary.color))
+                .map(|boundary| ui_color_f32(boundary.color, surface_srgb))
                 .unwrap_or([0.0; 4]),
             corner_radius: material.corner_radius_units as f32 / 64.0 * scale,
             boundary_width: material
@@ -1017,6 +1139,7 @@ fn prepare_material_quads(
                 .unwrap_or(0.0),
             blur_radius: 0.0,
             shadow: false,
+            snapped: snap,
         });
         enforce_resource_limit(
             "native material quad fragments",
@@ -1074,7 +1197,7 @@ fn logical_clip_to_scissor(
         .ceil()
         .max(0.0)
         .min(surface_height as f32) as u32;
-    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+    (right > left && bottom > top).then(|| (left, top, right - left, bottom - top))
 }
 
 fn pixel_rect_to_scissor(
@@ -1092,7 +1215,7 @@ fn pixel_rect_to_scissor(
         .ceil()
         .max(0.0)
         .min(surface_height as f32) as u32;
-    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+    (right > left && bottom > top).then(|| (left, top, right - left, bottom - top))
 }
 
 fn intersect_scissors(
@@ -1109,7 +1232,7 @@ fn intersect_scissors(
         .1
         .saturating_add(left.3)
         .min(right.1.saturating_add(right.3));
-    (right_edge > x && bottom_edge > y).then_some((x, y, right_edge - x, bottom_edge - y))
+    (right_edge > x && bottom_edge > y).then(|| (x, y, right_edge - x, bottom_edge - y))
 }
 
 fn subtract_scissor(
@@ -1149,12 +1272,196 @@ fn subtract_scissor(
     pieces
 }
 
-fn ui_color_f32(color: UiColor) -> [f32; 4] {
+fn union_scissors(
+    left: (u32, u32, u32, u32),
+    right: (u32, u32, u32, u32),
+) -> (u32, u32, u32, u32) {
+    let x = left.0.min(right.0);
+    let y = left.1.min(right.1);
+    let right_edge = left
+        .0
+        .saturating_add(left.2)
+        .max(right.0.saturating_add(right.2));
+    let bottom_edge = left
+        .1
+        .saturating_add(left.3)
+        .max(right.1.saturating_add(right.3));
+    (x, y, right_edge - x, bottom_edge - y)
+}
+
+fn expand_scissor(
+    clip: (u32, u32, u32, u32),
+    amount: u32,
+    surface_width: u32,
+    surface_height: u32,
+) -> (u32, u32, u32, u32) {
+    let left = clip.0.saturating_sub(amount);
+    let top = clip.1.saturating_sub(amount);
+    let right = clip
+        .0
+        .saturating_add(clip.2)
+        .saturating_add(amount)
+        .min(surface_width);
+    let bottom = clip
+        .1
+        .saturating_add(clip.3)
+        .saturating_add(amount)
+        .min(surface_height);
+    (
+        left,
+        top,
+        right.saturating_sub(left),
+        bottom.saturating_sub(top),
+    )
+}
+
+/// Separator materials are the only radius-0 fills that must land as true
+/// hairlines rather than merely whole-pixel rects. Their roles are emitted
+/// exclusively by `PresentationNodeRole::Separator` nodes.
+fn is_separator_material(role: crate::NativeMaterialRole) -> bool {
+    matches!(
+        role,
+        crate::NativeMaterialRole::BorderSubtle | crate::NativeMaterialRole::BorderStrong
+    )
+}
+
+/// Round a static rect to integer physical pixel edges, keeping at least one
+/// pixel of extent in each axis.
+fn snap_pixel_rect(rect: PixelRect) -> PixelRect {
+    let left = rect.x.round();
+    let top = rect.y.round();
+    let right = (rect.x + rect.width).round().max(left + 1.0);
+    let bottom = (rect.y + rect.height).round().max(top + 1.0);
+    PixelRect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    }
+}
+
+/// Render a separator as exactly one physical pixel on a pixel boundary
+/// (two when hovered, for discoverability). The 6lp hit target is scene-owned
+/// geometry and is unaffected by this paint-side thinning.
+fn snap_separator_rect(rect: PixelRect, role: crate::NativeMaterialRole) -> PixelRect {
+    let thickness = if role == crate::NativeMaterialRole::BorderStrong {
+        2.0
+    } else {
+        1.0
+    };
+    if rect.width <= rect.height {
+        let center = rect.x + rect.width / 2.0;
+        let x = if thickness <= 1.0 {
+            center.floor()
+        } else {
+            center.round() - 1.0
+        }
+        .max(0.0);
+        let top = rect.y.round();
+        let bottom = (rect.y + rect.height).round().max(top + 1.0);
+        PixelRect {
+            x,
+            y: top,
+            width: thickness,
+            height: bottom - top,
+        }
+    } else {
+        let center = rect.y + rect.height / 2.0;
+        let y = if thickness <= 1.0 {
+            center.floor()
+        } else {
+            center.round() - 1.0
+        }
+        .max(0.0);
+        let left = rect.x.round();
+        let right = (rect.x + rect.width).round().max(left + 1.0);
+        PixelRect {
+            x: left,
+            y,
+            width: right - left,
+            height: thickness,
+        }
+    }
+}
+
+/// Node ids whose material geometry in the motion-resolved plan differs from
+/// the settled target plan (or which the target plan no longer contains, as
+/// with retained overlay exits). Pixel-snapping these mid-flight would step
+/// the animation, so `prepare_material_quads` leaves them fractional.
+fn geometry_moving_nodes(
+    target: &NativePresentationPlan,
+    resolved: &NativePresentationPlan,
+) -> HashSet<PresentationNodeId> {
+    fn material_rects(
+        plan: &NativePresentationPlan,
+    ) -> HashMap<&PresentationNodeId, Vec<LogicalRect>> {
+        let mut rects: HashMap<&PresentationNodeId, Vec<LogicalRect>> = HashMap::new();
+        for command in plan.commands() {
+            if let NativePlanCommand::Material(material) = command {
+                rects
+                    .entry(&material.node_id)
+                    .or_default()
+                    .push(material.logical_rect);
+            }
+        }
+        rects
+    }
+    let target_rects = material_rects(target);
+    material_rects(resolved)
+        .into_iter()
+        .filter(|(node_id, rects)| target_rects.get(*node_id) != Some(rects))
+        .map(|(node_id, _)| node_id.clone())
+        .collect()
+}
+
+/// Piecewise sRGB EOTF (IEC 61966-2-1), applied exactly once CPU-side.
+///
+/// When the surface format is sRGB the hardware re-encodes on store. Theme
+/// and cell bytes are sRGB-encoded; feeding raw `byte / 255` values to the
+/// quad or material pipelines would double-encode them. glyphon
+/// (ColorMode::Accurate) and the Rgba8UnormSrgb raster path already
+/// linearize their own colors, so this seam covers only the quad/material
+/// instance buffers and the clear — and only on sRGB surfaces: see
+/// [`byte_channel_f32`] for the non-sRGB fallback.
+fn srgb_byte_to_linear(byte: u8) -> f32 {
+    let encoded = f32::from(byte) / 255.0;
+    if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Inverse OETF for [`srgb_byte_to_linear`]: re-encode one linear channel to
+/// an sRGB byte after a linear-space CPU composite.
+fn linear_to_srgb_byte(value: f32) -> u8 {
+    let clamped = value.clamp(0.0, 1.0);
+    let encoded = if clamped <= 0.003_130_8 {
+        clamped * 12.92
+    } else {
+        1.055 * clamped.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
+}
+
+/// One byte channel as the f32 the quad/material pipelines expect: decoded to
+/// linear when the surface is sRGB (the hardware re-encodes on store), left
+/// as the encoded `byte / 255` value when it is not (a non-sRGB surface
+/// stores values as-is, so decoding here would double-darken).
+fn byte_channel_f32(byte: u8, surface_srgb: bool) -> f32 {
+    if surface_srgb {
+        srgb_byte_to_linear(byte)
+    } else {
+        f32::from(byte) / 255.0
+    }
+}
+
+fn ui_color_f32(color: UiColor, surface_srgb: bool) -> [f32; 4] {
     let [red, green, blue, alpha] = color.to_array();
     [
-        f32::from(red) / 255.0,
-        f32::from(green) / 255.0,
-        f32::from(blue) / 255.0,
+        byte_channel_f32(red, surface_srgb),
+        byte_channel_f32(green, surface_srgb),
+        byte_channel_f32(blue, surface_srgb),
         f32::from(alpha) / 255.0,
     ]
 }
@@ -1238,21 +1545,36 @@ fn raster_replacement_layers(
         .collect()
 }
 
-fn resolve_program_cell(cell: &ProgramCell, theme: &Theme) -> ResolvedCell {
+fn resolve_program_cell(cell: &ProgramCell, theme: &Theme, surface_srgb: bool) -> ResolvedCell {
     let palette = &theme.terminal_palette;
     let mut foreground = resolve(cell.style.foreground, palette.foreground, palette);
     let mut background = resolve(cell.style.background, palette.background, palette);
-    let terminal_selection_reverses = cell.selection == Some(CellSelection::Terminal)
+    // A `Default` selection highlight means reverse-video in the terminal
+    // fallback, which never runs this adapter. Natively it composites the
+    // theme's translucent selection fill over the resolved background and
+    // preserves the text color, except in high contrast, whose contrast
+    // contract keeps the stronger inversion cue.
+    let default_selection = cell.selection == Some(CellSelection::Terminal)
         && theme.selection_highlight == SceneColor::Default;
+    let terminal_selection_reverses =
+        default_selection && theme.name == "mandatum-high-contrast";
+    if default_selection && !terminal_selection_reverses {
+        let tinted = composite_scrim(
+            [background[0], background[1], background[2], 255],
+            theme.ui.palette.selection_fill.to_array(),
+            surface_srgb,
+        );
+        background = [tinted[0], tinted[1], tinted[2]];
+    }
     if cell.selection == Some(CellSelection::Terminal)
         && theme.selection_highlight != SceneColor::Default
     {
         background = resolve(theme.selection_highlight, palette.background, palette);
     }
     // Item selection is already represented by the compiled style. A cursor
-    // and fallback terminal selection add the same reverse-video modifier as
-    // base inverse. Ratatui modifiers are presence bits, not XOR toggles, so
-    // any combination reverses exactly once.
+    // and high-contrast fallback terminal selection add the same
+    // reverse-video modifier as base inverse. Ratatui modifiers are presence
+    // bits, not XOR toggles, so any combination reverses exactly once.
     if cell.style.inverse || terminal_selection_reverses || cell.cursor {
         std::mem::swap(&mut foreground, &mut background);
     }
@@ -1261,11 +1583,11 @@ fn resolve_program_cell(cell: &ProgramCell, theme: &Theme) -> ResolvedCell {
         " ".to_owned()
     } else {
         match &cell.occupancy {
-            CellOccupancy::Grapheme(grapheme) if grapheme == "\r" || grapheme == "\n" => {
-                " ".to_owned()
-            }
+            CellOccupancy::Char('\r' | '\n') => " ".to_owned(),
+            CellOccupancy::Cluster(cluster) if cluster == "\r" || cluster == "\n" => " ".to_owned(),
             CellOccupancy::WideContinuation => String::new(),
-            CellOccupancy::Grapheme(grapheme) => grapheme.clone(),
+            CellOccupancy::Char(character) => character.to_string(),
+            CellOccupancy::Cluster(cluster) => cluster.clone(),
         }
     };
     let alpha = if cell.style.dim { 150 } else { 255 };
@@ -1280,8 +1602,8 @@ fn resolve_program_cell(cell: &ProgramCell, theme: &Theme) -> ResolvedCell {
     }
 }
 
-fn resolved_glyph_style(cell: &ProgramCell, theme: &Theme) -> ResolvedGlyphStyle {
-    let cell = resolve_program_cell(cell, theme);
+fn resolved_glyph_style(cell: &ProgramCell, theme: &Theme, surface_srgb: bool) -> ResolvedGlyphStyle {
+    let cell = resolve_program_cell(cell, theme, surface_srgb);
     ResolvedGlyphStyle {
         foreground: cell.foreground,
         bold: cell.bold,
@@ -1296,23 +1618,27 @@ fn prepare_cell_program(
     scene: &WorkspaceScene,
     theme: &Theme,
     presentation_plan: &NativePresentationPlan,
+    surface_srgb: bool,
 ) -> Result<PreparedCellProgram, SceneCompileError> {
     // `program.scoped_cells()` already yields final topmost cells in row-major
-    // order, so there is nothing left to resolve by coordinate here.
+    // order, so there is nothing left to resolve by coordinate here. The
+    // legacy-presentation fact is a whole-scene property: compare once per
+    // frame instead of constructing a default `ScenePresentation` per cell.
+    let legacy_presentation = scene.presentation == mandatum_scene::ScenePresentation::default();
     let cells = program
         .scoped_cells()
         .map(|(x, y, cell, scope)| {
             (
                 x,
                 y,
-                resolve_program_cell(cell, theme),
-                should_paint_legacy_background(scene, x, y, cell, scope.kind),
+                resolve_program_cell(cell, theme, surface_srgb),
+                should_paint_cell_background(scene, legacy_presentation, x, y, cell, scope.kind),
                 scope.kind,
                 cell.cursor,
             )
         })
         .collect::<Vec<_>>();
-    let mut plan = build_row_runs(program, |cell| resolved_glyph_style(cell, theme))
+    let mut plan = build_row_runs(program, |cell| resolved_glyph_style(cell, theme, surface_srgb))
         .map_err(text_program_error)?;
     plan.runs
         .retain(|run| {
@@ -1322,16 +1648,90 @@ fn prepare_cell_program(
             )
         });
     apply_native_text_scopes(&mut plan.runs, scene, presentation_plan)?;
-    apply_modal_scrim_to_base_text(&mut plan.runs, presentation_plan);
+    // Interception runs before the CPU-side scrim: base-scope box quads are
+    // drawn under the GPU scrim quad and are dimmed there, exactly like the
+    // cell backgrounds they extend.
+    let box_glyphs = extract_box_drawing_cells(&mut plan.runs)?;
+    apply_modal_scrim_to_base_text(&mut plan.runs, presentation_plan, surface_srgb);
     enforce_resource_limit("text buffers", plan.runs.len(), MAX_GPU_TEXT_BUFFERS)?;
     Ok(PreparedCellProgram {
         cells,
         rows: plan.runs,
+        box_glyphs,
         issues: plan.issues,
     })
 }
 
-fn apply_modal_scrim_to_base_text(rows: &mut [RowRun], plan: &NativePresentationPlan) {
+/// Pull box-drawing/block-element cells out of cell-exact terminal rows so
+/// they bypass shaping, admission, and fallback entirely and render as exact
+/// cell-geometry quads. Interface rows (native metrics/geometry) keep font
+/// glyphs: their placement is not cell-exact. Underlined or struck rows also
+/// keep font glyphs so text decorations are not lost. Bold or italic rows
+/// keep font glyphs too: quad decomposition carries no weight or slant, and a
+/// wrong-weight stroke next to genuinely bold text is worse than a font seam.
+/// Styled box glyphs are rare, so the interception win is negligible there.
+fn extract_box_drawing_cells(
+    rows: &mut Vec<RowRun>,
+) -> Result<Vec<BoxDrawingCell>, SceneCompileError> {
+    let mut extracted = Vec::new();
+    let mut rebuilt = Vec::with_capacity(rows.len());
+    for run in rows.drain(..) {
+        if run.native_metrics.is_some()
+            || run.native_geometry.is_some()
+            || run.glyph_style.underline
+            || run.glyph_style.strikethrough
+            || run.glyph_style.bold
+            || run.glyph_style.italic
+        {
+            rebuilt.push(run);
+            continue;
+        }
+        let intercepted_span = |span: &crate::row_run::ByteCellSpan| {
+            let mut chars = run.text[span.bytes.clone()].chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => {
+                    (span.cells.len() == 1 && box_drawing::is_box_drawing(ch)).then_some(ch)
+                }
+                _ => None,
+            }
+        };
+        if !run.byte_cells.iter().any(|span| intercepted_span(span).is_some()) {
+            rebuilt.push(run);
+            continue;
+        }
+        let mut kept_start = 0usize;
+        for index in 0..run.byte_cells.len() {
+            let span = &run.byte_cells[index];
+            let Some(ch) = intercepted_span(span) else {
+                continue;
+            };
+            if kept_start < index {
+                rebuilt.push(slice_run(&run, kept_start..index).map_err(text_program_error)?);
+            }
+            extracted.push(BoxDrawingCell {
+                x: run.x.saturating_add(span.cells.start),
+                y: run.y,
+                ch,
+                color: run.glyph_style.foreground,
+                scope: run.paint_scope.kind,
+            });
+            kept_start = index + 1;
+        }
+        if kept_start < run.byte_cells.len() {
+            rebuilt.push(
+                slice_run(&run, kept_start..run.byte_cells.len()).map_err(text_program_error)?,
+            );
+        }
+    }
+    *rows = rebuilt;
+    Ok(extracted)
+}
+
+fn apply_modal_scrim_to_base_text(
+    rows: &mut [RowRun],
+    plan: &NativePresentationPlan,
+    surface_srgb: bool,
+) {
     let scrim = plan.commands().iter().find_map(|command| match command {
         NativePlanCommand::Material(material)
             if material.role == crate::NativeMaterialRole::ModalScrim =>
@@ -1352,22 +1752,45 @@ fn apply_modal_scrim_to_base_text(rows: &mut [RowRun], plan: &NativePresentation
         ) {
             continue;
         }
-        row.glyph_style.foreground = composite_scrim(row.glyph_style.foreground, scrim);
+        row.glyph_style.foreground = composite_scrim(row.glyph_style.foreground, scrim, surface_srgb);
         for range in &mut row.style_ranges {
-            range.style.foreground = composite_scrim(range.style.foreground, scrim);
+            range.style.foreground = composite_scrim(range.style.foreground, scrim, surface_srgb);
         }
     }
 }
 
-fn composite_scrim(base: [u8; 4], scrim: [u8; 4]) -> [u8; 4] {
-    let alpha = u16::from(scrim[3]);
-    let inverse = 255u16.saturating_sub(alpha);
-    [
-        ((u16::from(scrim[0]) * alpha + u16::from(base[0]) * inverse + 127) / 255) as u8,
-        ((u16::from(scrim[1]) * alpha + u16::from(base[1]) * inverse + 127) / 255) as u8,
-        ((u16::from(scrim[2]) * alpha + u16::from(base[2]) * inverse + 127) / 255) as u8,
-        base[3],
-    ]
+/// CPU-side source-over composite of `scrim` over opaque `base`, performed in
+/// the same blending space the GPU uses on the configured surface. On an sRGB
+/// surface the quad/material pipelines blend linearized colors, so this
+/// decodes both operands, mixes in linear, and re-encodes; a mismatch would
+/// make CPU-composited colors (scrim-dimmed glyph text, terminal selection
+/// fills) visibly diverge from GPU-blended quads of the same nominal color.
+/// On a non-sRGB surface the GPU blends encoded values, so this blends
+/// encoded bytes to match.
+fn composite_scrim(base: [u8; 4], scrim: [u8; 4], surface_srgb: bool) -> [u8; 4] {
+    if surface_srgb {
+        let alpha = f32::from(scrim[3]) / 255.0;
+        let blend = |base: u8, scrim: u8| {
+            linear_to_srgb_byte(
+                alpha * srgb_byte_to_linear(scrim) + (1.0 - alpha) * srgb_byte_to_linear(base),
+            )
+        };
+        [
+            blend(base[0], scrim[0]),
+            blend(base[1], scrim[1]),
+            blend(base[2], scrim[2]),
+            base[3],
+        ]
+    } else {
+        let alpha = u16::from(scrim[3]);
+        let inverse = 255u16.saturating_sub(alpha);
+        [
+            ((u16::from(scrim[0]) * alpha + u16::from(base[0]) * inverse + 127) / 255) as u8,
+            ((u16::from(scrim[1]) * alpha + u16::from(base[1]) * inverse + 127) / 255) as u8,
+            ((u16::from(scrim[2]) * alpha + u16::from(base[2]) * inverse + 127) / 255) as u8,
+            base[3],
+        ]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1579,6 +2002,7 @@ fn apply_native_text_scopes(
     Ok(())
 }
 
+#[cfg(test)]
 fn should_paint_legacy_background(
     scene: &WorkspaceScene,
     x: u16,
@@ -1586,7 +2010,28 @@ fn should_paint_legacy_background(
     cell: &ProgramCell,
     scope: TextPaintScopeKind,
 ) -> bool {
-    if scene.presentation == mandatum_scene::ScenePresentation::default() {
+    should_paint_cell_background(
+        scene,
+        scene.presentation == mandatum_scene::ScenePresentation::default(),
+        x,
+        y,
+        cell,
+        scope,
+    )
+}
+
+/// `legacy_presentation` is the frame-hoisted
+/// `scene.presentation == ScenePresentation::default()` fact; callers compute
+/// it once per frame rather than per cell.
+fn should_paint_cell_background(
+    scene: &WorkspaceScene,
+    legacy_presentation: bool,
+    x: u16,
+    y: u16,
+    cell: &ProgramCell,
+    scope: TextPaintScopeKind,
+) -> bool {
+    if legacy_presentation {
         return true;
     }
     if cell.cursor
@@ -1739,10 +2184,11 @@ fn row_text_area_geometry(
         .clipped_cell_bounds()
         .unwrap_or_else(|| SceneRect::new(row.x, row.y, row.width, 1));
     let cell_bounds = glyph_text_bounds(
-        cell_clip.x,
-        cell_clip.y,
+        left,
+        cell_clip.x.saturating_sub(row.x),
         cell_clip.width,
-        cell_width,
+        profile.cell_advance,
+        f32::from(cell_clip.y) * cell_height,
         cell_height,
         surface_width,
         surface_height,
@@ -1861,11 +2307,18 @@ fn shape_row_buffer(
 ) {
     buffer.set_metrics(metrics);
     buffer.set_wrap(Wrap::None);
-    // Quantizes advances to a `cell_width / font_size` grid, which is far finer
-    // than a cell and so does not force whole cells. Proportional fallback
-    // picks — Apple Braille for spinners, Webdings, the STIX faces — still fail
-    // admission, which is what the anchored decomposition handles.
-    buffer.set_monospace_width(Some(cell_width));
+    // cosmic-text quantizes every advance to a `monospace_width / font_size`
+    // physical-pixel grid (its `match_mono_em_width` formula; the
+    // glyph-rescaling arm is dead code here because the `monospace_fallback`
+    // feature is off, so `font_monospace_em_width` is always `None`). Passing
+    // `cell_width * font_size` therefore makes the quantum exactly one cell:
+    // single-width glyphs land on the whole-pixel cell advance, double-width
+    // glyphs on two cells, combining marks on zero, and proportional fallback
+    // picks — Apple Braille for spinners, Webdings, the STIX faces — are
+    // pulled onto the same grid instead of drifting off it. Clusters whose
+    // structure still disagrees with declared cells fail admission, which is
+    // what the anchored decomposition handles.
+    buffer.set_monospace_width(Some(cell_width * metrics.font_size));
     buffer.set_size(
         Some((f32::from(row.width) * cell_width).max(1.0)),
         Some(cell_height),
@@ -1901,7 +2354,16 @@ fn layout_facts_and_observations(
     };
     let facts = LayoutRunFacts {
         rtl: layout.rtl,
-        line_width: layout.line_w,
+        // cosmic-text's `line_w` accumulates natural glyph widths BEFORE
+        // `set_monospace_width` quantization, so with a whole-pixel cell
+        // advance it understates the laid-out line by (cell - natural) per
+        // glyph. Admission compares against the declared cell grid, so
+        // report the width the quantized glyphs actually occupy.
+        line_width: layout
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.x + glyph.w)
+            .fold(0.0, f32::max),
         glyphs: layout
             .glyphs
             .iter()
@@ -2043,12 +2505,9 @@ impl RowShapingPass<'_> {
         for top in initial {
             queued = queued.saturating_sub(1);
             let top_spans = top.byte_cells.len();
-            let top_key = shaping_cache_key_for_candidate(
-                self.cache_enabled,
-                false,
-                &top,
-                self.cache_context(self.row_profile(&top)),
-            );
+            // Materialized only if the top run actually decomposes; the
+            // common hit path never allocates an owned key.
+            let mut top_key: Option<ShapingCacheKey> = None;
             let mut leaves: Vec<CachedDecompositionPart> = Vec::new();
             let mut decomposed = false;
             let mut reused_decomposition = false;
@@ -2069,16 +2528,15 @@ impl RowShapingPass<'_> {
                 let is_top = std::mem::replace(&mut next_is_top, false);
                 let profile = self.row_profile(&run);
                 let metrics = profile.metrics;
-                let cache_key = shaping_cache_key_for_candidate(
-                    self.cache_enabled,
-                    forced_anchor,
-                    &run,
-                    self.cache_context(profile),
-                );
+                let context = self.cache_context(profile);
 
-                if let Some(cached) = cache_key
-                    .as_ref()
-                    .and_then(|key| self.shaping_cache.get_cloned(key))
+                // Borrowed-key lookup: the hit path hashes run data in place
+                // with full key verification; owned keys materialize only on
+                // insert (shaping_cache.rs unifies both hash definitions).
+                if let Some(cached) = self
+                    .cache_enabled
+                    .then(|| BorrowedShapingKey::new(&run, context, forced_anchor))
+                    .and_then(|query| self.shaping_cache.get_cloned_query(&query))
                 {
                     match cached {
                         CachedShaping::Shaped {
@@ -2159,7 +2617,12 @@ impl RowShapingPass<'_> {
                         });
                         // Anchored buffers are cached too: they are what the
                         // live cascade would rebuild verbatim next frame.
-                        let buffer = if let Some(key) = cache_key {
+                        let buffer = if let Some(key) = shaping_cache_key_for_candidate(
+                            self.cache_enabled,
+                            forced_anchor,
+                            &run,
+                            context,
+                        ) {
                             let replacement = Buffer::new(self.font_system, metrics);
                             let buffer = Arc::new(std::mem::replace(
                                 &mut self.row_buffers.rows[buffer_index],
@@ -2179,6 +2642,16 @@ impl RowShapingPass<'_> {
                     }
                     RowRunAdmission::Fallback { reason, action } => {
                         decomposed = true;
+                        // Decomposition always originates at the top run, so
+                        // this is the one place its owned key is needed.
+                        if is_top {
+                            top_key = shaping_cache_key_for_candidate(
+                                self.cache_enabled,
+                                forced_anchor,
+                                &run,
+                                context,
+                            );
+                        }
                         record_row_run_diagnostic(
                             self.diagnostics,
                             format!(
@@ -2410,6 +2883,9 @@ pub struct GpuText {
     raster_cache_entries_high_water: usize,
     raster_cache_bytes_high_water: usize,
     presentation_motion: crate::PresentationMotion,
+    /// Generation-gated reuse of the last successful scene compile, so
+    /// animation-only frames skip `prepare_scene` entirely.
+    prepared_scene_cache: Option<PreparedSceneCache>,
 
     // Solid-quad pipeline.
     quad_pipeline: wgpu::RenderPipeline,
@@ -2417,6 +2893,16 @@ pub struct GpuText {
     unit_buf: wgpu::Buffer,
     inst_buf: wgpu::Buffer,
     inst_capacity_floats: usize,
+    // Per-frame instance scratch, retained across frames so steady-state
+    // frames build instances into already-sized allocations.
+    frame_quads: Vec<f32>,
+    frame_foreground_quads: Vec<f32>,
+    frame_material_instances: Vec<f32>,
+    frame_raster_instances: Vec<f32>,
+    /// The exact instance bytes last written to `inst_buf`. When a frame
+    /// rebuilds identical bytes the upload is skipped; the comparison is
+    /// content-based, so it can never publish a stale frame.
+    uploaded_quads: Vec<f32>,
     material_inst_buf: wgpu::Buffer,
     material_inst_capacity_floats: usize,
     res_buf: wgpu::Buffer,
@@ -2831,7 +3317,20 @@ impl GpuText {
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
+        // Accurate mode linearizes glyph colors in the shader and relies on
+        // the sRGB surface to re-encode on store; a non-sRGB fallback surface
+        // stores values as-is, so Web mode keeps text colors encoded there.
+        let mut atlas = TextAtlas::with_color_mode(
+            &device,
+            &queue,
+            &cache,
+            format,
+            if format.is_srgb() {
+                glyphon::ColorMode::Accurate
+            } else {
+                glyphon::ColorMode::Web
+            },
+        );
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
@@ -2859,11 +3358,17 @@ impl GpuText {
             raster_cache_entries_high_water: 0,
             raster_cache_bytes_high_water: 0,
             presentation_motion: crate::PresentationMotion::default(),
+            prepared_scene_cache: None,
             quad_pipeline,
             material_pipeline,
             unit_buf,
             inst_buf,
             inst_capacity_floats,
+            frame_quads: Vec::new(),
+            frame_foreground_quads: Vec::new(),
+            frame_material_instances: Vec::new(),
+            frame_raster_instances: Vec::new(),
+            uploaded_quads: Vec::new(),
             material_inst_buf,
             material_inst_capacity_floats,
             res_buf,
@@ -3213,7 +3718,15 @@ impl GpuText {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                // The sRGB view decodes encoded artifact bytes to linear on
+                // sample so the sRGB surface re-encodes on store. A non-sRGB
+                // fallback surface stores values as-is, so the texture stays
+                // encoded end to end there.
+                format: if self.config.format.is_srgb() {
+                    wgpu::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                },
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
@@ -3307,6 +3820,24 @@ impl GpuText {
         .run(initial)
     }
 
+    /// The exact reuse identity for the current renderer state. Every input
+    /// that could change what `prepare_scene` (or anything derived from its
+    /// output downstream) produces must appear here.
+    fn prepared_scene_key(&self, scene_generation: u64, theme: &Arc<Theme>) -> PreparedSceneKey {
+        PreparedSceneKey {
+            scene_generation,
+            theme: Arc::clone(theme),
+            surface_width: self.config.width,
+            surface_height: self.config.height,
+            scale_bits: self.scale.to_bits(),
+            scale_generation: self.scale_generation,
+            font_generation: self.font_profile.generation(),
+            font_size_bits: self.font_size.to_bits(),
+            cell_width_bits: self.cell_w.to_bits(),
+            cell_height_bits: self.cell_h.to_bits(),
+        }
+    }
+
     /// Render one frame from a `WorkspaceScene`. Consumes only scene types: the
     /// visible cells, styles, cursor/selection marks, and status come from the
     /// scene, never from a grid or parser. Returns the instant right after
@@ -3325,41 +3856,91 @@ impl GpuText {
     ///
     /// The product shell injects this time so animation tests and scheduling
     /// do not depend on hidden wall-clock reads inside presentation logic.
+    /// Without a scene generation, every frame recompiles the scene.
     pub fn render_at(
         &mut self,
         scene: &WorkspaceScene,
         theme: &Theme,
         visual_now: Instant,
     ) -> Result<GpuRenderOutcome, GpuRenderError> {
+        self.render_with_cache_key(scene, theme, None, visual_now)
+    }
+
+    /// Render with a caller-supplied scene-dirtiness generation, reusing the
+    /// previous frame's compiled scene when the generation and every renderer
+    /// dimension in [`PreparedSceneKey`] match.
+    ///
+    /// The generation is the app's monotonic scene-dirtiness counter: callers
+    /// guarantee that equal generations denote an identical `WorkspaceScene`
+    /// built from an identical viewport. Animation-only frames — motion
+    /// resolve over an unchanged scene — then skip scene compile entirely.
+    /// `None` disables reuse and clears any retained compile. The shared
+    /// `Arc<Theme>` keeps key construction allocation-free.
+    pub fn render_generation_at(
+        &mut self,
+        scene: &WorkspaceScene,
+        theme: &Arc<Theme>,
+        scene_generation: Option<u64>,
+        visual_now: Instant,
+    ) -> Result<GpuRenderOutcome, GpuRenderError> {
+        let cache_key = scene_generation
+            .map(|scene_generation| self.prepared_scene_key(scene_generation, theme));
+        self.render_with_cache_key(scene, theme, cache_key, visual_now)
+    }
+
+    fn render_with_cache_key(
+        &mut self,
+        scene: &WorkspaceScene,
+        theme: &Theme,
+        cache_key: Option<PreparedSceneKey>,
+        visual_now: Instant,
+    ) -> Result<GpuRenderOutcome, GpuRenderError> {
         if let Some(fault) = take_gpu_fault(&self.device_fault, self.device_generation) {
             return Err(fault);
         }
         let frame_prepare_started = Instant::now();
-        let prepared = prepare_scene(scene, theme)?;
+        let prepared =
+            match reusable_prepared_scene(&mut self.prepared_scene_cache, cache_key.as_ref()) {
+                Some(prepared) => prepared,
+                None => prepare_scene(scene, theme)?,
+            };
         let presentation_plan = self.presentation_motion.resolve(
-            prepared.presentation_plan().clone(),
+            prepared.presentation_plan(),
             scene.presentation.motion_policy,
             visual_now,
         );
+        // Every CPU-side color seam matches the blending space of the actual
+        // configured surface; the format never changes after startup.
+        let surface_srgb = self.config.format.is_srgb();
         let program = prepare_cell_program(
             prepared.cell_program(),
             scene,
             theme,
             &presentation_plan,
+            surface_srgb,
         )?;
+        let moving_nodes = if self.presentation_motion.is_active() {
+            geometry_moving_nodes(prepared.presentation_plan(), &presentation_plan)
+        } else {
+            HashSet::new()
+        };
         let material_quads = prepare_material_quads(
             &presentation_plan,
+            &moving_nodes,
             self.scale,
             self.config.width,
             self.config.height,
+            surface_srgb,
         )?;
-        let mut material_instances =
-            Vec::with_capacity(material_quads.len().saturating_mul(MaterialQuad::FLOATS));
+        self.frame_material_instances.clear();
+        self.frame_material_instances
+            .reserve(material_quads.len().saturating_mul(MaterialQuad::FLOATS));
         for quad in &material_quads {
-            quad.write_instance(&mut material_instances);
+            quad.write_instance(&mut self.frame_material_instances);
         }
-        if material_instances.len() > self.material_inst_capacity_floats {
-            self.material_inst_capacity_floats = material_instances.len().next_power_of_two();
+        if self.frame_material_instances.len() > self.material_inst_capacity_floats {
+            self.material_inst_capacity_floats =
+                self.frame_material_instances.len().next_power_of_two();
             self.material_inst_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("native-material-instances"),
                 size: (self.material_inst_capacity_floats * 4) as u64,
@@ -3367,11 +3948,11 @@ impl GpuText {
                 mapped_at_creation: false,
             });
         }
-        if !material_instances.is_empty() {
+        if !self.frame_material_instances.is_empty() {
             self.queue.write_buffer(
                 &self.material_inst_buf,
                 0,
-                bytes_of_slice(&material_instances),
+                bytes_of_slice(&self.frame_material_instances),
             );
         }
         let frame_colors = native_frame_colors(theme);
@@ -3392,45 +3973,71 @@ impl GpuText {
         // content, overlay, selection, and cursor semantics. The GPU adapter
         // only translates final topmost cells into solid backgrounds and
         // glyphon rows.
-        let mut quads = Vec::with_capacity(program.cells.len().saturating_mul(8));
-        let mut foreground_quads = Vec::new();
-        for (x, y, cell, background_visible, scope, cursor) in &program.cells {
-            if !background_visible {
+        self.frame_quads.clear();
+        self.frame_foreground_quads.clear();
+        build_cell_background_instances(
+            &program.cells,
+            self.cell_w,
+            self.cell_h,
+            &mut self.frame_quads,
+            &mut self.frame_foreground_quads,
+            surface_srgb,
+        );
+        // Intercepted box-drawing cells render as exact cell-geometry quads
+        // after every background in their batch: base-scope strokes sit under
+        // the modal scrim like the backgrounds they extend, while overlay and
+        // text-input strokes join the foreground batch drawn above overlay
+        // fills.
+        for glyph in &program.box_glyphs {
+            let Some(rects) = box_drawing::decompose(glyph.ch, self.cell_w, self.cell_h) else {
                 continue;
-            }
-            let target = if *cursor
-                && matches!(
-                    scope,
-                    TextPaintScopeKind::Overlay | TextPaintScopeKind::TextInput
-                ) {
-                &mut foreground_quads
-            } else {
-                &mut quads
             };
-            push_quad(
-                target,
-                f32::from(*x) * self.cell_w,
-                f32::from(*y) * self.cell_h,
-                self.cell_w,
-                self.cell_h,
-                cell.background,
-            );
+            let target = if matches!(
+                glyph.scope,
+                TextPaintScopeKind::Overlay | TextPaintScopeKind::TextInput
+            ) {
+                &mut self.frame_foreground_quads
+            } else {
+                &mut self.frame_quads
+            };
+            let origin_x = f32::from(glyph.x) * self.cell_w;
+            let origin_y = f32::from(glyph.y) * self.cell_h;
+            for rect in rects {
+                push_quad(
+                    target,
+                    origin_x + rect.x,
+                    origin_y + rect.y,
+                    rect.width,
+                    rect.height,
+                    glyph.color,
+                    surface_srgb,
+                );
+            }
         }
-        let base_instance_count = (quads.len() / 8) as u32;
-        quads.extend(foreground_quads);
+        let base_instance_count = (self.frame_quads.len() / 8) as u32;
+        {
+            // Split borrow: `extend` may not borrow two fields through `self`.
+            let (quads, foreground) = (&mut self.frame_quads, &self.frame_foreground_quads);
+            quads.extend_from_slice(foreground);
+        }
+        let instance_count = (self.frame_quads.len() / 8) as u32;
 
-        if quads.len() > self.inst_capacity_floats {
-            self.inst_capacity_floats = quads.len().next_power_of_two();
+        if self.frame_quads.len() > self.inst_capacity_floats {
+            self.inst_capacity_floats = self.frame_quads.len().next_power_of_two();
             self.inst_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("quad-instances"),
                 size: (self.inst_capacity_floats * 4) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            // A fresh buffer holds nothing; the retained upload copy must not
+            // satisfy the skip comparison against it.
+            self.uploaded_quads.clear();
         }
-        self.queue
-            .write_buffer(&self.inst_buf, 0, bytes_of_slice(&quads));
-        let instance_count = (quads.len() / 8) as u32;
+        if commit_instance_upload(&mut self.frame_quads, &mut self.uploaded_quads) {
+            self.queue
+                .write_buffer(&self.inst_buf, 0, bytes_of_slice(&self.uploaded_quads));
+        }
 
         let raster_rects = prepared
             .artifacts()
@@ -3451,12 +4058,15 @@ impl GpuText {
                 .map(|rect| (index, rect))
             })
             .collect::<Vec<_>>();
-        let mut raster_instances = Vec::with_capacity(raster_rects.len().saturating_mul(4));
+        self.frame_raster_instances.clear();
+        self.frame_raster_instances
+            .reserve(raster_rects.len().saturating_mul(4));
         for (_, rect) in &raster_rects {
-            raster_instances.extend_from_slice(&[rect.x, rect.y, rect.width, rect.height]);
+            self.frame_raster_instances
+                .extend_from_slice(&[rect.x, rect.y, rect.width, rect.height]);
         }
-        if raster_instances.len() > self.raster_inst_capacity_floats {
-            self.raster_inst_capacity_floats = raster_instances.len().next_power_of_two();
+        if self.frame_raster_instances.len() > self.raster_inst_capacity_floats {
+            self.raster_inst_capacity_floats = self.frame_raster_instances.len().next_power_of_two();
             self.raster_inst_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("artifact-raster-instances"),
                 size: (self.raster_inst_capacity_floats * 4) as u64,
@@ -3464,9 +4074,12 @@ impl GpuText {
                 mapped_at_creation: false,
             });
         }
-        if !raster_instances.is_empty() {
-            self.queue
-                .write_buffer(&self.raster_inst_buf, 0, bytes_of_slice(&raster_instances));
+        if !self.frame_raster_instances.is_empty() {
+            self.queue.write_buffer(
+                &self.raster_inst_buf,
+                0,
+                bytes_of_slice(&self.frame_raster_instances),
+            );
         }
 
         let resolution = [
@@ -3544,18 +4157,23 @@ impl GpuText {
             wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
             wgpu::CurrentSurfaceTexture::Timeout => {
+                store_prepared_scene(&mut self.prepared_scene_cache, cache_key, prepared);
                 return self.handle_surface_signal(SurfaceAcquireSignal::Timeout, timings);
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
+                store_prepared_scene(&mut self.prepared_scene_cache, cache_key, prepared);
                 return self.handle_surface_signal(SurfaceAcquireSignal::Occluded, timings);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
+                store_prepared_scene(&mut self.prepared_scene_cache, cache_key, prepared);
                 return self.handle_surface_signal(SurfaceAcquireSignal::Outdated, timings);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
+                store_prepared_scene(&mut self.prepared_scene_cache, cache_key, prepared);
                 return self.handle_surface_signal(SurfaceAcquireSignal::Lost, timings);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
+                store_prepared_scene(&mut self.prepared_scene_cache, cache_key, prepared);
                 return self.handle_surface_signal(SurfaceAcquireSignal::Validation, timings);
             }
         };
@@ -3574,9 +4192,18 @@ impl GpuText {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: frame_colors.clear_background[0] as f64 / 255.0,
-                            g: frame_colors.clear_background[1] as f64 / 255.0,
-                            b: frame_colors.clear_background[2] as f64 / 255.0,
+                            r: f64::from(byte_channel_f32(
+                                frame_colors.clear_background[0],
+                                surface_srgb,
+                            )),
+                            g: f64::from(byte_channel_f32(
+                                frame_colors.clear_background[1],
+                                surface_srgb,
+                            )),
+                            b: f64::from(byte_channel_f32(
+                                frame_colors.clear_background[2],
+                                surface_srgb,
+                            )),
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -3711,6 +4338,12 @@ impl GpuText {
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
+        // glyphon refuses to evict any key in `glyphs_in_use` and only
+        // `trim()` clears that set; trimming once per presented frame keeps
+        // glyph churn from growing the atlas until `TextAtlasFull`. The next
+        // `prepare` re-registers every glyph it still needs.
+        self.atlas.trim();
+        store_prepared_scene(&mut self.prepared_scene_cache, cache_key, prepared);
         let present = Instant::now();
         if reconfigure_after_present {
             self.recover_surface(GpuSurfaceRecovery::Outdated)?;
@@ -3808,15 +4441,104 @@ fn indexed_palette(i: u8) -> [u8; 3] {
     }
 }
 
-fn push_quad(buf: &mut Vec<f32>, x: f32, y: f32, w: f32, h: f32, rgba: [u8; 4]) {
+/// Translate resolved topmost cells into background quad instances, merging
+/// horizontally adjacent same-background cells into single instances.
+///
+/// Merging applies to the base cell batch only: cursor cells destined for the
+/// foreground batch (drawn above overlay fills) are emitted per cell, and a
+/// foreground or background-invisible cell always breaks the current base run
+/// (its `x` interrupts contiguity). Cells arrive in row-major order and
+/// `cell_w`/`cell_h` are whole physical pixels, so an `n`-cell instance covers
+/// exactly the same pixels as `n` single-cell instances.
+fn build_cell_background_instances(
+    cells: &[(u16, u16, ResolvedCell, bool, TextPaintScopeKind, bool)],
+    cell_w: f32,
+    cell_h: f32,
+    base: &mut Vec<f32>,
+    foreground: &mut Vec<f32>,
+    surface_srgb: bool,
+) {
+    // (start x, y, cell count, background)
+    let mut run: Option<(u16, u16, u16, [u8; 4])> = None;
+    let flush = |run: &mut Option<(u16, u16, u16, [u8; 4])>, base: &mut Vec<f32>| {
+        if let Some((x, y, cells, background)) = run.take() {
+            push_quad(
+                base,
+                f32::from(x) * cell_w,
+                f32::from(y) * cell_h,
+                f32::from(cells) * cell_w,
+                cell_h,
+                background,
+                surface_srgb,
+            );
+        }
+    };
+    for (x, y, cell, background_visible, scope, cursor) in cells {
+        if !background_visible {
+            continue;
+        }
+        if *cursor
+            && matches!(
+                scope,
+                TextPaintScopeKind::Overlay | TextPaintScopeKind::TextInput
+            )
+        {
+            push_quad(
+                foreground,
+                f32::from(*x) * cell_w,
+                f32::from(*y) * cell_h,
+                cell_w,
+                cell_h,
+                cell.background,
+                surface_srgb,
+            );
+            continue;
+        }
+        match &mut run {
+            Some((run_x, run_y, run_cells, run_background))
+                if *run_y == *y
+                    && run_x.checked_add(*run_cells) == Some(*x)
+                    && *run_background == cell.background =>
+            {
+                *run_cells += 1;
+            }
+            _ => {
+                flush(&mut run, base);
+                run = Some((*x, *y, 1, cell.background));
+            }
+        }
+    }
+    flush(&mut run, base);
+}
+
+/// Retain `current` as the uploaded copy and report whether an upload is
+/// needed. Identical instance bytes skip the GPU write; the swapped-out
+/// vector keeps its allocation as the next frame's build scratch.
+fn commit_instance_upload(current: &mut Vec<f32>, uploaded: &mut Vec<f32>) -> bool {
+    if current == uploaded {
+        return false;
+    }
+    std::mem::swap(current, uploaded);
+    true
+}
+
+fn push_quad(
+    buf: &mut Vec<f32>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rgba: [u8; 4],
+    surface_srgb: bool,
+) {
     buf.extend_from_slice(&[
         x,
         y,
         w,
         h,
-        rgba[0] as f32 / 255.0,
-        rgba[1] as f32 / 255.0,
-        rgba[2] as f32 / 255.0,
+        byte_channel_f32(rgba[0], surface_srgb),
+        byte_channel_f32(rgba[1], surface_srgb),
+        byte_channel_f32(rgba[2], surface_srgb),
         rgba[3] as f32 / 255.0,
     ]);
 }
@@ -3844,24 +4566,38 @@ fn cell_clip_scissor(
     let top = pixel_boundary(f32::from(clip.y) * cell_height, surface_height);
     let right = pixel_boundary(f32::from(clip.right()) * cell_width, surface_width);
     let bottom = pixel_boundary(f32::from(clip.bottom()) * cell_height, surface_height);
-    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+    (right > left && bottom > top).then(|| (left, top, right - left, bottom - top))
 }
 
+/// Raster clip for one run's clipped cell span.
+///
+/// The horizontal origin is the run's terminal-grid start, but the horizontal
+/// extent advances on the run's shaping quantum: the same `cell_advance` the
+/// shaper quantized every glyph to. For terminal rows the quantum equals the
+/// terminal cell width, so the clip stays cell-grid exact. App-owned roles
+/// scale the quantum by their font-size ratio, so their glyphs are wider or
+/// narrower than the terminal cells they are declared in; deriving the clip
+/// from the terminal grid there would shear the final glyph of every run
+/// whose role shapes wider than the terminal cell (a 13pt Title over an
+/// 11.5pt terminal loses ~1.8px per cell). Vertical bounds remain
+/// terminal-grid exact.
+#[allow(clippy::too_many_arguments)]
 fn glyph_text_bounds(
-    x: u16,
-    y: u16,
-    width: u16,
-    cell_width: f32,
+    origin_left: f32,
+    clip_offset_cells: u16,
+    clip_width_cells: u16,
+    quantum: f32,
+    top: f32,
     cell_height: f32,
     surface_width: u32,
     surface_height: u32,
 ) -> TextBounds {
-    let left = f32::from(x) * cell_width;
-    let top = f32::from(y) * cell_height;
+    let left = origin_left + f32::from(clip_offset_cells) * quantum;
     TextBounds {
         left: pixel_boundary(left, surface_width) as i32,
         top: pixel_boundary(top, surface_height) as i32,
-        right: pixel_boundary(left + f32::from(width.max(1)) * cell_width, surface_width) as i32,
+        right: pixel_boundary(left + f32::from(clip_width_cells.max(1)) * quantum, surface_width)
+            as i32,
         bottom: pixel_boundary(top + cell_height, surface_height) as i32,
     }
 }
@@ -3872,6 +4608,12 @@ fn pixel_boundary(position: f32, maximum: u32) -> u32 {
 
 /// Measure a monospace advance width by shaping a run of identical glyphs and
 /// dividing the laid-out line width by the glyph count.
+///
+/// The advance is rounded up to a whole physical pixel (Ghostty's policy) so
+/// every column sits at the same subpixel phase: glyph stems rasterize
+/// uniformly, background quads land on the same pixel edges as the
+/// pixel-snapped text clips, and per-cell decorations tile without seams.
+/// Shaping quantizes to this grid via `set_monospace_width`.
 fn measure_cell_width(font_system: &mut FontSystem, metrics: Metrics, family: &str) -> f32 {
     let mut buffer = Buffer::new(font_system, metrics);
     let mono = Attrs::new().family(font_family(family));
@@ -3882,7 +4624,7 @@ fn measure_cell_width(font_system: &mut FontSystem, metrics: Metrics, family: &s
         .next()
         .map(|run| run.line_w)
         .unwrap_or(metrics.font_size * 0.6);
-    (width / 20.0).max(1.0)
+    (width / 20.0).ceil().max(1.0)
 }
 
 fn validate_scale(scale: f32) -> Result<(), String> {
@@ -3980,10 +4722,26 @@ fn rounded_box_distance(pixel: vec2<f32>, rect: vec4<f32>, radius: f32) -> f32 {
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let distance = rounded_box_distance(in.pixel, in.shape, in.params.x);
     let blur = max(in.params.z, 0.0);
+    if in.params.w > 1.5 {
+        // Pixel-snapped flat material: geometry lies exactly on the pixel
+        // grid, so edges are hard by construction and take no AA ramp.
+        let snapped_boundary = max(in.params.y, 0.0);
+        if snapped_boundary > 0.0 && distance > -snapped_boundary {
+            return in.boundary;
+        }
+        return in.fill;
+    }
     if in.params.w > 0.5 {
+        // Gaussian falloff (sigma = blur / 2) reads as soft elevation depth
+        // instead of a uniform halo band. The curve is renormalized to hit
+        // exactly zero at the blur extent so the shadow quad's inflated
+        // draw rect never hard-clips a visible tail.
         let softness = max(blur, 0.75);
         let outside = smoothstep(-0.75, 0.75, distance);
-        let alpha = (1.0 - smoothstep(0.0, softness, distance)) * outside;
+        let sigma = softness * 0.5;
+        let gauss = exp(-(distance * distance) / (2.0 * sigma * sigma));
+        let tail = 0.13533528;
+        let alpha = max(gauss - tail, 0.0) / (1.0 - tail) * outside;
         return vec4<f32>(in.fill.rgb, in.fill.a * alpha);
     }
 
@@ -4070,7 +4828,7 @@ mod tests {
         };
 
         let plan = prepare_native_presentation(&scene, &Theme::default()).unwrap();
-        let quads = prepare_material_quads(&plan, 2.0, 1_600, 1_200).unwrap();
+        let quads = prepare_material_quads(&plan, &HashSet::new(), 2.0, 1_600, 1_200, true).unwrap();
 
         assert_eq!(quads.len(), 3);
         assert!(quads[0].shadow);
@@ -4079,8 +4837,10 @@ mod tests {
         assert!(quads[1].draw_rect.height > quads[1].shape_rect.height);
         let surface = quads[2];
         assert!(!surface.shadow);
+        // Rounded fills draw and scissor one pixel beyond the shape so the
+        // outer half of the analytic AA band is not truncated.
         assert_eq!(
-            surface.draw_rect,
+            surface.shape_rect,
             PixelRect {
                 x: 8.0,
                 y: 12.0,
@@ -4088,11 +4848,20 @@ mod tests {
                 height: 200.0,
             }
         );
-        assert_eq!(surface.shape_rect, surface.draw_rect);
-        assert_eq!(surface.clip, (8, 12, 400, 200));
+        assert_eq!(
+            surface.draw_rect,
+            PixelRect {
+                x: 7.0,
+                y: 11.0,
+                width: 402.0,
+                height: 202.0,
+            }
+        );
+        assert!(!surface.snapped);
+        assert_eq!(surface.clip, (7, 11, 402, 202));
         assert_eq!(
             surface.fill,
-            ui_color_f32(Theme::default().ui.palette.pane_surface)
+            ui_color_f32(Theme::default().ui.palette.pane_surface, true)
         );
         assert_eq!(surface.corner_radius, 20.0);
         assert_eq!(surface.boundary_width, 2.0);
@@ -4121,6 +4890,25 @@ mod tests {
     }
 
     #[test]
+    fn scissor_math_rejects_disjoint_and_degenerate_rects_without_overflow() {
+        // Regression: `bool::then_some(tuple)` evaluates the tuple eagerly, so
+        // disjoint rects underflowed `right_edge - x` in debug builds (live
+        // panic at gpu.rs intersect_scissors, 2026-07-26). The guards must be
+        // lazy for every rect relationship, not just overlapping ones.
+        assert_eq!(intersect_scissors((0, 0, 10, 10), (20, 20, 5, 5)), None);
+        assert_eq!(intersect_scissors((20, 20, 5, 5), (0, 0, 10, 10)), None);
+        assert_eq!(intersect_scissors((0, 0, 10, 10), (10, 0, 5, 5)), None);
+        assert_eq!(intersect_scissors((5, 5, 0, 0), (0, 0, 10, 10)), None);
+        assert_eq!(
+            intersect_scissors((0, 0, 10, 10), (5, 5, 10, 10)),
+            Some((5, 5, 5, 5))
+        );
+        assert_eq!(subtract_scissor((20, 20, 5, 5), (0, 0, 10, 10)), vec![(
+            20, 20, 5, 5
+        )]);
+    }
+
+    #[test]
     fn semantic_materials_replace_only_default_nonterminal_backgrounds() {
         let mut scene = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
         let pane_id = scene.panes[0].id.clone();
@@ -4136,7 +4924,7 @@ mod tests {
             first_visible_surface_row: 0,
         }];
         let default_cell = ProgramCell {
-            occupancy: CellOccupancy::Grapheme(" ".to_owned()),
+            occupancy: CellOccupancy::grapheme(" ".to_owned()),
             style: mandatum_scene::SceneCellStyle::default(),
             selection: None,
             cursor: false,
@@ -4259,7 +5047,7 @@ mod tests {
             1,
             2,
             &ProgramCell {
-                occupancy: CellOccupancy::Grapheme(" ".to_owned()),
+                occupancy: CellOccupancy::grapheme(" ".to_owned()),
                 style: mandatum_scene::SceneCellStyle::default(),
                 selection: None,
                 cursor: false,
@@ -4275,7 +5063,7 @@ mod tests {
             1,
             2,
             &ProgramCell {
-                occupancy: CellOccupancy::Grapheme(" ".to_owned()),
+                occupancy: CellOccupancy::grapheme(" ".to_owned()),
                 style: mandatum_scene::SceneCellStyle::default(),
                 selection: None,
                 cursor: false,
@@ -4288,8 +5076,18 @@ mod tests {
     #[test]
     fn app_owned_chrome_glyphs_use_ui_palette_and_typed_tones_without_label_parsing() {
         let mut scene = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        // A floating pane carries a state badge, which keeps its native chip
+        // and chrome-scoped glyph text. The terminal kind badge is the
+        // redundant one whose text is decoration-scoped away natively.
+        scene.panes[0].floating = true;
         let pane_id = scene.panes[0].id.clone();
         let badge_rect = scene.panes[0]
+            .badge_rects()
+            .into_iter()
+            .find(|(kind, _)| *kind == mandatum_scene::PaneBadgeKind::Floating)
+            .expect("floating badge rect")
+            .1;
+        let terminal_badge_rect = scene.panes[0]
             .badge_rects()
             .into_iter()
             .find(|(kind, _)| *kind == mandatum_scene::PaneBadgeKind::Terminal)
@@ -4337,9 +5135,9 @@ mod tests {
             make_node(
                 PresentationNodeId::pane(
                     pane_id,
-                    mandatum_scene::PaneNodePart::Badge(mandatum_scene::PaneBadgeKind::Terminal),
+                    mandatum_scene::PaneNodePart::Badge(mandatum_scene::PaneBadgeKind::Floating),
                 ),
-                PresentationNodeRole::PaneBadge(mandatum_scene::PaneBadgeKind::Terminal),
+                PresentationNodeRole::PaneBadge(mandatum_scene::PaneBadgeKind::Floating),
                 PresentationNodeState {
                     tone: mandatum_scene::PresentationTone::AgentIdentity,
                     ..PresentationNodeState::default()
@@ -4360,7 +5158,7 @@ mod tests {
         let program = compile_cell_program(&scene, &theme);
         let presentation_plan = prepare_native_presentation(&scene, &theme).unwrap();
         let translated =
-            prepare_cell_program(&program, &scene, &theme, &presentation_plan).unwrap();
+            prepare_cell_program(&program, &scene, &theme, &presentation_plan, true).unwrap();
         assert!(
             translated
                 .rows
@@ -4410,6 +5208,152 @@ mod tests {
             theme.ui.palette.agent_identity.to_array(),
             "the aligned badge cell rect must override the title rail glyph tone"
         );
+        assert!(
+            program.scoped_cells().any(|(x, y, _, scope)| {
+                terminal_badge_rect.contains(x, y)
+                    && scope.kind == TextPaintScopeKind::PaneDecoration
+            }),
+            "the redundant terminal kind label is decoration-scoped for the fallback"
+        );
+        assert!(
+            !translated.rows.iter().any(|run| {
+                run.y == terminal_badge_rect.y
+                    && run.x >= terminal_badge_rect.x
+                    && run.x < terminal_badge_rect.right()
+            }),
+            "the terminal kind label never reaches native shaping"
+        );
+    }
+
+    #[test]
+    fn chrome_role_glyph_ink_stays_inside_the_run_raster_clip() {
+        // Mirrors the live regression config: terminal 11.5pt at 2x scale ->
+        // font_size 23 physical, natural advance 13.8, cell ceil'd to 14.
+        // Title-role chrome (13pt -> 26px) then shapes at cell_advance
+        // 14 * 26/23 = 15.826 per declared cell, so a run's quantized ink is
+        // wider than its terminal-grid cell span: clipping the TextArea on
+        // the cell grid sheared the final glyph of every chrome run
+        // ("Mandatum" -> "Mandatur").
+        let terminal = PaneContent::Terminal(TerminalSurface {
+            rows: vec![vec![SceneCell::grapheme(
+                "X",
+                mandatum_scene::SceneCellStyle::default(),
+            )]],
+            ..TerminalSurface::default()
+        });
+        let mut scene = scene(vec![pane(PaneSceneKind::Terminal, terminal)]);
+        let header_rect = scene.header.area;
+        scene.presentation.nodes = vec![PresentationNode {
+            id: PresentationNodeId::workspace(WorkspaceNodePart::Header),
+            parent: None,
+            role: PresentationNodeRole::Header,
+            state: PresentationNodeState::default(),
+            logical_rect: LogicalRect::from_units(
+                0,
+                0,
+                u64::from(header_rect.width) * 7 * 64,
+                17 * 64,
+            ),
+            cell_rect: Some(header_rect),
+            terminal_projection: TerminalProjection::CellRegions(vec![header_rect]),
+        }];
+        scene.presentation.viewport = Some(
+            ViewportMetrics::new(
+                LogicalSize::from_units(560 * 64, 408 * 64),
+                PhysicalSize::new(1_120, 816),
+                BackingScale::new(2.0).unwrap(),
+                LogicalSize::from_units(7 * 64, 17 * 64),
+            )
+            .unwrap(),
+        );
+
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+            true,
+        )
+        .unwrap();
+
+        let font_profile = ResolvedFontProfile::resolve(FontRequest::default()).unwrap();
+        let mut font_system = font_profile.create_font_system();
+        let terminal_metrics = Metrics::new(23.0, 34.0);
+        let cell_w = measure_cell_width(&mut font_system, terminal_metrics, font_profile.family());
+        assert_eq!(cell_w, 14.0, "23px JetBrains Mono must ceil to a 14px cell");
+        let family = font_profile.family().to_owned();
+        let mut row_buffers = RowBufferPool::new();
+        let mut shaping_cache = ShapingCache::new();
+        let mut fallback_report = FallbackReport::new(font_profile.generation());
+        let mut diagnostics = BTreeSet::new();
+        let shaped = RowShapingPass {
+            font_system: &mut font_system,
+            row_buffers: &mut row_buffers,
+            shaping_cache: &mut shaping_cache,
+            fallback_report: &mut fallback_report,
+            diagnostics: &mut diagnostics,
+            font_profile: &font_profile,
+            font_family: &family,
+            cache_enabled: true,
+            terminal_metrics,
+            cell_advance: cell_w,
+            cell_height: 34.0,
+            scale: 2.0,
+            scale_generation: 1,
+        }
+        .run(translated.rows.clone())
+        .unwrap();
+
+        assert!(
+            shaped.iter().any(|row| {
+                row.row
+                    .native_metrics
+                    .is_some_and(|metric| metric.role == crate::NativeTextMetricRole::Title)
+            }),
+            "the header must reach shaping as Title-role chrome text"
+        );
+        for row in &shaped {
+            let profile = row_shaping_profile(&row.row, terminal_metrics, cell_w, 2.0);
+            if row.row.native_metrics.is_some() {
+                assert!(
+                    profile.cell_advance > cell_w,
+                    "the regression config needs chrome advances wider than \
+                     the terminal cell, got {} vs {cell_w}",
+                    profile.cell_advance,
+                );
+            }
+            let area = row_text_area_geometry(&row.row, profile, cell_w, 34.0, 2.0, 1_120, 816);
+            let buffer: &Buffer = match &row.buffer {
+                ShapedBuffer::Shared(buffer) => buffer.as_ref(),
+                ShapedBuffer::RowPool(index) => &row_buffers.rows[*index],
+            };
+            let ink_right = area.left
+                + buffer
+                    .layout_runs()
+                    .next()
+                    .map(|layout| {
+                        layout
+                            .glyphs
+                            .iter()
+                            .map(|glyph| glyph.x + glyph.w)
+                            .fold(0.0f32, f32::max)
+                    })
+                    .unwrap_or(0.0);
+            // `pixel_boundary` may pull the snapped edge in by up to half a
+            // physical pixel; anything beyond that clips real glyph ink.
+            assert!(
+                ink_right <= area.bounds.right as f32 + 0.5,
+                "glyph ink of {:?} (native {:?}) must fit its raster clip: \
+                 ink right {ink_right} vs clip right {} (advance {}, left {})",
+                row.row.text,
+                row.row.native_metrics.map(|metric| metric.role),
+                area.bounds.right,
+                profile.cell_advance,
+                area.left,
+            );
+        }
     }
 
     #[test]
@@ -4478,6 +5422,7 @@ mod tests {
             &scene,
             &theme,
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
 
@@ -4621,7 +5566,7 @@ mod tests {
             Vec::new(),
         );
         let translated =
-            prepare_cell_program(prepared.cell_program(), &scene, &theme, &plan).unwrap();
+            prepare_cell_program(prepared.cell_program(), &scene, &theme, &plan, true).unwrap();
         let first = translated
             .rows
             .iter()
@@ -5263,7 +6208,7 @@ mod tests {
             ..Theme::default()
         };
         let cell = ProgramCell {
-            occupancy: CellOccupancy::Grapheme('X'.to_string()),
+            occupancy: CellOccupancy::grapheme('X'.to_string()),
             style: mandatum_scene::SceneCellStyle {
                 foreground: SceneColor::Rgb(1, 2, 3),
                 background: SceneColor::Rgb(4, 5, 6),
@@ -5280,7 +6225,7 @@ mod tests {
             raster_layer: None,
         };
 
-        let resolved = resolve_program_cell(&cell, &theme);
+        let resolved = resolve_program_cell(&cell, &theme, true);
         assert_eq!(resolved.grapheme, "X");
         assert_eq!(resolved.foreground, [1, 2, 3, 150]);
         assert_eq!(resolved.background, [90, 91, 92, 255]);
@@ -5323,14 +6268,14 @@ mod tests {
             ..Theme::default()
         };
         let mut cell = ProgramCell {
-            occupancy: CellOccupancy::Grapheme("X".to_owned()),
+            occupancy: CellOccupancy::grapheme("X".to_owned()),
             style: mandatum_scene::SceneCellStyle::default(),
             selection: None,
             cursor: false,
             raster_layer: None,
         };
 
-        let defaults = resolve_program_cell(&cell, &theme);
+        let defaults = resolve_program_cell(&cell, &theme, true);
         assert_eq!(defaults.foreground, [1, 2, 3, 255]);
         assert_eq!(defaults.background, [4, 5, 6, 255]);
         assert_eq!(
@@ -5344,7 +6289,7 @@ mod tests {
         for index in 0..16 {
             cell.style.foreground = SceneColor::Ansi(index);
             assert_eq!(
-                resolve_program_cell(&cell, &theme).foreground,
+                resolve_program_cell(&cell, &theme, true).foreground,
                 [
                     ansi[index as usize][0],
                     ansi[index as usize][1],
@@ -5361,13 +6306,13 @@ mod tests {
         ] {
             cell.style.foreground = SceneColor::Indexed(index);
             assert_eq!(
-                resolve_program_cell(&cell, &theme).foreground,
+                resolve_program_cell(&cell, &theme, true).foreground,
                 [expected[0], expected[1], expected[2], 255]
             );
         }
         cell.style.foreground = SceneColor::Rgb(7, 8, 9);
         assert_eq!(
-            resolve_program_cell(&cell, &theme).foreground,
+            resolve_program_cell(&cell, &theme, true).foreground,
             [7, 8, 9, 255]
         );
 
@@ -5381,7 +6326,7 @@ mod tests {
             .expect("compiled header cell");
         assert_eq!(header.style.foreground, SceneColor::Ansi(12));
         assert_eq!(
-            resolve_program_cell(header, &chrome_theme).foreground,
+            resolve_program_cell(header, &chrome_theme, true).foreground,
             [ansi[12][0], ansi[12][1], ansi[12][2], 255],
             "compiled semantic chrome must materialize through the active terminal palette"
         );
@@ -5390,7 +6335,7 @@ mod tests {
     #[test]
     fn base_inverse_terminal_selection_fallback_and_cursor_reverse_once_by_presence() {
         let cell = ProgramCell {
-            occupancy: CellOccupancy::Grapheme('X'.to_string()),
+            occupancy: CellOccupancy::grapheme('X'.to_string()),
             style: mandatum_scene::SceneCellStyle {
                 foreground: SceneColor::Rgb(1, 2, 3),
                 background: SceneColor::Rgb(4, 5, 6),
@@ -5402,10 +6347,35 @@ mod tests {
             raster_layer: None,
         };
 
-        let resolved = resolve_program_cell(&cell, &Theme::default());
+        // Default-highlight selection tints the background natively instead
+        // of adding a reverse bit: rgb(4,5,6) under the dark theme's
+        // rgba(0x78,0xa9,0xff,36) selection fill blends in linear space —
+        // matching the GPU blend of the same token on Item selections — to
+        // rgb(46,68,106). Base inverse and the cursor still share one
+        // reverse-video bit, so the tinted background becomes the foreground
+        // exactly once.
+        let resolved = resolve_program_cell(&cell, &Theme::default(), true);
+        assert_eq!(resolved.foreground, [46, 68, 106, 255]);
+        assert_eq!(resolved.background, [1, 2, 3, 255]);
 
-        // Base inverse, fallback terminal selection, and the cursor all add
-        // the same reverse-video bit; their combination reverses once.
+        // Without other reverse sources the selection preserves text color
+        // over the tinted background.
+        let plain_selection = ProgramCell {
+            style: mandatum_scene::SceneCellStyle {
+                inverse: false,
+                ..cell.style
+            },
+            cursor: false,
+            ..cell.clone()
+        };
+        let resolved = resolve_program_cell(&plain_selection, &Theme::default(), true);
+        assert_eq!(resolved.foreground, [1, 2, 3, 255]);
+        assert_eq!(resolved.background, [46, 68, 106, 255]);
+
+        // High contrast keeps inversion as the stronger cue: inverse,
+        // selection, and cursor together still reverse exactly once.
+        let high_contrast = Theme::builtin("mandatum-high-contrast").unwrap();
+        let resolved = resolve_program_cell(&cell, &high_contrast, true);
         assert_eq!(resolved.foreground, [4, 5, 6, 255]);
         assert_eq!(resolved.background, [1, 2, 3, 255]);
     }
@@ -5413,7 +6383,7 @@ mod tests {
     #[test]
     fn item_selection_uses_compiled_style_and_hidden_or_continuation_cells_are_blank() {
         let item = ProgramCell {
-            occupancy: CellOccupancy::Grapheme('I'.to_string()),
+            occupancy: CellOccupancy::grapheme('I'.to_string()),
             style: mandatum_scene::SceneCellStyle {
                 foreground: SceneColor::Rgb(1, 2, 3),
                 background: SceneColor::Rgb(4, 5, 6),
@@ -5425,7 +6395,7 @@ mod tests {
             raster_layer: None,
         };
         let hidden = ProgramCell {
-            occupancy: CellOccupancy::Grapheme('H'.to_string()),
+            occupancy: CellOccupancy::grapheme('H'.to_string()),
             style: mandatum_scene::SceneCellStyle {
                 hidden: true,
                 ..mandatum_scene::SceneCellStyle::default()
@@ -5442,16 +6412,60 @@ mod tests {
             raster_layer: None,
         };
 
-        let resolved_item = resolve_program_cell(&item, &Theme::default());
+        let resolved_item = resolve_program_cell(&item, &Theme::default(), true);
         assert_eq!(resolved_item.foreground, [4, 5, 6, 255]);
         assert_eq!(resolved_item.background, [1, 2, 3, 255]);
         assert_eq!(
-            resolve_program_cell(&hidden, &Theme::default()).grapheme,
+            resolve_program_cell(&hidden, &Theme::default(), true).grapheme,
             " "
         );
         assert_eq!(
-            resolve_program_cell(&continuation, &Theme::default()).grapheme,
+            resolve_program_cell(&continuation, &Theme::default(), true).grapheme,
             ""
+        );
+    }
+
+    /// V1 seam invariant: every CPU-side composite blends in the same space
+    /// as the GPU on the configured surface. On sRGB surfaces that is linear
+    /// space; the expectations are hand-computed closed forms
+    /// (`a * lin(scrim) + (1 - a) * lin(base)`, re-encoded), so a regression
+    /// to encoded-byte math cannot pass silently.
+    #[test]
+    fn cpu_composites_blend_in_linear_space_on_srgb_surfaces() {
+        // Dark-theme modal scrim rgba(5,7,10,140) over 0xE0 text: a = 140/255,
+        // lin(0xE0) = 0.73046, lin(5) = 0.00152, lin(7) = 0.00214,
+        // lin(10) = 0.00304; each channel re-encodes to 0x9D = 157. The
+        // legacy encoded-byte math yields 104-107, ~35% darker.
+        let base = [0xE0, 0xE0, 0xE0, 255];
+        let scrim = [5, 7, 10, 140];
+        assert_eq!(composite_scrim(base, scrim, true), [157, 157, 157, 255]);
+        // Base alpha passes through untouched.
+        assert_eq!(composite_scrim([0xE0, 0xE0, 0xE0, 150], scrim, true)[3], 150);
+        // Non-sRGB surfaces blend encoded on the GPU, so the CPU composite
+        // stays in encoded space there: (5*140 + 224*115 + 127) / 255 = 104.
+        assert_eq!(composite_scrim(base, scrim, false), [104, 105, 107, 255]);
+    }
+
+    #[test]
+    fn srgb_byte_round_trip_is_lossless() {
+        for byte in 0..=255u8 {
+            assert_eq!(linear_to_srgb_byte(srgb_byte_to_linear(byte)), byte);
+        }
+    }
+
+    /// F12: a non-sRGB fallback surface stores values as-is, so the CPU
+    /// seams must feed encoded `byte / 255` values instead of linearizing
+    /// (which would double-darken every midtone).
+    #[test]
+    fn color_seams_are_identity_on_non_srgb_surfaces() {
+        assert_eq!(byte_channel_f32(128, false), 128.0 / 255.0);
+        assert!((byte_channel_f32(128, true) - 0.215_860_5).abs() < 1e-6);
+        let mut quads = Vec::new();
+        push_quad(&mut quads, 0.0, 0.0, 1.0, 1.0, [128, 64, 255, 255], false);
+        assert_eq!(&quads[4..8], &[128.0 / 255.0, 64.0 / 255.0, 1.0, 1.0]);
+        assert_eq!(
+            ui_color_f32(UiColor::rgba(128, 64, 255, 255), false),
+            [128.0 / 255.0, 64.0 / 255.0, 1.0, 1.0]
         );
     }
 
@@ -5461,7 +6475,7 @@ mod tests {
             rows: vec![
                 vec![
                     SceneCell {
-                        occupancy: CellOccupancy::Grapheme('X'.to_string()),
+                        occupancy: CellOccupancy::grapheme('X'.to_string()),
                         style: mandatum_scene::SceneCellStyle::default(),
                     };
                     20
@@ -5491,6 +6505,7 @@ mod tests {
             &scene,
             &theme,
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
         let final_cells = translated
@@ -5539,6 +6554,7 @@ mod tests {
             &scene,
             &theme,
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
         let inner = layout::pane_inner_rect(scene.panes[0].area);
@@ -5564,6 +6580,107 @@ mod tests {
         assert!(
             runs.iter().all(|(_, _, text)| !text.is_empty()),
             "continuations reserve cells but never become shaped glyph runs"
+        );
+    }
+
+    #[test]
+    fn box_drawing_cells_bypass_shaping_and_become_exact_geometry_quads() {
+        let styled = mandatum_scene::SceneCellStyle {
+            foreground: SceneColor::Rgb(10, 20, 30),
+            ..mandatum_scene::SceneCellStyle::default()
+        };
+        let underlined = mandatum_scene::SceneCellStyle {
+            underline: true,
+            ..styled
+        };
+        let bold = mandatum_scene::SceneCellStyle { bold: true, ..styled };
+        let italic = mandatum_scene::SceneCellStyle {
+            italic: true,
+            ..styled
+        };
+        let surface = TerminalSurface {
+            rows: vec![vec![
+                SceneCell::grapheme("a", styled),
+                SceneCell::grapheme("─", styled),
+                SceneCell::grapheme("█", styled),
+                SceneCell::grapheme("b", styled),
+                SceneCell::grapheme("│", underlined),
+                SceneCell::grapheme("─", bold),
+                SceneCell::grapheme("│", italic),
+            ]],
+            ..TerminalSurface::default()
+        };
+        let scene = scene(vec![pane(
+            PaneSceneKind::Terminal,
+            PaneContent::Terminal(surface),
+        )]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+            true,
+        )
+        .unwrap();
+        let inner = layout::pane_inner_rect(scene.panes[0].area);
+
+        assert_eq!(
+            translated.box_glyphs,
+            vec![
+                BoxDrawingCell {
+                    x: inner.x + 1,
+                    y: inner.y,
+                    ch: '─',
+                    color: [10, 20, 30, 255],
+                    scope: TextPaintScopeKind::PaneContent,
+                },
+                BoxDrawingCell {
+                    x: inner.x + 2,
+                    y: inner.y,
+                    ch: '█',
+                    color: [10, 20, 30, 255],
+                    scope: TextPaintScopeKind::PaneContent,
+                },
+            ],
+            "content box glyphs are intercepted with their resolved color"
+        );
+        let content_runs = translated
+            .rows
+            .iter()
+            .filter(|row| row.y == inner.y && row.x >= inner.x && row.x < inner.x + 7)
+            .map(|row| (row.x, row.width, row.text.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            content_runs.contains(&(inner.x, 1, "a"))
+                && content_runs.contains(&(inner.x + 3, 1, "b")),
+            "neighboring text still shapes as sliced runs; got {content_runs:?}"
+        );
+        assert!(
+            content_runs.contains(&(inner.x + 4, 1, "│")),
+            "underlined box cells keep font glyphs so the decoration survives; got {content_runs:?}"
+        );
+        assert!(
+            content_runs.contains(&(inner.x + 5, 1, "─"))
+                && content_runs.contains(&(inner.x + 6, 1, "│")),
+            "bold and italic box cells keep font glyphs so the weight and slant survive; \
+             got {content_runs:?}"
+        );
+        assert!(
+            translated
+                .box_glyphs
+                .iter()
+                .all(|glyph| glyph.x < inner.x + 5),
+            "styled box cells are never intercepted"
+        );
+        assert!(
+            translated.rows.iter().all(|row| {
+                row.y != inner.y
+                    || row.glyph_style.bold
+                    || !row.text.contains('─') && !row.text.contains('█')
+            }),
+            "unstyled intercepted glyphs never reach shaping"
         );
     }
 
@@ -5594,6 +6711,7 @@ mod tests {
             &scene,
             &theme,
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
         let base = translated
@@ -5668,6 +6786,7 @@ mod tests {
             &scene,
             &theme,
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
         let row = translated
@@ -5793,6 +6912,382 @@ mod tests {
         assert_eq!(namespaced.len(), 2);
     }
 
+    /// One admissible single-style row run for key-identity tests, obtained
+    /// through the real compile pipeline so its paint scope is genuine.
+    fn compiled_row_run(text: &str) -> RowRun {
+        let surface = TerminalSurface {
+            rows: vec![
+                text.chars()
+                    .map(|character| {
+                        SceneCell::grapheme(
+                            character.to_string(),
+                            mandatum_scene::SceneCellStyle::default(),
+                        )
+                    })
+                    .collect(),
+            ],
+            ..TerminalSurface::default()
+        };
+        let scene = scene(vec![pane(
+            PaneSceneKind::Terminal,
+            PaneContent::Terminal(surface),
+        )]);
+        let theme = Theme::default();
+        let prepared = prepare_scene(&scene, &theme).unwrap();
+        let translated = prepare_cell_program(
+            prepared.cell_program(),
+            &scene,
+            &theme,
+            prepared.presentation_plan(),
+            true,
+        )
+        .unwrap();
+        translated
+            .rows
+            .iter()
+            .find(|row| row.text == text)
+            .expect("same-style graphemes share one row run")
+            .clone()
+    }
+
+    /// The property the borrowed-lookup fast path rests on: for any run
+    /// shape, the borrowed view and the materialized owned key must hash
+    /// identically and compare equal, or hit rates silently die.
+    #[test]
+    fn borrowed_and_owned_shaping_keys_hash_and_compare_identically() {
+        use crate::row_run::{ByteCellSpan, RowRunStyleRange};
+        use crate::shaping_cache::owned_and_borrowed_agree;
+
+        let base = compiled_row_run("seed");
+        // Deterministic pseudo-random sweep over texts, style ranges,
+        // byte-cell topologies, contexts, and namespaces.
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        let mut next = |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for case in 0..512 {
+            let mut run = base.clone();
+            let text_len = 1 + next(12) as usize;
+            run.text = (0..text_len)
+                .map(|_| char::from(b'a' + next(26) as u8))
+                .collect();
+            run.width = 1 + next(40) as u16;
+            run.style_ranges = (0..1 + next(3) as usize)
+                .map(|index| RowRunStyleRange {
+                    bytes: index..index + 1 + next(4) as usize,
+                    style: ResolvedGlyphStyle {
+                        foreground: [
+                            next(256) as u8,
+                            next(256) as u8,
+                            next(256) as u8,
+                            next(256) as u8,
+                        ],
+                        bold: next(2) == 1,
+                        italic: next(2) == 1,
+                        underline: next(2) == 1,
+                        strikethrough: next(2) == 1,
+                    },
+                })
+                .collect();
+            run.byte_cells = (0..1 + next(4) as usize)
+                .map(|index| ByteCellSpan {
+                    bytes: index..index + 1 + next(3) as usize,
+                    cells: index as u16..index as u16 + 1 + next(2) as u16,
+                })
+                .collect();
+            let context = ShapingCacheContext {
+                font_generation: next(9),
+                scale_generation: next(9),
+                metric_generation: next(9),
+                metric_slot: next(4) as u8,
+                renderer_config_generation: next(9),
+                font_size_bits: (10.0 + next(20) as f32).to_bits(),
+                line_height_bits: (12.0 + next(24) as f32).to_bits(),
+                cell_width_bits: (6.0 + next(12) as f32).to_bits(),
+                cell_height_bits: (12.0 + next(24) as f32).to_bits(),
+            };
+            let forced_anchor = next(2) == 1;
+
+            let owned = ShapingCacheKey::from_run(&run, context, forced_anchor);
+            let borrowed = BorrowedShapingKey::new(&run, context, forced_anchor);
+            let (hashes_agree, keys_equal) = owned_and_borrowed_agree(&owned, &borrowed);
+            assert!(hashes_agree, "case {case}: borrowed hash diverged from owned");
+            assert!(keys_equal, "case {case}: borrowed key must equal its owned form");
+
+            // A materially different run must not compare equal to the
+            // original owned key through the borrowed view.
+            let mut different = run.clone();
+            different.text.push('!');
+            let (_, different_equal) = owned_and_borrowed_agree(
+                &owned,
+                &BorrowedShapingKey::new(&different, context, forced_anchor),
+            );
+            assert!(
+                !different_equal,
+                "case {case}: a changed run must fail full-key verification"
+            );
+        }
+    }
+
+    /// Borrowed lookups hit owned insertions and preserve the anchored
+    /// namespace plus full-key verification on every dimension of run data.
+    #[test]
+    fn borrowed_key_lookups_hit_owned_insertions_with_full_verification() {
+        let row = compiled_row_run("abcd");
+        let context = ShapingCacheContext {
+            font_generation: 7,
+            scale_generation: 1,
+            metric_generation: 0,
+            metric_slot: 0,
+            renderer_config_generation: SHAPING_POLICY_GENERATION,
+            font_size_bits: 15.0_f32.to_bits(),
+            line_height_bits: 20.0_f32.to_bits(),
+            cell_width_bits: 9.0_f32.to_bits(),
+            cell_height_bits: 20.0_f32.to_bits(),
+        };
+        let key = shaping_cache_key_for_candidate(true, false, &row, context)
+            .expect("cache candidates materialize owned keys");
+        let value = CachedShaping::Decomposed(Arc::from(vec![CachedDecompositionPart {
+            spans: 0..row.byte_cells.len(),
+            forced_anchor: false,
+        }]));
+        let accounted = shaping_cache_accounted_bytes(&key, &value);
+        let mut cache = ShapingCache::new();
+        assert!(cache.insert(key, value, accounted));
+
+        assert!(
+            cache
+                .get_cloned_query(&BorrowedShapingKey::new(&row, context, false))
+                .is_some(),
+            "a borrowed lookup of the identical run must hit"
+        );
+        assert!(
+            cache
+                .get_cloned_query(&BorrowedShapingKey::new(&row, context, true))
+                .is_none(),
+            "the anchored namespace must stay separate under borrowed lookups"
+        );
+        let recolored_context = ShapingCacheContext {
+            scale_generation: 2,
+            ..context
+        };
+        assert!(
+            cache
+                .get_cloned_query(&BorrowedShapingKey::new(&row, recolored_context, false))
+                .is_none(),
+            "context changes must miss under borrowed lookups"
+        );
+        let mut retextured = row.clone();
+        retextured.text = "abce".to_owned();
+        assert!(
+            cache
+                .get_cloned_query(&BorrowedShapingKey::new(&retextured, context, false))
+                .is_none(),
+            "text changes must fail full-key verification"
+        );
+        assert_eq!(cache.stats().hits, 1);
+        assert_eq!(cache.stats().misses, 3);
+    }
+
+    /// P1 coverage proof: flipping any single dimension of the prepared-scene
+    /// key — the app generation, the theme, surface size, scale, font
+    /// identity, or cell metrics — must force a recompile instead of reuse.
+    #[test]
+    fn prepared_scene_reuse_requires_every_key_dimension_to_match() {
+        let workspace = scene(vec![pane(PaneSceneKind::Terminal, terminal_content())]);
+        let theme = Theme::default();
+        let fresh = || prepare_scene(&workspace, &theme).unwrap();
+        let base = PreparedSceneKey {
+            scene_generation: 7,
+            theme: Arc::new(theme.clone()),
+            surface_width: 1_600,
+            surface_height: 1_000,
+            scale_bits: 2.0_f32.to_bits(),
+            scale_generation: 3,
+            font_generation: 5,
+            font_size_bits: 26.0_f32.to_bits(),
+            cell_width_bits: 16.0_f32.to_bits(),
+            cell_height_bits: 34.0_f32.to_bits(),
+        };
+        let mut cache = None;
+
+        store_prepared_scene(&mut cache, Some(base.clone()), fresh());
+        assert!(
+            reusable_prepared_scene(&mut cache, Some(&base)).is_some(),
+            "an identical key must reuse the retained compile"
+        );
+        assert!(
+            reusable_prepared_scene(&mut cache, Some(&base)).is_none(),
+            "reuse consumes the retained compile until it is stored again"
+        );
+
+        let mut altered_theme = theme.clone();
+        altered_theme.name = "altered".to_owned();
+        let variants = [
+            PreparedSceneKey {
+                scene_generation: base.scene_generation + 1,
+                ..base.clone()
+            },
+            PreparedSceneKey {
+                theme: Arc::new(altered_theme),
+                ..base.clone()
+            },
+            PreparedSceneKey {
+                surface_width: base.surface_width + 1,
+                ..base.clone()
+            },
+            PreparedSceneKey {
+                surface_height: base.surface_height + 1,
+                ..base.clone()
+            },
+            PreparedSceneKey {
+                scale_bits: 1.5_f32.to_bits(),
+                ..base.clone()
+            },
+            PreparedSceneKey {
+                scale_generation: base.scale_generation + 1,
+                ..base.clone()
+            },
+            PreparedSceneKey {
+                font_generation: base.font_generation + 1,
+                ..base.clone()
+            },
+            PreparedSceneKey {
+                font_size_bits: 28.0_f32.to_bits(),
+                ..base.clone()
+            },
+            PreparedSceneKey {
+                cell_width_bits: 17.0_f32.to_bits(),
+                ..base.clone()
+            },
+            PreparedSceneKey {
+                cell_height_bits: 36.0_f32.to_bits(),
+                ..base.clone()
+            },
+        ];
+        for (index, variant) in variants.iter().enumerate() {
+            store_prepared_scene(&mut cache, Some(base.clone()), fresh());
+            assert!(
+                reusable_prepared_scene(&mut cache, Some(variant)).is_none(),
+                "key dimension {index} must force a recompile when it changes"
+            );
+        }
+
+        // A generation-less render never reuses, and storing without a key
+        // clears the cache so nothing survives an unidentified frame.
+        store_prepared_scene(&mut cache, Some(base.clone()), fresh());
+        assert!(reusable_prepared_scene(&mut cache, None).is_none());
+        store_prepared_scene(&mut cache, None, fresh());
+        assert!(cache.is_none());
+        assert!(reusable_prepared_scene(&mut cache, Some(&base)).is_none());
+    }
+
+    /// P4(a) coverage proof: horizontally adjacent same-background cells
+    /// merge into single instances, and every discontinuity — color change,
+    /// invisible cell, foreground-batch cursor cell, or row boundary — starts
+    /// a new instance. Foreground cursor cells never merge: the split keeps
+    /// the `base_instance_count` draw ordering intact.
+    #[test]
+    fn background_instances_merge_same_color_runs_within_the_base_batch_only() {
+        let cell = |background: [u8; 4]| ResolvedCell {
+            grapheme: " ".to_owned(),
+            foreground: [255, 255, 255, 255],
+            background,
+            bold: false,
+            italic: false,
+            underline: false,
+            strikethrough: false,
+        };
+        let red = [200, 10, 10, 255];
+        let blue = [10, 10, 200, 255];
+        let content = TextPaintScopeKind::PaneContent;
+        let cells = vec![
+            // Row 0: a three-cell red run, an invisible gap, one blue cell,
+            // a red cell, an overlay cursor cell, then red again.
+            (0, 0, cell(red), true, content, false),
+            (1, 0, cell(red), true, content, false),
+            (2, 0, cell(red), true, content, false),
+            (3, 0, cell(red), false, content, false),
+            (4, 0, cell(blue), true, content, false),
+            (5, 0, cell(red), true, content, false),
+            (6, 0, cell(red), true, TextPaintScopeKind::Overlay, true),
+            (7, 0, cell(red), true, content, false),
+            // Row 1 starts with the same color and must not merge across rows.
+            (0, 1, cell(red), true, content, false),
+            // Row 2: a base-scope cursor cell merges like any base cell.
+            (0, 2, cell(red), true, content, true),
+            (1, 2, cell(red), true, content, false),
+        ];
+        let (cell_w, cell_h) = (8.0, 20.0);
+        let mut base = Vec::new();
+        let mut foreground = Vec::new();
+        build_cell_background_instances(&cells, cell_w, cell_h, &mut base, &mut foreground, true);
+
+        let rects = |buf: &[f32]| {
+            buf.chunks(8)
+                .map(|chunk| (chunk[0], chunk[1], chunk[2], chunk[3]))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rects(&base),
+            vec![
+                (0.0, 0.0, 24.0, 20.0),
+                (32.0, 0.0, 8.0, 20.0),
+                (40.0, 0.0, 8.0, 20.0),
+                (56.0, 0.0, 8.0, 20.0),
+                (0.0, 20.0, 8.0, 20.0),
+                (0.0, 40.0, 16.0, 20.0),
+            ]
+        );
+        assert_eq!(rects(&foreground), vec![(48.0, 0.0, 8.0, 20.0)]);
+
+        // A merged instance carries exactly the bytes a single-cell quad of
+        // the same color would: only the geometry widens.
+        let mut reference = Vec::new();
+        push_quad(&mut reference, 0.0, 0.0, 8.0, 20.0, red, true);
+        assert_eq!(&base[4..8], &reference[4..8]);
+        assert_eq!(&foreground[4..8], &reference[4..8]);
+    }
+
+    /// P4(b) coverage proof: rebuilding identical instance bytes skips the
+    /// upload while any difference — including growth and shrink-to-empty —
+    /// re-uploads and replaces the retained copy.
+    #[test]
+    fn instance_uploads_are_skipped_only_for_byte_identical_rebuilds() {
+        let mut current = vec![1.0_f32, 2.0];
+        let mut uploaded = Vec::new();
+        assert!(commit_instance_upload(&mut current, &mut uploaded));
+        assert_eq!(uploaded, vec![1.0, 2.0]);
+
+        current.clear();
+        current.extend_from_slice(&[1.0, 2.0]);
+        assert!(
+            !commit_instance_upload(&mut current, &mut uploaded),
+            "identical bytes must skip the upload"
+        );
+        assert_eq!(uploaded, vec![1.0, 2.0]);
+
+        current.clear();
+        current.extend_from_slice(&[1.0, 3.0]);
+        assert!(commit_instance_upload(&mut current, &mut uploaded));
+        assert_eq!(uploaded, vec![1.0, 3.0]);
+
+        current.clear();
+        current.extend_from_slice(&[1.0, 3.0, 4.0, 5.0]);
+        assert!(commit_instance_upload(&mut current, &mut uploaded));
+        assert_eq!(uploaded, vec![1.0, 3.0, 4.0, 5.0]);
+
+        current.clear();
+        assert!(
+            commit_instance_upload(&mut current, &mut uploaded),
+            "an emptied instance list is a change, not a skip"
+        );
+        assert!(uploaded.is_empty());
+    }
+
     #[test]
     fn a_repeat_frame_of_permanently_inadmissible_rows_reshapes_nothing() {
         use crate::row_run::ByteCellSpan;
@@ -5822,6 +7317,7 @@ mod tests {
             &scene,
             &theme,
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
         let mut row = translated
@@ -5959,6 +7455,7 @@ mod tests {
             &scene,
             &theme,
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
         let row = translated
@@ -6114,6 +7611,7 @@ mod tests {
             &scene,
             &theme,
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
         let row = translated
@@ -6216,6 +7714,7 @@ mod tests {
             &scene,
             &theme,
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
         let profile = ResolvedFontProfile::resolve(FontRequest::default()).unwrap();
@@ -6275,16 +7774,36 @@ mod tests {
 
     #[test]
     fn glyph_raster_bounds_are_clipped_to_the_declared_cell_span() {
-        let narrow = glyph_text_bounds(3, 2, 1, 9.5, 18.0, 100, 100);
+        let bounds = |x: u16, y: u16, width: u16, quantum: f32| {
+            glyph_text_bounds(
+                f32::from(x) * 9.5,
+                0,
+                width,
+                quantum,
+                f32::from(y) * 18.0,
+                18.0,
+                100,
+                100,
+            )
+        };
+        let narrow = bounds(3, 2, 1, 9.5);
         assert_eq!((narrow.left, narrow.right), (28, 38));
-        let wide = glyph_text_bounds(3, 2, 2, 9.5, 18.0, 100, 100);
+        let wide = bounds(3, 2, 2, 9.5);
         assert_eq!((wide.left, wide.right), (28, 47));
-        let adjacent = glyph_text_bounds(5, 2, 1, 9.5, 18.0, 100, 100);
+        let adjacent = bounds(5, 2, 1, 9.5);
         assert_eq!(wide.right, adjacent.left);
-        let next_row = glyph_text_bounds(5, 3, 1, 9.5, 18.0, 100, 100);
+        let next_row = bounds(5, 3, 1, 9.5);
         assert_eq!(adjacent.bottom, next_row.top);
-        let edge = glyph_text_bounds(10, 2, 2, 9.5, 18.0, 100, 100);
+        let edge = bounds(10, 2, 2, 9.5);
         assert_eq!(edge.right, 100);
+        // An app-owned role whose quantum outgrows the terminal cell keeps
+        // its terminal-grid origin while the extent covers the quantized ink.
+        let scaled = bounds(3, 2, 2, 10.4);
+        assert_eq!((scaled.left, scaled.right), (28, 49));
+        // A clip that trims leading cells advances its left edge on the same
+        // quantum the glyphs were laid out on.
+        let trimmed = glyph_text_bounds(28.5, 1, 1, 10.4, 36.0, 18.0, 100, 100);
+        assert_eq!((trimmed.left, trimmed.right), (39, 49));
     }
 
     fn terminal_content() -> PaneContent {
@@ -6296,6 +7815,7 @@ mod tests {
 
     fn pane(kind: PaneSceneKind, content: PaneContent) -> PaneScene {
         PaneScene {
+            content_revision: 0,
             id: PaneId::new("pane-1"),
             title: kind.label().to_owned(),
             kind,
@@ -6411,6 +7931,7 @@ mod tests {
                 &dense,
                 &theme,
                 prepared.presentation_plan(),
+                true,
             )
             .unwrap_err(),
             SceneCompileError::ResourceLimit {
@@ -6438,6 +7959,7 @@ mod tests {
             &scene,
             &Theme::default(),
             prepared.presentation_plan(),
+            true,
         )
         .unwrap();
         let row = translated

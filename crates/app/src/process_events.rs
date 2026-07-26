@@ -9,15 +9,18 @@ use mandatum_pty::{NativePtyReader, PtyEvent};
 
 use crate::events::{AppEvent, AppEventSender};
 
-const PTY_READ_CHUNK_BYTES: usize = 8192;
+const PTY_READ_CHUNK_BYTES: usize = 64 * 1024;
 
 /// The most PTY output one pane may have in flight (read but not yet applied)
-/// before its reader thread blocks instead of sending more. Four to eight read
-/// chunks preserve streaming throughput without putting a large parse backlog
-/// ahead of newly queued input. While the reader is blocked the child's writes
-/// back up in the kernel pipe, so a flooding `yes`/`cat` blocks in the OS
-/// instead of ballooning the app heap or delaying workspace controls.
-pub(crate) const MAX_IN_FLIGHT_BYTES: usize = 64 * 1024;
+/// before its reader thread blocks instead of sending more. Sixteen read
+/// chunks keep a flooding child's next slice of output queued while the main
+/// loop parses the current one; the drain path coalesces a pane's queued
+/// chunks into one parser feed per slice, and the input priority lane keeps
+/// that backlog from delaying newly arrived user input. While the reader is
+/// blocked the child's writes back up in the kernel pipe, so a flooding
+/// `yes`/`cat` blocks in the OS instead of ballooning the app heap or
+/// delaying workspace controls.
+pub(crate) const MAX_IN_FLIGHT_BYTES: usize = 1024 * 1024;
 
 /// Per-reader flow control between a PTY reader thread and the main loop.
 ///
@@ -104,10 +107,28 @@ pub(crate) struct PtyFlowCredit {
     bytes: usize,
 }
 
+impl PtyFlowCredit {
+    /// Bytes this credit reserved. The drain path releases credits exactly
+    /// as their bytes reach the parser, so it needs each credit's size.
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
 impl Drop for PtyFlowCredit {
     fn drop(&mut self) {
         self.flow.release(self.bytes);
     }
+}
+
+/// Drop the read-buffer slack before charging flow control: `read_event`
+/// hands back a chunk-capacity allocation no matter how few bytes the read
+/// returned, while the flow credit charges only `len`. Right-sizing keeps
+/// charged bytes equal to retained allocation, so fragmented short reads
+/// cannot hold chunk-sized buffers far beyond the in-flight window.
+fn right_size_chunk(mut bytes: Vec<u8>) -> Vec<u8> {
+    bytes.shrink_to_fit();
+    bytes
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,7 +164,7 @@ pub(crate) fn spawn_reader_thread(
         loop {
             match reader.read_event(PTY_READ_CHUNK_BYTES) {
                 Ok(Some(PtyEvent::Output(output))) => {
-                    let bytes = output.into_bytes();
+                    let bytes = right_size_chunk(output.into_bytes());
                     // Backpressure: block here (leaving the child blocked in
                     // the OS pipe) rather than queue unbounded chunks. A
                     // `None` credit means shutdown is joining this thread.
@@ -227,6 +248,33 @@ mod tests {
             blocked_for >= Duration::from_millis(30),
             "acquire returned in {blocked_for:?}; it should have blocked until release"
         );
+        assert_eq!(flow.in_flight_bytes(), 0);
+    }
+
+    // The flow gate charges payload length, so the retained allocation must
+    // match it: without right-sizing, ~1M fragmented 1-byte reads could sit
+    // under the nominal 1 MiB window while holding ~64 GiB of chunk-capacity
+    // buffers.
+    #[test]
+    fn fragmented_short_reads_cannot_retain_chunk_capacity_beyond_the_window() {
+        let flow = PtyFlowControl::new();
+        let mut retained = Vec::new();
+        let mut retained_capacity = 0usize;
+        for _ in 0..1024 {
+            let mut raw = Vec::with_capacity(PTY_READ_CHUNK_BYTES);
+            raw.push(b'x');
+            let chunk = right_size_chunk(raw);
+            assert_eq!(chunk, vec![b'x']);
+            let credit = flow.acquire(chunk.len()).expect("gate is open");
+            retained_capacity += chunk.capacity();
+            retained.push((chunk, credit));
+        }
+        assert!(
+            retained_capacity <= MAX_IN_FLIGHT_BYTES,
+            "retained allocation ({retained_capacity} bytes) must stay within \
+             the charged window ({MAX_IN_FLIGHT_BYTES} bytes)"
+        );
+        drop(retained);
         assert_eq!(flow.in_flight_bytes(), 0);
     }
 

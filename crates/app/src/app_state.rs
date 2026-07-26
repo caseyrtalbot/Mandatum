@@ -18,10 +18,10 @@ use mandatum_core::{
 };
 use mandatum_pty::PtySize;
 use mandatum_scene::{
-    ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind, LogicalHitTarget,
-    LogicalPoint, OverlayScene, PaletteOverlay, PaneSceneKind, PromptOverlay, SceneRect, SceneSize,
-    SearchOverlay, SemanticKey, SessionMapOverlay, Theme, TimelineOverlay, ViewportMetrics,
-    WelcomeOverlay, WorkspaceScene,
+    ArtifactState, ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind,
+    LogicalHitTarget, LogicalPoint, OverlayScene, PaletteOverlay, PaneSceneKind, PromptOverlay,
+    SceneRect, SceneSize, SearchOverlay, SemanticKey, SessionMapOverlay, Theme, TimelineOverlay,
+    ViewportMetrics, WelcomeOverlay, WorkspaceScene,
     cell_program::scalar_range_to_columns,
     input::{
         CompositionEvent, InputEvent, Key, KeyCode, PointerButton, PointerEvent, PointerKind,
@@ -52,7 +52,7 @@ use crate::{
     palette::{PaletteRow, PaletteState, PaletteWorkspaceView, palette_footer, palette_rows},
     persistence::{PersistenceCoordinator, WorkspaceFileError},
     pointer::{encode_mouse_event, split_percent_for_pointer},
-    process_events::PtyRuntimeEvent,
+    process_events::{PtyFlowCredit, PtyRuntimeEvent},
     runtime_engine::{
         AgentApprovalError, AgentRuntimeView, PreparedRuntimeRestore, RestoreGeometry,
         RestoreRuntimeError, RuntimeEngine, RuntimeExitEffect, RuntimeLifecycleTrigger,
@@ -85,12 +85,119 @@ use crate::{
 /// shell loop; the reader-side flow gates bound how much can queue at all.
 const DRAIN_EVENT_BUDGET: usize = 256;
 
-/// Wall-clock ceiling on one `drain_events` call, checked after each applied
-/// event. The event budget alone bounds nothing useful: a single PTY chunk is
-/// up to 8 KiB whose parse can cost hundreds of milliseconds, so a
-/// budget-only drain can hold the frontend's loop — and every keystroke queued
-/// behind it — for seconds under a flood.
+/// Wall-clock ceiling on one `drain_events` call. The event budget alone
+/// bounds nothing useful: a single PTY chunk is up to 64 KiB whose parse can
+/// cost hundreds of milliseconds, so a budget-only drain can hold the
+/// frontend's loop — and every keystroke queued behind it — for seconds under
+/// a flood. The deadline is checked after each ingested event AND between
+/// parse chunks of the coalesced flush, so one slice's total work (ingestion
+/// plus parse) overshoots it by at most one [`PTY_PARSE_CHUNK_BYTES`] parse.
 const DRAIN_DEADLINE: Duration = Duration::from_millis(3);
+
+/// Upper bound on bytes fed to a pane's parser between drain-deadline checks.
+/// The coalesced flush parses in chunks of this size, re-checking
+/// [`DRAIN_DEADLINE`] after each and carrying unparsed bytes to the next
+/// slice, so a 1 MiB coalesced backlog can never parse as one unbounded call
+/// — the same per-slice overshoot bound the pre-coalescing per-chunk apply
+/// path had.
+const PTY_PARSE_CHUNK_BYTES: usize = 64 * 1024;
+
+/// PTY output pulled off the channel but not yet parsed, coalesced per
+/// runtime identity (pane, restart generation, token). Chunk order within an
+/// identity is channel order, which is that reader thread's byte order;
+/// keying on the full identity keeps a pre-restart reader's bytes out of the
+/// fresh runtime's feed (the flush's identity check then rejects them). A
+/// buffer's flow credits release exactly as its bytes reach the parser, so
+/// bytes carried here across drain slices still count against the
+/// reader-side window: channel backlog plus carried bytes stay bounded.
+#[derive(Default)]
+struct PendingPtyOutput {
+    buffers: Vec<PendingPaneOutput>,
+}
+
+struct PendingPaneOutput {
+    pane_id: PaneId,
+    restart_generation: u64,
+    runtime_token: u64,
+    bytes: Vec<u8>,
+    credits: Vec<PtyFlowCredit>,
+    /// Bytes already covered by dropped credits but not yet parsed: credits
+    /// release whole read-chunks, and parse chunks need not align with them.
+    released_ahead: usize,
+}
+
+impl PendingPtyOutput {
+    fn push(
+        &mut self,
+        pane_id: PaneId,
+        restart_generation: u64,
+        runtime_token: u64,
+        bytes: Vec<u8>,
+        credit: Option<PtyFlowCredit>,
+    ) {
+        if let Some(buffer) = self.buffers.iter_mut().find(|buffer| {
+            buffer.pane_id == pane_id
+                && buffer.restart_generation == restart_generation
+                && buffer.runtime_token == runtime_token
+        }) {
+            buffer.bytes.extend_from_slice(&bytes);
+            buffer.credits.extend(credit);
+            return;
+        }
+        self.buffers.push(PendingPaneOutput {
+            pane_id,
+            restart_generation,
+            runtime_token,
+            bytes,
+            credits: credit.into_iter().collect(),
+            released_ahead: 0,
+        });
+    }
+
+    fn is_empty(&self) -> bool {
+        self.buffers.is_empty()
+    }
+
+    #[cfg(test)]
+    fn byte_len(&self) -> usize {
+        self.buffers.iter().map(|buffer| buffer.bytes.len()).sum()
+    }
+}
+
+impl PendingPaneOutput {
+    /// Drop the flow credits covering the next `parse_bytes` of this buffer,
+    /// so the reader refills its window while those bytes parse — the same
+    /// release-before-parse order the uncoalesced apply path uses. Credits
+    /// release whole read-chunks; release beyond the parse boundary is
+    /// remembered in `released_ahead` so the accounting stays exact across
+    /// chunk-misaligned parses.
+    fn release_credits_covering(&mut self, parse_bytes: usize) {
+        let covered = self.released_ahead.min(parse_bytes);
+        self.released_ahead -= covered;
+        let mut need = parse_bytes - covered;
+        while need > 0 && !self.credits.is_empty() {
+            let credit = self.credits.remove(0);
+            let credit_bytes = credit.bytes();
+            drop(credit);
+            if credit_bytes >= need {
+                self.released_ahead += credit_bytes - need;
+                need = 0;
+            } else {
+                need -= credit_bytes;
+            }
+        }
+    }
+}
+
+/// Cheap identity of one artifact pane's preview state: enough to detect
+/// that filesystem observation changed what a scene build would show,
+/// without touching pixel bytes.
+#[derive(Debug, PartialEq, Eq)]
+enum ArtifactPreviewKey {
+    Loading,
+    Ready { revision: u64 },
+    Failed { message: String },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CompositionTarget {
@@ -129,6 +236,18 @@ pub struct AppState {
     /// around input, runtime drains, and heartbeat work rather than treating a
     /// requested frame number as proof that the scene changed.
     scene_generation: u64,
+    /// PTY output dequeued but not yet parsed, carried across drain slices
+    /// when the coalesced flush hits [`DRAIN_DEADLINE`]. See
+    /// [`PendingPtyOutput`] for the ordering and flow-credit contract.
+    pending_pty_output: PendingPtyOutput,
+    /// Per-pane parser dirtiness counters, bumped whenever an applied PTY
+    /// feed reports `screen_changed` (and on parser failures). Monotonic and
+    /// never reset, so a pane's counter is collision-free across its whole
+    /// lifetime. Read by the scene builder's per-pane surface cache.
+    pane_grid_revisions: BTreeMap<PaneId, u64>,
+    /// Retained per-pane scene build products; the invalidation contract
+    /// lives on [`crate::scene_builder::PaneSceneCache`].
+    pane_scene_cache: crate::scene_builder::PaneSceneCache,
     runtime: RuntimeEngine,
     agent_connector: Option<Box<dyn AgentConnector>>,
     agent_connector_label: &'static str,
@@ -246,6 +365,9 @@ impl AppState {
             preserve_status_on_next_resize: false,
             cwd_fallback_status: None,
             scene_generation: 0,
+            pending_pty_output: PendingPtyOutput::default(),
+            pane_grid_revisions: BTreeMap::new(),
+            pane_scene_cache: crate::scene_builder::PaneSceneCache::default(),
             runtime: match wake {
                 Some(wake) => RuntimeEngine::with_wake_callback(wake),
                 None => RuntimeEngine::new(),
@@ -511,6 +633,9 @@ impl AppState {
     }
 
     pub fn handle_event(&mut self, event: InputEvent) {
+        // Input may consult parser state (mouse mode, DECCKM, bracketed
+        // paste), so output dequeued before this event must parse first.
+        self.flush_pending_pty_output();
         if matches!(
             &event,
             InputEvent::Key(_)
@@ -798,9 +923,17 @@ impl AppState {
     /// Build one frame from a coherent logical/physical viewport and retain
     /// exactly its cell and logical interaction contract.
     pub fn build_scene_with_viewport(&mut self, viewport: ViewportMetrics) -> WorkspaceScene {
-        let sender = self.runtime.event_sender();
-        self.artifacts.refresh_active(&self.workspace, &sender);
-        let scene = crate::scene_builder::build_workspace_scene_with_viewport(self, viewport);
+        // The build is a read-only projection of app state: artifact sources
+        // are observed on the runtime cadence (`observe_artifact_sources`),
+        // never here, so a build can never mutate its own inputs at an
+        // unchanged scene generation. The prepared-scene cache relies on
+        // equal generations denoting identical scenes.
+        // The retained pane cache is taken out for the build so the builder
+        // can hold it mutably beside `&self`, then stored back.
+        let mut pane_cache = std::mem::take(&mut self.pane_scene_cache);
+        let scene =
+            crate::scene_builder::build_workspace_scene_cached(self, viewport, &mut pane_cache);
+        self.pane_scene_cache = pane_cache;
         self.hit_targets = scene.hit_targets.clone();
         self.logical_hit_targets = scene.presentation.logical_hit_targets.clone();
         self.context_menu_scene_area = match &scene.overlay {
@@ -1412,6 +1545,14 @@ impl AppState {
     /// nothing: the frontend gets woken again exactly as it does when the
     /// event budget runs out. At least one event is applied per call so a
     /// single expensive event can never stall the queue.
+    ///
+    /// PTY output is not applied chunk-by-chunk: chunks are coalesced per
+    /// runtime identity and fed to the parser at the end of the slice (or
+    /// just before any non-Output event that must observe them), so a
+    /// flooded pane costs few parses and screen diffs per slice. The flush
+    /// itself re-checks the deadline between bounded parse chunks and
+    /// carries the unparsed remainder — with its flow credits — to the next
+    /// slice, so parse cost cannot escape the wall-clock ceiling.
     fn drain_events_until(&mut self, budget: usize, deadline: Instant) -> usize {
         let mut drained = 0;
         for _ in 0..budget.min(DRAIN_EVENT_BUDGET) {
@@ -1419,7 +1560,28 @@ impl AppState {
                 break;
             }
             match self.runtime.try_recv_event() {
+                Ok(AppEvent::Pty(
+                    PtyRuntimeEvent::Output {
+                        pane_id,
+                        restart_generation,
+                        runtime_token,
+                        bytes,
+                    },
+                    credit,
+                )) => {
+                    self.pending_pty_output.push(
+                        pane_id,
+                        restart_generation,
+                        runtime_token,
+                        bytes,
+                        credit,
+                    );
+                    drained += 1;
+                }
                 Ok(event) => {
+                    // `apply_app_event` flushes the pending output first, so
+                    // an event sent after those chunks (a ReaderClosed, or
+                    // input that consults parser state) observes them.
                     self.apply_app_event(event);
                     drained += 1;
                 }
@@ -1429,11 +1591,67 @@ impl AppState {
                 break;
             }
         }
+        self.flush_pending_pty_output_within(Some(deadline));
         self.runtime.rearm_frontend_wake();
         drained
     }
 
+    /// Flush every pending coalesced buffer regardless of deadline. Required
+    /// before applying any event that must observe already-dequeued output.
+    fn flush_pending_pty_output(&mut self) {
+        self.flush_pending_pty_output_within(None);
+    }
+
+    /// Feed pending coalesced buffers to their panes' parsers in
+    /// [`PTY_PARSE_CHUNK_BYTES`]-bounded chunks. With a deadline, at least
+    /// one chunk parses per call (so an expired deadline still makes
+    /// progress), the deadline is re-checked between chunks, and unparsed
+    /// bytes stay buffered — with their unreleased flow credits — to carry
+    /// to the next slice in order. Buffers rotate on a truncated flush so
+    /// one flooding pane cannot starve another pane's carried bytes.
+    fn flush_pending_pty_output_within(&mut self, deadline: Option<Instant>) {
+        if self.pending_pty_output.is_empty() {
+            return;
+        }
+        let mut pending = std::mem::take(&mut self.pending_pty_output);
+        let mut index = 0;
+        while !pending.buffers.is_empty() {
+            if index >= pending.buffers.len() {
+                index = 0;
+            }
+            let buffer = &mut pending.buffers[index];
+            let take = buffer.bytes.len().min(PTY_PARSE_CHUNK_BYTES);
+            buffer.release_credits_covering(take);
+            let chunk = buffer.bytes.drain(..take).collect::<Vec<u8>>();
+            let event = PtyRuntimeEvent::Output {
+                pane_id: buffer.pane_id.clone(),
+                restart_generation: buffer.restart_generation,
+                runtime_token: buffer.runtime_token,
+                bytes: chunk,
+            };
+            if buffer.bytes.is_empty() {
+                pending.buffers.remove(index);
+            } else {
+                index += 1;
+            }
+            self.apply_pty_runtime_event(event);
+            if let Some(deadline) = deadline
+                && !pending.buffers.is_empty()
+                && Instant::now() >= deadline
+            {
+                let len = pending.buffers.len();
+                pending.buffers.rotate_left(index % len);
+                break;
+            }
+        }
+        self.pending_pty_output = pending;
+    }
+
     fn apply_app_event(&mut self, event: AppEvent) {
+        // Causal order: output already dequeued off the channel (coalesced,
+        // not yet parsed) must reach its parser before a later event applies
+        // — e.g. output enabling mouse reporting, then the click it routes.
+        self.flush_pending_pty_output();
         match event {
             AppEvent::Input(input) => self.handle_event(input),
             AppEvent::Pty(event, credit) => {
@@ -1452,6 +1670,7 @@ impl AppState {
     }
 
     pub fn shutdown(&mut self) {
+        self.invalidate_pane_surface_cache();
         self.active_composition = None;
         self.reject_next_composition_commit = false;
         self.artifacts.shutdown();
@@ -1561,6 +1780,7 @@ impl AppState {
         mut workspace: Workspace,
         runtimes: PreparedRuntimeRestore,
     ) {
+        self.invalidate_pane_surface_cache();
         let outgoing_session_id = self.workspace.active_session().id().clone();
         let report = self
             .runtime
@@ -1647,6 +1867,7 @@ impl AppState {
             return;
         };
 
+        self.invalidate_pane_surface_cache();
         let outcome = self.runtime.launch_task(
             &self.workspace,
             &self.shell_program,
@@ -1681,6 +1902,7 @@ impl AppState {
             return;
         };
 
+        self.invalidate_pane_surface_cache();
         self.status = match self.runtime.stop_task(&pane_id) {
             TaskStopOutcome::StoppedBeforeLaunch => {
                 format!("task {pane_id} stopped before launch")
@@ -2150,6 +2372,9 @@ impl AppState {
     /// is the session boundary for L3; a same-id pane never inherits another
     /// session's process, parser, task state, or agent actor.
     fn retire_runtimes_for_session_switch(&mut self, previous_session_id: &SessionId) {
+        // Pane ids repeat across sessions; a retained surface must never
+        // survive into a same-id pane of another session.
+        self.invalidate_pane_surface_cache();
         let _report = self
             .runtime
             .retire_session(&mut self.workspace, previous_session_id);
@@ -2204,6 +2429,7 @@ impl AppState {
         pane_id: PaneId,
         intent: &TaskPaneIntent,
     ) -> Result<(), RuntimeReconcileError> {
+        self.invalidate_pane_surface_cache();
         let outcome = self.runtime.launch_task(
             &self.workspace,
             &self.shell_program,
@@ -2240,6 +2466,8 @@ impl AppState {
     }
 
     fn reconcile_runtimes(&mut self) -> Result<(), RuntimeReconcileError> {
+        // Reconcile can spawn, restart, resize, or drop pane grids.
+        self.invalidate_pane_surface_cache();
         let visible_terminals = self.visible_terminal_pane_sizes();
         let visible_tasks = self.visible_task_pane_sizes();
         self.cwd_fallback_status = None;
@@ -2390,6 +2618,9 @@ impl AppState {
                 bytes,
                 screen_changed,
             } => {
+                if screen_changed {
+                    self.bump_pane_grid_revision(&pane_id);
+                }
                 if self.debug_status {
                     self.status = format!("read {bytes} byte(s) from {pane_id}");
                     true
@@ -2402,6 +2633,9 @@ impl AppState {
                 bytes,
                 screen_changed,
             } => {
+                if screen_changed {
+                    self.bump_pane_grid_revision(&pane_id);
+                }
                 if self.debug_status {
                     self.status = format!("read {bytes} task byte(s) from {pane_id}");
                     true
@@ -2410,15 +2644,24 @@ impl AppState {
                 }
             }
             RuntimePtyEffect::TerminalParserFailed { pane_id, error } => {
+                self.bump_pane_grid_revision(&pane_id);
                 self.status = format!("terminal parser failed for {pane_id}: {error}");
                 true
             }
             RuntimePtyEffect::TaskParserFailed { pane_id, error } => {
+                self.bump_pane_grid_revision(&pane_id);
                 self.status = format!("task parser failed for {pane_id}: {error}");
                 true
             }
             RuntimePtyEffect::ReaderClosed { pane_id } => {
                 self.status = format!("PTY reader closed for {pane_id}");
+                // EOF almost always means the child exited: poll now so
+                // `exit` tears the pane down immediately instead of on the
+                // next 250ms heartbeat. Safe against restarts: the effect
+                // only exists when the event passed the restart-generation
+                // identity check, and a live fresh child just reports
+                // "still running" to `try_wait`.
+                self.poll_child_exits();
                 true
             }
             RuntimePtyEffect::ReaderFailed { pane_id, error } => {
@@ -2431,13 +2674,63 @@ impl AppState {
         }
     }
 
-    /// Heartbeat work: notice exited children. Called from `tick_runtime`
-    /// and on the shell's heartbeat cadence rather than per event.
+    /// Cheap identity of every active artifact pane's preview state, used to
+    /// detect when filesystem observation changed what a scene build would
+    /// show — without comparing pixel bytes.
+    fn artifact_preview_signature(&self) -> Vec<(PaneId, ArtifactPreviewKey)> {
+        self.workspace
+            .active_session()
+            .panes()
+            .iter()
+            .filter_map(|(pane_id, pane)| match pane.kind() {
+                PaneKind::Artifact { intent } => {
+                    let key = match self
+                        .artifacts
+                        .content(&self.workspace, pane_id, intent)
+                        .state
+                    {
+                        ArtifactState::Loading => ArtifactPreviewKey::Loading,
+                        ArtifactState::Ready(surface) => ArtifactPreviewKey::Ready {
+                            revision: surface.revision,
+                        },
+                        ArtifactState::Failed { message } => ArtifactPreviewKey::Failed { message },
+                    };
+                    Some((pane_id.clone(), key))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Observe artifact sources on the runtime cadence (heartbeat/tick),
+    /// never during a frame build. A changed observation mutates preview
+    /// state that the next build will show, so it must bump the scene
+    /// generation here at the mutation site: the prepared-scene cache keys
+    /// on the generation, and its contract is that equal generations denote
+    /// identical scenes. This is also what surfaces an externally rewritten
+    /// or deleted artifact file while the app is otherwise idle.
+    fn observe_artifact_sources(&mut self) {
+        let before = self.artifact_preview_signature();
+        let sender = self.runtime.event_sender();
+        self.artifacts.refresh_active(&self.workspace, &sender);
+        if self.artifact_preview_signature() != before {
+            self.mark_redraw();
+        }
+    }
+
+    /// Notice exited children. Triggered promptly by `ReaderClosed` (EOF),
+    /// with `tick_runtime` and the shell's heartbeat cadence as backstop.
     pub(crate) fn poll_child_exits(&mut self) {
+        // Artifact filesystem observation shares this cadence: it is the
+        // one periodic app-state hook every shell already drives, and any
+        // resulting change marks a redraw before the next frame builds.
+        self.observe_artifact_sources();
         let effects = self.runtime.poll_child_exits();
         if effects.is_empty() {
             return;
         }
+        // An exit tears the pane's runtime (and grid) down.
+        self.invalidate_pane_surface_cache();
         for effect in effects {
             match effect {
                 RuntimeExitEffect::TerminalExited { pane_id, status } => {
@@ -2528,6 +2821,9 @@ impl AppState {
         pointer: PointerEvent,
         logical_position: LogicalPoint,
     ) {
+        // Pointer routing consults parser state (mouse reporting mode), so
+        // output dequeued before this event must parse first.
+        self.flush_pending_pty_output();
         self.active_logical_pointer = Some(logical_position);
         self.handle_pointer_with_active_position(pointer);
         self.active_logical_pointer = None;
@@ -2579,16 +2875,25 @@ impl AppState {
             };
             self.forward_captured_pointer(&pane_id, inner, &release);
         }
+        // A cancelled selection or hover is scene-visible state: bump the
+        // generation at the mutation site so the change reaches the screen
+        // (the prepared-scene cache treats equal generations as identical
+        // scenes, so a silent clear would repaint the stale selection).
+        let mut scene_changed = false;
         if matches!(self.pointer_drag, Some(PointerDrag::Select { .. }))
             && let Some(view) = self.pointer_view.as_mut()
         {
-            view.selection = None;
+            scene_changed |= view.selection.take().is_some();
             if view.scroll_offset == 0 {
                 self.pointer_view = None;
+                scene_changed = true;
             }
         }
         self.pointer_drag = None;
-        self.separator_hover = None;
+        scene_changed |= self.separator_hover.take().is_some();
+        if scene_changed {
+            self.mark_redraw();
+        }
     }
 
     pub(crate) fn pointer_move_needs_redraw(&self) -> bool {
@@ -2601,7 +2906,14 @@ impl AppState {
         if self.pointer_drag.is_some() {
             return false;
         }
-        self.separator_hover.take().is_some()
+        let cleared = self.separator_hover.take().is_some();
+        if cleared {
+            // The hover highlight is scene-visible: without a generation
+            // bump the requested repaint is skipped and the separator stays
+            // painted in its hovered tone after the cursor leaves.
+            self.mark_redraw();
+        }
+        cleared
     }
 
     pub(crate) fn hovered_separator(&self) -> Option<usize> {
@@ -3175,7 +3487,7 @@ impl AppState {
     }
 
     fn handle_pointer_wheel(&mut self, pointer: PointerEvent) {
-        let PointerKind::Wheel { dy, .. } = pointer.kind else {
+        let PointerKind::Wheel { dy, precise, .. } = pointer.kind else {
             return;
         };
         // The palette is modal: the wheel moves its selection (the item
@@ -3245,7 +3557,7 @@ impl AppState {
                 .runtime
                 .terminal_grid(&pane_id)
                 .expect("runtime present");
-            let step = WHEEL_SCROLL_ROWS * usize::from(dy.unsigned_abs());
+            let step = wheel_step_rows(dy, precise);
             if dy < 0 {
                 state.move_up(step, grid);
             } else {
@@ -3262,7 +3574,7 @@ impl AppState {
         };
         let view_rows = usize::from(grid.size().rows().min(target.rect.height));
         let max_top = grid.total_rows().saturating_sub(view_rows);
-        let step = WHEEL_SCROLL_ROWS * usize::from(dy.unsigned_abs());
+        let step = wheel_step_rows(dy, precise);
         let (current, selection) = match &self.pointer_view {
             Some(view) if view.pane_id == pane_id => (view.scroll_offset, view.selection),
             _ => (0, None),
@@ -3352,16 +3664,21 @@ impl AppState {
     /// Copy the pointer selection through the copy-mode extraction model and
     /// request that the active frontend update its clipboard.
     fn copy_pointer_selection(&mut self) {
+        // Every exit rewrites the status line (and the success exit clears
+        // the selection), all scene-visible: bump the generation at the
+        // mutation site so a shell-requested repaint is not skipped.
         let Some((pane_id, (anchor, cursor))) = self
             .pointer_view
             .as_ref()
             .and_then(|view| Some((view.pane_id.clone(), view.selection?)))
         else {
             self.status = "nothing is selected to copy".to_owned();
+            self.mark_redraw();
             return;
         };
         let Some(grid) = self.runtime.terminal_grid(&pane_id) else {
             self.status = format!("pane {pane_id} has no live terminal to copy from");
+            self.mark_redraw();
             return;
         };
 
@@ -3386,6 +3703,7 @@ impl AppState {
             self.pointer_view = None;
         }
         self.status = format!("copied {count} char(s) to clipboard");
+        self.mark_redraw();
     }
 
     /// Click-dispatch for palette rows: same semantics as pressing Enter on
@@ -4715,6 +5033,9 @@ impl AppState {
         self.last_copied = Some(text);
         self.copy_mode = None;
         self.status = format!("copied {count} char(s) to clipboard");
+        // Leaving copy mode and rewriting the status are scene-visible;
+        // bump here (not in the shell) so every dispatch path repaints.
+        self.mark_redraw();
     }
 
     fn mark_redraw(&mut self) {
@@ -4723,13 +5044,52 @@ impl AppState {
             .checked_add(1)
             .expect("scene generation overflowed");
     }
+
+    /// The pane's monotonic parser-dirtiness counter (0 before any feed).
+    pub(crate) fn pane_grid_revision(&self, pane_id: &PaneId) -> u64 {
+        self.pane_grid_revisions.get(pane_id).copied().unwrap_or(0)
+    }
+
+    fn bump_pane_grid_revision(&mut self, pane_id: &PaneId) {
+        let revision = self.pane_grid_revisions.entry(pane_id.clone()).or_insert(0);
+        *revision = revision.saturating_add(1);
+    }
+
+    /// Runtime lifecycle and geometry changes can swap or reshape a pane's
+    /// grid without a feed passing through `apply_pty_runtime_event`; every
+    /// such choke point calls this so the next scene build re-walks each
+    /// grid instead of trusting a retained surface. Feeds themselves are
+    /// covered incrementally by [`Self::bump_pane_grid_revision`].
+    fn invalidate_pane_surface_cache(&mut self) {
+        self.pane_scene_cache.invalidate_surfaces();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pane_surface_cache_counters(&self) -> (usize, usize) {
+        (
+            self.pane_scene_cache.surface_rebuilds,
+            self.pane_scene_cache.surface_reuses,
+        )
+    }
 }
 
 /// Double-click window for pane titles/bodies.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
-/// Rows scrolled per wheel tick over a terminal pane.
+/// Rows scrolled per discrete wheel tick over a terminal pane.
 const WHEEL_SCROLL_ROWS: usize = 3;
+
+/// Rows one wheel event scrolls. Precise (trackpad) deltas arrive from the
+/// shell already quantized to whole rows and map 1:1; discrete mouse ticks
+/// are amplified by [`WHEEL_SCROLL_ROWS`].
+const fn wheel_step_rows(dy: i16, precise: bool) -> usize {
+    let rows = dy.unsigned_abs() as usize;
+    if precise {
+        rows
+    } else {
+        WHEEL_SCROLL_ROWS * rows
+    }
+}
 
 /// Columns one keyboard float-move step covers (rows step by 1: terminal
 /// cells are roughly twice as tall as they are wide, so 2:1 keeps a step

@@ -640,16 +640,71 @@ fn pointer_leave_clears_idle_separator_hover_but_preserves_active_drag() {
         &mut state,
         pointer_event(PointerKind::Move, None, separator.rect.x, separator.rect.y),
     );
+    let hovered_generation = state.scene_generation();
     assert!(state.pointer_left());
     assert_eq!(state.hovered_separator(), None);
     assert!(!state.pointer_move_needs_redraw());
+    assert!(
+        state.scene_generation() > hovered_generation,
+        "clearing the hover highlight is scene-visible and must bump the generation, \
+         or the skip guard leaves the separator painted in its hovered tone"
+    );
+    let cleared_generation = state.scene_generation();
+    assert!(!state.pointer_left());
+    assert_eq!(
+        state.scene_generation(),
+        cleared_generation,
+        "a leave with nothing hovered changes no scene state"
+    );
 
     send_pointer(
         &mut state,
         left(PointerKind::Down, separator.rect.x, separator.rect.y),
     );
+    let drag_generation = state.scene_generation();
     assert!(!state.pointer_left());
     assert_eq!(state.hovered_separator(), Some(0));
+    assert_eq!(
+        state.scene_generation(),
+        drag_generation,
+        "a leave during an active drag preserves the hover and the generation"
+    );
+}
+
+// A surface-recovery suspend cancels any live pointer selection/hover; that
+// mutation is scene-visible, so it must bump the generation — the forced
+// post-recovery render keys the prepared-scene cache on the generation, and
+// an unchanged one would repaint the cancelled selection.
+#[test]
+fn suspend_scene_interaction_bumps_generation_only_when_it_cancels_state() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    state.build_scene(POINTER_FRAME);
+
+    send_pointer(&mut state, left(PointerKind::Down, 5, 5));
+    send_pointer(&mut state, left(PointerKind::Drag, 12, 5));
+    assert!(
+        state.pane_view_state(&pane_id).selection.is_some(),
+        "the drag must have a live selection to cancel"
+    );
+    let before = state.scene_generation();
+    state.suspend_scene_interaction();
+    assert!(state.pane_view_state(&pane_id).selection.is_none());
+    assert!(
+        state.scene_generation() > before,
+        "cancelling a live drag selection must bump the scene generation"
+    );
+
+    let idle = state.scene_generation();
+    state.suspend_scene_interaction();
+    assert_eq!(
+        state.scene_generation(),
+        idle,
+        "a suspend with nothing to cancel changes no scene state"
+    );
+    state.shutdown();
 }
 
 // Pointer events with no scene built yet (no hit targets) do nothing.
@@ -663,7 +718,11 @@ fn pointer_without_hit_targets_is_inert() {
         PointerKind::Up,
         PointerKind::Move,
         PointerKind::Drag,
-        PointerKind::Wheel { dx: 0, dy: 1 },
+        PointerKind::Wheel {
+            dx: 0,
+            dy: 1,
+            precise: false,
+        },
     ] {
         send_pointer(&mut state, left(kind, 2, 2));
     }
@@ -1131,7 +1190,16 @@ fn wheel_scrolls_the_open_palette_and_the_footer_counts_the_overflow() {
 
     send_pointer(
         &mut state,
-        pointer_event(PointerKind::Wheel { dx: 0, dy: 2 }, None, 50, 15),
+        pointer_event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: 2,
+                precise: false,
+            },
+            None,
+            50,
+            15,
+        ),
     );
     assert_eq!(
         state.palette_overlay(POINTER_FRAME).unwrap().selected,
@@ -1139,7 +1207,16 @@ fn wheel_scrolls_the_open_palette_and_the_footer_counts_the_overflow() {
     );
     send_pointer(
         &mut state,
-        pointer_event(PointerKind::Wheel { dx: 0, dy: -1 }, None, 50, 15),
+        pointer_event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: -1,
+                precise: false,
+            },
+            None,
+            50,
+            15,
+        ),
     );
     assert_eq!(
         state.palette_overlay(POINTER_FRAME).unwrap().selected,
@@ -2194,6 +2271,380 @@ fn stale_pty_output() -> AppEvent {
     )
 }
 
+// One drain slice feeds all of a pane's queued output chunks to the parser
+// in a single call: with debug diagnostics on, the byte count reported for
+// the slice is the total across chunks, not the last chunk's, and the grid
+// holds the concatenation in reader order.
+#[test]
+fn drain_coalesces_a_panes_queued_output_into_one_parser_feed() {
+    let mut config = test_config();
+    config.spawn_pty = true;
+    config.debug_status = true;
+    let mut state = AppState::new(config);
+    state.handle_terminal_resize(80, 24);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    // Let the shell go idle so its own reader adds no bytes to the slice
+    // measured below.
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(10));
+        state.drain_events();
+    }
+    let runtime = state.runtime.terminals().get(&pane_id).unwrap();
+    let restart_generation = runtime.restart_generation;
+    let runtime_token = runtime.runtime_token;
+    let sender = state.event_sender();
+    for chunk in [b"AA".as_slice(), b"BB", b"CC"] {
+        sender
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::Output {
+                    pane_id: pane_id.clone(),
+                    restart_generation,
+                    runtime_token,
+                    bytes: chunk.to_vec(),
+                },
+                None,
+            ))
+            .unwrap();
+    }
+
+    state.drain_events();
+
+    assert!(
+        state.status().contains("read 6 byte(s) from pane-1"),
+        "three queued chunks must apply as one six-byte feed, got: {}",
+        state.status()
+    );
+    assert!(
+        grid_text(&state, &pane_id).contains("AABBCC"),
+        "coalesced bytes must reach the grid in reader order"
+    );
+    state.shutdown();
+}
+
+// A ReaderClosed queued behind output chunks was sent after its reader read
+// them, so the buffered output must flush to the parser before the close
+// applies: the close's status lands last and the tail bytes still render.
+#[test]
+fn reader_closed_queued_behind_output_applies_after_the_flush() {
+    let mut config = test_config();
+    config.spawn_pty = true;
+    config.debug_status = true;
+    let mut state = AppState::new(config);
+    state.handle_terminal_resize(80, 24);
+    let pane_id = PaneId::new("pane-1");
+    let runtime = state.runtime.terminals().get(&pane_id).unwrap();
+    let restart_generation = runtime.restart_generation;
+    let runtime_token = runtime.runtime_token;
+    let sender = state.event_sender();
+    sender
+        .send(AppEvent::Pty(
+            PtyRuntimeEvent::Output {
+                pane_id: pane_id.clone(),
+                restart_generation,
+                runtime_token,
+                bytes: b"TAIL_BYTES".to_vec(),
+            },
+            None,
+        ))
+        .unwrap();
+    sender
+        .send(AppEvent::Pty(
+            PtyRuntimeEvent::ReaderClosed {
+                pane_id: pane_id.clone(),
+                restart_generation,
+                runtime_token,
+            },
+            None,
+        ))
+        .unwrap();
+
+    state.drain_events();
+
+    assert!(
+        state.status().contains("PTY reader closed"),
+        "the close must apply after the flushed output, got: {}",
+        state.status()
+    );
+    assert!(
+        grid_text(&state, &pane_id).contains("TAIL_BYTES"),
+        "output queued ahead of the close must still reach the grid"
+    );
+    state.shutdown();
+}
+
+// Coalescing holds each chunk's flow credit until the slice's flush, then
+// every credit releases exactly once — even when the identity check rejects
+// the buffered bytes — so the reader-side window can never leak capacity.
+#[test]
+fn drain_releases_every_coalesced_flow_credit() {
+    let mut state = state();
+    let flow = crate::process_events::PtyFlowControl::new();
+    let sender = state.event_sender();
+    for _ in 0..3 {
+        let credit = flow.acquire(100).expect("gate is open");
+        sender
+            .send(AppEvent::Pty(
+                PtyRuntimeEvent::Output {
+                    pane_id: PaneId::new("pane-none"),
+                    restart_generation: 0,
+                    runtime_token: 0,
+                    bytes: b"x".to_vec(),
+                },
+                Some(credit),
+            ))
+            .unwrap();
+    }
+    assert_eq!(flow.in_flight_bytes(), 300);
+
+    let drained = state.drain_events();
+
+    assert_eq!(drained, 3);
+    assert_eq!(
+        flow.in_flight_bytes(),
+        0,
+        "every buffered chunk's credit must release at the flush"
+    );
+}
+
+// Chunks from a pane's pre-restart reader must not coalesce into the fresh
+// runtime's feed: buffers key on the full runtime identity, so the stale
+// buffer is rejected whole while the fresh one lands.
+#[test]
+fn pre_restart_output_does_not_coalesce_into_the_fresh_runtime_feed() {
+    let mut state = live_state();
+    state.handle_terminal_resize(80, 24);
+    let pane_id = PaneId::new("pane-1");
+    let before = state.runtime.terminals().get(&pane_id).unwrap();
+    let old_generation = before.restart_generation;
+    let old_token = before.runtime_token;
+
+    state.dispatch(CommandId::RestartPane);
+    let after = state.runtime.terminals().get(&pane_id).unwrap();
+    let new_generation = after.restart_generation;
+    let new_token = after.runtime_token;
+    assert_ne!(
+        (old_generation, old_token),
+        (new_generation, new_token),
+        "restart must mint a fresh runtime identity"
+    );
+
+    let sender = state.event_sender();
+    sender
+        .send(AppEvent::Pty(
+            PtyRuntimeEvent::Output {
+                pane_id: pane_id.clone(),
+                restart_generation: old_generation,
+                runtime_token: old_token,
+                bytes: b"OLD_READER_OUTPUT".to_vec(),
+            },
+            None,
+        ))
+        .unwrap();
+    sender
+        .send(AppEvent::Pty(
+            PtyRuntimeEvent::Output {
+                pane_id: pane_id.clone(),
+                restart_generation: new_generation,
+                runtime_token: new_token,
+                bytes: b"FRESH_OUTPUT".to_vec(),
+            },
+            None,
+        ))
+        .unwrap();
+
+    state.drain_events();
+
+    let rendered = grid_text(&state, &pane_id);
+    assert!(
+        rendered.contains("FRESH_OUTPUT"),
+        "the fresh runtime's chunk must feed its parser"
+    );
+    assert!(
+        !rendered.contains("OLD_READER_OUTPUT"),
+        "a stale-identity chunk must never merge into the fresh feed"
+    );
+    state.shutdown();
+}
+
+// The coalesced flush parses in bounded chunks, re-checks the drain deadline
+// between chunks, and carries the unparsed remainder — with its flow credits
+// still held — to later slices. This is what keeps one drain slice's
+// wall-clock bounded under a full 1 MiB coalesced backlog: without it, the
+// flush would parse the whole window after the deadline check, reintroducing
+// the multi-second stall DRAIN_DEADLINE exists to prevent.
+#[test]
+fn coalesced_flush_is_deadline_bounded_and_carries_the_remainder() {
+    let mut state = live_state();
+    state.handle_terminal_resize(80, 24);
+    let pane_id = PaneId::new("pane-1");
+    let runtime = state
+        .runtime
+        .terminals()
+        .get(&pane_id)
+        .expect("live runtime");
+    let restart_generation = runtime.restart_generation;
+    let runtime_token = runtime.runtime_token;
+    let flow = crate::process_events::PtyFlowControl::new();
+    let chunk_bytes = PTY_PARSE_CHUNK_BYTES;
+    let chunk_count = crate::process_events::MAX_IN_FLIGHT_BYTES / chunk_bytes;
+    for _ in 0..chunk_count {
+        let credit = flow.acquire(chunk_bytes).expect("gate is open");
+        state.pending_pty_output.push(
+            pane_id.clone(),
+            restart_generation,
+            runtime_token,
+            vec![b'a'; chunk_bytes],
+            Some(credit),
+        );
+    }
+    assert_eq!(
+        flow.in_flight_bytes(),
+        crate::process_events::MAX_IN_FLIGHT_BYTES
+    );
+
+    // An already-expired deadline still parses exactly one bounded chunk
+    // (the progress guarantee), then carries the rest to the next slice.
+    state.flush_pending_pty_output_within(Some(Instant::now()));
+    assert_eq!(
+        state.pending_pty_output.byte_len(),
+        (chunk_count - 1) * chunk_bytes,
+        "an expired deadline bounds the flush to one parse chunk"
+    );
+    assert_eq!(
+        flow.in_flight_bytes(),
+        (chunk_count - 1) * chunk_bytes,
+        "credits for carried bytes stay held, so the reader window keeps \
+         bounding channel backlog plus carried bytes"
+    );
+
+    // A deadline-free flush drains the carried remainder in order and
+    // releases every remaining credit.
+    state.flush_pending_pty_output_within(None);
+    assert_eq!(state.pending_pty_output.byte_len(), 0);
+    assert_eq!(flow.in_flight_bytes(), 0);
+    state.shutdown();
+}
+
+// Causal order: input consults parser state (mouse reporting, DECCKM), so
+// output that was dequeued into the coalesced buffer before the input
+// arrived must reach the parser first — e.g. a child enabling mouse
+// reporting, then the wheel that must route to it by the NEW mode.
+#[test]
+fn dequeued_output_parses_before_later_input_is_applied() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    state.build_scene(POINTER_FRAME);
+    let runtime = state
+        .runtime
+        .terminals()
+        .get(&pane_id)
+        .expect("live runtime");
+    let restart_generation = runtime.restart_generation;
+    let runtime_token = runtime.runtime_token;
+
+    // The child's mouse-enabling output sits dequeued but unparsed.
+    state.pending_pty_output.push(
+        pane_id.clone(),
+        restart_generation,
+        runtime_token,
+        b"\x1b[?1006h\x1b[?1000h".to_vec(),
+        None,
+    );
+    assert!(
+        !state
+            .runtime
+            .terminal_mouse_mode(&pane_id)
+            .is_some_and(|mode| mode.wants_mouse()),
+        "the enabling bytes must not have reached the parser yet"
+    );
+
+    state.apply_app_event(AppEvent::Input(InputEvent::Pointer(pointer_event(
+        PointerKind::Wheel {
+            dx: 0,
+            dy: 1,
+            precise: false,
+        },
+        None,
+        5,
+        5,
+    ))));
+
+    assert!(
+        state
+            .runtime
+            .terminal_mouse_mode(&pane_id)
+            .is_some_and(|mode| mode.wants_mouse()),
+        "already-dequeued output must parse before a later input event applies"
+    );
+    assert!(
+        state.pointer_view.is_none(),
+        "the wheel routed to the child's fresh mouse mode, not workspace scrollback"
+    );
+    state.shutdown();
+}
+
+// Artifact filesystem observation happens on the runtime cadence
+// (poll_child_exits / heartbeat), bumps the generation when it changes
+// preview state, and never runs inside a frame build — a build is a
+// read-only projection, so equal generations keep denoting identical scenes.
+#[test]
+fn artifact_observation_runs_on_runtime_cadence_and_bumps_generation() {
+    let mut state = state();
+    let file_name = format!(
+        "observed-artifact-{}.png",
+        TEST_DIR_COUNTER.fetch_add(1, Ordering::SeqCst)
+    );
+    let intent = ArtifactPaneIntent {
+        source: PathBuf::from(&file_name),
+        title: "observed".to_owned(),
+        alt_text: "observed".to_owned(),
+        fit: ArtifactFit::Contain,
+    };
+    state
+        .workspace
+        .apply_action(CoreAction::CreateArtifactPane { intent })
+        .expect("artifact pane created");
+
+    // First observation: the missing source records a synchronous failure.
+    let created = state.scene_generation();
+    state.poll_child_exits();
+    assert!(
+        state.scene_generation() > created,
+        "the first observation changes preview state and must bump"
+    );
+
+    // A frame build must not observe the filesystem or mutate preview state.
+    let generation = state.scene_generation();
+    state.build_scene(POINTER_FRAME);
+    assert_eq!(
+        state.scene_generation(),
+        generation,
+        "a frame build is a read-only projection of app state"
+    );
+
+    // External write: the next runtime tick observes it and bumps, so the
+    // skip guard cannot absorb the repaint while the app is idle.
+    let source = test_config().project_path.join(&file_name);
+    fs::write(&source, b"externally written bytes").expect("write artifact source");
+    state.poll_child_exits();
+    assert!(
+        state.scene_generation() > generation,
+        "an externally written artifact source must bump on observation"
+    );
+
+    // External delete: Loading/Ready -> Failed synchronously, same contract.
+    let after_write = state.scene_generation();
+    fs::remove_file(&source).expect("remove artifact source");
+    state.poll_child_exits();
+    assert!(
+        state.scene_generation() > after_write,
+        "an externally deleted artifact source must bump on observation"
+    );
+}
+
 // The flood regression the stranger test found: an infinite producer
 // (`yes`) must leave the workstation bounded in memory, responsive to
 // input, and quittable — the reader-side flow gate plus the bounded
@@ -2769,13 +3220,32 @@ fn wheel_scrolls_terminal_scrollback_and_returns_to_live() {
     state.build_scene(POINTER_FRAME);
 
     // Wheel up over the pane body scrolls into history without copy mode.
+    // Discrete ticks amplify by WHEEL_SCROLL_ROWS.
     send_pointer(
         &mut state,
-        pointer_event(PointerKind::Wheel { dx: 0, dy: -1 }, None, 5, 5),
+        pointer_event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: -1,
+                precise: false,
+            },
+            None,
+            5,
+            5,
+        ),
     );
     send_pointer(
         &mut state,
-        pointer_event(PointerKind::Wheel { dx: 0, dy: -1 }, None, 5, 5),
+        pointer_event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: -1,
+                precise: false,
+            },
+            None,
+            5,
+            5,
+        ),
     );
     assert!(!state.copy_mode_active());
     assert_eq!(state.pane_view_state(&pane_id).scroll_offset, 6);
@@ -2784,11 +3254,75 @@ fn wheel_scrolls_terminal_scrollback_and_returns_to_live() {
     // Wheel down returns to following live output.
     send_pointer(
         &mut state,
-        pointer_event(PointerKind::Wheel { dx: 0, dy: 2 }, None, 5, 5),
+        pointer_event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: 2,
+                precise: false,
+            },
+            None,
+            5,
+            5,
+        ),
     );
     assert_eq!(state.pane_view_state(&pane_id).scroll_offset, 0);
     assert!(state.pointer_view.is_none());
     assert!(state.status().contains("following live output"));
+
+    // Precise (trackpad) deltas arrive pre-quantized to rows and scroll
+    // exactly dy rows: no WHEEL_SCROLL_ROWS amplification.
+    send_pointer(
+        &mut state,
+        pointer_event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: -2,
+                precise: true,
+            },
+            None,
+            5,
+            5,
+        ),
+    );
+    assert_eq!(state.pane_view_state(&pane_id).scroll_offset, 2);
+
+    // Copy-mode wheel honors the same precise/discrete split.
+    state.dispatch(CommandId::EnterCopyMode);
+    let cursor_before = state.copy_mode.as_ref().unwrap().cursor_row;
+    send_pointer(
+        &mut state,
+        pointer_event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: -2,
+                precise: true,
+            },
+            None,
+            5,
+            5,
+        ),
+    );
+    assert_eq!(
+        state.copy_mode.as_ref().unwrap().cursor_row,
+        cursor_before - 2
+    );
+    send_pointer(
+        &mut state,
+        pointer_event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: -1,
+                precise: false,
+            },
+            None,
+            5,
+            5,
+        ),
+    );
+    assert_eq!(
+        state.copy_mode.as_ref().unwrap().cursor_row,
+        cursor_before - 5
+    );
 
     state.shutdown();
 }
@@ -2873,8 +3407,16 @@ fn pointer_drag_selects_cells_and_copy_selection_copies_them() {
     );
     assert!(!state.copy_mode_active());
 
-    // Copy Selection stages renderer-neutral clipboard text.
+    // Copy Selection stages renderer-neutral clipboard text. The dispatch
+    // path (the one Cmd+C reaches through FrontendHost::copy_selection)
+    // clears the selection and rewrites the status — scene-visible state —
+    // so it must bump the generation or the skip guard absorbs the repaint.
+    let before_copy = state.scene_generation();
     state.dispatch(CommandId::CopySelection);
+    assert!(
+        state.scene_generation() > before_copy,
+        "copying a pointer selection must bump the scene generation"
+    );
     assert_eq!(state.last_copied(), Some("SELECT_ME"));
     assert_eq!(
         state.take_frontend_effects(),
@@ -3209,6 +3751,61 @@ fn old_reader_terminal_close_and_error_events_after_restart_are_ignored() {
     state.shutdown();
 }
 
+// EOF from the PTY reader almost always means the child exited: applying
+// ReaderClosed must record the exit immediately, not leave the pane
+// lingering until the next 250ms heartbeat poll.
+#[test]
+fn reader_closed_records_the_child_exit_without_a_heartbeat_poll() {
+    let mut state = live_state();
+    state.handle_terminal_resize(80, 24);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    let runtime = state.runtime.terminals().get(&pane_id).unwrap();
+    let restart_generation = runtime.restart_generation;
+    let runtime_token = runtime.runtime_token;
+
+    let written = state
+        .runtime
+        .write_terminal(&pane_id, b"exit\r")
+        .expect("exit command should be written");
+    assert!(written, "terminal runtime {pane_id} should exist");
+
+    // Apply ReaderClosed directly (retrying while the child winds down)
+    // rather than via tick_runtime, whose heartbeat poll would mask the
+    // behavior under test.
+    let mut exited = false;
+    for _ in 0..300 {
+        state.apply_pty_runtime_event(PtyRuntimeEvent::ReaderClosed {
+            pane_id: pane_id.clone(),
+            restart_generation,
+            runtime_token,
+        });
+        if state
+            .runtime
+            .terminals()
+            .get(&pane_id)
+            .unwrap()
+            .exit_status
+            .is_some()
+        {
+            exited = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        exited,
+        "ReaderClosed did not record the child exit without a heartbeat poll"
+    );
+    assert!(
+        state.status().contains("exited"),
+        "exit status did not reach the status line: {}",
+        state.status()
+    );
+
+    state.shutdown();
+}
+
 #[test]
 fn enter_copy_mode_without_live_terminal_is_a_noop() {
     let mut state = state(); // spawn_pty = false, so no runtimes exist
@@ -3242,6 +3839,29 @@ fn copy_mode_enters_selects_and_copies_to_clipboard() {
     assert_eq!(state.last_copied(), Some(text.as_str()));
     assert!(state.take_frontend_effects().is_empty());
 
+    state.shutdown();
+}
+
+// Cmd+C regression: FrontendHost::copy_selection dispatches
+// CommandId::CopySelection without going through handle_key's redraw
+// marking, so the copy paths themselves must bump the generation at every
+// state/status-mutating exit — otherwise the screen keeps showing copy mode
+// while input already routes normal-mode.
+#[test]
+fn copy_selection_dispatch_bumps_generation_for_a_copy_mode_selection() {
+    let mut state = live_state();
+    state.handle_terminal_resize(80, 24);
+    state.dispatch(CommandId::EnterCopyMode);
+    state.handle_key(key(KeyCode::Char('v')));
+    assert!(state.copy_mode_active());
+
+    let before = state.scene_generation();
+    state.dispatch(CommandId::CopySelection);
+    assert!(!state.copy_mode_active());
+    assert!(
+        state.scene_generation() > before,
+        "leaving copy mode via the dispatch path must bump the scene generation"
+    );
     state.shutdown();
 }
 
@@ -5394,4 +6014,205 @@ fn appearance_adjustments_persist_to_the_user_config_file() {
     );
 
     let _ = std::fs::remove_dir_all(&temp);
+}
+
+// --- P7: per-pane content revisions and retained surfaces ----------------
+//
+// `content_revision` is settled by equality against the previous frame's
+// content, and terminal surfaces are reused only when every build input
+// (feed counter, restart generation, grid facts, view state, window dims)
+// matches. These tests pin the two directions that matter: unchanged panes
+// keep their revision and skip the grid walk, while every content-changing
+// path — feeds, copy-mode view state, restarts — is visible in the very
+// next frame (the stale-surface hazard from the P7 brief).
+
+fn scene_pane_snapshot(
+    scene: &WorkspaceScene,
+    pane_id: &str,
+) -> (u64, mandatum_scene::PaneContent) {
+    let pane = scene
+        .panes
+        .iter()
+        .find(|pane| pane.id.as_str() == pane_id)
+        .unwrap_or_else(|| panic!("{pane_id} missing from scene"));
+    (pane.content_revision, pane.content.clone())
+}
+
+fn surface_text(content: &mandatum_scene::PaneContent) -> String {
+    let mandatum_scene::PaneContent::Terminal(surface) = content else {
+        panic!("terminal content expected, got {content:?}");
+    };
+    surface
+        .rows
+        .iter()
+        .flat_map(|row| row.iter())
+        .map(mandatum_scene::SceneCell::grapheme_text)
+        .collect()
+}
+
+// An unrelated redraw (focus, status text) advances the scene generation
+// but changes no pane content, so no pane's revision may move.
+#[test]
+fn unrelated_redraws_keep_pane_content_revisions_stable() {
+    let mut state = state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let first = state.build_scene(POINTER_FRAME);
+    let generation_before = state.scene_generation();
+    state.handle_event(InputEvent::FocusGained);
+    assert!(state.scene_generation() > generation_before);
+    let second = state.build_scene(POINTER_FRAME);
+
+    let (first_revision, first_content) = scene_pane_snapshot(&first, "pane-1");
+    let (second_revision, second_content) = scene_pane_snapshot(&second, "pane-1");
+    assert_eq!(second_revision, first_revision);
+    assert_eq!(second_content, first_content);
+}
+
+// Typing into one pane bumps only that pane; the untouched pane keeps its
+// revision, its content, and its retained surface (no grid walk), while the
+// fed pane's rebuilt surface provably carries the new bytes.
+#[test]
+fn pty_output_bumps_only_the_fed_panes_content_revision() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_1 = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_1);
+    state.dispatch(CommandId::SplitRight);
+    let pane_2 = PaneId::new("pane-2");
+    wait_for_shell_ready(&mut state, &pane_2);
+    // Let both shells go idle so nothing feeds between the builds below.
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(10));
+        state.drain_events();
+    }
+
+    let first = state.build_scene(POINTER_FRAME);
+    let (rebuilds_after_first, _) = state.pane_surface_cache_counters();
+
+    // Feed pane-1 through its real runtime identity, exactly as its reader
+    // thread would.
+    let runtime = state.runtime.terminals().get(&pane_1).unwrap();
+    let restart_generation = runtime.restart_generation;
+    let runtime_token = runtime.runtime_token;
+    let sender = state.event_sender();
+    sender
+        .send(AppEvent::Pty(
+            PtyRuntimeEvent::Output {
+                pane_id: pane_1.clone(),
+                restart_generation,
+                runtime_token,
+                bytes: b"P7_MARKER".to_vec(),
+            },
+            None,
+        ))
+        .unwrap();
+    state.drain_events();
+
+    let second = state.build_scene(POINTER_FRAME);
+    let (rebuilds_after_second, reuses_after_second) = state.pane_surface_cache_counters();
+
+    let (first_revision_1, _) = scene_pane_snapshot(&first, "pane-1");
+    let (first_revision_2, first_content_2) = scene_pane_snapshot(&first, "pane-2");
+    let (second_revision_1, second_content_1) = scene_pane_snapshot(&second, "pane-1");
+    let (second_revision_2, second_content_2) = scene_pane_snapshot(&second, "pane-2");
+    assert_ne!(
+        second_revision_1, first_revision_1,
+        "the fed pane must bump"
+    );
+    assert_eq!(
+        second_revision_2, first_revision_2,
+        "the untouched pane must keep its revision"
+    );
+    assert_eq!(second_content_2, first_content_2);
+    assert!(
+        surface_text(&second_content_1).contains("P7_MARKER"),
+        "the rebuilt surface must reflect the feed"
+    );
+    assert_eq!(
+        rebuilds_after_second - rebuilds_after_first,
+        1,
+        "only the fed pane may walk its grid"
+    );
+
+    // An unrelated redraw reuses both surfaces and bumps neither revision.
+    state.handle_event(InputEvent::FocusGained);
+    let third = state.build_scene(POINTER_FRAME);
+    let (rebuilds_after_third, reuses_after_third) = state.pane_surface_cache_counters();
+    assert_eq!(
+        rebuilds_after_third, rebuilds_after_second,
+        "an idle rebuild must not walk any grid"
+    );
+    assert_eq!(reuses_after_third - reuses_after_second, 2);
+    assert_eq!(scene_pane_snapshot(&third, "pane-1").0, second_revision_1);
+    assert_eq!(scene_pane_snapshot(&third, "pane-2").0, second_revision_2);
+    state.shutdown();
+}
+
+// Copy-mode view state (cursor, scroll, selection) alters the pane's
+// surface without any PTY feed; a retained surface must never survive it.
+// This is exactly the stale path where pointer input would resolve against
+// wrong geometry if the cache missed a bump.
+#[test]
+fn copy_mode_view_changes_bump_the_viewed_panes_revision() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(10));
+        state.drain_events();
+    }
+
+    let live = state.build_scene(POINTER_FRAME);
+    state.dispatch(CommandId::EnterCopyMode);
+    let entered = state.build_scene(POINTER_FRAME);
+    // The ready marker plus prompt put the copy cursor below row 0, so one
+    // step up always moves it.
+    state.handle_key(Key::plain(KeyCode::Char('k')));
+    let moved = state.build_scene(POINTER_FRAME);
+    state.handle_key(Key::plain(KeyCode::Escape));
+    let exited = state.build_scene(POINTER_FRAME);
+
+    let revision = |scene: &WorkspaceScene| scene_pane_snapshot(scene, "pane-1").0;
+    let copy_cursor = |scene: &WorkspaceScene| match scene_pane_snapshot(scene, "pane-1").1 {
+        mandatum_scene::PaneContent::Terminal(surface) => surface.copy_cursor,
+        content => panic!("terminal content expected, got {content:?}"),
+    };
+    assert_ne!(revision(&entered), revision(&live));
+    assert!(copy_cursor(&entered).is_some());
+    assert_ne!(revision(&moved), revision(&entered));
+    assert_ne!(copy_cursor(&moved), copy_cursor(&entered));
+    assert_ne!(revision(&exited), revision(&moved));
+    assert!(copy_cursor(&exited).is_none());
+    state.shutdown();
+}
+
+// A restarted pane owns a fresh grid: the revision moves and the previous
+// shell's surface is never republished, even before the new shell prints
+// its first byte.
+#[test]
+fn pane_restart_bumps_the_revision_and_drops_the_retained_surface() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    let pane_id = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_id);
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(10));
+        state.drain_events();
+    }
+
+    let before = state.build_scene(POINTER_FRAME);
+    state.dispatch(CommandId::RestartPane);
+    let after = state.build_scene(POINTER_FRAME);
+
+    let (before_revision, before_content) = scene_pane_snapshot(&before, "pane-1");
+    let (after_revision, after_content) = scene_pane_snapshot(&after, "pane-1");
+    assert!(surface_text(&before_content).contains(SHELL_READY_MARKER));
+    assert_ne!(after_revision, before_revision);
+    assert_ne!(after_content, before_content);
+    assert!(
+        !surface_text(&after_content).contains(SHELL_READY_MARKER),
+        "the pre-restart surface must not survive into the fresh runtime"
+    );
+    state.shutdown();
 }

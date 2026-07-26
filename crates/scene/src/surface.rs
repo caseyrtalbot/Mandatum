@@ -1,6 +1,7 @@
 //! Terminal content surfaces: pre-windowed rows of styled cells plus the
 //! viewport state a frontend needs to overlay cursor and selection marks.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -17,16 +18,16 @@ pub struct SceneCell {
 impl Default for SceneCell {
     fn default() -> Self {
         Self {
-            occupancy: CellOccupancy::Grapheme(" ".to_owned()),
+            occupancy: CellOccupancy::Char(' '),
             style: SceneCellStyle::default(),
         }
     }
 }
 
 impl SceneCell {
-    pub fn grapheme(grapheme: impl Into<String>, style: SceneCellStyle) -> Self {
+    pub fn grapheme(grapheme: impl AsRef<str> + Into<String>, style: SceneCellStyle) -> Self {
         Self {
-            occupancy: CellOccupancy::Grapheme(grapheme.into()),
+            occupancy: CellOccupancy::grapheme(grapheme),
             style,
         }
     }
@@ -38,10 +39,11 @@ impl SceneCell {
         }
     }
 
-    pub fn grapheme_text(&self) -> &str {
+    pub fn grapheme_text(&self) -> Cow<'_, str> {
         match &self.occupancy {
-            CellOccupancy::Grapheme(grapheme) => grapheme,
-            CellOccupancy::WideContinuation => "",
+            CellOccupancy::Char(character) => Cow::Owned(character.to_string()),
+            CellOccupancy::Cluster(cluster) => Cow::Borrowed(cluster.as_str()),
+            CellOccupancy::WideContinuation => Cow::Borrowed(""),
         }
     }
 }

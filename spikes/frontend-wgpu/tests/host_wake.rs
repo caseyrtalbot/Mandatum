@@ -101,7 +101,8 @@ fn cell_program_text(prepared: &PreparedScene, area: SceneRect) -> String {
     for y in area.y..area.bottom().min(program.size().height) {
         for x in area.x..area.right().min(program.size().width) {
             match program.cell_at(x, y).map(|cell| &cell.occupancy) {
-                Some(CellOccupancy::Grapheme(grapheme)) => text.push_str(grapheme),
+                Some(CellOccupancy::Char(character)) => text.push(*character),
+                Some(CellOccupancy::Cluster(cluster)) => text.push_str(cluster),
                 Some(CellOccupancy::WideContinuation) | None => {}
             };
             if matches!(
@@ -1488,7 +1489,11 @@ fn real_host_pointer_selection_copy_and_wheel_scrollback_reach_the_gpu_boundary(
     let body = layout::pane_inner_rect(terminal_pane(&scrolled_ready).0.area);
     let wheel = |dy| {
         InputEvent::Pointer(PointerEvent {
-            kind: PointerKind::Wheel { dx: 0, dy },
+            kind: PointerKind::Wheel {
+                dx: 0,
+                dy,
+                precise: false,
+            },
             button: None,
             column: body.x,
             row: body.y,

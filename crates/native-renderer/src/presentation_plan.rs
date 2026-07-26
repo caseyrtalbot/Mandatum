@@ -578,21 +578,17 @@ fn materials_for_node(
                 ))
             }
         }
-        PresentationNodeRole::Attention => Some(semantic_chip_material(
-            NativeMaterialRole::Attention,
-            node.state.tone,
-            theme,
-        )),
+        PresentationNodeRole::Attention => {
+            semantic_chip_material(NativeMaterialRole::Attention, node.state.tone, theme)
+        }
         PresentationNodeRole::PaneTitle if node.state.floating => None,
         PresentationNodeRole::PaneTitle => Some(NativeMaterialSpec::flat(
             NativeMaterialRole::ChromeSurface,
             palette.chrome_surface,
         )),
-        PresentationNodeRole::PaneBadge(_) => Some(semantic_chip_material(
-            NativeMaterialRole::Badge,
-            node.state.tone,
-            theme,
-        )),
+        PresentationNodeRole::PaneBadge(_) => {
+            semantic_chip_material(NativeMaterialRole::Badge, node.state.tone, theme)
+        }
         PresentationNodeRole::FocusIndicator => Some(NativeMaterialSpec::flat(
             NativeMaterialRole::Focus,
             palette.focus,
@@ -631,11 +627,9 @@ fn materials_for_node(
                 palette.chrome_surface,
             )),
         },
-        PresentationNodeRole::WorkflowStatusBadge => Some(semantic_chip_material(
-            NativeMaterialRole::Badge,
-            node.state.tone,
-            theme,
-        )),
+        // The status word reads as tone-colored bold text; a container around
+        // a one-line label was chip noise on the first row of every pane.
+        PresentationNodeRole::WorkflowStatusBadge => None,
         PresentationNodeRole::ArtifactCanvas => Some(NativeMaterialSpec::flat(
             NativeMaterialRole::ArtifactCanvas,
             palette.canvas,
@@ -673,7 +667,7 @@ fn text_for_node(
         }
         PresentationNodeRole::PaneBadge(_) => Some((
             NativeTextMetricRole::Metadata,
-            tone_color(node.state.tone, theme),
+            chip_text_color(node.state.tone, theme),
         )),
         PresentationNodeRole::TerminalOutput => Some((NativeTextMetricRole::Terminal, color)),
         PresentationNodeRole::TaskOutput => Some((NativeTextMetricRole::Body, color)),
@@ -705,7 +699,7 @@ fn text_for_node(
         }),
         PresentationNodeRole::WorkflowStatusBadge => Some((
             NativeTextMetricRole::Metadata,
-            tone_color(node.state.tone, theme),
+            chip_text_color(node.state.tone, theme),
         )),
         PresentationNodeRole::OverlayTitle => {
             Some((NativeTextMetricRole::Title, palette.text_primary))
@@ -715,7 +709,7 @@ fn text_for_node(
         }
         PresentationNodeRole::Attention => Some((
             NativeTextMetricRole::Metadata,
-            tone_color(node.state.tone, theme),
+            chip_text_color(node.state.tone, theme),
         )),
         PresentationNodeRole::Workspace
         | PresentationNodeRole::Pane
@@ -752,18 +746,49 @@ fn native_text_color_projection(node: &PresentationNode) -> Option<SceneRect> {
     }
 }
 
+/// Low-alpha tone tint blended over the rail behind a chip, following the
+/// `selection_fill` treatment: tint the fill, never outline the box. 16 is
+/// the strongest tint that keeps every chip tone at normal-text contrast
+/// (4.5:1) on its tinted rail across the dark and light themes under the
+/// renderer's actual linear-space composite; dark `failure` on chrome is
+/// the binding pair. High-contrast never reaches this constant: its 7:1 bar
+/// leaves no headroom for any visible tint, so its chips drop the container
+/// entirely (below).
+const CHIP_FILL_ALPHA: u8 = 16;
+
 fn semantic_chip_material(
     role: NativeMaterialRole,
     tone: PresentationTone,
     theme: &Theme,
-) -> NativeMaterialSpec {
-    let mut spec = NativeMaterialSpec::flat(role, theme.ui.palette.chrome_surface);
+) -> Option<NativeMaterialSpec> {
+    // Neutral badges carry no state worth a container; they render as plain
+    // muted text.
+    if tone == PresentationTone::Neutral {
+        return None;
+    }
+    // High-contrast renders chips as plain tone-colored text: a tint strong
+    // enough to see cannot hold the theme's 7:1 text bar, and an invisible
+    // tint is a container in name only. Name match follows the established
+    // high-contrast detection precedent in the theme crate.
+    if theme.name == "mandatum-high-contrast" {
+        return None;
+    }
+    let tone = tone_color(tone, theme);
+    let mut spec = NativeMaterialSpec::flat(
+        role,
+        UiColor::rgba(tone.red, tone.green, tone.blue, CHIP_FILL_ALPHA),
+    );
     spec.corner_radius_units = u64::from(theme.ui.spacing.space_1) * 64;
-    spec.boundary = Some(NativeBoundary {
-        width_units: u64::from(theme.ui.spacing.tiled_separator.max(1)) * 64,
-        color: tone_color(tone, theme),
-    });
-    spec
+    Some(spec)
+}
+
+/// Chip glyph color paired with [`semantic_chip_material`]: tone-colored for
+/// stateful chips, muted for the container-less neutral badge.
+fn chip_text_color(tone: PresentationTone, theme: &Theme) -> UiColor {
+    match tone {
+        PresentationTone::Neutral => theme.ui.palette.text_muted,
+        _ => tone_color(tone, theme),
+    }
 }
 
 fn tone_color(tone: PresentationTone, theme: &Theme) -> UiColor {

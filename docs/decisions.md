@@ -617,8 +617,11 @@ Attention aggregation (in `crates/app/src/attention.rs`, severity order):
 approvals waiting (count + first pane), failed tasks (count + first
 pane), blocked/failed agents (count). Segments are hit targets
 (`HitTargetKind::AttentionSegment` carries the jump pane); when calm the
-strip shows session facts (session name, pane count, connector kind) —
-never blank, never noisy.
+strip shows session facts (session name, pane count) — never blank,
+never noisy. Amended 2026-07-26: the connector kind appears only while
+the session contains an agent pane. The label is configuration, not
+activity; a workspace of plain terminals (which may host any CLI,
+including other vendors' agents) must not claim an agent connector.
 
 Verification: attention aggregation tests in the scene builder, the
 segment-restyle renderer test, the attention click test in `app_state`,

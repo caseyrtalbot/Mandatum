@@ -5,6 +5,7 @@
 //! monotonic instant, which keeps tests deterministic and keeps wall-clock
 //! policy out of scene compilation.
 
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use mandatum_scene::{
@@ -78,30 +79,43 @@ impl PresentationMotion {
     /// Equal target plans never restart active motion. Reduced motion snaps
     /// every property. Direct geometry cancels pane interpolation while
     /// leaving unrelated focus/selection/overlay emphasis eligible.
-    pub fn resolve(
+    ///
+    /// An unchanged target with no active transitions borrows the caller's
+    /// plan untouched: idle frames pay no plan clone. Only frames that
+    /// actually interpolate return an owned rewrite.
+    pub fn resolve<'a>(
         &mut self,
-        next: NativePresentationPlan,
+        next: &'a NativePresentationPlan,
         policy: SceneMotionPolicy,
         now: Instant,
-    ) -> NativePresentationPlan {
+    ) -> Cow<'a, NativePresentationPlan> {
         if policy.reduced_motion || policy.direct_geometry || self.target.is_none() {
-            self.target = Some(next.clone());
+            if self.target.as_ref() != Some(next) {
+                self.target = Some(next.clone());
+            }
             self.active.clear();
             self.finish_schedule();
-            return next;
+            return Cow::Borrowed(next);
         }
 
-        let previous = self
+        if self
             .target
             .as_ref()
-            .expect("initial target handled above")
-            .clone();
-        if previous != next {
-            self.retarget(&previous, &next, now);
-            self.target = Some(next);
+            .is_some_and(|previous| previous != next)
+        {
+            let previous = self.target.take().expect("initial target handled above");
+            self.retarget(&previous, next, now);
+            self.target = Some(next.clone());
         }
 
-        self.sample(now)
+        if self.active.is_empty() {
+            // No transitions survive over an unchanged target: the settled
+            // plan is the caller's plan, byte for byte.
+            self.finish_schedule();
+            return Cow::Borrowed(next);
+        }
+
+        Cow::Owned(self.sample(now))
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
@@ -206,6 +220,7 @@ impl PresentationMotion {
                 && has_transition(next, &candidate.node_id, candidate.role);
             let newly_eligible_emphasis = newly_eligible_emphasis || repeated_approval_arrival;
             let exiting = to.is_empty() && !from.is_empty();
+            let entering = from.is_empty() && !to.is_empty();
             let visually_changed = transition_changes_visual(
                 &from,
                 &to,
@@ -221,12 +236,30 @@ impl PresentationMotion {
 
             // Overlay glyph rows are rebuilt from the current scene cell
             // program. Once the overlay closes those rows no longer exist, so
-            // retaining only its presentation material would produce an
-            // incoherent empty-shell fade. Exit is therefore authoritative
-            // and direct until renderer-owned overlay text retention exists.
+            // text exit stays direct. The overlay's materials and scrim are
+            // adapter-frozen from the last sampled visual state and fade out
+            // on the exit timing token; renderer-owned text retention is a
+            // follow-up.
             if candidate.role == TransitionRole::Overlay && exiting {
                 self.active
                     .retain(|active| active.node_id != candidate.node_id);
+                let from_materials = from
+                    .iter()
+                    .filter(|command| matches!(command, NativePlanCommand::Material(_)))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if from_materials.is_empty() || candidate.exit_timing.duration_ms == 0 {
+                    continue;
+                }
+                self.active.push(ActiveNodeTransition {
+                    node_id: candidate.node_id,
+                    role: TransitionRole::Overlay,
+                    properties: vec![TransitionProperty::Opacity],
+                    from: from_materials,
+                    to: Vec::new(),
+                    started_at: now,
+                    timing: candidate.exit_timing,
+                });
                 continue;
             }
 
@@ -261,13 +294,21 @@ impl PresentationMotion {
             if timing.duration_ms == 0 {
                 continue;
             }
+            // Backdate entrances one frame interval so the frame rendered in
+            // direct response to the triggering input samples visible
+            // progress instead of alpha zero.
+            let started_at = if entering {
+                now.checked_sub(FRAME_INTERVAL).unwrap_or(now)
+            } else {
+                now
+            };
             self.active.push(ActiveNodeTransition {
                 node_id: candidate.node_id,
                 role: candidate.role,
                 properties: candidate.properties,
                 from,
                 to,
-                started_at: now,
+                started_at,
                 timing,
             });
         }
@@ -299,10 +340,10 @@ impl PresentationMotion {
         self.active.retain(|active| !active.is_complete(now));
         let target = self
             .target
-            .as_ref()
-            .expect("motion sampling requires a stable target")
-            .clone();
+            .take()
+            .expect("motion sampling requires a stable target");
         let resolved = self.sample_without_scheduling(&target, now);
+        self.target = Some(target);
         // Only pane-geometry motion invalidates hit targets: panes really
         // move, so clicks against the previous layout would land wrong. An
         // overlay's entrance scale is cosmetic — its hit rects are already
@@ -982,7 +1023,7 @@ mod tests {
         let mut motion = PresentationMotion::default();
         assert_eq!(
             material_rect(&motion.resolve(
-                material_plan(start, vec![spec.clone()]),
+                &material_plan(start, vec![spec.clone()]),
                 SceneMotionPolicy::default(),
                 origin,
             )),
@@ -990,14 +1031,15 @@ mod tests {
         );
         assert_eq!(
             material_rect(&motion.resolve(
-                material_plan(end, vec![spec]),
+                &material_plan(end, vec![spec]),
                 SceneMotionPolicy::default(),
                 origin,
             )),
             start
         );
+        let target = motion.target.clone().unwrap();
         let midpoint = motion.resolve(
-            motion.target.clone().unwrap(),
+            &target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(50),
         );
@@ -1006,7 +1048,7 @@ mod tests {
             LogicalRect::from_units(50, 100, 200, 300)
         );
         let final_plan = motion.resolve(
-            motion.target.clone().unwrap(),
+            &target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(100),
         );
@@ -1030,12 +1072,13 @@ mod tests {
         ];
         let mut motion = PresentationMotion::default();
         motion.resolve(
-            text_plan(start, transitions.clone()),
+            &text_plan(start, transitions.clone()),
             SceneMotionPolicy::default(),
             origin,
         );
+        let end_plan = text_plan(end, transitions);
         let resolved = motion.resolve(
-            text_plan(end, transitions),
+            &end_plan,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(1),
         );
@@ -1053,21 +1096,24 @@ mod tests {
         let empty = NativePresentationPlan::from_resolved_commands(Vec::new(), Vec::new());
         let target = text_plan(rect, vec![opacity]);
         let mut motion = PresentationMotion::default();
-        motion.resolve(empty, SceneMotionPolicy::default(), origin);
-        let start = motion.resolve(target.clone(), SceneMotionPolicy::default(), origin);
-        assert_eq!(text_alpha(&start), Some(0));
+        motion.resolve(&empty, SceneMotionPolicy::default(), origin);
+        let start = motion.resolve(&target, SceneMotionPolicy::default(), origin);
+        // Entrances are backdated one FRAME_INTERVAL (8ms of 100ms linear),
+        // so the first frame samples 8% progress: alpha 200 * 0.08 = 16.
+        assert_eq!(text_alpha(&start), Some(16));
         assert_eq!(text_rect(&start), Some(rect));
 
         let midpoint = motion.resolve(
-            target.clone(),
+            &target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(50),
         );
-        assert_eq!(text_alpha(&midpoint), Some(100));
+        // 58ms of 100ms elapsed: alpha 200 * 0.58 = 116.
+        assert_eq!(text_alpha(&midpoint), Some(116));
         assert_eq!(text_rect(&midpoint), Some(rect));
 
         let end = motion.resolve(
-            target,
+            &target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(100),
         );
@@ -1087,17 +1133,18 @@ mod tests {
         );
         let mut motion = PresentationMotion::default();
         motion.resolve(
-            material_and_text_plan(start, vec![geometry.clone()]),
+            &material_and_text_plan(start, vec![geometry.clone()]),
             SceneMotionPolicy::default(),
             origin,
         );
         motion.resolve(
-            material_and_text_plan(end, vec![geometry.clone()]),
+            &material_and_text_plan(end, vec![geometry.clone()]),
             SceneMotionPolicy::default(),
             origin,
         );
+        let end_plan = material_and_text_plan(end, vec![geometry]);
         let midpoint = motion.resolve(
-            material_and_text_plan(end, vec![geometry]),
+            &end_plan,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(50),
         );
@@ -1122,27 +1169,28 @@ mod tests {
         );
         let mut motion = PresentationMotion::default();
         motion.resolve(
-            material_plan(start, vec![spec.clone()]),
+            &material_plan(start, vec![spec.clone()]),
             SceneMotionPolicy::default(),
             origin,
         );
         let target = material_plan(end, vec![spec]);
-        motion.resolve(target.clone(), SceneMotionPolicy::default(), origin);
+        motion.resolve(&target, SceneMotionPolicy::default(), origin);
         let midpoint = motion.resolve(
-            target.clone(),
+            &target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(50),
         );
         assert_eq!(material_rect(&midpoint).origin.x_units(), 50);
         let later = motion.resolve(
-            target,
+            &target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(75),
         );
         assert_eq!(material_rect(&later).origin.x_units(), 75);
 
+        let snap_plan = material_plan(LogicalRect::from_units(200, 0, 100, 100), Vec::new());
         let snapped = motion.resolve(
-            material_plan(LogicalRect::from_units(200, 0, 100, 100), Vec::new()),
+            &snap_plan,
             SceneMotionPolicy {
                 direct_geometry: true,
                 ..SceneMotionPolicy::default()
@@ -1152,8 +1200,9 @@ mod tests {
         assert_eq!(material_rect(&snapped).origin.x_units(), 200);
         assert!(!motion.pointer_geometry_is_moving());
 
+        let reduced_plan = material_plan(LogicalRect::from_units(300, 0, 100, 100), Vec::new());
         let reduced = motion.resolve(
-            material_plan(LogicalRect::from_units(300, 0, 100, 100), Vec::new()),
+            &reduced_plan,
             SceneMotionPolicy {
                 reduced_motion: true,
                 direct_geometry: false,
@@ -1165,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_enter_finishes_at_exact_target_and_exit_is_direct() {
+    fn overlay_enter_finishes_at_exact_target_and_exit_fades_the_material() {
         let origin = Instant::now();
         let rect = LogicalRect::from_units(100, 100, 1_000, 800);
         let opacity = transition(TransitionRole::Overlay, TransitionProperty::Opacity, 100);
@@ -1173,10 +1222,11 @@ mod tests {
         let empty = NativePresentationPlan::from_resolved_commands(Vec::new(), Vec::new());
         let overlay = material_plan(rect, vec![opacity, scale]);
         let mut motion = PresentationMotion::default();
-        motion.resolve(empty.clone(), SceneMotionPolicy::default(), origin);
+        motion.resolve(&empty, SceneMotionPolicy::default(), origin);
 
-        let entered = motion.resolve(overlay.clone(), SceneMotionPolicy::default(), origin);
-        assert_eq!(material_alpha(&entered), Some(0));
+        let entered = motion.resolve(&overlay, SceneMotionPolicy::default(), origin);
+        // Backdated entrance: 8ms of 100ms linear => alpha 200 * 0.08 = 16.
+        assert_eq!(material_alpha(&entered), Some(16));
         assert!(material_rect(&entered).size.width_units() < rect.size.width_units());
         assert!(
             !motion.pointer_geometry_is_moving(),
@@ -1185,27 +1235,99 @@ mod tests {
         );
 
         let midpoint = motion.resolve(
-            overlay.clone(),
+            &overlay,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(50),
         );
-        assert_eq!(material_alpha(&midpoint), Some(100));
+        // 58ms of 100ms elapsed: alpha 200 * 0.58 = 116.
+        assert_eq!(material_alpha(&midpoint), Some(116));
 
         let stable = motion.resolve(
-            overlay.clone(),
+            &overlay,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(100),
         );
-        assert_eq!(stable, overlay);
+        assert_eq!(*stable, overlay);
         assert!(!motion.is_active());
 
-        let exited = motion.resolve(
-            empty.clone(),
+        // Exit fades the frozen material on the exit timing token, starting
+        // from full alpha and unscaled geometry.
+        let exit_started = motion.resolve(
+            &empty,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(110),
         );
-        assert_eq!(exited, empty);
+        assert_eq!(material_alpha(&exit_started), Some(200));
+        assert_eq!(material_rect(&exit_started), rect);
+        assert!(motion.is_active());
+        assert!(motion.next_deadline().is_some());
+        assert_eq!(
+            motion.active_transition_window(TransitionRole::Overlay),
+            Some(ActiveTransitionWindow {
+                started_at: origin + Duration::from_millis(110),
+                finishes_at: origin + Duration::from_millis(210),
+            })
+        );
+
+        let exit_midpoint = motion.resolve(
+            &empty,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(160),
+        );
+        // 50ms of the 100ms exit elapsed: alpha 200 * 0.5 = 100.
+        assert_eq!(material_alpha(&exit_midpoint), Some(100));
+
+        let exited = motion.resolve(
+            &empty,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(210),
+        );
+        assert_eq!(*exited, empty);
         assert_eq!(material_alpha(&exited), None);
+        assert!(!motion.is_active());
+        assert_eq!(motion.next_deadline(), None);
+    }
+
+    #[test]
+    fn overlay_exit_drops_text_immediately_and_fades_only_the_material() {
+        let origin = Instant::now();
+        let rect = LogicalRect::from_units(100, 100, 1_000, 800);
+        let opacity = transition(TransitionRole::Overlay, TransitionProperty::Opacity, 100);
+        let empty = NativePresentationPlan::from_resolved_commands(Vec::new(), Vec::new());
+        let overlay = material_and_text_plan(rect, vec![opacity]);
+        let mut motion = PresentationMotion::default();
+        motion.resolve(&empty, SceneMotionPolicy::default(), origin);
+        motion.resolve(&overlay, SceneMotionPolicy::default(), origin);
+        motion.resolve(
+            &overlay,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(100),
+        );
+
+        // Overlay glyph rows are rebuilt from the scene cell program and no
+        // longer exist after close, so text exit is direct by design.
+        let exit_started = motion.resolve(
+            &empty,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(110),
+        );
+        assert_eq!(text_alpha(&exit_started), None);
+        assert_eq!(material_alpha(&exit_started), Some(200));
+
+        let exit_midpoint = motion.resolve(
+            &empty,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(160),
+        );
+        assert_eq!(text_alpha(&exit_midpoint), None);
+        assert_eq!(material_alpha(&exit_midpoint), Some(100));
+
+        let exited = motion.resolve(
+            &empty,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(210),
+        );
+        assert_eq!(*exited, empty);
         assert!(!motion.is_active());
         assert_eq!(motion.next_deadline(), None);
     }
@@ -1219,10 +1341,10 @@ mod tests {
         let empty = NativePresentationPlan::from_resolved_commands(Vec::new(), Vec::new());
         let overlay = material_plan(rect, vec![opacity, scale]);
         let mut motion = PresentationMotion::default();
-        motion.resolve(overlay, SceneMotionPolicy::default(), origin);
+        motion.resolve(&overlay, SceneMotionPolicy::default(), origin);
 
         let resolved = motion.resolve(
-            empty.clone(),
+            &empty,
             SceneMotionPolicy {
                 direct_geometry: true,
                 ..SceneMotionPolicy::default()
@@ -1230,7 +1352,7 @@ mod tests {
             origin + Duration::from_millis(1),
         );
 
-        assert_eq!(resolved, empty);
+        assert_eq!(*resolved, empty);
         assert!(!motion.is_active());
         assert_eq!(motion.next_deadline(), None);
         assert_eq!(
@@ -1241,22 +1363,48 @@ mod tests {
     }
 
     #[test]
-    fn closing_during_overlay_entry_is_direct_and_does_not_resurrect_old_endpoint() {
+    fn closing_during_overlay_entry_fades_out_from_the_sampled_alpha() {
         let origin = Instant::now();
         let rect = LogicalRect::from_units(100, 100, 1_000, 800);
         let overlay = transition(TransitionRole::Overlay, TransitionProperty::Opacity, 180);
         let empty = NativePresentationPlan::from_resolved_commands(Vec::new(), Vec::new());
         let open = material_plan(rect, vec![overlay]);
         let mut motion = PresentationMotion::default();
-        motion.resolve(empty.clone(), SceneMotionPolicy::default(), origin);
-        motion.resolve(open, SceneMotionPolicy::default(), origin);
+        motion.resolve(&empty, SceneMotionPolicy::default(), origin);
+        motion.resolve(&open, SceneMotionPolicy::default(), origin);
 
+        // The exit fade resumes from the sampled entrance alpha, never the
+        // full endpoint: 68ms of the backdated 180ms linear entrance elapsed,
+        // so alpha = round(200 * 68/180) = 76.
         let closed = motion.resolve(
-            empty.clone(),
+            &empty,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(60),
         );
-        assert_eq!(closed, empty);
+        assert_eq!(material_alpha(&closed), Some(76));
+        assert!(motion.is_active());
+        assert_eq!(
+            motion.active_transition_window(TransitionRole::Overlay),
+            Some(ActiveTransitionWindow {
+                started_at: origin + Duration::from_millis(60),
+                finishes_at: origin + Duration::from_millis(240),
+            })
+        );
+
+        let fade_midpoint = motion.resolve(
+            &empty,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(150),
+        );
+        // Halfway through the 180ms exit: alpha = round(76 * 0.5) = 38.
+        assert_eq!(material_alpha(&fade_midpoint), Some(38));
+
+        let settled = motion.resolve(
+            &empty,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(240),
+        );
+        assert_eq!(*settled, empty);
         assert!(!motion.is_active());
         assert_eq!(motion.next_deadline(), None);
         assert_eq!(
@@ -1275,13 +1423,9 @@ mod tests {
         let selected_overlay = material_plan(rect, vec![selection.clone(), overlay.clone()]);
         let stable_overlay = material_plan(rect, vec![overlay]);
         let mut motion = PresentationMotion::default();
-        motion.resolve(empty, SceneMotionPolicy::default(), origin);
+        motion.resolve(&empty, SceneMotionPolicy::default(), origin);
 
-        motion.resolve(
-            selected_overlay.clone(),
-            SceneMotionPolicy::default(),
-            origin,
-        );
+        motion.resolve(&selected_overlay, SceneMotionPolicy::default(), origin);
         assert!(
             motion
                 .active_transition_window(TransitionRole::Overlay)
@@ -1294,17 +1438,17 @@ mod tests {
         );
 
         motion.resolve(
-            selected_overlay.clone(),
+            &selected_overlay,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(180),
         );
         motion.resolve(
-            stable_overlay,
+            &stable_overlay,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(181),
         );
         motion.resolve(
-            selected_overlay,
+            &selected_overlay,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(182),
         );
@@ -1330,11 +1474,11 @@ mod tests {
         let unselected = overlay_item_plan(rect, false, vec![overlay.clone()]);
         let selected = overlay_item_plan(rect, true, vec![selection.clone(), overlay.clone()]);
         let mut motion = PresentationMotion::default();
-        motion.resolve(empty, SceneMotionPolicy::default(), origin);
-        motion.resolve(unselected.clone(), SceneMotionPolicy::default(), origin);
+        motion.resolve(&empty, SceneMotionPolicy::default(), origin);
+        motion.resolve(&unselected, SceneMotionPolicy::default(), origin);
 
         let down = motion.resolve(
-            selected.clone(),
+            &selected,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(60),
         );
@@ -1350,7 +1494,7 @@ mod tests {
         );
 
         let up = motion.resolve(
-            unselected.clone(),
+            &unselected,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(90),
         );
@@ -1362,11 +1506,11 @@ mod tests {
         );
 
         let settled = motion.resolve(
-            unselected.clone(),
+            &unselected,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(180),
         );
-        assert_eq!(settled, unselected);
+        assert_eq!(*settled, unselected);
         assert!(!has_material(&settled, NativeMaterialRole::Selection));
         assert!(!motion.is_active());
     }
@@ -1392,27 +1536,29 @@ mod tests {
             ],
         );
         let mut motion = PresentationMotion::default();
-        motion.resolve(empty, SceneMotionPolicy::default(), origin);
-        motion.resolve(arrival.clone(), SceneMotionPolicy::default(), origin);
+        motion.resolve(&empty, SceneMotionPolicy::default(), origin);
+        motion.resolve(&arrival, SceneMotionPolicy::default(), origin);
 
         assert_eq!(
             motion.active_transition_window(TransitionRole::PaneGeometry),
             None
         );
+        // The callout materializes from nothing, so its start is backdated
+        // one frame interval like every entrance.
         assert_eq!(
             motion.active_transition_window(TransitionRole::ApprovalArrival),
             Some(ActiveTransitionWindow {
-                started_at: origin,
-                finishes_at: origin + Duration::from_millis(120),
+                started_at: origin - FRAME_INTERVAL,
+                finishes_at: origin + Duration::from_millis(120) - FRAME_INTERVAL,
             })
         );
         let settled = motion.resolve(
-            arrival.clone(),
+            &arrival,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(120),
         );
         assert_eq!(
-            settled, arrival,
+            *settled, arrival,
             "the end checkpoint must equal the stable arrival plan exactly"
         );
         assert!(!motion.is_active());
@@ -1429,14 +1575,14 @@ mod tests {
         ];
         let mut motion = PresentationMotion::default();
         motion.resolve(
-            material_plan(start, transitions.clone()),
+            &material_plan(start, transitions.clone()),
             SceneMotionPolicy::default(),
             origin,
         );
 
         let target = material_plan(resized, transitions);
         let resolved = motion.resolve(
-            target.clone(),
+            &target,
             SceneMotionPolicy {
                 direct_geometry: true,
                 ..SceneMotionPolicy::default()
@@ -1444,7 +1590,7 @@ mod tests {
             origin + Duration::from_millis(1),
         );
 
-        assert_eq!(resolved, target);
+        assert_eq!(*resolved, target);
         assert!(!motion.is_active());
         assert_eq!(motion.next_deadline(), None);
         assert!(!motion.pointer_geometry_is_moving());
@@ -1462,17 +1608,18 @@ mod tests {
         );
         let mut motion = PresentationMotion::default();
         motion.resolve(
-            material_plan(left, vec![spec.clone()]),
+            &material_plan(left, vec![spec.clone()]),
             SceneMotionPolicy::default(),
             origin,
         );
         motion.resolve(
-            material_plan(right, vec![spec.clone()]),
+            &material_plan(right, vec![spec.clone()]),
             SceneMotionPolicy::default(),
             origin,
         );
+        let forward_target = motion.target.clone().unwrap();
         let forward = motion.resolve(
-            motion.target.clone().unwrap(),
+            &forward_target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(40),
         );
@@ -1480,23 +1627,23 @@ mod tests {
 
         let reversed_target = material_plan(left, vec![spec]);
         let reversal_start = motion.resolve(
-            reversed_target.clone(),
+            &reversed_target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(40),
         );
         assert_eq!(material_rect(&reversal_start).origin.x_units(), 40);
         let reversal_midpoint = motion.resolve(
-            reversed_target.clone(),
+            &reversed_target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(90),
         );
         assert_eq!(material_rect(&reversal_midpoint).origin.x_units(), 20);
         let converged = motion.resolve(
-            reversed_target.clone(),
+            &reversed_target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(140),
         );
-        assert_eq!(converged, reversed_target);
+        assert_eq!(*converged, reversed_target);
     }
 
     #[test]
@@ -1513,8 +1660,8 @@ mod tests {
             )],
         );
         let mut motion = PresentationMotion::default();
-        motion.resolve(stable.clone(), SceneMotionPolicy::default(), origin);
-        let start = motion.resolve(arrival, SceneMotionPolicy::default(), origin);
+        motion.resolve(&stable, SceneMotionPolicy::default(), origin);
+        let start = motion.resolve(&arrival, SceneMotionPolicy::default(), origin);
         assert!(material_rect(&start).size.width_units() < rect.size.width_units());
         let approval_window = motion
             .active_transition_window(TransitionRole::ApprovalArrival)
@@ -1531,8 +1678,9 @@ mod tests {
             origin + Duration::from_millis(50)
         );
 
+        let repeated_target = motion.target.clone().unwrap();
         let repeated = motion.resolve(
-            motion.target.clone().unwrap(),
+            &repeated_target,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(25),
         );
@@ -1548,11 +1696,11 @@ mod tests {
 
         // Resolution/removal is authoritative and cancels visual emphasis.
         let cleared = motion.resolve(
-            stable.clone(),
+            &stable,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(50),
         );
-        assert_eq!(cleared, stable);
+        assert_eq!(*cleared, stable);
         assert!(!motion.is_active());
         assert_eq!(motion.next_deadline(), None);
     }
@@ -1572,10 +1720,10 @@ mod tests {
             NativePresentationPlan::from_resolved_commands(Vec::new(), vec![approval.clone()]);
         let visible = material_plan(rect, vec![approval]);
         let mut motion = PresentationMotion::default();
-        motion.resolve(stable, SceneMotionPolicy::default(), origin);
+        motion.resolve(&stable, SceneMotionPolicy::default(), origin);
 
         let hidden_frame = motion.resolve(
-            hidden,
+            &hidden,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(1),
         );
@@ -1584,11 +1732,11 @@ mod tests {
         assert_eq!(motion.next_deadline(), None);
 
         let revealed = motion.resolve(
-            visible.clone(),
+            &visible,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(2),
         );
-        assert_eq!(revealed, visible);
+        assert_eq!(*revealed, visible);
         assert!(!motion.is_active());
         assert_eq!(motion.next_deadline(), None);
     }
@@ -1608,10 +1756,10 @@ mod tests {
         let first_plan = material_plan(rect, vec![first]);
         let second_plan = material_plan(rect, vec![second]);
         let mut motion = PresentationMotion::default();
-        motion.resolve(first_plan, SceneMotionPolicy::default(), origin);
+        motion.resolve(&first_plan, SceneMotionPolicy::default(), origin);
 
         let restarted = motion.resolve(
-            second_plan,
+            &second_plan,
             SceneMotionPolicy::default(),
             origin + Duration::from_millis(10),
         );
@@ -1623,5 +1771,72 @@ mod tests {
                 finishes_at: origin + Duration::from_millis(110),
             })
         );
+    }
+
+    /// P3(a) coverage proof: idle frames — an unchanged target with no active
+    /// transitions — must borrow the caller's plan with zero clones, while
+    /// frames that actually interpolate return an owned rewrite. The borrowed
+    /// pointer identity is the allocation-freedom proof.
+    #[test]
+    fn resolve_borrows_idle_frames_and_owns_only_interpolated_ones() {
+        let origin = Instant::now();
+        let start = LogicalRect::from_units(0, 0, 100, 100);
+        let end = LogicalRect::from_units(100, 0, 100, 100);
+        let spec = transition(
+            TransitionRole::PaneGeometry,
+            TransitionProperty::Geometry,
+            100,
+        );
+        let start_plan = material_plan(start, vec![spec.clone()]);
+        let end_plan = material_plan(end, vec![spec]);
+        let mut motion = PresentationMotion::default();
+
+        let initial = motion.resolve(&start_plan, SceneMotionPolicy::default(), origin);
+        assert!(
+            matches!(initial, Cow::Borrowed(plan) if std::ptr::eq(plan, &start_plan)),
+            "the initial snap must return the caller's plan uncloned"
+        );
+
+        let idle = motion.resolve(
+            &start_plan,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(1),
+        );
+        assert!(
+            matches!(idle, Cow::Borrowed(plan) if std::ptr::eq(plan, &start_plan)),
+            "an unchanged motionless target must take the borrowed fast path"
+        );
+        assert_eq!(motion.next_deadline(), None);
+
+        let interpolated = motion.resolve(
+            &end_plan,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(1),
+        );
+        assert!(
+            matches!(interpolated, Cow::Owned(_)),
+            "active interpolation must return an owned rewrite"
+        );
+        assert!(motion.is_active());
+
+        let finishing = motion.resolve(
+            &end_plan,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(200),
+        );
+        assert_eq!(
+            *finishing, end_plan,
+            "the completion frame still resolves to the exact target"
+        );
+        let settled = motion.resolve(
+            &end_plan,
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(201),
+        );
+        assert!(
+            matches!(settled, Cow::Borrowed(plan) if std::ptr::eq(plan, &end_plan)),
+            "after completion the borrowed fast path must resume"
+        );
+        assert!(!motion.is_active());
     }
 }

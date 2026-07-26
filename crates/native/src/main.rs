@@ -36,7 +36,13 @@ use winit::{
 };
 
 const HEARTBEAT: Duration = Duration::from_millis(250);
-const EVENT_DRAIN_BUDGET: usize = 16;
+// Matches the app layer's DRAIN_EVENT_BUDGET; the 3ms wall-clock deadline
+// inside the app drain remains the responsiveness bound.
+const EVENT_DRAIN_BUDGET: usize = 256;
+// Retry cadence after a skipped render (transient surface timeout): soon
+// enough that the missed frame presents within a few refresh intervals,
+// long enough that a persistently timing-out surface cannot spin the loop.
+const SKIPPED_RENDER_RETRY: Duration = Duration::from_millis(50);
 
 trait VisualClock {
     fn now(&self) -> Instant;
@@ -50,8 +56,48 @@ impl VisualClock for MonotonicVisualClock {
     }
 }
 
-fn next_scheduled_deadline(heartbeat: Instant, animation: Option<Instant>) -> Instant {
-    animation.map_or(heartbeat, |animation| animation.min(heartbeat))
+/// Deadlines that exist only to drive a repaint (animation stepping, the
+/// skipped-render retry) never arm a wake while the window is occluded:
+/// repaints are suppressed while occluded, so arming an already-elapsed
+/// deadline would wake the loop hot until de-occlusion instead of letting
+/// it idle at the heartbeat. De-occlusion itself forces a render, which
+/// re-derives or clears both deadlines.
+fn next_scheduled_deadline(
+    heartbeat: Instant,
+    animation: Option<Instant>,
+    render_retry: Option<Instant>,
+    occluded: bool,
+) -> Instant {
+    if occluded {
+        return heartbeat;
+    }
+    [animation, render_retry]
+        .into_iter()
+        .flatten()
+        .fold(heartbeat, Instant::min)
+}
+
+/// A skipped render latched `force_render` but presented nothing, and no
+/// other path re-requests the frame; retry through the scheduled-work
+/// mechanism rather than an immediate re-request, which could tight-loop
+/// against a persistently timing-out surface.
+fn skipped_render_retry_deadline(now: Instant) -> Instant {
+    now + SKIPPED_RENDER_RETRY
+}
+
+/// A repaint is skippable only when nothing could have changed the frame:
+/// no forced repaint pending (surface recovery, resize, scale/font
+/// transitions, de-occlusion), no active presentation motion, and the scene
+/// generation matches the last presented frame.
+fn render_can_be_skipped(
+    force_render: bool,
+    animation_active: bool,
+    last_rendered_generation: Option<u64>,
+    scene_generation: u64,
+) -> bool {
+    !force_render
+        && !animation_active
+        && last_rendered_generation.is_some_and(|generation| generation == scene_generation)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -87,6 +133,57 @@ fn pointer_input_needs_redraw(
     after: (bool, Option<usize>, Option<usize>),
 ) -> bool {
     kind != PointerKind::Move || before.0 || after.0 || before.1 != after.1 || before.2 != after.2
+}
+
+/// Fold a precise (trackpad pixel) scroll delta, already converted to cell
+/// units, into whole-cell steps, carrying the sub-cell remainder between
+/// events. A direction reversal on an axis discards that axis's remainder:
+/// leftover travel from the old direction must not pay into the new one.
+fn accumulate_precise_wheel(remainder: &mut (f64, f64), delta_cells: (f64, f64)) -> (i16, i16) {
+    fn axis(remainder: &mut f64, delta: f64) -> i16 {
+        if *remainder * delta < 0.0 {
+            *remainder = 0.0;
+        }
+        *remainder += delta;
+        let whole = remainder.trunc();
+        *remainder -= whole;
+        whole as i16
+    }
+    (
+        axis(&mut remainder.0, delta_cells.0),
+        axis(&mut remainder.1, delta_cells.1),
+    )
+}
+
+/// Sub-cell precise-wheel travel banked between events, keyed on the mouse
+/// cell that accumulated it. The cell is only a proxy for the scroll
+/// target, so the bank must also be invalidated by any transition that can
+/// change which pane a cell resolves to (keyboard-driven layout change,
+/// resize, display-scale or font-metric change); otherwise travel banked
+/// over one pane pays into a whole-row scroll against another.
+#[derive(Debug, Default, PartialEq)]
+struct WheelRemainderBank {
+    remainder: (f64, f64),
+    cell: Option<(u16, u16)>,
+}
+
+impl WheelRemainderBank {
+    /// Drop all banked travel; the next precise event starts from zero.
+    fn invalidate(&mut self) {
+        self.remainder = (0.0, 0.0);
+        self.cell = None;
+    }
+
+    /// Fold a precise delta banked against `mouse_cell`. Travel banked
+    /// over a different cell may have targeted another pane, so it is
+    /// dropped rather than paid into the new target.
+    fn accumulate(&mut self, mouse_cell: (u16, u16), delta_cells: (f64, f64)) -> (i16, i16) {
+        if self.cell != Some(mouse_cell) {
+            self.remainder = (0.0, 0.0);
+            self.cell = Some(mouse_cell);
+        }
+        accumulate_precise_wheel(&mut self.remainder, delta_cells)
+    }
 }
 
 fn logical_pointer_position(x: f64, y: f64, backing_scale: f32) -> Option<LogicalPoint> {
@@ -311,10 +408,14 @@ struct App {
     mouse_logical: Option<LogicalPoint>,
     mouse_cell: (u16, u16),
     pressed_pointer_buttons: PressedPointerButtons,
-    wheel_cell_remainder: (f64, f64),
+    wheel_remainder: WheelRemainderBank,
     scene_presentable: bool,
     window_focused: bool,
+    window_occluded: bool,
     ime_allowed: bool,
+    last_rendered_scene_generation: Option<u64>,
+    force_render: bool,
+    render_retry_deadline: Option<Instant>,
 }
 
 impl App {
@@ -342,16 +443,54 @@ impl App {
             mouse_logical: None,
             mouse_cell: (0, 0),
             pressed_pointer_buttons: PressedPointerButtons::default(),
-            wheel_cell_remainder: (0.0, 0.0),
+            wheel_remainder: WheelRemainderBank::default(),
             scene_presentable: false,
             window_focused: false,
+            window_occluded: false,
             ime_allowed: false,
+            last_rendered_scene_generation: None,
+            force_render: true,
+            render_retry_deadline: None,
         }
     }
 
     fn request_redraw(&self) {
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+
+    /// Wake/heartbeat/animation repaints are pointless while the window is
+    /// occluded; the runtime keeps draining regardless (PTY flow-control
+    /// credits ride on drained events), only the repaint is suppressed.
+    fn request_redraw_if_visible(&self) {
+        if !self.window_occluded {
+            self.request_redraw();
+        }
+    }
+
+    fn window_occluded_changed(&mut self, occluded: bool) {
+        if occluded == self.window_occluded {
+            return;
+        }
+        self.window_occluded = occluded;
+        if occluded {
+            // Snap motion so no mid-flight frame is left frozen on screen
+            // and the animation deadline stops arming wakes.
+            if let Some(gpu) = &mut self.gpu {
+                gpu.snap_presentation_motion();
+            }
+        } else {
+            self.force_render = true;
+            self.request_redraw();
+        }
+    }
+
+    /// Belt-and-braces de-occlusion: focus and cursor events prove the
+    /// window is visible even if `Occluded(false)` was never delivered.
+    fn note_window_visible(&mut self) {
+        if self.window_occluded {
+            self.window_occluded_changed(false);
         }
     }
 
@@ -401,6 +540,7 @@ impl App {
 
     fn apply_scale_factor(&mut self, scale_factor: f32) {
         self.scene_presentable = false;
+        self.force_render = true;
         self.cancel_pointer_gesture();
         self.host_mut().suspend_scene_interaction();
         let physical_size = self
@@ -433,6 +573,10 @@ impl App {
         self.host_mut().handle_input(input);
         self.apply_effects();
         if self.host().scene_generation() != generation {
+            // The scene changed (possibly the pane layout): sub-row wheel
+            // travel banked under the old layout must not pay into a
+            // scroll against whatever pane now occupies that cell.
+            self.wheel_remainder.invalidate();
             self.request_redraw();
         }
     }
@@ -526,6 +670,7 @@ impl App {
             // Cell metrics changed: the same choreography as a display-scale
             // transition keeps pointer, motion, and PTY geometry coherent.
             self.scene_presentable = false;
+            self.force_render = true;
             self.cancel_pointer_gesture();
             self.host_mut().suspend_scene_interaction();
             if let Some(gpu) = &mut self.gpu {
@@ -549,6 +694,14 @@ impl App {
     }
 
     fn render_frame(&mut self) -> Result<(), GpuRenderError> {
+        if render_can_be_skipped(
+            self.force_render,
+            self.gpu.as_ref().is_some_and(GpuText::animation_is_active),
+            self.last_rendered_scene_generation,
+            self.host().scene_generation(),
+        ) {
+            return Ok(());
+        }
         self.scene_presentable = false;
         let Some(viewport) = self.viewport_metrics() else {
             self.cancel_and_disable_ime();
@@ -563,11 +716,20 @@ impl App {
             return Ok(());
         }
         self.sync_ime(&snapshot.scene);
+        let snapshot_generation = snapshot.scene_generation;
         let visual_now = self.visual_now();
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(());
         };
-        let outcome = match gpu.render_at(&snapshot.scene, &snapshot.theme, visual_now) {
+        // Threading the snapshot's scene generation lets the renderer reuse
+        // its compiled scene on animation-only frames; the generation is the
+        // same dirtiness counter the render-skip guard above keys on.
+        let outcome = match gpu.render_generation_at(
+            &snapshot.scene,
+            &snapshot.theme,
+            Some(snapshot_generation),
+            visual_now,
+        ) {
             Ok(outcome) => outcome,
             Err(GpuRenderError::DeviceLost { .. }) => {
                 self.consecutive_device_recoveries =
@@ -579,6 +741,7 @@ impl App {
                 match pollster::block_on(gpu.recreate_device()) {
                     Ok(()) => {
                         self.scene_presentable = false;
+                        self.force_render = true;
                         self.host_mut().suspend_scene_interaction();
                         self.resize_host();
                         self.request_redraw();
@@ -593,20 +756,33 @@ impl App {
         };
         match outcome {
             GpuRenderOutcome::Presented { .. } => {
-                self.scene_presentable = !self
-                    .gpu
-                    .as_ref()
-                    .is_some_and(GpuText::pointer_geometry_is_moving);
-                if !self.scene_presentable {
-                    self.host_mut().suspend_scene_interaction();
-                }
+                // Pane-geometry motion no longer suspends pointer admission:
+                // hit targets stay at stable settled geometry, so input
+                // admitted mid-flight resolves against the final layout.
+                self.scene_presentable = true;
+                self.last_rendered_scene_generation = Some(snapshot_generation);
+                self.force_render = false;
+                self.render_retry_deadline = None;
                 self.consecutive_surface_recoveries = 0;
                 self.consecutive_device_recoveries = 0;
+                // Present-paced animation stepping: chaining a redraw off
+                // each presented frame locks motion to the display refresh
+                // (FIFO present). The WaitUntil animation deadline stays as
+                // fallback for outcomes where no present occurs.
+                if self.gpu.as_ref().is_some_and(GpuText::animation_is_active) {
+                    self.request_redraw_if_visible();
+                }
             }
             GpuRenderOutcome::Skipped { .. } => {
+                self.force_render = true;
                 self.host_mut().suspend_scene_interaction();
+                // Nothing was presented and `scene_presentable` stays
+                // false, so without a retry the app would stop presenting
+                // and drop pointer input until an unrelated scene change.
+                self.render_retry_deadline = Some(skipped_render_retry_deadline(self.visual_now()));
             }
             GpuRenderOutcome::SurfaceReconfigured { .. } => {
+                self.force_render = true;
                 self.host_mut().suspend_scene_interaction();
                 self.consecutive_surface_recoveries =
                     self.consecutive_surface_recoveries.saturating_add(1);
@@ -616,6 +792,16 @@ impl App {
                     self.request_redraw();
                 }
             }
+        }
+        // A render performed while occluded (an already-queued redraw, a
+        // synchronous resize render) can create fresh motion whose deadline
+        // occlusion suppresses from ever being serviced; snapping mirrors
+        // the Occluded(true) transition and keeps "no motion state while
+        // occluded" true for every render path.
+        if self.window_occluded
+            && let Some(gpu) = self.gpu.as_mut()
+        {
+            gpu.snap_presentation_motion();
         }
         Ok(())
     }
@@ -725,36 +911,49 @@ impl App {
         let Some(gpu) = &self.gpu else {
             return;
         };
-        let (dx, dy) = match delta {
+        let (dx, dy, precise) = match delta {
             MouseScrollDelta::LineDelta(x, y) => {
-                self.wheel_cell_remainder = (0.0, 0.0);
-                ((-x).round() as i16, (-y).round() as i16)
+                self.wheel_remainder.invalidate();
+                ((-x).round() as i16, (-y).round() as i16, false)
             }
             MouseScrollDelta::PixelDelta(position) => {
-                self.wheel_cell_remainder.0 += -position.x / f64::from(gpu.cell_w());
-                self.wheel_cell_remainder.1 += -position.y / f64::from(gpu.cell_h());
-                let dx = self.wheel_cell_remainder.0.trunc();
-                let dy = self.wheel_cell_remainder.1.trunc();
-                self.wheel_cell_remainder.0 -= dx;
-                self.wheel_cell_remainder.1 -= dy;
-                (dx as i16, dy as i16)
+                // Precise deltas accumulate in cell units (rows vertically)
+                // and dispatch every whole row, so a slow trackpad scroll
+                // moves one row at a time with no amplification downstream.
+                let (dx, dy) = self.wheel_remainder.accumulate(
+                    self.mouse_cell,
+                    (
+                        -position.x / f64::from(gpu.cell_w()),
+                        -position.y / f64::from(gpu.cell_h()),
+                    ),
+                );
+                (dx, dy, true)
             }
         };
+        // Wheel bypasses the scene_presentable gate: it re-resolves its pane
+        // target in the app layer and needs no fresh hit test, so it is
+        // admitted whenever a scene exists, even while geometry settles.
+        if self.scene_size().is_none() {
+            return;
+        }
         if dx != 0 {
-            self.pointer_input(PointerKind::Wheel { dx, dy: 0 }, None);
+            self.send_pointer_input(PointerKind::Wheel { dx, dy: 0, precise }, None);
         }
         if dy != 0 {
-            self.pointer_input(PointerKind::Wheel { dx: 0, dy }, None);
+            self.send_pointer_input(PointerKind::Wheel { dx: 0, dy, precise }, None);
         }
     }
 
     fn focus_changed(&mut self, focused: bool) {
         self.window_focused = focused;
+        if focused {
+            self.note_window_visible();
+        }
         if !focused {
             self.cancel_and_disable_ime();
             self.pressed_pointer_buttons.clear();
             self.modifiers = ModifiersState::empty();
-            self.wheel_cell_remainder = (0.0, 0.0);
+            self.wheel_remainder.invalidate();
         }
         self.send_input(if focused {
             InputEvent::FocusGained
@@ -817,7 +1016,7 @@ impl App {
             let scene_changed = self.host_mut().heartbeat();
             self.next_heartbeat = now + HEARTBEAT;
             if scene_changed {
-                self.request_redraw();
+                self.request_redraw_if_visible();
             }
         }
         if self
@@ -826,7 +1025,17 @@ impl App {
             .and_then(GpuText::next_animation_deadline)
             .is_some_and(|deadline| now >= deadline)
         {
-            self.request_redraw();
+            self.request_redraw_if_visible();
+        }
+        if self
+            .render_retry_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            // One-shot: the deadline is consumed when serviced, so a
+            // persistently skipping surface re-arms per attempt instead of
+            // pinning an expired WaitUntil target.
+            self.render_retry_deadline = None;
+            self.request_redraw_if_visible();
         }
         if self.fatal_error.is_some() {
             self.cancel_and_disable_ime();
@@ -842,11 +1051,17 @@ impl App {
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_scheduled_deadline(
             self.next_heartbeat,
             animation,
+            self.render_retry_deadline,
+            self.window_occluded,
         )));
     }
 
     fn cancel_pointer_gesture(&mut self) {
         self.pressed_pointer_buttons.clear();
+        // Every caller is a geometry transition (resize, display-scale or
+        // font-metric change): banked sub-row wheel travel is stale against
+        // the new cell-to-pane mapping.
+        self.wheel_remainder.invalidate();
         if let Some(host) = &mut self.host {
             host.cancel_pointer_gesture();
         }
@@ -927,7 +1142,7 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if scene_changed {
-                    self.request_redraw();
+                    self.request_redraw_if_visible();
                 }
             }
         }
@@ -944,8 +1159,9 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                // The frame below repaints regardless, so the drain's
-                // scene-change verdict is not needed here.
+                // render_frame's skip guard reads the post-drain scene
+                // generation, so the drain's scene-change verdict is not
+                // needed here.
                 self.drain_runtime();
                 if self.exit_if_requested(event_loop) {
                     return;
@@ -961,6 +1177,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(size) => {
                 self.scene_presentable = false;
+                self.force_render = true;
                 self.cancel_pointer_gesture();
                 self.host_mut().suspend_scene_interaction();
                 if let Some(gpu) = &mut self.gpu {
@@ -969,7 +1186,17 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.refresh_mouse_cell();
                 self.resize_host();
-                self.request_redraw();
+                // Render inside the resize step so a frame matching the new
+                // size exists before the window edge moves again; a deferred
+                // redraw would rubber-band content behind the edge.
+                if let Err(error) = self.render_frame() {
+                    self.fail(error.to_string());
+                }
+                if self.fatal_error.is_some() {
+                    self.cancel_and_disable_ime();
+                    self.shutdown_host();
+                    event_loop.exit();
+                }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.apply_scale_factor(scale_factor as f32);
@@ -1029,6 +1256,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.exit_if_requested(event_loop);
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.note_window_visible();
                 self.update_mouse_cell(position.x, position.y);
                 self.pointer_motion();
             }
@@ -1044,7 +1272,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseWheel { delta, .. } => self.pointer_wheel(delta),
             WindowEvent::Focused(focused) => self.focus_changed(focused),
-            WindowEvent::Occluded(_) => {}
+            WindowEvent::Occluded(occluded) => self.window_occluded_changed(occluded),
             _ => {}
         }
     }

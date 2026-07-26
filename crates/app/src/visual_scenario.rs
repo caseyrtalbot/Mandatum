@@ -703,7 +703,7 @@ fn scene_text(frame: &FrameSnapshot) -> String {
         if let PaneContent::Terminal(surface) = &pane.content {
             for row in &surface.rows {
                 for cell in row {
-                    text.push_str(cell.grapheme_text());
+                    text.push_str(&cell.grapheme_text());
                 }
                 text.push('\n');
             }

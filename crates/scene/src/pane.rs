@@ -20,6 +20,23 @@ pub struct PaneScene {
     pub floating: bool,
     pub stacked: bool,
     pub zoomed: bool,
+    /// Content-change hint for caching renderers, scoped to [`Self::content`]
+    /// alone.
+    ///
+    /// Contract: within one producing app state, two frames that carry the
+    /// same `(id, content_revision)` pair carry an identical `content` value,
+    /// so a renderer may reuse work derived purely from that pane's content.
+    /// The reverse is not promised — a producer may bump the revision even
+    /// though the content happens to be unchanged, and the safe direction is
+    /// always a rebuild.
+    ///
+    /// This is a hint, never a requirement: `&WorkspaceScene` alone still
+    /// paints a complete frame, and a renderer that ignores this field must
+    /// render identically. It says nothing about the pane's other fields
+    /// (`title`, `area`, `focused`, chrome flags) or about theme; caches
+    /// keyed on this value must key on those inputs separately.
+    #[serde(default)]
+    pub content_revision: u64,
     pub content: PaneContent,
 }
 
@@ -747,6 +764,7 @@ mod tests {
             floating: false,
             stacked: false,
             zoomed: false,
+            content_revision: 0,
             content,
         }
     }
@@ -1043,6 +1061,33 @@ mod tests {
                 "  $ true",
             ]
         );
+    }
+
+    // The revision is a pure hint layered onto the scene contract: scenes
+    // captured before the field existed still deserialize (revision 0), and
+    // the value round-trips so consumers on the far side of a serialization
+    // boundary see the producer's revision, not a re-derived one.
+    #[test]
+    fn content_revision_round_trips_and_defaults_to_zero_for_old_scenes() {
+        let mut scene = pane(
+            PaneContent::Terminal(TerminalSurface::default()),
+            PaneSceneKind::Terminal,
+        );
+        scene.content_revision = 7;
+        let json = serde_json::to_value(&scene).unwrap();
+        assert_eq!(json["content_revision"], 7);
+        let round_tripped: PaneScene = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(round_tripped, scene);
+
+        let mut without_field = json;
+        without_field
+            .as_object_mut()
+            .unwrap()
+            .remove("content_revision")
+            .expect("field present before removal");
+        let legacy: PaneScene = serde_json::from_value(without_field).unwrap();
+        assert_eq!(legacy.content_revision, 0);
+        assert_eq!(legacy.content, scene.content);
     }
 
     #[test]

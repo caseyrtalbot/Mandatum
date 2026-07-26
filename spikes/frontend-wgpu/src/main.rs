@@ -2313,10 +2313,10 @@ impl App {
         let Some(gpu) = &self.gpu else {
             return;
         };
-        let (dx, dy) = match delta {
+        let (dx, dy, precise) = match delta {
             MouseScrollDelta::LineDelta(x, y) => {
                 self.wheel_cell_remainder = (0.0, 0.0);
-                ((-x).round() as i16, (-y).round() as i16)
+                ((-x).round() as i16, (-y).round() as i16, false)
             }
             MouseScrollDelta::PixelDelta(position) => {
                 self.wheel_cell_remainder.0 += -position.x / f64::from(gpu.cell_w());
@@ -2325,14 +2325,14 @@ impl App {
                 let dy = self.wheel_cell_remainder.1.trunc();
                 self.wheel_cell_remainder.0 -= dx;
                 self.wheel_cell_remainder.1 -= dy;
-                (dx as i16, dy as i16)
+                (dx as i16, dy as i16, true)
             }
         };
         if dx != 0 {
-            self.pointer_input(PointerKind::Wheel { dx, dy: 0 }, None);
+            self.pointer_input(PointerKind::Wheel { dx, dy: 0, precise }, None);
         }
         if dy != 0 {
-            self.pointer_input(PointerKind::Wheel { dx: 0, dy }, None);
+            self.pointer_input(PointerKind::Wheel { dx: 0, dy, precise }, None);
         }
     }
 

@@ -4,14 +4,15 @@
 //! the app side: the scene crate never depends on the terminal engine, so no
 //! parser type crosses the frontend seam (L1/L4).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, hash_map::Entry as HashMapEntry};
+use std::sync::Arc;
 
 use mandatum_agent_runtime::RiskLevel;
 use mandatum_core::{AgentPaneIntent, PaneId, PaneKind, PaneSpec, Session, TaskPaneIntent};
 use mandatum_scene::{
     AccessibilityActionKind, AccessibilityNode, AccessibilityRole, AccessibilityState,
-    AgentApprovalPrompt, AgentContent, CellOccupancy, EmptyContent, HeaderScene, HitTarget,
-    HitTargetKind, LogicalHitTarget, LogicalRect, OverlayKind, OverlayNodePart,
+    AgentApprovalPrompt, AgentContent, ArtifactState, CellOccupancy, EmptyContent, HeaderScene,
+    HitTarget, HitTargetKind, LogicalHitTarget, LogicalRect, OverlayKind, OverlayNodePart,
     OverlayPresentationKind, OverlayScene, PaneBadgeKind, PaneContent, PaneNodePart, PaneScene,
     PaneSceneKind, PreeditScene, PresentationAxis, PresentationNode, PresentationNodeId,
     PresentationNodeRole, PresentationNodeState, PresentationTone, SceneCell, SceneCellStyle,
@@ -23,7 +24,7 @@ use mandatum_scene::{
     layout::{self, PaneLayout},
 };
 use mandatum_terminal_vt::{
-    CellStyle, Color as VtColor, TerminalCell, TerminalCellOccupancy, TerminalGrid,
+    CellStyle, Color as VtColor, TerminalCell, TerminalCellOccupancy, TerminalCursor, TerminalGrid,
 };
 
 use crate::{
@@ -47,15 +48,239 @@ pub(crate) struct PaneViewState {
     pub(crate) copy_cursor: Option<(usize, u16)>,
 }
 
+/// Retained per-pane build products, keyed by pane id and owned by
+/// [`AppState`] between frames (the pure `build_workspace_scene*` entry
+/// points use a throwaway cache and rebuild everything).
+///
+/// Two independent mechanisms live here:
+///
+/// 1. **Surface reuse** skips the [`terminal_surface`] grid walk when every
+///    input that feeds it is provably unchanged (see [`TerminalSurfaceKey`]).
+///    The paths that can change a pane's cells, and how each is covered:
+///    - PTY output feeds: the parser's own `screen_changed` signal bumps the
+///      per-pane grid revision in `AppState::apply_pty_runtime_event`.
+///      Cursor-only motion also sets the parser's dirty flag (every cursor
+///      move funnels through `set_cursor`), so cursor moves are covered.
+///      Parser failures bump it too.
+///    - Grid resize/rewrap and runtime lifecycle changes (spawn, restart,
+///      task launch/rerun/stop, child exit, restore, session retire,
+///      shutdown): `AppState` calls
+///      `PaneSceneCache::invalidate_surfaces` at each of those choke
+///      points, and the key additionally carries the pane's restart
+///      generation plus the grid's live size/scrollback/cursor facts as
+///      belt-and-braces.
+///    - Scroll offset, selection, and the copy-mode cursor: the full
+///      [`PaneViewState`] is part of the key.
+///    - Theme changes never alter surfaces (cells carry semantic
+///      `SceneColor`s), so they deliberately do not invalidate; renderers
+///      key theme separately.
+/// 2. **Revision settlement** decides each pane's published
+///    `content_revision` by comparing the freshly assembled [`PaneContent`]
+///    against the previous frame's, so the hint is proven by equality
+///    rather than inferred from dirt tracking. A missed invalidation above
+///    could cost a stale *reuse* only on a full key collision, while the
+///    revision itself can only err in the safe direction (a spurious
+///    bump). Cheap intent-driven content (task status rows, agent rows,
+///    artifact labels) is rebuilt every frame and settled purely by this
+///    comparison.
+#[derive(Default)]
+pub(crate) struct PaneSceneCache {
+    entries: HashMap<PaneId, PaneSceneCacheEntry>,
+    /// Cumulative surface builds that walked a grid (test observability).
+    #[cfg(test)]
+    pub(crate) surface_rebuilds: usize,
+    /// Cumulative surface builds served from the cache (test observability).
+    #[cfg(test)]
+    pub(crate) surface_reuses: usize,
+}
+
+struct PaneSceneCacheEntry {
+    revision: u64,
+    content: PaneContent,
+    terminal_key: Option<TerminalSurfaceKey>,
+    task_output_key: Option<TerminalSurfaceKey>,
+}
+
+/// Every input [`terminal_surface`] reads, compared cheaply per frame; any
+/// difference rebuilds the surface. [`task_output_surface`] derives its view
+/// from grid content, so its key fixes `view` at the default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TerminalSurfaceKey {
+    /// App-side per-pane feed counter, bumped on `screen_changed`. Never
+    /// resets, so within one pane it is collision-free across feeds.
+    grid_revision: u64,
+    /// A fresh runtime never reuses its predecessor's surface, even before
+    /// its first feed.
+    restart_generation: u64,
+    columns: u16,
+    rows: u16,
+    total_rows: usize,
+    scrollback_len: usize,
+    cursor: TerminalCursor,
+    view: PaneViewState,
+    max_width: u16,
+    max_height: u16,
+}
+
+fn terminal_surface_key(
+    state: &AppState,
+    pane: &PaneSpec,
+    grid: &TerminalGrid,
+    view: PaneViewState,
+    max_width: u16,
+    max_height: u16,
+) -> TerminalSurfaceKey {
+    TerminalSurfaceKey {
+        grid_revision: state.pane_grid_revision(pane.id()),
+        restart_generation: pane.restart_generation(),
+        columns: grid.size().columns(),
+        rows: grid.size().rows(),
+        total_rows: grid.total_rows(),
+        scrollback_len: grid.scrollback_len(),
+        cursor: grid.cursor(),
+        view,
+        max_width,
+        max_height,
+    }
+}
+
+impl PaneSceneCache {
+    /// Drop every retained surface key so the next build re-walks each grid.
+    /// Revisions and retained content survive: the post-build equality
+    /// comparison keeps revisions honest across the forced rebuild.
+    pub(crate) fn invalidate_surfaces(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.terminal_key = None;
+            entry.task_output_key = None;
+        }
+    }
+
+    fn cached_terminal_surface(
+        &self,
+        pane_id: &PaneId,
+        key: &TerminalSurfaceKey,
+    ) -> Option<TerminalSurface> {
+        let entry = self.entries.get(pane_id)?;
+        if entry.terminal_key.as_ref() != Some(key) {
+            return None;
+        }
+        match &entry.content {
+            PaneContent::Terminal(surface) => Some(surface.clone()),
+            _ => None,
+        }
+    }
+
+    fn cached_task_output_surface(
+        &self,
+        pane_id: &PaneId,
+        key: &TerminalSurfaceKey,
+    ) -> Option<TerminalSurface> {
+        let entry = self.entries.get(pane_id)?;
+        if entry.task_output_key.as_ref() != Some(key) {
+            return None;
+        }
+        match &entry.content {
+            PaneContent::Task(task) => task.output.clone(),
+            _ => None,
+        }
+    }
+
+    /// Settle a pane's published revision once its content is fully
+    /// assembled. `terminal_content_reused` marks content cloned verbatim
+    /// from this entry (a terminal-pane surface hit), which skips the
+    /// equality walk. New and changed panes take a revision of at least the
+    /// current scene generation, which keeps revisions from regressing into
+    /// previously published values even if an entry was pruned in between
+    /// (any pane removal or re-admission moves the generation).
+    fn settle(
+        &mut self,
+        scene_generation: u64,
+        pane_id: &PaneId,
+        content: &PaneContent,
+        terminal_key: Option<TerminalSurfaceKey>,
+        task_output_key: Option<TerminalSurfaceKey>,
+        terminal_content_reused: bool,
+    ) -> u64 {
+        match self.entries.entry(pane_id.clone()) {
+            HashMapEntry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
+                let unchanged =
+                    terminal_content_reused || pane_content_matches(&entry.content, content);
+                if !unchanged {
+                    entry.revision = entry.revision.saturating_add(1).max(scene_generation);
+                    entry.content = content.clone();
+                }
+                entry.terminal_key = terminal_key;
+                entry.task_output_key = task_output_key;
+                entry.revision
+            }
+            HashMapEntry::Vacant(vacant) => {
+                vacant
+                    .insert(PaneSceneCacheEntry {
+                        revision: scene_generation,
+                        content: content.clone(),
+                        terminal_key,
+                        task_output_key,
+                    })
+                    .revision
+            }
+        }
+    }
+
+    /// Keep only entries for panes present in the built frame, bounding the
+    /// retained content to the live workspace.
+    fn retain_only(&mut self, panes: &[PaneScene]) {
+        self.entries
+            .retain(|pane_id, _| panes.iter().any(|pane| &pane.id == pane_id));
+    }
+}
+
+/// Content equality with the artifact raster compared by identity
+/// (dimensions, revision, and shared allocation) instead of by pixel bytes;
+/// a false negative merely bumps the revision, which is the safe direction.
+fn pane_content_matches(previous: &PaneContent, current: &PaneContent) -> bool {
+    match (previous, current) {
+        (PaneContent::Artifact(previous), PaneContent::Artifact(current)) => {
+            previous.source_label == current.source_label
+                && previous.alt_text == current.alt_text
+                && previous.fit == current.fit
+                && match (&previous.state, &current.state) {
+                    (ArtifactState::Ready(previous), ArtifactState::Ready(current)) => {
+                        previous.width == current.width
+                            && previous.height == current.height
+                            && previous.revision == current.revision
+                            && Arc::ptr_eq(&previous.rgba8, &current.rgba8)
+                    }
+                    (previous, current) => previous == current,
+                }
+        }
+        (previous, current) => previous == current,
+    }
+}
+
 /// Build one frame of workspace scene from live app state.
 pub fn build_workspace_scene(state: &AppState, size: SceneSize) -> WorkspaceScene {
     build_workspace_scene_with_viewport(state, ViewportMetrics::from_scene_size(size))
 }
 
 /// Build one frame from a coherent shell-provided logical/physical viewport.
+///
+/// Pure entry point: a throwaway pane cache rebuilds every pane, so repeated
+/// calls on one unchanged `&AppState` stay deterministic. The production
+/// path (`AppState::build_scene_with_viewport`) threads the retained cache.
 pub fn build_workspace_scene_with_viewport(
     state: &AppState,
     viewport: ViewportMetrics,
+) -> WorkspaceScene {
+    build_workspace_scene_cached(state, viewport, &mut PaneSceneCache::default())
+}
+
+/// Build one frame, reusing per-pane surfaces retained in `cache` for panes
+/// whose build inputs are provably unchanged.
+pub(crate) fn build_workspace_scene_cached(
+    state: &AppState,
+    viewport: ViewportMetrics,
+    cache: &mut PaneSceneCache,
 ) -> WorkspaceScene {
     let size = viewport.scene_size();
     let workspace = state.workspace();
@@ -67,9 +292,10 @@ pub fn build_workspace_scene_with_viewport(
         .filter_map(|placed| {
             session
                 .pane(&placed.pane_id)
-                .map(|pane| pane_scene(state, session, pane, placed))
+                .map(|pane| pane_scene(state, session, pane, placed, cache))
         })
         .collect::<Vec<_>>();
+    cache.retain_only(&panes);
 
     // Overlay surfaces are mutually exclusive; Welcome and Context Menu keep
     // their distinct non-modal/anchored presentation grammar.
@@ -728,6 +954,11 @@ fn push_pane_presentation(
         }
     }
     for (kind, cell_rect) in pane.badge_rects() {
+        // Default panes are terminals; a "terminal" chip on every rail is
+        // pure noise natively. The terminal fallback keeps its badge cells.
+        if kind == PaneBadgeKind::Terminal {
+            continue;
+        }
         let badge_cell_rect = viewport.logical_rect_for_cells(cell_rect);
         nodes.push(presentation_cell_logical_node(
             PresentationNodeId::pane(pane.id.clone(), PaneNodePart::Badge(kind)),
@@ -861,9 +1092,10 @@ fn push_workflow_presentation(
             ..PresentationNodeState::default()
         };
         if visible {
+            // The status renders as tone-colored bold text with no container,
+            // so the node covers exactly the label's cells.
             let width = u16::try_from(display_width(&badge.label))
                 .unwrap_or(u16::MAX)
-                .saturating_add(2)
                 .min(inner.width);
             nodes.push(presentation_node(
                 id,
@@ -1595,16 +1827,36 @@ fn pane_scene(
     session: &Session,
     pane: &PaneSpec,
     placed: PaneLayout,
+    cache: &mut PaneSceneCache,
 ) -> PaneScene {
     let inner = layout::pane_inner_rect(placed.area);
+    let mut terminal_key = None;
+    let mut terminal_content_reused = false;
     let content = match pane.kind() {
         PaneKind::Terminal { .. } => match state.terminal_grid(pane.id()) {
-            Some(grid) => PaneContent::Terminal(terminal_surface(
-                grid,
-                state.pane_view_state(pane.id()),
-                inner.width,
-                inner.height,
-            )),
+            Some(grid) => {
+                let view = state.pane_view_state(pane.id());
+                let key = terminal_surface_key(state, pane, grid, view, inner.width, inner.height);
+                let surface = match cache.cached_terminal_surface(pane.id(), &key) {
+                    Some(surface) => {
+                        terminal_content_reused = true;
+                        #[cfg(test)]
+                        {
+                            cache.surface_reuses += 1;
+                        }
+                        surface
+                    }
+                    None => {
+                        #[cfg(test)]
+                        {
+                            cache.surface_rebuilds += 1;
+                        }
+                        terminal_surface(grid, view, inner.width, inner.height)
+                    }
+                };
+                terminal_key = Some(key);
+                PaneContent::Terminal(surface)
+            }
             None => PaneContent::Empty(empty_content(state, pane)),
         },
         PaneKind::Task { intent } => PaneContent::Task(task_content(state, pane, intent)),
@@ -1624,6 +1876,7 @@ fn pane_scene(
         floating: placed.floating,
         stacked: placed.stacked,
         zoomed: placed.zoomed,
+        content_revision: 0,
         content,
     };
 
@@ -1632,16 +1885,49 @@ fn pane_scene(
     // attached (the "output:" marker replaces "output: no live grid
     // attached"), so measuring before attaching is exact.
     let detail_rows = u16::try_from(scene.terminal_fallback_row_count()).unwrap_or(u16::MAX);
+    let mut task_output_key = None;
     if let PaneContent::Task(task) = &mut scene.content
         && let Some((_, Some(grid))) = state.task_view(&scene.id)
     {
-        task.output = Some(task_output_surface(
+        let max_height = inner.height.saturating_sub(detail_rows);
+        // The output window's scroll offset is derived from grid content
+        // (`task_output_surface` anchors to the content tail), so the key's
+        // view component is fixed at the default.
+        let key = terminal_surface_key(
+            state,
+            pane,
             grid,
+            PaneViewState::default(),
             inner.width,
-            inner.height.saturating_sub(detail_rows),
-        ));
+            max_height,
+        );
+        task.output = Some(match cache.cached_task_output_surface(&scene.id, &key) {
+            Some(surface) => {
+                #[cfg(test)]
+                {
+                    cache.surface_reuses += 1;
+                }
+                surface
+            }
+            None => {
+                #[cfg(test)]
+                {
+                    cache.surface_rebuilds += 1;
+                }
+                task_output_surface(grid, inner.width, max_height)
+            }
+        });
+        task_output_key = Some(key);
     }
 
+    scene.content_revision = cache.settle(
+        state.scene_generation(),
+        &scene.id,
+        &scene.content,
+        terminal_key,
+        task_output_key,
+        terminal_content_reused,
+    );
     scene
 }
 
@@ -1835,8 +2121,10 @@ fn terminal_surface(
                         .unwrap_or(&blank);
                     SceneCell {
                         occupancy: match cell.occupancy() {
+                            // Single-scalar graphemes (the overwhelming
+                            // majority) inline into `Char` without cloning.
                             TerminalCellOccupancy::Grapheme(grapheme) => {
-                                CellOccupancy::Grapheme(grapheme.clone())
+                                CellOccupancy::grapheme(grapheme.as_str())
                             }
                             TerminalCellOccupancy::WideContinuation => {
                                 CellOccupancy::WideContinuation
@@ -1854,7 +2142,7 @@ fn terminal_surface(
                     })
                 && let Some(last) = row.last_mut()
             {
-                last.occupancy = CellOccupancy::Grapheme("\u{fffd}".to_owned());
+                last.occupancy = CellOccupancy::Char('\u{fffd}');
             }
             row
         })
@@ -2164,7 +2452,7 @@ mod tests {
         let surface = terminal_surface(parser.grid(), PaneViewState::default(), 1, 1);
         assert_eq!(
             surface.rows[0][0].occupancy,
-            CellOccupancy::Grapheme("\u{fffd}".to_owned())
+            CellOccupancy::Char('\u{fffd}')
         );
     }
 
@@ -2300,8 +2588,24 @@ mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(badges, pane.badge_kinds());
+            let native_badges = pane
+                .badge_kinds()
+                .into_iter()
+                .filter(|kind| *kind != PaneBadgeKind::Terminal)
+                .collect::<Vec<_>>();
+            assert_eq!(badges, native_badges);
+            assert!(
+                scene.presentation.nodes.iter().all(|node| node.id
+                    != PresentationNodeId::pane(
+                        pane.id.clone(),
+                        PaneNodePart::Badge(PaneBadgeKind::Terminal)
+                    )),
+                "the redundant terminal kind badge stays out of native presentation"
+            );
             for (kind, rect) in pane.badge_rects() {
+                if kind == PaneBadgeKind::Terminal {
+                    continue;
+                }
                 let node = scene
                     .presentation
                     .nodes
@@ -2321,7 +2625,8 @@ mod tests {
                 let text = (rect.x..rect.right())
                     .filter_map(|x| program.cell_at(x, rect.y))
                     .filter_map(|cell| match &cell.occupancy {
-                        CellOccupancy::Grapheme(grapheme) => Some(grapheme.as_str()),
+                        CellOccupancy::Char(character) => Some(character.to_string()),
+                        CellOccupancy::Cluster(cluster) => Some(cluster.clone()),
                         CellOccupancy::WideContinuation => None,
                     })
                     .collect::<String>();
@@ -2469,12 +2774,14 @@ mod tests {
             scene.header.text
         );
         assert!(
-            scene.header.text.contains("2 pane(s)"),
+            scene.header.text.contains("2 panes"),
             "{}",
             scene.header.text
         );
+        // No agent pane exists, so the header must not claim an agent: the
+        // connector label is configuration, announced only alongside activity.
         assert!(
-            scene.header.text.contains("agent: fake"),
+            !scene.header.text.contains("agent:"),
             "{}",
             scene.header.text
         );
@@ -3939,6 +4246,7 @@ mod tests {
         let mut canvases = Vec::new();
         for state in states {
             let pane = PaneScene {
+                content_revision: 0,
                 id: pane_id.clone(),
                 title: "artifact".to_owned(),
                 kind: PaneSceneKind::Artifact,
@@ -3999,6 +4307,7 @@ mod tests {
             output_tail: vec!["one".to_owned(), "two".to_owned()],
         });
         let make_pane = |height| PaneScene {
+            content_revision: 0,
             id: pane_id.clone(),
             title: "agent".to_owned(),
             kind: PaneSceneKind::Agent,

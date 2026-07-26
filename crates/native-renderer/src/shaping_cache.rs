@@ -4,8 +4,15 @@
 //! unit: its text, resolved rich-text styles, declared byte-to-cell topology,
 //! font/metrics generations, and shaping-policy generation. This prevents a
 //! rejected or differently mapped run from borrowing an admitted layout.
+//!
+//! Hot-path lookups use [`BorrowedShapingKey`], which views the live run data
+//! without allocating; owned keys materialize only on insert. Hash and
+//! equality are defined once over a shared key view, so the borrowed and
+//! owned forms can never disagree, and a hit always verifies the FULL key —
+//! never a hash fingerprint alone.
 
-use std::hash::Hash;
+use std::borrow::Borrow;
+use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 use std::num::NonZeroUsize;
 
@@ -77,7 +84,7 @@ impl From<&ByteCellSpan> for ByteCellSpanKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ShapingCacheKey {
     context: ShapingCacheContext,
     width: u16,
@@ -87,6 +94,170 @@ pub(crate) struct ShapingCacheKey {
     text: Box<str>,
     styles: Box<[ShapingStyleKey]>,
     byte_cells: Box<[ByteCellSpanKey]>,
+}
+
+/// The complete shaping-unit identity, viewed through either an owned key or
+/// borrowed per-frame run data.
+///
+/// Hash and equality are defined once, over this view, so a borrowed lookup
+/// and an owned insertion can never disagree. Equality compares every
+/// component — context, width, namespace, text bytes, style ranges, and
+/// byte-to-cell topology — never a fingerprint.
+trait ShapingKeyQuery {
+    fn context(&self) -> ShapingCacheContext;
+    fn width(&self) -> u16;
+    fn forced_anchor(&self) -> bool;
+    fn text(&self) -> &str;
+    fn style_len(&self) -> usize;
+    fn style_at(&self, index: usize) -> ShapingStyleKey;
+    fn span_len(&self) -> usize;
+    fn span_at(&self, index: usize) -> ByteCellSpanKey;
+}
+
+/// The single hash definition both key forms delegate to.
+fn hash_key_view<H: Hasher>(key: &(dyn ShapingKeyQuery + '_), state: &mut H) {
+    key.context().hash(state);
+    key.width().hash(state);
+    key.forced_anchor().hash(state);
+    key.text().hash(state);
+    state.write_usize(key.style_len());
+    for index in 0..key.style_len() {
+        key.style_at(index).hash(state);
+    }
+    state.write_usize(key.span_len());
+    for index in 0..key.span_len() {
+        key.span_at(index).hash(state);
+    }
+}
+
+impl Hash for dyn ShapingKeyQuery + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_key_view(self, state);
+    }
+}
+
+impl PartialEq for dyn ShapingKeyQuery + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.context() == other.context()
+            && self.width() == other.width()
+            && self.forced_anchor() == other.forced_anchor()
+            && self.text() == other.text()
+            && self.style_len() == other.style_len()
+            && (0..self.style_len()).all(|index| self.style_at(index) == other.style_at(index))
+            && self.span_len() == other.span_len()
+            && (0..self.span_len()).all(|index| self.span_at(index) == other.span_at(index))
+    }
+}
+
+impl Eq for dyn ShapingKeyQuery + '_ {}
+
+/// Owned keys must hash exactly like the shared key view or borrowed lookups
+/// would silently never hit.
+impl Hash for ShapingCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_key_view(self, state);
+    }
+}
+
+impl ShapingKeyQuery for ShapingCacheKey {
+    fn context(&self) -> ShapingCacheContext {
+        self.context
+    }
+    fn width(&self) -> u16 {
+        self.width
+    }
+    fn forced_anchor(&self) -> bool {
+        self.forced_anchor
+    }
+    fn text(&self) -> &str {
+        &self.text
+    }
+    fn style_len(&self) -> usize {
+        self.styles.len()
+    }
+    fn style_at(&self, index: usize) -> ShapingStyleKey {
+        self.styles[index]
+    }
+    fn span_len(&self) -> usize {
+        self.byte_cells.len()
+    }
+    fn span_at(&self, index: usize) -> ByteCellSpanKey {
+        self.byte_cells[index]
+    }
+}
+
+impl<'a> Borrow<dyn ShapingKeyQuery + 'a> for ShapingCacheKey {
+    fn borrow(&self) -> &(dyn ShapingKeyQuery + 'a) {
+        self
+    }
+}
+
+/// Borrowed shaping-unit identity for allocation-free hot-path lookups.
+///
+/// Views the run's text, styles, and byte-cell topology in place; the owned
+/// [`ShapingCacheKey`] materializes only when a value is actually inserted.
+pub(crate) struct BorrowedShapingKey<'a> {
+    run: &'a RowRun,
+    context: ShapingCacheContext,
+    forced_anchor: bool,
+}
+
+impl<'a> BorrowedShapingKey<'a> {
+    pub(crate) fn new(run: &'a RowRun, context: ShapingCacheContext, forced_anchor: bool) -> Self {
+        Self {
+            run,
+            context,
+            forced_anchor,
+        }
+    }
+}
+
+impl ShapingKeyQuery for BorrowedShapingKey<'_> {
+    fn context(&self) -> ShapingCacheContext {
+        self.context
+    }
+    fn width(&self) -> u16 {
+        self.run.width
+    }
+    fn forced_anchor(&self) -> bool {
+        self.forced_anchor
+    }
+    fn text(&self) -> &str {
+        &self.run.text
+    }
+    fn style_len(&self) -> usize {
+        self.run.style_ranges.len()
+    }
+    fn style_at(&self, index: usize) -> ShapingStyleKey {
+        ShapingStyleKey::from(&self.run.style_ranges[index])
+    }
+    fn span_len(&self) -> usize {
+        self.run.byte_cells.len()
+    }
+    fn span_at(&self, index: usize) -> ByteCellSpanKey {
+        ByteCellSpanKey::from(&self.run.byte_cells[index])
+    }
+}
+
+/// Test seam proving the property the borrowed fast path rests on: the owned
+/// key and the borrowed view of the same run hash and compare identically.
+#[cfg(test)]
+pub(crate) fn owned_and_borrowed_agree(
+    owned: &ShapingCacheKey,
+    borrowed: &BorrowedShapingKey<'_>,
+) -> (bool, bool) {
+    use std::collections::hash_map::DefaultHasher;
+    fn hash_of(key: &(dyn ShapingKeyQuery + '_)) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+    let owned_view: &dyn ShapingKeyQuery = owned;
+    let borrowed_view: &dyn ShapingKeyQuery = borrowed;
+    (
+        hash_of(owned_view) == hash_of(borrowed_view),
+        owned_view == borrowed_view,
+    )
 }
 
 impl ShapingCacheKey {
@@ -231,7 +402,21 @@ impl<V: Clone> ShapingCache<V> {
         }
     }
 
+    /// Owned-key lookup. Production lookups go through
+    /// [`Self::get_cloned_query`]; tests keep this seam to prove both key
+    /// forms address the same entries.
+    #[cfg(test)]
     pub(crate) fn get_cloned(&mut self, key: &ShapingCacheKey) -> Option<V> {
+        self.lookup_cloned(key)
+    }
+
+    /// Borrowed-key lookup for the per-frame hot path: hashes run data in
+    /// place and verifies full key equality on hit, materializing nothing.
+    pub(crate) fn get_cloned_query(&mut self, query: &BorrowedShapingKey<'_>) -> Option<V> {
+        self.lookup_cloned(query)
+    }
+
+    fn lookup_cloned(&mut self, key: &(dyn ShapingKeyQuery + '_)) -> Option<V> {
         let Some(entry) = self.entries.get(key) else {
             self.stats.misses = self.stats.misses.saturating_add(1);
             return None;

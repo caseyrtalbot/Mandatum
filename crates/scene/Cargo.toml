@@ -13,3 +13,6 @@ mandatum-core = { workspace = true }
 serde.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -36,8 +36,11 @@ fn paint_program_cell(target: &mut ratatui::buffer::Cell, cell: &ProgramCell, th
     // `set_style` patches existing state, so clear before translating it.
     target.reset();
     match &cell.occupancy {
-        CellOccupancy::Grapheme(grapheme) => {
-            target.set_symbol(grapheme);
+        CellOccupancy::Char(character) => {
+            target.set_char(*character);
+        }
+        CellOccupancy::Cluster(cluster) => {
+            target.set_symbol(cluster);
         }
         CellOccupancy::WideContinuation => {
             // A continuation occupies this cell but contributes no glyph.
@@ -144,7 +147,8 @@ mod tests {
         WorkspaceScene {
             size: SceneSize::new(60, 12),
             header: header(&format!(
-                " Mandatum | main · {pane_count} pane(s) · agent: fake"
+                " Mandatum | main · {pane_count} {} · agent: fake",
+                if pane_count == 1 { "pane" } else { "panes" }
             )),
             panes,
             overlay: None,
@@ -177,6 +181,7 @@ mod tests {
 
     fn pane(content: PaneContent) -> PaneScene {
         PaneScene {
+            content_revision: 0,
             id: PaneId::new("pane-1"),
             title: "shell".to_owned(),
             kind: PaneSceneKind::Terminal,
@@ -197,7 +202,7 @@ mod tests {
                 .map(|row| {
                     (0..4)
                         .map(|column| SceneCell {
-                            occupancy: CellOccupancy::Grapheme(
+                            occupancy: CellOccupancy::grapheme(
                                 row.chars().nth(column).unwrap_or(' ').to_string(),
                             ),
                             style: SceneCellStyle::default(),
@@ -245,12 +250,12 @@ mod tests {
         theme.header = SceneColor::Ansi(12);
 
         let mut cells = vec![SceneCell {
-            occupancy: CellOccupancy::Grapheme("D".to_owned()),
+            occupancy: CellOccupancy::grapheme("D".to_owned()),
             style: SceneCellStyle::default(),
         }];
         for index in 0..16 {
             cells.push(SceneCell {
-                occupancy: CellOccupancy::Grapheme("A".to_owned()),
+                occupancy: CellOccupancy::grapheme("A".to_owned()),
                 style: SceneCellStyle {
                     foreground: SceneColor::Ansi(index),
                     ..SceneCellStyle::default()
@@ -316,7 +321,7 @@ mod tests {
         };
         let mut surface = text_surface(&["x"]);
         surface.rows[0][0] = SceneCell {
-            occupancy: CellOccupancy::Grapheme('x'.to_string()),
+            occupancy: CellOccupancy::grapheme('x'.to_string()),
             style: terminal_style,
         };
         surface.cursor = Some(SurfacePosition::new(0, 0));
@@ -329,7 +334,7 @@ mod tests {
 
         let program = compile_cell_program(&workspace, &theme);
         let compiled = program.cell_at(1, 2).expect("inner cell is compiled");
-        assert_eq!(compiled.occupancy, CellOccupancy::Grapheme('x'.to_string()));
+        assert_eq!(compiled.occupancy, CellOccupancy::grapheme('x'.to_string()));
         assert_eq!(compiled.selection, Some(CellSelection::Terminal));
         assert!(compiled.cursor);
 
@@ -373,7 +378,7 @@ mod tests {
     fn advanced_text_adapter_writes_complete_graphemes_and_clears_continuations() {
         let mut grapheme_target = ratatui::buffer::Cell::new("x");
         let grapheme = ProgramCell {
-            occupancy: CellOccupancy::Grapheme("e\u{301}".to_owned()),
+            occupancy: CellOccupancy::grapheme("e\u{301}".to_owned()),
             style: SceneCellStyle::default(),
             selection: None,
             cursor: false,
@@ -407,7 +412,7 @@ mod tests {
 
         // The strips paint the scene's composed text verbatim at the
         // scene's areas: nothing is derived in the frontend.
-        assert!(rows[0].contains("Mandatum | main · 1 pane(s) · agent: fake"));
+        assert!(rows[0].contains("Mandatum | main · 1 pane · agent: fake"));
         assert!(rows[1].contains("shell | focused"));
         assert!(rows[11].contains("all good"));
     }
@@ -563,7 +568,7 @@ mod tests {
                 .map(|_| {
                     (0..38)
                         .map(|_| SceneCell {
-                            occupancy: CellOccupancy::Grapheme('X'.to_string()),
+                            occupancy: CellOccupancy::grapheme('X'.to_string()),
                             style: SceneCellStyle::default(),
                         })
                         .collect()
@@ -965,7 +970,7 @@ mod tests {
                 SessionMapRow {
                     depth: 0,
                     glyph: "▸".to_owned(),
-                    label: "session-1 · main · 2 pane(s) (active)".to_owned(),
+                    label: "session-1 · main · 2 panes (active)".to_owned(),
                     state: String::new(),
                     focused: false,
                     badges: String::new(),
@@ -986,7 +991,7 @@ mod tests {
         let all = buffer_rows(&terminal).join("\n");
 
         assert!(all.contains("Sessions"));
-        assert!(all.contains("session-1 · main · 2 pane(s) (active)"));
+        assert!(all.contains("session-1 · main · 2 panes (active)"));
         assert!(all.contains("●  ❯ pane-1 shell"));
         assert!(all.contains("running"));
         assert!(all.contains("[zoom]"));

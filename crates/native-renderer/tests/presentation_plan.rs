@@ -9,7 +9,7 @@ use mandatum_scene::{
     PaneScene, PaneSceneKind, PhysicalSize, PresentationNode, PresentationNodeId,
     PresentationNodeRole, PresentationNodeState, PresentationTone, ScenePresentation, SceneRect,
     SceneSize, SemanticKey, StatusScene, TerminalProjection, Theme, TransitionProperty,
-    TransitionRole, TransitionTarget, ViewportMetrics, WorkflowNodePart, WorkflowRowRole,
+    TransitionRole, TransitionTarget, UiColor, ViewportMetrics, WorkflowNodePart, WorkflowRowRole,
     WorkspaceNodePart, WorkspaceScene, compile_cell_program,
 };
 
@@ -30,6 +30,7 @@ fn scene(nodes: Vec<PresentationNode>, transitions: Vec<TransitionTarget>) -> Wo
             attention: Vec::new(),
         },
         panes: vec![PaneScene {
+            content_revision: 0,
             id: pane_id.clone(),
             title: "shell".into(),
             kind: PaneSceneKind::Terminal,
@@ -402,11 +403,17 @@ fn phase_three_material_family_maps_tiled_floating_focus_separator_and_tone_stat
         Some(SceneRect::new(15, 5, 50, 1))
     );
 
+    let identity = theme.ui.palette.agent_identity;
     assert_eq!(material(&badge_id).role, NativeMaterialRole::Badge);
-    assert_eq!(material(&badge_id).color, theme.ui.palette.chrome_surface);
     assert_eq!(
-        material(&badge_id).boundary.unwrap().color,
-        theme.ui.palette.agent_identity
+        material(&badge_id).color,
+        UiColor::rgba(identity.red, identity.green, identity.blue, 16),
+        "chips fill with a low-alpha tone tint over the rail"
+    );
+    assert_eq!(
+        material(&badge_id).boundary,
+        None,
+        "chips carry no outline stroke"
     );
     let badge_text = plan
         .commands()
@@ -418,14 +425,12 @@ fn phase_three_material_family_maps_tiled_floating_focus_separator_and_tone_stat
         .expect("badge receives a typed glyph scope");
     assert_eq!(badge_text.color, theme.ui.palette.agent_identity);
     assert_ne!(material(&badge_id).color, badge_text.color);
+    let waiting = theme.ui.palette.waiting;
     assert_eq!(
         material(&attention_id).color,
-        theme.ui.palette.chrome_surface
+        UiColor::rgba(waiting.red, waiting.green, waiting.blue, 16)
     );
-    assert_eq!(
-        material(&attention_id).boundary.unwrap().color,
-        theme.ui.palette.waiting
-    );
+    assert_eq!(material(&attention_id).boundary, None);
     let attention_text = plan
         .commands()
         .iter()
@@ -811,15 +816,14 @@ fn phase_five_workflow_family_maps_typed_regions_without_parsing_text() {
         material(&approval_id).boundary.unwrap().color,
         theme.ui.palette.waiting
     );
-    assert_eq!(material(&status_badge_id).role, NativeMaterialRole::Badge);
-    assert_eq!(
-        material(&status_badge_id).logical_rect.size.width_units(),
-        120 * 64
+    assert!(
+        plan.commands().iter().all(|command| !matches!(
+            command,
+            NativePlanCommand::Material(material) if material.node_id == status_badge_id
+        )),
+        "the status word paints as tone-colored text, not a chip container"
     );
-    assert_eq!(
-        material(&status_badge_id).boundary.unwrap().color,
-        theme.ui.palette.waiting
-    );
+    assert_eq!(text(&status_badge_id).color, theme.ui.palette.waiting);
     assert_eq!(
         material(&console_id).role,
         NativeMaterialRole::WorkflowConsole
@@ -945,4 +949,170 @@ fn token_sampler_uses_direct_ui_colors_in_stable_clipped_order() {
         prepare_token_sampler(&theme, LogicalRect::from_units(0, 0, 10, 10)),
         Err(NativePresentationPlanError::TokenSamplerBoundsTooSmall)
     );
+}
+
+#[test]
+fn chip_tone_fills_keep_label_contrast_and_neutral_badges_stay_plain_text() {
+    // WCAG relative luminance and contrast, matching the theme crate's own
+    // resolved_ui_contrast math for opaque colors.
+    fn luminance(color: UiColor) -> f64 {
+        fn channel(value: u8) -> f64 {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.039_28 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.212_6 * channel(color.red)
+            + 0.715_2 * channel(color.green)
+            + 0.072_2 * channel(color.blue)
+    }
+    // Linear-space source-over, matching the GPU blend of chip fills on the
+    // sRGB surface (V1 linearizes material colors before ALPHA_BLENDING), so
+    // the contrast assertions model the composite that actually renders.
+    fn blend(over: UiColor, base: UiColor) -> UiColor {
+        fn decode(value: u8) -> f64 {
+            let encoded = f64::from(value) / 255.0;
+            if encoded <= 0.04045 {
+                encoded / 12.92
+            } else {
+                ((encoded + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn encode(value: f64) -> u8 {
+            let clamped = value.clamp(0.0, 1.0);
+            let encoded = if clamped <= 0.003_130_8 {
+                clamped * 12.92
+            } else {
+                1.055 * clamped.powf(1.0 / 2.4) - 0.055
+            };
+            (encoded * 255.0).round() as u8
+        }
+        let alpha = f64::from(over.alpha) / 255.0;
+        let channel =
+            |over: u8, base: u8| encode(alpha * decode(over) + (1.0 - alpha) * decode(base));
+        UiColor::rgb(
+            channel(over.red, base.red),
+            channel(over.green, base.green),
+            channel(over.blue, base.blue),
+        )
+    }
+    fn contrast_milli(foreground: UiColor, background: UiColor) -> u32 {
+        let lighter = luminance(foreground).max(luminance(background));
+        let darker = luminance(foreground).min(luminance(background));
+        (((lighter + 0.05) / (darker + 0.05)) * 1_000.0).floor() as u32
+    }
+
+    let workspace_id = PresentationNodeId::workspace(WorkspaceNodePart::Surface);
+    // Every tone a product chip can carry: pane badges map to
+    // AgentIdentity/Waiting/Neutral, attention chips to Waiting/Failure, and
+    // status words (Running/Complete/...) render without a container. Focus
+    // is deliberately absent — no chip ships with it, and the light theme's
+    // focus-on-chrome pair has no contrast headroom left for a tint.
+    let tones = [
+        (PaneBadgeKind::Task, PresentationTone::Running),
+        (PaneBadgeKind::Agent, PresentationTone::Waiting),
+        (PaneBadgeKind::Artifact, PresentationTone::Failure),
+        (PaneBadgeKind::Status, PresentationTone::Complete),
+        (PaneBadgeKind::Floating, PresentationTone::AgentIdentity),
+        (PaneBadgeKind::Stacked, PresentationTone::Neutral),
+    ];
+    let mut nodes = vec![node(
+        workspace_id.clone(),
+        None,
+        PresentationNodeRole::Workspace,
+        PresentationNodeState::default(),
+        LogicalRect::from_units(0, 0, 800 * 64, 600 * 64),
+        SceneRect::new(0, 0, 100, 30),
+    )];
+    for (index, (kind, tone)) in tones.iter().enumerate() {
+        nodes.push(node(
+            PresentationNodeId::pane(PaneId::new("pane-a"), PaneNodePart::Badge(*kind)),
+            Some(workspace_id.clone()),
+            PresentationNodeRole::PaneBadge(*kind),
+            PresentationNodeState {
+                tone: *tone,
+                ..PresentationNodeState::default()
+            },
+            LogicalRect::from_units((10 + index as i64 * 90) * 64, 30 * 64, 80 * 64, 17 * 64),
+            SceneRect::new(1 + index as u16 * 8, 1, 6, 1),
+        ));
+    }
+
+    for name in Theme::BUILTIN_NAMES {
+        let theme = Theme::builtin(name).unwrap();
+        let minimum = if *name == "mandatum-high-contrast" {
+            7_000
+        } else {
+            4_500
+        };
+        let plan = prepare_native_presentation(&scene(nodes.clone(), Vec::new()), &theme).unwrap();
+        for (kind, tone) in &tones {
+            let id = PresentationNodeId::pane(PaneId::new("pane-a"), PaneNodePart::Badge(*kind));
+            let fill = plan.commands().iter().find_map(|command| match command {
+                NativePlanCommand::Material(material) if material.node_id == id => Some(material),
+                _ => None,
+            });
+            let text = plan
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    NativePlanCommand::Text(text) if text.node_id == id => Some(text),
+                    _ => None,
+                })
+                .expect("every badge keeps its typed glyph scope");
+            if *tone == PresentationTone::Neutral {
+                assert!(
+                    fill.is_none(),
+                    "{name}: a neutral badge is plain muted text without a container"
+                );
+                assert_eq!(text.color, theme.ui.palette.text_muted);
+                continue;
+            }
+            if *name == "mandatum-high-contrast" {
+                // High-contrast drops the container: no visible tint can hold
+                // the 7:1 text bar, so chips render as plain tone text and the
+                // contrast pairs below are the raw text-on-rail pairs already
+                // asserted by the theme's own resolved_ui_contrast gate.
+                assert!(
+                    fill.is_none(),
+                    "{name}: high-contrast chips render without a tinted container"
+                );
+                for (surface, rail) in [
+                    ("chrome", theme.ui.palette.chrome_surface),
+                    ("pane", theme.ui.palette.pane_surface),
+                    ("overlay", theme.ui.palette.overlay_surface),
+                ] {
+                    let actual = contrast_milli(text.color, rail);
+                    assert!(
+                        actual >= minimum,
+                        "{name}: chip label loses contrast on its bare {surface} rail \
+                         ({actual} < {minimum})"
+                    );
+                }
+                continue;
+            }
+            let fill = fill.expect("stateful chips keep a tone-tinted fill");
+            assert!(
+                fill.color.alpha < 64,
+                "{name}: chip fills stay a low-alpha tint, got alpha {}",
+                fill.color.alpha
+            );
+            assert_eq!(fill.boundary, None);
+            for (surface, rail) in [
+                ("chrome", theme.ui.palette.chrome_surface),
+                ("pane", theme.ui.palette.pane_surface),
+                ("overlay", theme.ui.palette.overlay_surface),
+            ] {
+                let blended = blend(fill.color, rail);
+                let actual = contrast_milli(text.color, blended);
+                assert!(
+                    actual >= minimum,
+                    "{name}: chip label loses contrast over its tinted {surface} rail \
+                     ({actual} < {minimum})"
+                );
+            }
+        }
+    }
 }

@@ -39,7 +39,7 @@ pub(crate) fn encode_mouse_event(
             // Motion with no button: code 3 plus the motion flag.
             (3 + 32, false)
         }
-        PointerKind::Wheel { dx, dy } => {
+        PointerKind::Wheel { dx, dy, .. } => {
             let code = if dy < 0 {
                 64
             } else if dy > 0 {
@@ -179,12 +179,28 @@ mod tests {
             Some(b"\x1b[<34;5;10M".to_vec())
         );
 
-        let wheel_up = event(PointerKind::Wheel { dx: 0, dy: -1 }, None, Modifiers::NONE);
+        let wheel_up = event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: -1,
+                precise: false,
+            },
+            None,
+            Modifiers::NONE,
+        );
         assert_eq!(
             encode_mouse_event(SGR_NORMAL, &wheel_up, 0, 0),
             Some(b"\x1b[<64;1;1M".to_vec())
         );
-        let wheel_down = event(PointerKind::Wheel { dx: 0, dy: 2 }, None, Modifiers::NONE);
+        let wheel_down = event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: 2,
+                precise: false,
+            },
+            None,
+            Modifiers::NONE,
+        );
         assert_eq!(
             encode_mouse_event(SGR_NORMAL, &wheel_down, 0, 0),
             Some(b"\x1b[<65;1;1M\x1b[<65;1;1M".to_vec())

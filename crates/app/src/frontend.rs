@@ -71,10 +71,38 @@ fn translate_mouse(mouse: MouseEvent) -> Option<PointerEvent> {
         MouseEventKind::Up(button) => (PointerKind::Up, Some(translate_button(button))),
         MouseEventKind::Drag(button) => (PointerKind::Drag, Some(translate_button(button))),
         MouseEventKind::Moved => (PointerKind::Move, None),
-        MouseEventKind::ScrollDown => (PointerKind::Wheel { dx: 0, dy: 1 }, None),
-        MouseEventKind::ScrollUp => (PointerKind::Wheel { dx: 0, dy: -1 }, None),
-        MouseEventKind::ScrollLeft => (PointerKind::Wheel { dx: -1, dy: 0 }, None),
-        MouseEventKind::ScrollRight => (PointerKind::Wheel { dx: 1, dy: 0 }, None),
+        MouseEventKind::ScrollDown => (
+            PointerKind::Wheel {
+                dx: 0,
+                dy: 1,
+                precise: false,
+            },
+            None,
+        ),
+        MouseEventKind::ScrollUp => (
+            PointerKind::Wheel {
+                dx: 0,
+                dy: -1,
+                precise: false,
+            },
+            None,
+        ),
+        MouseEventKind::ScrollLeft => (
+            PointerKind::Wheel {
+                dx: -1,
+                dy: 0,
+                precise: false,
+            },
+            None,
+        ),
+        MouseEventKind::ScrollRight => (
+            PointerKind::Wheel {
+                dx: 1,
+                dy: 0,
+                precise: false,
+            },
+            None,
+        ),
     };
     Some(PointerEvent {
         kind,

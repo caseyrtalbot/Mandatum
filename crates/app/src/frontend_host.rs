@@ -28,7 +28,9 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameSnapshot {
     pub scene: WorkspaceScene,
-    pub theme: Theme,
+    /// Shared theme snapshot: consecutive frames with an unchanged theme hand
+    /// out the same allocation, so per-frame theme cost is one `Arc` bump.
+    pub theme: Arc<Theme>,
     pub revision: u64,
     /// Monotonic app-owned scene dirtiness at snapshot construction time.
     /// Unlike `revision`, this does not advance merely because a frame was
@@ -40,6 +42,9 @@ pub struct FrameSnapshot {
 pub struct FrontendHost {
     app: AppState,
     frame_revision: u64,
+    /// Retained theme `Arc` handed to snapshots; refreshed only when the
+    /// app's theme value actually changes (config reload).
+    theme_snapshot: Option<Arc<Theme>>,
     shutdown_complete: bool,
 }
 
@@ -61,6 +66,7 @@ impl FrontendHost {
         Self {
             app: AppState::new_with_frontend_wake(config, wake),
             frame_revision: 0,
+            theme_snapshot: None,
             shutdown_complete: false,
         }
     }
@@ -220,7 +226,14 @@ impl FrontendHost {
             .checked_add(1)
             .expect("frontend frame revision overflowed");
         let scene = self.app.build_scene_with_viewport(viewport);
-        let theme = self.app.theme().clone();
+        let theme = match &self.theme_snapshot {
+            Some(cached) if **cached == *self.app.theme() => Arc::clone(cached),
+            _ => {
+                let fresh = Arc::new(self.app.theme().clone());
+                self.theme_snapshot = Some(Arc::clone(&fresh));
+                fresh
+            }
+        };
         let scene_generation = self.app.scene_generation();
         self.frame_revision = revision;
         FrameSnapshot {
@@ -308,6 +321,25 @@ mod tests {
         assert_eq!(first.scene.size, FRAME_SIZE);
         assert_eq!(first.theme.name, "mandatum-dark");
         assert_eq!(first.scene.panes.len(), 1);
+    }
+
+    /// P3(e) coverage proof: an unchanged theme is shared across snapshots as
+    /// one `Arc` allocation, and the shared value always equals the app's
+    /// live theme (the equality gate in `frame_with_viewport` is the only
+    /// path that may reuse the retained `Arc`).
+    #[test]
+    fn snapshots_share_one_theme_allocation_while_the_theme_is_unchanged() {
+        let mut host = FrontendHost::new(AppConfig::default());
+
+        let first = host.frame(FRAME_SIZE);
+        host.handle_input(InputEvent::FocusGained);
+        let second = host.frame(FRAME_SIZE);
+
+        assert!(
+            Arc::ptr_eq(&first.theme, &second.theme),
+            "an unchanged theme must not be recloned per frame"
+        );
+        assert_eq!(*first.theme, *host.app.theme());
     }
 
     #[test]
@@ -620,7 +652,13 @@ mod tests {
     fn native_copy_request_stays_behind_the_effect_boundary() {
         let mut host = FrontendHost::new(AppConfig::default());
 
+        let before = host.scene_generation();
         host.copy_selection();
+        assert!(
+            host.scene_generation() > before,
+            "even the nothing-selected exit rewrites the status line, which is \
+             scene-visible: without a generation bump the skip guard hides it"
+        );
         assert!(host.take_effects().is_empty());
         let frame = host.frame(FRAME_SIZE);
         assert!(frame.scene.status.text.contains("nothing is selected"));

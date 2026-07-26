@@ -184,6 +184,11 @@ pub enum PointerKind {
     Wheel {
         dx: i16,
         dy: i16,
+        /// True when the deltas came from a precise device (trackpad pixel
+        /// deltas the shell already quantized to whole cells) and map to
+        /// rows 1:1; false for discrete wheel ticks, which consumers may
+        /// amplify.
+        precise: bool,
     },
 }
 
