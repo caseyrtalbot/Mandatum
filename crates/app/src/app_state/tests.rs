@@ -870,6 +870,7 @@ fn right_click_opens_context_menu_and_escape_dismisses() {
         labels,
         vec![
             "Command palette",
+            "Adjust appearance",
             "Enter copy mode",
             "Copy selection",
             "Restart pane",
@@ -904,8 +905,8 @@ fn context_menu_keyboard_navigates_and_dispatches() {
     frame(&mut state);
     send_pointer(&mut state, right_down(5, 5));
 
-    // Down to "Zoom pane" (index 7), then Enter runs it.
-    for _ in 0..7 {
+    // Down to "Zoom pane" (index 8), then Enter runs it.
+    for _ in 0..8 {
         state.handle_key(key(KeyCode::Down));
     }
     state.handle_key(key(KeyCode::Enter));
@@ -923,11 +924,11 @@ fn context_menu_rows_are_clickable() {
     send_pointer(&mut state, right_down(5, 5));
     let scene = state.build_scene(POINTER_FRAME);
 
-    // Click the "Zoom pane" row (index 7) through its hit target.
+    // Click the "Zoom pane" row (index 8) through its hit target.
     let zoom_row = scene
         .hit_targets
         .iter()
-        .find(|target| target.kind == HitTargetKind::ContextMenuItem(7))
+        .find(|target| target.kind == HitTargetKind::ContextMenuItem(8))
         .expect("menu rows must be hit targets");
     send_pointer(
         &mut state,
@@ -1649,7 +1650,7 @@ fn paste_filters_help_instead_of_reaching_the_hidden_terminal() {
     let overlay = state.help_overlay_scene(size).unwrap();
     assert_eq!(overlay.query, "split pane");
     assert_eq!(overlay.selected, Some(0));
-    assert_eq!(state.status(), "help: type to filter, Esc close");
+    assert_eq!(state.status(), "help: type to filter · esc close");
 }
 
 #[test]

@@ -1041,7 +1041,9 @@ mod tests {
         // multibyte).
         let hint_byte = rows[3].rfind("ctrl+p z").expect("hint rendered");
         let hint_end = rows[3][..hint_byte].chars().count() + "ctrl+p z".chars().count();
-        let inner_right = 10 + 26 - 1; // immediately before the right border
+        // One margin cell before the right border: native item rows carry a
+        // horizontal inset, and a flush-right hint loses its last character.
+        let inner_right = 10 + 26 - 2;
         assert_eq!(hint_end as u16, inner_right);
 
         // The selected row is reversed; unselected rows are not.
@@ -1076,7 +1078,8 @@ mod tests {
         assert!(split_row.contains("Split pane right  layout"));
         let hint_byte = split_row.rfind('v').expect("key hint rendered");
         let hint_end = split_row[..hint_byte].chars().count() + 1;
-        assert_eq!(hint_end as u16, area.right().saturating_sub(1));
+        // Border cell plus the one-cell trailing margin (see the menu test).
+        assert_eq!(hint_end as u16, area.right().saturating_sub(2));
         assert!(all.contains("Run task  task"));
         assert!(all.contains("type to search · enter run · esc close"));
     }
@@ -1286,7 +1289,7 @@ mod tests {
         let all = rows.join("\n");
 
         assert!(all.contains("Help"));
-        assert!(all.contains("type to filter the keymap"));
+        assert!(all.contains("type to filter"));
         assert!(all.contains("Layout"));
         assert!(all.contains("Split pane right"));
         assert!(all.contains("ctrl+p v"));

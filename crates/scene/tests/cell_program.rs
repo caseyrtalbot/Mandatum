@@ -540,7 +540,7 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     assert_eq!(matched.selection, Some(CellSelection::Item));
 
     let key_hint = program
-        .cell_at(item_target.rect.right().saturating_sub(1), 7)
+        .cell_at(item_target.rect.right().saturating_sub(2), 7)
         .expect("right-aligned palette key hint");
     assert_eq!(key_hint.occupancy, CellOccupancy::grapheme('v'.to_string()));
     assert!(key_hint.style.dim);
@@ -822,7 +822,7 @@ fn list_overlays_preserve_rows_styles_and_hit_target_alignment() {
     assert_eq!(label.selection, Some(CellSelection::Item));
     assert!(label.style.inverse);
     let chord = program
-        .cell_at(context_target.rect.right().saturating_sub(6), 4)
+        .cell_at(context_target.rect.right().saturating_sub(7), 4)
         .expect("right-aligned context chord");
     assert_eq!(chord.occupancy, CellOccupancy::grapheme('c'.to_string()));
     assert!(chord.style.dim);
@@ -1022,7 +1022,7 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
     assert_eq!(entry.occupancy, CellOccupancy::grapheme('S'.to_string()));
     assert_eq!(entry.selection, Some(CellSelection::Item));
     let keys = program
-        .cell_at(area.right().saturating_sub(1 + 6), 8)
+        .cell_at(area.right().saturating_sub(2 + 6), 8)
         .expect("right-aligned help key hint");
     assert_eq!(keys.occupancy, CellOccupancy::grapheme('c'.to_string()));
     assert!(keys.style.dim);

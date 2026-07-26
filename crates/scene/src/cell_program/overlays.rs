@@ -218,7 +218,7 @@ impl Compiler {
             let hint_width =
                 display_width(&item.chord_hint).min(usize::from(inner.width.saturating_sub(2)));
             let label_width = usize::from(inner.width)
-                .saturating_sub(hint_width.saturating_add(2))
+                .saturating_sub(hint_width.saturating_add(3))
                 .max(1);
             let y = block.y;
             let label_area = SceneRect::new(inner.x, y, label_width as u16, 1);
@@ -234,8 +234,14 @@ impl Compiler {
                 );
             }
             if !item.chord_hint.is_empty() {
+                // One trailing margin cell mirrors the label's leading space:
+                // native item rows carry a horizontal inset
+                // (`overlay_row_padding_x`), and a flush-right hint would lose
+                // its last character to that clip.
                 let hint_area = SceneRect::new(
-                    inner.right().saturating_sub(hint_width as u16),
+                    inner
+                        .right()
+                        .saturating_sub(hint_width.saturating_add(1) as u16),
                     y,
                     hint_width as u16,
                     1,
@@ -503,7 +509,7 @@ impl Compiler {
         self.paint_input(
             layout::filtered_overlay_input_rect(inner),
             &help.query,
-            "type to filter the keymap",
+            "type to filter",
             surface,
         );
         if let (true, Some(empty)) = (help.items.is_empty(), layout::palette_item_rect(inner, 0)) {
@@ -535,7 +541,7 @@ impl Compiler {
             let key_width =
                 display_width(&item.keys).min(usize::from(inner.width.saturating_sub(2)));
             let label_width = usize::from(inner.width)
-                .saturating_sub(key_width.saturating_add(2))
+                .saturating_sub(key_width.saturating_add(3))
                 .max(1);
             let label_area = SceneRect::new(inner.x, y, label_width as u16, 1);
             let mut column = 0usize;
@@ -553,8 +559,11 @@ impl Compiler {
                 );
             }
             if !item.keys.is_empty() {
+                // Trailing margin cell: see the context-menu hint note.
                 let key_area = SceneRect::new(
-                    inner.right().saturating_sub(key_width as u16),
+                    inner
+                        .right()
+                        .saturating_sub(key_width.saturating_add(1) as u16),
                     y,
                     key_width as u16,
                     1,
@@ -777,7 +786,7 @@ impl Compiler {
                 .unwrap_or(0)
                 .min(usize::from(inner.width.saturating_sub(2)));
             let left_width = usize::from(inner.width)
-                .saturating_sub(hint_width.saturating_add(2))
+                .saturating_sub(hint_width.saturating_add(3))
                 .max(1);
             let left_area = SceneRect::new(inner.x, y, left_width as u16, 1);
             let mut column = 0usize;
@@ -817,8 +826,11 @@ impl Compiler {
                 );
             }
             if let Some(hint) = &item.key_hint {
+                // Trailing margin cell: see the context-menu hint note.
                 let hint_area = SceneRect::new(
-                    inner.right().saturating_sub(hint_width as u16),
+                    inner
+                        .right()
+                        .saturating_sub(hint_width.saturating_add(1) as u16),
                     y,
                     hint_width as u16,
                     1,

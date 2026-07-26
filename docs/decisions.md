@@ -3621,3 +3621,38 @@ scene tests, app-state interaction tests (input ownership, mutual
 exclusion with other overlays, persistence wiring), a cell-program
 painting test pinning truthful bar stop colors and marker contrast, and
 a candidate-family enumeration test. Full local ci/gate.sh run.
+
+## Encoded-Space Alpha Blending For Ghostty-Parity Text Weight
+
+Context: the native surface preferred an sRGB texture format, so all
+alpha blending — including glyph antialiasing — happened in linear
+space. Linear coverage blending visibly thickens light-on-dark text
+relative to macOS-native rendering; side-by-side with Ghostty (whose
+macOS default is `alpha-blending = native`, i.e. encoded-space
+blending, with font smoothing off), the same JetBrains Mono at the same
+size read heavier and less refined in Mandatum.
+
+Decision: the surface format preference flips to non-sRGB (sRGB remains
+the fallback), so blending happens in encoded space — the space glyph
+antialiasing is designed for and the platform-native default. No new
+code path: every color seam already branched on `format.is_srgb()`
+(quad/material byte decode, glyphon color mode, scrim compositing, the
+artifact raster texture format), so the change selects the existing
+encoded path rather than adding one. Ghostty's `linear-corrected` mode
+(per-pixel alpha correction against the destination luminance) was
+considered and rejected: it needs per-glyph background knowledge inside
+the text shader, which glyphon does not expose, and encoded-space
+blending is what stock Ghostty on macOS ships anyway.
+
+Consequences: text weight matches the macOS-native/Ghostty look; the
+theoretical cost is linear blending's freedom from hue-darkening
+artifacts on antialiased edges between saturated complements, an edge
+case the platform default also accepts. Existing fixed-reference visual
+baselines predate the current theme and remain stale; new captures are
+the comparison truth.
+
+Verification: full local ci/gate.sh run; fresh context-menu, palette,
+and typography scenario captures reviewed against the prior render and
+Ghostty for weight, plus a pixel probe of captured surfaces confirming
+theme bytes survive un-double-encoded (±1 compositor color-management
+rounding only).

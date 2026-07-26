@@ -78,58 +78,62 @@ pub(crate) fn help_rows(keymap: &Keymap) -> Vec<HelpEntry> {
         }
     }
 
-    rows.push(heading("palette-fast-paths", "Palette fast paths"));
+    // Behavior rows read like the command rows: a short action label on the
+    // left, the trigger in the keys column. Long sentences truncate in the
+    // overlay's label column and read as prose, not reference.
+    rows.push(heading("palette-fast-paths", "Command palette"));
     rows.push(entry(
         "palette-bound-letter",
-        "With an empty input, a bound letter runs its command",
-        String::new(),
+        "Run a bound command (input empty)",
+        "its letter".to_owned(),
     ));
     rows.push(entry(
         "palette-shift-filter",
-        "Shift+letter (or any unbound key) starts the fuzzy filter",
-        String::new(),
+        "Filter all commands",
+        "shift+letter, or type".to_owned(),
     ));
     rows.push(entry(
         "palette-focus-cycle",
-        "Tab / BackTab cycle pane focus while the input is empty",
-        String::new(),
+        "Cycle pane focus (input empty)",
+        "tab / shift+tab".to_owned(),
     ));
     rows.push(entry(
         "palette-navigation",
-        "Up/Down or Ctrl+N/Ctrl+P move · Enter run · Esc close",
-        String::new(),
+        "Move selection",
+        "↑/↓ · ctrl+n/ctrl+p".to_owned(),
     ));
+    rows.push(entry("palette-run", "Run selection", "enter".to_owned()));
+    rows.push(entry("palette-close", "Close palette", "esc".to_owned()));
 
     rows.push(heading("mouse", "Mouse"));
-    rows.push(entry(
-        "mouse-focus-zoom",
-        "Click focuses a pane; double-click zooms",
-        String::new(),
-    ));
+    rows.push(entry("mouse-focus", "Focus pane", "click".to_owned()));
+    rows.push(entry("mouse-zoom", "Zoom pane", "double-click".to_owned()));
     rows.push(entry(
         "mouse-resize",
-        "Drag a split separator to resize (keys: Grow/Shrink pane)",
-        String::new(),
+        "Resize split",
+        "drag separator".to_owned(),
     ));
     rows.push(entry(
         "mouse-float-move",
-        "Drag a floating pane's title to move it (keys: Move float)",
-        String::new(),
+        "Move floating pane",
+        "drag its title".to_owned(),
+    ));
+    rows.push(entry("mouse-scroll", "Scroll history", "wheel".to_owned()));
+    rows.push(entry("mouse-select", "Select text", "drag".to_owned()));
+    rows.push(entry(
+        "mouse-context-menu",
+        "Open pane menu",
+        "right-click".to_owned(),
     ));
     rows.push(entry(
-        "mouse-scroll-select",
-        "Wheel scrolls history; drag selects text (keys: copy mode)",
-        String::new(),
-    ));
-    rows.push(entry(
-        "mouse-context-status",
-        "Right-click opens the pane menu; click the status strip for commands",
-        String::new(),
+        "mouse-status-strip",
+        "Open command palette",
+        "click status strip".to_owned(),
     ));
     rows.push(entry(
         "mouse-child-capture",
-        "When a child app captures the mouse, alt+click / alt+drag reaches the workspace",
-        String::new(),
+        "Reach workspace (app captures mouse)",
+        "alt+click / alt+drag".to_owned(),
     ));
 
     rows.push(heading("glyphs-session-map", "Glyphs · session map"));
@@ -343,7 +347,8 @@ mod tests {
     fn rows_cover_the_l5_mouse_note_and_both_glyph_legends() {
         let rows = help_rows(&Keymap::default());
         assert!(
-            rows.iter().any(|row| row.label.contains("alt+click")),
+            rows.iter()
+                .any(|row| row.label.contains("alt+click") || row.keys.contains("alt+click")),
             "the L5 mouse-capture override must be documented"
         );
         for (_, glyph, meaning) in SESSION_MAP_GLYPH_LEGEND.iter().chain(TIMELINE_GLYPH_LEGEND) {

@@ -3033,11 +3033,17 @@ impl GpuText {
         });
 
         let caps = surface.get_capabilities(&adapter);
+        // Prefer a non-sRGB surface so alpha blending happens in encoded
+        // (gamma) space, the space glyph antialiasing is designed for and the
+        // macOS-native default (Ghostty's `alpha-blending = native`). An sRGB
+        // surface blends linearly, which visibly thickens light-on-dark text.
+        // Every color seam branches on `format.is_srgb()`, so the sRGB
+        // fallback still renders correctly if no non-sRGB format exists.
         let format = caps
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .or_else(|| caps.formats.first().copied())
             .ok_or_else(|| {
                 startup_error(
@@ -3317,9 +3323,10 @@ impl GpuText {
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
+        // Web mode keeps text colors encoded on the preferred non-sRGB
+        // surface, which stores values as-is; if only an sRGB surface exists,
         // Accurate mode linearizes glyph colors in the shader and relies on
-        // the sRGB surface to re-encode on store; a non-sRGB fallback surface
-        // stores values as-is, so Web mode keeps text colors encoded there.
+        // the hardware to re-encode on store.
         let mut atlas = TextAtlas::with_color_mode(
             &device,
             &queue,

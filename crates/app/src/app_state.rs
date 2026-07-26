@@ -3741,7 +3741,7 @@ impl AppState {
             anchor: (pointer.column, pointer.row),
         });
         self.context_menu_scene_area = None;
-        self.status = "menu: up/down choose, Enter run, Esc close".to_owned();
+        self.status = "menu: ↑/↓ choose · enter run · esc close".to_owned();
     }
 
     fn context_menu_items(&self, pane_id: &PaneId) -> Vec<ContextMenuItem> {
@@ -3807,7 +3807,15 @@ impl AppState {
         commands.push(CommandId::ShowHelp);
 
         // "Command palette" leads: the menu is one of the two mouse doors
-        // into the palette (the other is the status strip).
+        // into the palette (the other is the status strip). Appearance rides
+        // second — theme, colors, and font live one right-click away — except
+        // under a pending approval, where the decision keeps the lead.
+        let appearance_index = if commands.first() == Some(&CommandId::ApproveAgentAction) {
+            2
+        } else {
+            0
+        };
+        commands.insert(appearance_index, CommandId::AdjustAppearance);
         let mut items = vec![ContextMenuItem {
             action: ContextMenuAction::OpenPalette,
             label: "Command palette".to_owned(),
@@ -3886,7 +3894,9 @@ impl AppState {
             .map(|entry| entry.label.chars().count() + 2 + entry.chord_hint.chars().count())
             .max()
             .unwrap_or(0) as u16;
-        let width = widest.saturating_add(4);
+        // Border (2) + leading label space + trailing hint margin cell; the
+        // margin keeps the widest row's hint clear of the native item inset.
+        let width = widest.saturating_add(5);
         let height = (items.len() as u16)
             .saturating_mul(mandatum_scene::layout::OVERLAY_CONTROL_ROWS)
             .saturating_add(2);
@@ -4293,7 +4303,7 @@ impl AppState {
             })
             .unwrap_or(0);
         self.session_map = Some(SessionMapState { selected });
-        self.status = "session map: up/down choose, Enter focus, Esc close".to_owned();
+        self.status = "session map: ↑/↓ choose · enter focus · esc close".to_owned();
     }
 
     fn close_session_map(&mut self) {
@@ -4314,7 +4324,7 @@ impl AppState {
         self.objective_prompt = None;
         self.appearance_view = None;
         self.help_view = Some(HelpViewState::default());
-        self.status = "help: type to filter, Esc close".to_owned();
+        self.status = "help: type to filter · esc close".to_owned();
     }
 
     fn close_help(&mut self) {

@@ -374,9 +374,9 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         label: "Adjust appearance",
         name: "adjust-appearance",
         category: CommandCategory::Config,
-        // Searchable in the palette; `i` stays reserved so a bare letter can
-        // still seed the filter.
-        palette_key: None,
+        // Comma mirrors the macOS settings convention (cmd+,); `i` stays
+        // reserved so a bare letter can still seed the filter.
+        palette_key: Some(','),
     },
     Command {
         id: CommandId::Quit,
