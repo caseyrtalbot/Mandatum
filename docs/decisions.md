@@ -3656,3 +3656,71 @@ and typography scenario captures reviewed against the prior render and
 Ghostty for weight, plus a pixel probe of captured surfaces confirming
 theme bytes survive un-double-encoded (±1 compositor color-management
 rounding only).
+
+## In-App Update Command And Launch-Time Release Check
+
+Context: updating the installed app required a terminal (`mandatum
+update` or the curl-piped installer). The download, checksum
+verification, downgrade refusal, and atomic swap-with-rollback already
+existed in the shipped installer and are gated by
+`ci/distribution-smoke.sh`; only the in-app door was missing.
+
+Decision: a new `update-mandatum` command (palette-searchable, Config
+category, no letter — an update is deliberate, not a fast path) runs
+the resolved updater as a visible task pane, the product's native idiom
+for a command with output worth watching. Resolution prefers the
+running bundle's own launcher (`Contents/Resources/mandatum update`)
+with `MANDATUM_INSTALL_DIR` pinned to the installer's default so the
+launcher cannot derive an install directory inside the bundle; a dev
+binary falls back to a `mandatum` on PATH, and a machine with neither
+gets an honest status line instead of a pane. The running binary keeps
+its inode through the swap, so success sets a persistent status-strip
+prompt — "updated: reopen to finish" — rather than auto-relaunching:
+relaunch kills live PTYs, and durable intent restores while processes
+do not, so the user picks the moment.
+
+A launch-time release check (`[update] check`, default on) reads the
+version from the `releases/latest` redirect target via `curl --head` —
+no bytes downloaded, same TLS floor as the installer — at most once per
+day (stamp beside the user config), on an OS thread reporting through
+the unified event channel. A newer version writes a persistent
+status-strip note naming the palette route. Failures are silent: an
+offline launch surfaces nothing. The check lives in FrontendHost
+construction so both frontends get it; the test-baseline AppConfig
+keeps it off, so no test construction reaches the network.
+
+An external security review of this surface drove five hardenings into
+the shipped design: the bundle now carries `install.sh` in Resources and
+the launcher prefers it, so updating executes the release-pinned,
+checksummed installer instead of code fetched from a mutable branch
+(the branch fetch survives only as a download-to-file bootstrap
+fallback that requires transport success — never a pipe); resolved
+updater paths must be shell-quotable (a path carrying `$`, backtick,
+quote, backslash, or control characters resolves to no updater rather
+than a differently-parsed command); the automatic check invokes
+`/usr/bin/curl` by absolute path, since it runs unprompted at launch;
+exit zero is not treated as an install — success reads the destination
+bundle's Info.plist and claims an install only when the version is
+actually newer, names "already the latest" when equal, and otherwise
+says plainly that this build was not replaced; and a project config may
+disable the check but can never re-enable a user-layer opt-out. One
+finding was rejected deliberately: routing the update pane through a
+non-configurable shell. A hostile project `shell.program` already
+executes at first terminal spawn, so the update command adds no new
+authority, and a per-pane shell would thread through the engine's
+reconcile path — disproportionate to zero marginal exposure.
+
+Consequences: the app updates itself end to end without a terminal;
+trust rests on TLS to github.com plus the release checksum. Developer
+ID signing and notarization remain the named next hardening if
+distribution widens.
+
+Verification: full local ci/gate.sh run (distribution smoke now
+exercises the bundled-installer update path); unit tests for updater
+resolution (bundle, PATH, hostile path, none), redirect parsing,
+version comparison, and throttle; app-state tests for the task-pane
+run, duplicate-run guard, version-verified success, failure never
+claiming an install, and the persistent hints; config tests for the
+disable-wins merge; external Codex review (criterion: security-
+sensitive persistent-state mutation) with all accepted findings
+resolved as above.

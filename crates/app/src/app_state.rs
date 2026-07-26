@@ -326,6 +326,16 @@ pub struct AppState {
     context_menu: Option<ContextMenuState>,
     /// The previous button press, for double-click detection.
     last_pane_click: Option<PaneClick>,
+    /// The update door — task-pane command plus the bundle it replaces —
+    /// resolved once from the running binary; `None` on a machine with no
+    /// installed updater. Tests set it directly.
+    updater: Option<crate::updater::ResolvedUpdater>,
+    /// The live Update Mandatum task pane, watched for the relaunch prompt.
+    update_pane_id: Option<PaneId>,
+    /// A newer release the launch-time check reported (`x.y.z`).
+    update_available: Option<String>,
+    /// An update finished installing; quitting and reopening completes it.
+    update_installed: bool,
 }
 
 impl AppState {
@@ -409,6 +419,10 @@ impl AppState {
             pointer_view: None,
             context_menu: None,
             last_pane_click: None,
+            updater: crate::updater::resolve_updater(),
+            update_pane_id: None,
+            update_available: None,
+            update_installed: false,
         };
 
         if restore_on_startup {
@@ -505,11 +519,20 @@ impl AppState {
     /// chord, the right-click menu, and the help key are always written on
     /// screen.
     pub(crate) fn control_hint(&self) -> String {
-        format!(
+        let mut hint = format!(
             "{} commands · right-click menu · {} help",
             format_chord(self.keymap.toggle_palette),
             help_route(&self.keymap)
-        )
+        );
+        // Update facts persist here — transient status lines get overwritten
+        // by the next action, and an available or half-finished update must
+        // stay written on screen.
+        if self.update_installed {
+            hint.push_str(" · updated: reopen to finish");
+        } else if let Some(version) = &self.update_available {
+            hint.push_str(&format!(" · {version} available: update"));
+        }
+        hint
     }
 
     /// Whether the config asked for reduced motion. Nothing animates yet;
@@ -1480,6 +1503,7 @@ impl AppState {
             RuntimeTaskCommand::InvestigateFocusedTaskFailure => {
                 self.investigate_focused_task_failure()
             }
+            RuntimeTaskCommand::UpdateMandatum => self.update_mandatum(),
         }
     }
 
@@ -1666,6 +1690,14 @@ impl AppState {
                     self.mark_redraw();
                 }
             }
+            AppEvent::UpdateAvailable(version) => {
+                if crate::updater::version_is_newer(&version, crate::updater::CURRENT_VERSION) {
+                    self.status =
+                        format!("Mandatum {version} is available · palette: Update Mandatum");
+                    self.update_available = Some(version);
+                    self.mark_redraw();
+                }
+            }
         }
     }
 
@@ -1828,16 +1860,53 @@ impl AppState {
     }
 
     fn run_configured_task(&mut self) {
+        let command = self.task_command.clone();
+        self.create_and_launch_task_pane("task", command);
+    }
+
+    /// Update Mandatum: run the shipped updater — download, checksum,
+    /// downgrade refusal, atomic swap with rollback — as a visible task
+    /// pane. The running binary keeps its inode through the swap; the
+    /// relaunch prompt on exit completes the update.
+    fn update_mandatum(&mut self) {
+        let Some(command) = self.updater.as_ref().map(|door| door.command.clone()) else {
+            self.status =
+                "no installed updater found — dev builds ride git, not releases".to_owned();
+            self.mark_redraw();
+            return;
+        };
+        if let Some(pane_id) = self.update_pane_id.clone()
+            && self.runtime.task_running_or_pending(&pane_id)
+        {
+            self.status = format!("update already running in {pane_id}");
+            self.mark_redraw();
+            return;
+        }
+        self.update_pane_id = self.create_and_launch_task_pane("update", command);
+    }
+
+    /// The version installed at the update's destination bundle, falling
+    /// back to the conventional install locations for a PATH-resolved
+    /// launcher.
+    fn installed_update_version(&self) -> Option<String> {
+        let bundle = self
+            .updater
+            .as_ref()
+            .and_then(|door| door.bundle.clone())
+            .or_else(crate::updater::default_bundle)?;
+        crate::updater::bundle_version(&bundle)
+    }
+
+    /// Create and launch an ad-hoc task pane (no recipe: "recipe:" is
+    /// reserved for real recipe names). Returns the created pane's id.
+    fn create_and_launch_task_pane(&mut self, title: &str, command: String) -> Option<PaneId> {
         let intent = TaskPaneIntent {
-            // No recipe: this is an ad-hoc run of the configured default
-            // command, and "recipe:" is reserved for real recipe names.
             recipe_id: None,
-            command: self.task_command.clone(),
+            command,
             cwd: Some(self.command_context.project_path.clone()),
         };
-        let title = "task".to_owned();
         match self.workspace.apply_action(CoreAction::CreateTaskPane {
-            title,
+            title: title.to_owned(),
             intent: intent.clone(),
         }) {
             Ok(ActionOutcome::Mutated { focused_pane }) => {
@@ -1846,18 +1915,23 @@ impl AppState {
                     kind: "task".to_owned(),
                 });
                 self.status = format!("task pane created for {}", intent.command);
-                if let Err(error) = self.launch_task_pane(focused_pane, &intent) {
+                if let Err(error) = self.launch_task_pane(focused_pane.clone(), &intent) {
                     self.status = format!("task launch failed: {error}");
                 }
+                self.mark_redraw();
+                Some(focused_pane)
             }
             Ok(ActionOutcome::PersistenceRequested(_)) => {
                 self.status = "task command unexpectedly requested persistence".to_owned();
+                self.mark_redraw();
+                None
             }
             Err(error) => {
                 self.status = format!("task pane creation failed: {error}");
+                self.mark_redraw();
+                None
             }
         }
-        self.mark_redraw();
     }
 
     fn rerun_focused_task(&mut self) {
@@ -2755,6 +2829,40 @@ impl AppState {
                         pane_status_name(&self.workspace, &pane_id),
                         status
                     );
+                    // The update pane's success is the swap having landed;
+                    // only a relaunch runs the new bundle, so the prompt
+                    // persists in the status-strip hint until quit.
+                    // Exit zero alone is not an install: verify the bundle
+                    // actually carries a newer version before claiming one.
+                    // The running binary keeps its inode through the swap,
+                    // so a real install prompts a relaunch persistently in
+                    // the status-strip hint until quit.
+                    if self.update_pane_id.as_ref() == Some(&pane_id) {
+                        if status.starts_with("succeeded") {
+                            self.status = match self.installed_update_version() {
+                                Some(version)
+                                    if crate::updater::version_is_newer(
+                                        &version,
+                                        crate::updater::CURRENT_VERSION,
+                                    ) =>
+                                {
+                                    self.update_installed = true;
+                                    self.update_available = None;
+                                    format!(
+                                        "Mandatum {version} installed · quit and reopen to finish"
+                                    )
+                                }
+                                Some(version) if version == crate::updater::CURRENT_VERSION => {
+                                    self.update_available = None;
+                                    format!("Mandatum {version} is already the latest release")
+                                }
+                                _ => "update finished · this build was not replaced \
+                                      (see the update pane)"
+                                    .to_owned(),
+                            };
+                        }
+                        self.update_pane_id = None;
+                    }
                 }
                 RuntimeExitEffect::TaskWaitFailed { pane_id, error } => {
                     self.status = format!("task wait failed for {pane_id}: {error}");

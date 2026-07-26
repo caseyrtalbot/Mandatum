@@ -43,6 +43,9 @@ pub struct LoadedConfig {
     /// frontend reads these, and only at launch.
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
+    /// `[update] check`: the once-daily launch-time release check. `None`
+    /// means unset; the product default is on.
+    pub update_check: Option<bool>,
     pub warnings: Vec<String>,
 }
 
@@ -148,7 +151,8 @@ fn apply_file(config: &mut LoadedConfig, path: &Path, label: &str) {
             ("task", toml::Value::Table(task)) => apply_task(config, task, label),
             ("agent", toml::Value::Table(agent)) => apply_agent(config, agent, label),
             ("font", toml::Value::Table(font)) => apply_font(config, font, label),
-            ("keymap" | "theme" | "ui" | "shell" | "task" | "agent" | "font", _) => {
+            ("update", toml::Value::Table(update)) => apply_update(config, update, label),
+            ("keymap" | "theme" | "ui" | "shell" | "task" | "agent" | "font" | "update", _) => {
                 config
                     .warnings
                     .push(format!("{label}: [{section}] must be a table"));
@@ -558,6 +562,28 @@ fn apply_task(config: &mut LoadedConfig, table: toml::Table, label: &str) {
     }
 }
 
+fn apply_update(config: &mut LoadedConfig, table: toml::Table, label: &str) {
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            // A later layer may disable the check but never re-enable it:
+            // the user layer loads first, so a project config cannot defeat
+            // the user's opt-out.
+            ("check", toml::Value::Boolean(flag)) => {
+                config.update_check = match (config.update_check, flag) {
+                    (Some(false), true) => Some(false),
+                    _ => Some(flag),
+                };
+            }
+            ("check", other) => config.warnings.push(format!(
+                "{label}: update.check must be true or false, got {other}"
+            )),
+            (unknown, _) => config
+                .warnings
+                .push(format!("{label}: unknown key 'update.{unknown}'")),
+        }
+    }
+}
+
 fn apply_agent(config: &mut LoadedConfig, table: toml::Table, label: &str) {
     for (key, value) in table {
         match key.as_str() {
@@ -881,6 +907,9 @@ model = "claude-opus-4-6"
 [font]
 family = "Berkeley Mono"
 size = 15.0
+
+[update]
+check = false
 "##,
         );
         let config = load_config(Some(&user), &dir.missing("project.toml"));
@@ -907,6 +936,7 @@ size = 15.0
         );
         // The old default letter was released by the rebind.
         assert_eq!(config.keymap.palette.resolve_char('v'), None);
+        assert_eq!(config.update_check, Some(false));
         assert_eq!(config.theme.name, "mandatum-light");
         assert_eq!(config.theme.focus_title, SceneColor::Rgb(0xff, 0x88, 0x00));
         assert_eq!(
@@ -1107,6 +1137,47 @@ chartreuse = "#010203"
 
         let migrated: Theme = serde_json::from_value(legacy).unwrap();
         assert_eq!(migrated, Theme::default());
+    }
+
+    #[test]
+    fn update_check_defaults_open_and_rejects_bad_values() {
+        let dir = TestConfigDir::new();
+        // Unset: the loader reports None; the product default (on) is
+        // applied at the AppConfig boundary.
+        let unset = load_config(None, &dir.missing("project.toml"));
+        assert_eq!(unset.update_check, None);
+
+        let bad = dir.write("bad.toml", "[update]\ncheck = \"yes\"\nextra = 1\n");
+        let config = load_config(Some(&bad), &dir.missing("project.toml"));
+        assert_eq!(config.update_check, None);
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("update.check must be true or false")),
+            "{:?}",
+            config.warnings
+        );
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unknown key 'update.extra'")),
+            "{:?}",
+            config.warnings
+        );
+
+        // A project layer can disable the check but never re-enable a
+        // user-layer opt-out.
+        let user_off = dir.write("user-off.toml", "[update]\ncheck = false\n");
+        let project_on = dir.write("project-on.toml", "[update]\ncheck = true\n");
+        let merged = load_config(Some(&user_off), &project_on);
+        assert_eq!(merged.update_check, Some(false));
+
+        let user_on = dir.write("user-on.toml", "[update]\ncheck = true\n");
+        let project_off = dir.write("project-off.toml", "[update]\ncheck = false\n");
+        let merged = load_config(Some(&user_on), &project_off);
+        assert_eq!(merged.update_check, Some(false));
     }
 
     #[test]

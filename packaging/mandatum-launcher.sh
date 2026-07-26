@@ -46,16 +46,33 @@ installed_version() {
 }
 
 run_update() {
-    command -v curl >/dev/null 2>&1 || fail "curl is required to update"
     self_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) \
         || fail "could not resolve the launcher directory"
     MANDATUM_INSTALL_DIR="${MANDATUM_INSTALL_DIR:-$self_dir}"
     export MANDATUM_INSTALL_DIR
     if app=$(resolve_app 2>/dev/null); then
-        MANDATUM_APP_DIR="${MANDATUM_APP_DIR:-$(dirname "$app")}"
+        # Pin the destination to the app actually resolved, never an
+        # ambient override: the update must replace this installation.
+        MANDATUM_APP_DIR=$(dirname "$app")
         export MANDATUM_APP_DIR
+        # Prefer the installer shipped inside that app: it is versioned
+        # and checksummed with the release, so updating executes no code
+        # fetched from a mutable branch.
+        if [ -f "${app}/Contents/Resources/install.sh" ]; then
+            exec /bin/sh "${app}/Contents/Resources/install.sh"
+        fi
     fi
-    curl --proto '=https' --tlsv1.2 -fsSL "$INSTALLER_URL" | /bin/sh
+    # Bootstrap fallback (no installed app carries the installer yet):
+    # download to a file and require transport success — never pipe a
+    # possibly-empty stream into the shell.
+    command -v curl >/dev/null 2>&1 || fail "curl is required to update"
+    installer=$(mktemp "${TMPDIR:-/tmp}/mandatum-installer.XXXXXX") \
+        || fail "could not create a temporary file for the installer"
+    trap 'rm -f "$installer"' EXIT
+    curl --proto '=https' --tlsv1.2 -fsSL --output "$installer" \
+        "$INSTALLER_URL" || fail "could not download the installer"
+    [ -s "$installer" ] || fail "downloaded installer is empty"
+    /bin/sh "$installer"
 }
 
 case "${1:-}" in

@@ -45,6 +45,9 @@ install -m 0755 "$native" "$app/Contents/MacOS/Mandatum"
 install -m 0755 "$bridge" "$app/Contents/MacOS/mandatum-approval-bridge"
 install -m 0755 "$packaging_dir/mandatum-launcher.sh" \
     "$app/Contents/Resources/mandatum"
+# The installer ships inside the bundle so `mandatum update` executes the
+# release-pinned, checksummed copy instead of fetching code from a branch.
+install -m 0644 "$repo_root/install.sh" "$app/Contents/Resources/install.sh"
 install -m 0644 "$packaging_dir/Mandatum.icns" \
     "$app/Contents/Resources/Mandatum.icns"
 install -m 0644 "$repo_root/LICENSE" "$app/Contents/Resources/LICENSE"

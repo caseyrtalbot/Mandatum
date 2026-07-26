@@ -3997,6 +3997,158 @@ fn run_task_launches_configured_shell_command_and_surfaces_success_status() {
 }
 
 #[test]
+fn update_mandatum_without_an_updater_says_so_and_creates_no_pane() {
+    let mut state = state();
+    state.updater = None;
+    let panes_before = state.workspace().active_session().panes().len();
+
+    state.dispatch(CommandId::UpdateMandatum);
+
+    assert_eq!(
+        state.workspace().active_session().panes().len(),
+        panes_before,
+        "no pane without an updater"
+    );
+    assert!(
+        state.status().contains("no installed updater"),
+        "{}",
+        state.status()
+    );
+    assert!(state.update_pane_id.is_none());
+}
+
+#[test]
+fn update_mandatum_runs_the_updater_task_and_prompts_relaunch_on_success() {
+    let temp = TestWorkspaceDir::new();
+    let mut state = AppState::new(temp.app_config(true, false));
+    state.handle_terminal_resize(100, 35);
+    // A fake destination bundle proves the success path verifies the
+    // installed version instead of trusting exit zero.
+    let bundle = temp.project_path().join("Mandatum.app");
+    fs::create_dir_all(bundle.join("Contents")).unwrap();
+    fs::write(
+        bundle.join("Contents/Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>99.0.0</string>
+</dict></plist>
+"#,
+    )
+    .unwrap();
+    state.updater = Some(crate::updater::ResolvedUpdater {
+        command: "printf 'UPDATE_OK\\n'".to_owned(),
+        bundle: Some(bundle),
+    });
+
+    state.dispatch(CommandId::UpdateMandatum);
+
+    let pane_id = state.update_pane_id.clone().expect("update pane recorded");
+    let pane = state.workspace().active_session().pane(&pane_id).unwrap();
+    let PaneKind::Task { intent } = pane.kind() else {
+        panic!("update must run as a task pane");
+    };
+    assert_eq!(intent.command, "printf 'UPDATE_OK\\n'");
+
+    // A second invocation while the update runs does not stack a second run.
+    let panes_before = state.workspace().active_session().panes().len();
+    state.dispatch(CommandId::UpdateMandatum);
+    assert_eq!(
+        state.workspace().active_session().panes().len(),
+        panes_before,
+        "a running update is not duplicated"
+    );
+
+    let observed = pump_runtime_until(&mut state, |state| state.update_installed);
+    assert!(observed, "update success was not observed");
+    assert_eq!(
+        state.status(),
+        "Mandatum 99.0.0 installed · quit and reopen to finish"
+    );
+    assert!(
+        state.control_hint().ends_with("updated: reopen to finish"),
+        "{}",
+        state.control_hint()
+    );
+    assert!(
+        state.update_pane_id.is_none(),
+        "the watch ends with the run"
+    );
+
+    state.shutdown();
+}
+
+#[test]
+fn update_task_failure_never_claims_an_install() {
+    let temp = TestWorkspaceDir::new();
+    let mut state = AppState::new(temp.app_config(true, false));
+    state.handle_terminal_resize(100, 35);
+    state.updater = Some(crate::updater::ResolvedUpdater {
+        command: "exit 7".to_owned(),
+        bundle: None,
+    });
+
+    state.dispatch(CommandId::UpdateMandatum);
+    let pane_id = state.update_pane_id.clone().expect("update pane recorded");
+
+    let observed = pump_runtime_until(&mut state, |state| {
+        state
+            .runtime
+            .tasks()
+            .get(&pane_id)
+            .is_some_and(|task| task.runtime.exit_status.is_some())
+    });
+    assert!(observed, "update failure was not observed");
+    assert!(!state.update_installed);
+    assert!(
+        state.status().contains("failed: exit 7"),
+        "{}",
+        state.status()
+    );
+    assert!(
+        !state.control_hint().contains("reopen to finish"),
+        "a failed update must not prompt a relaunch"
+    );
+
+    state.shutdown();
+}
+
+#[test]
+fn update_available_event_writes_the_persistent_hint_for_newer_versions_only() {
+    let mut state = state();
+    let base_hint = state.control_hint();
+    assert!(!base_hint.contains("available"));
+
+    // An older or equal version is ignored.
+    state
+        .runtime
+        .event_sender()
+        .send(AppEvent::UpdateAvailable("0.0.1".to_owned()))
+        .unwrap();
+    state.drain_events();
+    assert!(state.update_available.is_none());
+    assert_eq!(state.control_hint(), base_hint);
+
+    state
+        .runtime
+        .event_sender()
+        .send(AppEvent::UpdateAvailable("99.0.0".to_owned()))
+        .unwrap();
+    state.drain_events();
+    assert_eq!(state.update_available.as_deref(), Some("99.0.0"));
+    assert!(
+        state.control_hint().ends_with("99.0.0 available: update"),
+        "{}",
+        state.control_hint()
+    );
+    assert!(
+        state.status().contains("Update Mandatum"),
+        "{}",
+        state.status()
+    );
+}
+
+#[test]
 fn run_task_surfaces_nonzero_exit_as_failure_status() {
     let temp = TestWorkspaceDir::new();
     let mut config = temp.app_config(true, false);

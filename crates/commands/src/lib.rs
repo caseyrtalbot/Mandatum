@@ -49,6 +49,7 @@ pub enum CommandId {
     RestoreWorkspace,
     ReloadConfig,
     AdjustAppearance,
+    UpdateMandatum,
     Quit,
 }
 
@@ -379,6 +380,15 @@ pub const BUILT_IN_COMMANDS: &[Command] = &[
         palette_key: Some(','),
     },
     Command {
+        id: CommandId::UpdateMandatum,
+        label: "Update Mandatum",
+        name: "update-mandatum",
+        category: CommandCategory::Config,
+        // Searchable in the palette; an update is deliberate, not a fast
+        // path, so it takes no letter.
+        palette_key: None,
+    },
+    Command {
         id: CommandId::Quit,
         label: "Quit Mandatum",
         name: "quit",
@@ -460,6 +470,7 @@ pub enum RuntimeTaskCommand {
     RerunFocusedTask,
     StopFocusedTask,
     InvestigateFocusedTaskFailure,
+    UpdateMandatum,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -534,6 +545,7 @@ pub fn command_target(command_id: CommandId) -> CommandTarget {
         CommandId::InvestigateTaskFailure => {
             CommandTarget::RuntimeTask(RuntimeTaskCommand::InvestigateFocusedTaskFailure)
         }
+        CommandId::UpdateMandatum => CommandTarget::RuntimeTask(RuntimeTaskCommand::UpdateMandatum),
         CommandId::NewAgentPane => CommandTarget::RuntimeAgent(RuntimeAgentCommand::NewAgentPane),
         CommandId::StartAgent => {
             CommandTarget::RuntimeAgent(RuntimeAgentCommand::StartFocusedAgent)
@@ -713,7 +725,8 @@ pub fn core_action_for_command(
         | CommandId::ApproveAgentAction
         | CommandId::RejectAgentAction
         | CommandId::FocusNextWaitingAgent
-        | CommandId::SetAgentObjective => {
+        | CommandId::SetAgentObjective
+        | CommandId::UpdateMandatum => {
             return Err(CommandError::NotACoreCommand(command_id));
         }
     })

@@ -274,6 +274,10 @@ pub struct AppConfig {
     /// The user-level config file consulted by Reload Config; `None` skips
     /// the user layer (tests).
     pub user_config_file: Option<PathBuf>,
+    /// Launch-time release check (`[update] check`). The test baseline is
+    /// off so no test construction ever reaches the network; the product
+    /// path defaults it on.
+    pub update_check: bool,
 }
 
 impl Default for AppConfig {
@@ -300,6 +304,7 @@ impl Default for AppConfig {
             font_size: None,
             config_warnings: Vec::new(),
             user_config_file: None,
+            update_check: false,
         }
     }
 }
@@ -340,6 +345,7 @@ impl AppConfig {
             font_size: loaded.font_size,
             config_warnings,
             user_config_file,
+            update_check: loaded.update_check.unwrap_or(true),
         })
     }
 }

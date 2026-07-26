@@ -63,12 +63,20 @@ impl FrontendHost {
     }
 
     fn with_optional_wake_callback(config: AppConfig, wake: Option<WakeCallback>) -> Self {
-        Self {
+        let update_check = config.update_check;
+        let host = Self {
             app: AppState::new_with_frontend_wake(config, wake),
             frame_revision: 0,
             theme_snapshot: None,
             shutdown_complete: false,
+        };
+        // Both frontends construct a host, so the launch-time release check
+        // lives here. The test baseline config keeps it off; only the
+        // product config path (`[update] check`, default on) reaches it.
+        if update_check && let Some(stamp) = crate::updater::update_check_stamp_file() {
+            crate::updater::spawn_release_check(host.event_sender(), stamp);
         }
+        host
     }
 
     /// Apply one already-neutral platform input synchronously.

@@ -32,6 +32,7 @@ mod task_runtime;
 mod terminal_runtime;
 mod timeline;
 mod timeline_view;
+mod updater;
 mod visual_scenario;
 
 pub use app_shell::{AppConfig, AppError, default_workspace_file, run, run_with_config};
@@ -44,6 +45,7 @@ pub use frontend_host::{FrameSnapshot, FrontendHost};
 pub use input::{RuntimeInput, key_to_input, key_to_input_with_keymap, key_to_terminal_input};
 pub use keymap::{ChordAction, Keymap, format_chord, parse_chord};
 pub use scene_builder::build_workspace_scene;
+pub use updater::update_check_stamp_file;
 pub use visual_scenario::{
     PreparedVisualScenario, VISUAL_SCENARIOS, VisualScenarioDescriptor, VisualScenarioError,
     VisualScenarioId, prepare_visual_scenario,

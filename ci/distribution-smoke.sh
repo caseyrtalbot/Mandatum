@@ -119,8 +119,8 @@ run_installer >"$scratch/current.stdout"
 grep -q "already the latest release" "$scratch/current.stdout"
 test "$(installed_version)" = "0.1.0"
 
-# 3. `mandatum update` reaches the hosted installer and applies the
-#    newer release.
+# 3. `mandatum update` runs the installer shipped inside the resolved
+#    app bundle and applies the newer release.
 serve_version 0.1.1
 env \
   PATH="$mock_bin:$PATH" \

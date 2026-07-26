@@ -37,6 +37,10 @@ pub(crate) enum AppEvent {
     Pty(PtyRuntimeEvent, Option<PtyFlowCredit>),
     Agent(AgentRuntimeEvent),
     Artifact(ArtifactLoadEvent),
+    /// The launch-time release check found a newer version (`x.y.z`). Sent
+    /// at most once per launch; dropped on runtime replacement — the next
+    /// launch simply checks again.
+    UpdateAvailable(String),
 }
 
 pub(crate) type WakeCallback = Arc<dyn Fn() + Send + Sync + 'static>;

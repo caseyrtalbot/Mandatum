@@ -63,8 +63,11 @@ mandatum update    # replace the app with the latest release
 mandatum --version
 ```
 
-Updates verify checksums before touching the installed app, and they refuse
-downgrades.
+No terminal needed: the command palette's "Update Mandatum" runs the same
+updater as a visible task pane, and once a day the app quietly checks for
+a newer release and names it in the status strip (`[update] check = false`
+turns the check off). Updates verify checksums before touching the
+installed app, and they refuse downgrades.
 
 ## Around the workspace
 
