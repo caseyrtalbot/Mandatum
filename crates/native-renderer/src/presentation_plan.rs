@@ -554,12 +554,28 @@ fn materials_for_node(
             }
             Some(surface)
         }
-        PresentationNodeRole::OverlayTitle
-        | PresentationNodeRole::OverlayFooter
-        | PresentationNodeRole::TextInput => Some(NativeMaterialSpec::flat(
-            NativeMaterialRole::OverlayBand,
-            palette.chrome_surface,
-        )),
+        PresentationNodeRole::OverlayTitle => {
+            // The parent overlay strokes its boundary inside its own top edge,
+            // which the title band shares; the band draws later, so it must
+            // start below the stroke or it paints the top border out.
+            let stroke = (u64::from(theme.ui.spacing.tiled_separator.max(1)) * 64)
+                .min(node.logical_rect.size.height_units());
+            let mut band =
+                NativeMaterialSpec::flat(NativeMaterialRole::OverlayBand, palette.chrome_surface);
+            band.logical_rect = Some(LogicalRect::from_units(
+                node.logical_rect.origin.x_units(),
+                node.logical_rect
+                    .origin
+                    .y_units()
+                    .saturating_add_unsigned(stroke),
+                node.logical_rect.size.width_units(),
+                node.logical_rect.size.height_units() - stroke,
+            ));
+            Some(band)
+        }
+        PresentationNodeRole::OverlayFooter | PresentationNodeRole::TextInput => Some(
+            NativeMaterialSpec::flat(NativeMaterialRole::OverlayBand, palette.chrome_surface),
+        ),
         PresentationNodeRole::Separator => {
             if node.state.dragging {
                 Some(NativeMaterialSpec::flat(

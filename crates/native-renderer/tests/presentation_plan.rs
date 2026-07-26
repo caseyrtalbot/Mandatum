@@ -615,6 +615,27 @@ fn phase_four_overlay_family() {
         );
     }
 
+    // The overlay surface strokes its boundary inside its own top edge, and
+    // the title band shares that edge; the band must start below the stroke
+    // or it paints the top border out.
+    let title_id = PresentationNodeId::overlay(OverlayKind::Palette, OverlayNodePart::Title);
+    let stroke = u64::from(theme.ui.spacing.tiled_separator.max(1)) * 64;
+    assert_eq!(
+        materials_for(&modal_plan, &title_id)[0].logical_rect,
+        LogicalRect::from_units(
+            160 * 64,
+            100 * 64 + i64::try_from(stroke).unwrap(),
+            480 * 64,
+            20 * 64 - stroke
+        )
+    );
+    let input_id = PresentationNodeId::overlay(OverlayKind::Palette, OverlayNodePart::Input);
+    assert_eq!(
+        materials_for(&modal_plan, &input_id)[0].logical_rect,
+        LogicalRect::from_units(176 * 64, 140 * 64, 448 * 64, 20 * 64),
+        "bands inside the border keep their node rect"
+    );
+
     let selected_id =
         PresentationNodeId::overlay_item(OverlayKind::Palette, SemanticKey::new("selected"));
     let selected = materials_for(&modal_plan, &selected_id);

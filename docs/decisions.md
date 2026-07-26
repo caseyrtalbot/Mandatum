@@ -3724,3 +3724,28 @@ claiming an install, and the persistent hints; config tests for the
 disable-wins merge; external Codex review (criterion: security-
 sensitive persistent-state mutation) with all accepted findings
 resolved as above.
+
+## Overlay Title Band Insets Below The Boundary Stroke
+
+Context: the native renderer strokes an overlay's border inside the
+top edge of the surface quad, and the title band (`OverlayBand`)
+shares that edge and draws later, so every titled overlay's top border
+vanished between the corner arcs. The terminal frontend was unaffected:
+its cell-program border was always correct, which localized the defect
+to the native presentation layer.
+
+Decision: `materials_for_node` starts the `OverlayTitle` band one
+boundary-stroke width below the node's top edge instead of reordering
+material draw order. This mirrors the existing precedent of avoiding
+the boundary rather than restacking paint (floating panes skip their
+title band for the same reason). Footer and input bands already sit
+inside the border and keep their node rects.
+
+Consequences: the title band is one stroke width shorter; title text
+placement is untouched because glyph projection reads the node rect,
+not the material rect.
+
+Verification: `phase_four_overlay_family` pins the inset title-band
+rect (red before the fix) and pins that inner bands keep their full
+node rects; displayed check of the Appearance overlay top edge across
+the dark, light, and high-contrast themes; full ci/gate.sh green.
