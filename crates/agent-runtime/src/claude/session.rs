@@ -10,14 +10,14 @@ use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
-    process::{Child, ChildStderr, ChildStdout, Stdio},
+    process::{Child, ChildStderr, ChildStdout, ExitStatus},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc::Sender,
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -30,12 +30,22 @@ use crate::{
     events::AgentSessionEvent,
 };
 
-use super::parser::StreamParser;
+use super::{parser::StreamParser, runtime_dir::SessionRuntimeDir};
 
 /// Poll interval for the non-blocking accept loop and shutdown checks.
 const LISTENER_POLL: Duration = Duration::from_millis(25);
 /// How long the listener waits for a connected bridge to send its request.
 const BRIDGE_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Poll interval for the bounded reap and join waits below.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(5);
+/// How long the stdout pump polls for the child's exit after stdout EOF
+/// before giving up on its exit status.
+const PUMP_REAP_DEADLINE: Duration = Duration::from_secs(5);
+/// How long shutdown polls for the child it just killed, so a detached pump
+/// does not leave a zombie behind.
+const SHUTDOWN_REAP_DEADLINE: Duration = Duration::from_millis(100);
+/// How long shutdown waits for each worker thread before detaching it.
+const THREAD_JOIN_DEADLINE: Duration = Duration::from_millis(250);
 
 static APPROVAL_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -80,30 +90,132 @@ impl Shared {
     }
 }
 
+/// The child process and its process-group id, guarded together.
+///
+/// Signaling and reaping serialize on one mutex, and the pgid is cleared in
+/// the same critical section as the `wait` that reaps the child. That is the
+/// whole point of this type: after the reap the kernel may hand the number to
+/// an unrelated process group, so `kill(-pgid)` from a late interrupt or
+/// shutdown would land on a stranger. No pgid outlives its reap.
+#[derive(Debug)]
+pub(crate) struct ChildHandle {
+    slot: Mutex<ChildSlot>,
+}
+
+#[derive(Debug)]
+struct ChildSlot {
+    child: Option<Child>,
+    /// `None` once the child has been reaped: the gate on every signal.
+    pgid: Option<u32>,
+}
+
+impl ChildSlot {
+    /// Retire both halves at once — the child is gone and its group number is
+    /// no longer ours to signal.
+    fn retire(&mut self) {
+        self.child = None;
+        self.pgid = None;
+    }
+}
+
+/// Why a signal was not delivered.
+#[derive(Debug)]
+enum SignalError {
+    /// The child was already reaped; its process group is not ours anymore.
+    Reaped,
+    Failed {
+        pgid: u32,
+        error: std::io::Error,
+    },
+}
+
+impl ChildHandle {
+    pub(crate) fn new(child: Option<Child>, pgid: Option<u32>) -> Self {
+        Self {
+            slot: Mutex::new(ChildSlot { child, pgid }),
+        }
+    }
+
+    /// Signal the child's process group, refusing once it has been reaped.
+    fn signal_group(&self, signal: i32) -> Result<(), SignalError> {
+        let slot = self.slot.lock().unwrap();
+        let Some(pgid) = slot.pgid else {
+            return Err(SignalError::Reaped);
+        };
+        signal_process_group(pgid, signal).map_err(|error| SignalError::Failed { pgid, error })
+    }
+
+    /// SIGKILL the whole group (claude spawns its own children), falling back
+    /// to the direct child when the group signal fails. Both run under the
+    /// reap lock, and the child slot is only occupied while its pid is still
+    /// ours, so neither can reach a reused pid.
+    fn kill_group(&self) {
+        let mut slot = self.slot.lock().unwrap();
+        let killed = slot
+            .pgid
+            .is_some_and(|pgid| signal_process_group(pgid, SIGKILL).is_ok());
+        if !killed && let Some(child) = slot.child.as_mut() {
+            let _ = child.kill();
+        }
+    }
+
+    /// Poll for the child's exit until `deadline`, retiring the process group
+    /// in the same critical section as the wait that succeeds.
+    ///
+    /// `try_wait` rather than `wait` keeps each critical section short, so a
+    /// concurrent shutdown SIGKILL still lands between polls instead of
+    /// blocking behind a wait that will never return. A child that outlives
+    /// the deadline is left unreaped, which keeps its pid — and with it its
+    /// process group — reserved, so shutdown may still signal it.
+    fn reap_before(&self, deadline: Instant) -> Option<std::io::Result<ExitStatus>> {
+        loop {
+            {
+                let mut slot = self.slot.lock().unwrap();
+                // Nothing to reap: another path already retired the child.
+                let waited = slot.child.as_mut()?.try_wait();
+                match waited {
+                    Ok(Some(status)) => {
+                        slot.retire();
+                        return Some(Ok(status));
+                    }
+                    // The child's fate is unknown; treat it as gone rather
+                    // than keep a pid we may no longer own.
+                    Err(error) => {
+                        slot.retire();
+                        return Some(Err(error));
+                    }
+                    Ok(None) => {}
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(SHUTDOWN_POLL);
+        }
+    }
+}
+
 /// [`AgentSessionControl`] for a live Claude CLI child process.
 pub(crate) struct ClaudeSessionControl {
     shared: Arc<Shared>,
-    child: Arc<Mutex<Option<Child>>>,
-    child_pid: u32,
+    child: Arc<ChildHandle>,
     threads: Vec<JoinHandle<()>>,
-    socket_path: PathBuf,
+    runtime: SessionRuntimeDir,
     torn_down: bool,
 }
 
 impl ClaudeSessionControl {
     pub(crate) fn new(
         shared: Arc<Shared>,
-        child: Arc<Mutex<Option<Child>>>,
-        child_pid: u32,
+        child: Arc<ChildHandle>,
         threads: Vec<JoinHandle<()>>,
-        socket_path: PathBuf,
+        runtime: SessionRuntimeDir,
     ) -> Self {
         Self {
             shared,
             child,
-            child_pid,
             threads,
-            socket_path,
+            runtime,
             torn_down: false,
         }
     }
@@ -137,8 +249,15 @@ impl AgentSessionControl for ClaudeSessionControl {
         if !self.shared.inner.lock().unwrap().alive {
             return Err(AgentControlError::SessionClosed);
         }
-        signal_process_group(self.child_pid, "INT");
-        Ok(())
+        // The `alive` check above can go stale the instant it is read; the
+        // reap gate inside `signal_group` is what actually decides.
+        match self.child.signal_group(SIGINT) {
+            Ok(()) => Ok(()),
+            Err(SignalError::Reaped) => Err(AgentControlError::SessionClosed),
+            Err(SignalError::Failed { pgid, error }) => Err(AgentControlError::SignalFailed {
+                message: format!("SIGINT to process group {pgid}: {error}"),
+            }),
+        }
     }
 
     fn shutdown(&mut self) {
@@ -151,17 +270,21 @@ impl AgentSessionControl for ClaudeSessionControl {
             state.shutdown = true;
             self.shared.wake.notify_all();
         }
-        // Kill the whole process group (claude spawns its own children), then
-        // the direct child as a fallback if the group signal failed.
-        if !signal_process_group(self.child_pid, "KILL")
-            && let Some(child) = self.child.lock().unwrap().as_mut()
-        {
-            let _ = child.kill();
-        }
+        // A no-op once the pump has reaped the child: a session that ended on
+        // its own is not signaled at all.
+        self.child.kill_group();
+        // Bounded joins: a descendant that left the process group but kept the
+        // inherited stdout/stderr open parks its pump in `read` with no EOF
+        // coming, and an unbounded join would hang shutdown behind it.
         for handle in self.threads.drain(..) {
-            let _ = handle.join();
+            join_with_deadline(handle);
         }
-        let _ = std::fs::remove_file(&self.socket_path);
+        // A detached pump may never reach its own reap, so briefly reap the
+        // child we just killed rather than leave a zombie.
+        let _ = self
+            .child
+            .reap_before(Instant::now() + SHUTDOWN_REAP_DEADLINE);
+        self.runtime.cleanup();
     }
 
     fn is_alive(&self) -> bool {
@@ -175,20 +298,49 @@ impl Drop for ClaudeSessionControl {
     }
 }
 
-/// Best-effort `SIG<signal>` to the child's process group (the child is its
-/// own group leader via `process_group(0)`).
-fn signal_process_group(pid: u32, signal: &str) -> bool {
+/// Join a worker thread, detaching it at the deadline. The thread exits on its
+/// own once its fd chain finally closes, so detaching leaks nothing. Mirrors
+/// `join_reader_with_deadline` in the PTY runtime; deliberately duplicated
+/// rather than shared, since this crate depends on nothing frontend-side.
+fn join_with_deadline(handle: JoinHandle<()>) {
+    let deadline = Instant::now() + THREAD_JOIN_DEADLINE;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(SHUTDOWN_POLL);
+    }
+    let _ = handle.join();
+}
+
+/// POSIX signal numbers used for session control (identical on macOS and
+/// Linux).
+const SIGINT: i32 = 2;
+const SIGKILL: i32 = 9;
+
+/// Signal the child's process group (the child is its own group leader via
+/// `process_group(0)`) through the `kill(2)` syscall directly — never a
+/// PATH-resolved binary.
+fn signal_process_group(pid: u32, signal: i32) -> std::io::Result<()> {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
     if pid == 0 {
         // pid 0 addresses the caller's own process group; never signal it.
-        return false;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to signal process group 0",
+        ));
     }
-    std::process::Command::new("kill")
-        .args(["-s", signal, "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    let pid = i32::try_from(pid).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "pid out of i32 range")
+    })?;
+    // SAFETY: `kill` takes two plain integers and touches no memory.
+    if unsafe { kill(-pid, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 /// Approval-socket listener: accepts one bridge connection at a time,
@@ -370,7 +522,7 @@ pub(crate) fn run_stdout_pump(
     stdout: ChildStdout,
     tx: &Sender<AgentSessionEvent>,
     shared: &Shared,
-    child: &Mutex<Option<Child>>,
+    child: &ChildHandle,
 ) {
     let mut parser = StreamParser::new();
     let mut saw_terminal = false;
@@ -387,9 +539,11 @@ pub(crate) fn run_stdout_pump(
         }
     }
 
-    // Reap the child; never hold the lock across wait() callers of kill.
-    let reaped = child.lock().unwrap().take();
-    let exit = reaped.map(|mut child| child.wait());
+    // Reap the child, retiring its process group as part of the same step.
+    // Bounded: stdout EOF does not guarantee the process is on its way out,
+    // and a child that lingers past the deadline stays unreaped (and so stays
+    // signalable) rather than parking this thread forever.
+    let exit = child.reap_before(Instant::now() + PUMP_REAP_DEADLINE);
 
     let was_shutdown = {
         let mut state = shared.inner.lock().unwrap();
@@ -432,6 +586,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+    use crate::claude::runtime_dir;
 
     fn temp_socket(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -624,6 +779,123 @@ mod tests {
         shared.inner.lock().unwrap().shutdown = true;
         handle.join().unwrap();
         let _ = std::fs::remove_file(&socket_path);
+    }
+
+    /// A control handle with no live child, so shutdown and interrupt
+    /// exercise only the signal gate and the filesystem paths. `pgid` picks
+    /// which side of that gate the test is on: `Some(0)` is a group number
+    /// `signal_process_group` always refuses, `None` is a reaped session.
+    fn childless_control(pgid: Option<u32>) -> ClaudeSessionControl {
+        ClaudeSessionControl::new(
+            Arc::new(Shared::new()),
+            Arc::new(ChildHandle::new(None, pgid)),
+            Vec::new(),
+            runtime_dir::prepare_session_dir(Path::new("/tmp")).unwrap(),
+        )
+    }
+
+    #[test]
+    fn shutdown_removes_the_private_session_dir() {
+        let mut control = childless_control(Some(0));
+        let session_dir = control.runtime.socket_path.parent().unwrap().to_path_buf();
+        std::fs::write(&control.runtime.settings_path, "{}").unwrap();
+        control.shutdown();
+        assert!(
+            !session_dir.exists(),
+            "shutdown must remove the session runtime dir",
+        );
+    }
+
+    #[test]
+    fn interrupt_surfaces_signal_failure() {
+        let mut control = childless_control(Some(0));
+        assert!(matches!(
+            control.interrupt(),
+            Err(AgentControlError::SignalFailed { .. })
+        ));
+    }
+
+    /// Once the pump has reaped the child, its pid may already belong to
+    /// someone else. Every signal path must decline rather than aim at the
+    /// number: interrupt reports a closed session, and shutdown — the one
+    /// path that used to signal unconditionally — signals nothing at all.
+    #[test]
+    fn a_reaped_session_is_never_signaled_again() {
+        let mut control = childless_control(None);
+        assert!(matches!(
+            control.interrupt(),
+            Err(AgentControlError::SessionClosed)
+        ));
+        control.shutdown();
+        assert!(
+            control.child.slot.lock().unwrap().pgid.is_none(),
+            "shutdown must not resurrect a retired process group",
+        );
+    }
+
+    /// The reap itself is the gate, against a real process group: signals
+    /// land while the group is live, and the same handle refuses them the
+    /// moment `reap_before` has waited on the child.
+    #[test]
+    fn reaping_retires_a_live_process_group() {
+        use std::os::unix::process::CommandExt;
+
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let handle = ChildHandle::new(Some(child), None);
+        let pgid = handle.slot.lock().unwrap().child.as_ref().unwrap().id();
+        handle.slot.lock().unwrap().pgid = Some(pgid);
+
+        handle
+            .signal_group(SIGKILL)
+            .expect("a live process group takes signals");
+        let exit = handle.reap_before(Instant::now() + Duration::from_secs(5));
+        assert!(matches!(exit, Some(Ok(_))), "the child must be reaped");
+
+        assert!(
+            matches!(handle.signal_group(SIGINT), Err(SignalError::Reaped)),
+            "the pgid must not outlive the wait that freed it for reuse",
+        );
+        assert!(handle.slot.lock().unwrap().pgid.is_none());
+        // A second reap has nothing to wait on and stays a no-op.
+        assert!(
+            handle
+                .reap_before(Instant::now() + Duration::from_millis(10))
+                .is_none()
+        );
+    }
+
+    /// Shutdown must not wait on a pump thread that never finishes: a
+    /// descendant holding the inherited stdout open keeps it parked in
+    /// `read`, so the join detaches at the deadline instead.
+    #[test]
+    fn shutdown_detaches_a_worker_thread_that_never_finishes() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let parked = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+        let mut control = ClaudeSessionControl::new(
+            Arc::new(Shared::new()),
+            Arc::new(ChildHandle::new(None, Some(0))),
+            vec![parked],
+            runtime_dir::prepare_session_dir(Path::new("/tmp")).unwrap(),
+        );
+
+        let started = Instant::now();
+        control.shutdown();
+        assert!(
+            started.elapsed() < THREAD_JOIN_DEADLINE * 4,
+            "shutdown must detach the thread near its deadline, took {:?}",
+            started.elapsed(),
+        );
+        drop(release_tx);
     }
 
     #[test]

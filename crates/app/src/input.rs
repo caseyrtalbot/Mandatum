@@ -22,10 +22,17 @@ pub enum RuntimeInput {
 }
 
 pub fn key_to_input(key: Key) -> RuntimeInput {
-    key_to_input_with_keymap(key, &Keymap::default())
+    key_to_input_with_keymap(key, &Keymap::default(), false)
 }
 
-pub fn key_to_input_with_keymap(key: Key, keymap: &Keymap) -> RuntimeInput {
+/// `application_cursor_keys` is the focused child's DECCKM state; the caller
+/// reads it from the pane's parser so cursor keys encode the form the child
+/// asked for.
+pub fn key_to_input_with_keymap(
+    key: Key,
+    keymap: &Keymap,
+    application_cursor_keys: bool,
+) -> RuntimeInput {
     // Chords are explicit workspace control: they are the only keys the
     // workspace intercepts ahead of the focused child terminal (L5), and the
     // config boundary rejects chords without a command modifier.
@@ -36,12 +43,12 @@ pub fn key_to_input_with_keymap(key: Key, keymap: &Keymap) -> RuntimeInput {
         None => {}
     }
 
-    key_to_terminal_input(key)
+    key_to_terminal_input(key, application_cursor_keys)
         .map(RuntimeInput::SendToTerminal)
         .unwrap_or(RuntimeInput::Noop)
 }
 
-pub fn key_to_terminal_input(key: Key) -> Option<Vec<u8>> {
+pub fn key_to_terminal_input(key: Key, application_cursor_keys: bool) -> Option<Vec<u8>> {
     // The platform command modifier is workspace-only. A configured workspace
     // chord already had first refusal above; an unbound Super/Windows-key chord
     // must not leak its character into the child terminal.
@@ -61,12 +68,12 @@ pub fn key_to_terminal_input(key: Key) -> Option<Vec<u8>> {
         KeyCode::Tab if key.mods.shift => modified_backtab(key.mods),
         KeyCode::Tab => b"\t".to_vec(),
         KeyCode::Escape => vec![0x1b],
-        KeyCode::Up => modified_csi_letter('A', key.mods),
-        KeyCode::Down => modified_csi_letter('B', key.mods),
-        KeyCode::Right => modified_csi_letter('C', key.mods),
-        KeyCode::Left => modified_csi_letter('D', key.mods),
-        KeyCode::Home => modified_csi_letter('H', key.mods),
-        KeyCode::End => modified_csi_letter('F', key.mods),
+        KeyCode::Up => cursor_key('A', key.mods, application_cursor_keys),
+        KeyCode::Down => cursor_key('B', key.mods, application_cursor_keys),
+        KeyCode::Right => cursor_key('C', key.mods, application_cursor_keys),
+        KeyCode::Left => cursor_key('D', key.mods, application_cursor_keys),
+        KeyCode::Home => cursor_key('H', key.mods, application_cursor_keys),
+        KeyCode::End => cursor_key('F', key.mods, application_cursor_keys),
         KeyCode::PageUp => modified_csi_tilde(5, key.mods),
         KeyCode::PageDown => modified_csi_tilde(6, key.mods),
         KeyCode::Insert => modified_csi_tilde(2, key.mods),
@@ -90,6 +97,20 @@ pub fn key_to_terminal_input(key: Key) -> Option<Vec<u8>> {
 fn modifier_parameter(mods: mandatum_scene::input::Modifiers) -> Option<u8> {
     let parameter = 1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.control);
     (parameter > 1).then_some(parameter)
+}
+
+/// DECCKM switches unmodified cursor keys (and xterm's Home/End) between the
+/// normal CSI form and the SS3 application form. Any modifier keeps xterm's
+/// `CSI 1;{parameter}` encoding regardless of mode.
+fn cursor_key(
+    letter: char,
+    mods: mandatum_scene::input::Modifiers,
+    application_mode: bool,
+) -> Vec<u8> {
+    if application_mode && modifier_parameter(mods).is_none() {
+        return format!("\x1bO{letter}").into_bytes();
+    }
+    modified_csi_letter(letter, mods)
 }
 
 fn modified_csi_letter(letter: char, mods: mandatum_scene::input::Modifiers) -> Vec<u8> {
@@ -165,6 +186,47 @@ mod tests {
     use super::{RuntimeInput, key_to_input_with_keymap, key_to_terminal_input};
     use crate::Keymap;
 
+    /// Normal-mode encoding (DECCKM off), the baseline for every test that
+    /// is not about application cursor keys.
+    fn terminal_input(key: Key) -> Option<Vec<u8>> {
+        key_to_terminal_input(key, false)
+    }
+
+    #[test]
+    fn decckm_switches_unmodified_cursor_keys_to_ss3_and_modifiers_keep_csi() {
+        let application = |key: Key| key_to_terminal_input(key, true);
+        let cases = [
+            (KeyCode::Up, b"\x1bOA".as_slice()),
+            (KeyCode::Down, b"\x1bOB".as_slice()),
+            (KeyCode::Right, b"\x1bOC".as_slice()),
+            (KeyCode::Left, b"\x1bOD".as_slice()),
+            (KeyCode::Home, b"\x1bOH".as_slice()),
+            (KeyCode::End, b"\x1bOF".as_slice()),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(
+                application(Key::plain(code)),
+                Some(expected.to_vec()),
+                "missing SS3 application form for {code:?}"
+            );
+        }
+        // Modified cursor keys keep the xterm CSI parameter form in both
+        // modes, and non-cursor keys are untouched by DECCKM.
+        assert_eq!(
+            application(Key::new(KeyCode::Up, Modifiers::CTRL)),
+            Some(b"\x1b[1;5A".to_vec())
+        );
+        assert_eq!(
+            application(Key::plain(KeyCode::PageUp)),
+            Some(b"\x1b[5~".to_vec())
+        );
+        // And normal mode still encodes CSI.
+        assert_eq!(
+            terminal_input(Key::plain(KeyCode::Up)),
+            Some(b"\x1b[A".to_vec())
+        );
+    }
+
     #[test]
     fn workspace_chord_precedes_terminal_fallback_and_unbound_super_does_not_leak() {
         let mut keymap = Keymap::default();
@@ -177,7 +239,7 @@ mod tests {
         );
         keymap.bind_chord(mandatum_commands::CommandId::CopySelection, super_c);
         assert_eq!(
-            key_to_input_with_keymap(super_c, &keymap),
+            key_to_input_with_keymap(super_c, &keymap, false),
             RuntimeInput::Dispatch(mandatum_commands::CommandId::CopySelection)
         );
 
@@ -189,7 +251,7 @@ mod tests {
             },
         );
         assert_eq!(
-            key_to_input_with_keymap(unbound, &keymap),
+            key_to_input_with_keymap(unbound, &keymap, false),
             RuntimeInput::Noop
         );
     }
@@ -208,21 +270,15 @@ mod tests {
         ];
         for (code, expected) in cases {
             assert_eq!(
-                key_to_terminal_input(Key::plain(code)),
+                terminal_input(Key::plain(code)),
                 Some(expected.to_vec()),
                 "missing baseline sequence for {code:?}"
             );
         }
+        assert_eq!(terminal_input(Key::plain(KeyCode::Function(0))), None);
+        assert_eq!(terminal_input(Key::plain(KeyCode::Function(25))), None);
         assert_eq!(
-            key_to_terminal_input(Key::plain(KeyCode::Function(0))),
-            None
-        );
-        assert_eq!(
-            key_to_terminal_input(Key::plain(KeyCode::Function(25))),
-            None
-        );
-        assert_eq!(
-            key_to_terminal_input(Key::new(
+            terminal_input(Key::new(
                 KeyCode::Function(1),
                 Modifiers {
                     shift: true,
@@ -241,19 +297,19 @@ mod tests {
             ..Modifiers::NONE
         };
         assert_eq!(
-            key_to_terminal_input(Key::new(KeyCode::Char('a'), ctrl_alt)),
+            terminal_input(Key::new(KeyCode::Char('a'), ctrl_alt)),
             Some(vec![0x1b, 0x01])
         );
         assert_eq!(
-            key_to_terminal_input(Key::new(KeyCode::Right, Modifiers::CTRL)),
+            terminal_input(Key::new(KeyCode::Right, Modifiers::CTRL)),
             Some(b"\x1b[1;5C".to_vec())
         );
         assert_eq!(
-            key_to_terminal_input(Key::new(KeyCode::Left, Modifiers::ALT)),
+            terminal_input(Key::new(KeyCode::Left, Modifiers::ALT)),
             Some(b"\x1b[1;3D".to_vec())
         );
         assert_eq!(
-            key_to_terminal_input(Key::new(
+            terminal_input(Key::new(
                 KeyCode::BackTab,
                 Modifiers {
                     shift: true,
@@ -264,7 +320,7 @@ mod tests {
             Some(b"\x1b[1;5Z".to_vec())
         );
         assert_eq!(
-            key_to_terminal_input(Key::new(KeyCode::Function(13), ctrl_alt)),
+            terminal_input(Key::new(KeyCode::Function(13), ctrl_alt)),
             Some(b"\x1b[1;8P".to_vec())
         );
     }
@@ -298,7 +354,7 @@ mod tests {
         ];
         for (character, expected) in cases {
             assert_eq!(
-                key_to_terminal_input(Key::new(KeyCode::Char(character), Modifiers::CTRL)),
+                terminal_input(Key::new(KeyCode::Char(character), Modifiers::CTRL)),
                 Some(vec![expected]),
                 "missing control mapping for {character:?}"
             );
@@ -308,11 +364,11 @@ mod tests {
     #[test]
     fn alt_character_is_meta_prefixed() {
         assert_eq!(
-            key_to_terminal_input(Key::new(KeyCode::Char('x'), Modifiers::ALT)),
+            terminal_input(Key::new(KeyCode::Char('x'), Modifiers::ALT)),
             Some(b"\x1bx".to_vec())
         );
         assert_eq!(
-            key_to_terminal_input(Key::new(
+            terminal_input(Key::new(
                 KeyCode::Tab,
                 Modifiers {
                     shift: true,

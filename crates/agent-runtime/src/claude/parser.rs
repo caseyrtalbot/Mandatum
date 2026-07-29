@@ -5,8 +5,10 @@
 //! to run, and the matching `tool_result` decides what actually happened.
 //! [`AgentSessionEvent::CommandRun`] is therefore emitted only when a Bash
 //! tool call returns without error — a hook-denied command never reports as
-//! run, which is what the approval gate promises. File-change events are
-//! emitted at `tool_use` time (the write intent is the signal there).
+//! run, which is what the approval gate promises. File-change events follow
+//! the same rule: [`AgentSessionEvent::FilesChanged`] is emitted only when a
+//! file-write tool result arrives without error, so a rejected or failed
+//! write is never recorded as a changed file.
 //!
 //! Never panics on garbage: lines that are not JSON become raw
 //! [`AgentSessionEvent::OutputChunk`]s; well-formed stream noise
@@ -31,7 +33,7 @@ const FILE_WRITE_TOOLS: [&str; 4] = ["Write", "Edit", "MultiEdit", "NotebookEdit
 #[derive(Clone, Debug)]
 enum PendingTool {
     Bash { command: String },
-    FileWrite,
+    FileWrite { change: Option<FileChange> },
     Other,
 }
 
@@ -124,10 +126,6 @@ impl StreamParser {
         }
 
         if FILE_WRITE_TOOLS.contains(&name) {
-            if let Some(id) = id {
-                self.pending_tools
-                    .insert(id.to_owned(), PendingTool::FileWrite);
-            }
             let path = file_write_path(&input);
             let change_kind = if name == "Write" {
                 // Write creates the file (or replaces it wholesale); the
@@ -140,14 +138,18 @@ impl StreamParser {
                 Some(path) => format!("{name}: {}", path.display()),
                 None => name.to_owned(),
             };
-            let mut events = vec![AgentSessionEvent::Action { description }];
-            if let Some(path) = path {
-                events.push(AgentSessionEvent::FilesChanged(vec![FileChange {
-                    path,
-                    change_kind,
-                }]));
+            if let Some(id) = id {
+                // Mirror the Bash pattern: the change is recorded only when
+                // the matching tool_result arrives without error, so a
+                // denied or failed write never claims a changed file.
+                self.pending_tools.insert(
+                    id.to_owned(),
+                    PendingTool::FileWrite {
+                        change: path.map(|path| FileChange { path, change_kind }),
+                    },
+                );
             }
-            return events;
+            return vec![AgentSessionEvent::Action { description }];
         }
 
         if let Some(id) = id {
@@ -182,8 +184,16 @@ impl StreamParser {
                 )));
                 continue;
             }
-            if let Some(PendingTool::Bash { command }) = pending {
-                events.push(AgentSessionEvent::CommandRun { command });
+            match pending {
+                Some(PendingTool::Bash { command }) => {
+                    events.push(AgentSessionEvent::CommandRun { command });
+                }
+                Some(PendingTool::FileWrite {
+                    change: Some(change),
+                }) => {
+                    events.push(AgentSessionEvent::FilesChanged(vec![change]));
+                }
+                _ => {}
             }
         }
         events
@@ -315,10 +325,93 @@ mod tests {
             AgentSessionEvent::FilesChanged(changes) => Some(changes),
             _ => None,
         });
-        let changes = changes.expect("Write tool_use must produce FilesChanged");
+        let changes = changes.expect("a successful Write result must produce FilesChanged");
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].change_kind, FileChangeKind::Added);
         assert!(changes[0].path.ends_with("hello.txt"));
+        // FilesChanged comes from the tool_result, after the request Action.
+        let action = events
+            .iter()
+            .position(|e| matches!(e, AgentSessionEvent::Action { .. }))
+            .unwrap();
+        let changed = events
+            .iter()
+            .position(|e| matches!(e, AgentSessionEvent::FilesChanged(_)))
+            .unwrap();
+        assert!(action < changed);
+    }
+
+    #[test]
+    fn failed_write_result_never_reports_files_changed() {
+        let mut parser = StreamParser::new();
+        let use_line = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "tool-w1", "name": "Write",
+                "input": {"file_path": "/tmp/project/blocked.txt", "content": "x"}
+            }]}
+        })
+        .to_string();
+        let events = parser.parse_line(&use_line);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentSessionEvent::FilesChanged(_))),
+            "the write intent alone must not record a changed file",
+        );
+        let result_line = serde_json::json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "tool-w1",
+                "content": "Mandatum rejected this command", "is_error": true
+            }]}
+        })
+        .to_string();
+        let events = parser.parse_line(&result_line);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentSessionEvent::FilesChanged(_))),
+            "a failed write must not record a changed file",
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentSessionEvent::OutputChunk(text) if text.starts_with("[tool error]")
+        )));
+    }
+
+    #[test]
+    fn successful_edit_result_reports_files_changed_with_modified_kind() {
+        let mut parser = StreamParser::new();
+        let use_line = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "tool-e1", "name": "Edit",
+                "input": {"file_path": "/tmp/project/src/lib.rs", "old_string": "a", "new_string": "b"}
+            }]}
+        })
+        .to_string();
+        assert!(
+            !parser
+                .parse_line(&use_line)
+                .iter()
+                .any(|e| matches!(e, AgentSessionEvent::FilesChanged(_)))
+        );
+        let result_line = serde_json::json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "tool-e1",
+                "content": "ok", "is_error": false
+            }]}
+        })
+        .to_string();
+        assert_eq!(
+            parser.parse_line(&result_line),
+            vec![AgentSessionEvent::FilesChanged(vec![FileChange {
+                path: PathBuf::from("/tmp/project/src/lib.rs"),
+                change_kind: FileChangeKind::Modified,
+            }])]
+        );
     }
 
     #[test]

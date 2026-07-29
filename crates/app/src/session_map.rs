@@ -106,7 +106,6 @@ pub(crate) const SESSION_MAP_GLYPH_LEGEND: &[(&str, &str, &str)] = &[
     ("task", "▶", "task"),
     ("agent", "◆", "agent"),
     ("artifact", "▣", "artifact"),
-    ("status", "≡", "status"),
     ("focused", SESSION_MAP_FOCUS_GLYPH, "focused"),
 ];
 
@@ -119,16 +118,13 @@ fn pane_glyph(kind: &PaneKind) -> &'static str {
         PaneKind::Task { .. } => SESSION_MAP_GLYPH_LEGEND[2].1,
         PaneKind::Agent { .. } => SESSION_MAP_GLYPH_LEGEND[3].1,
         PaneKind::Artifact { .. } => SESSION_MAP_GLYPH_LEGEND[4].1,
-        PaneKind::StatusLog { .. } => SESSION_MAP_GLYPH_LEGEND[5].1,
     }
 }
 
 /// The one-word state durable intent alone supports (no live runtime).
 fn durable_pane_state(kind: &PaneKind) -> String {
     match kind {
-        PaneKind::Terminal { .. } | PaneKind::StatusLog { .. } | PaneKind::Task { .. } => {
-            "idle".to_owned()
-        }
+        PaneKind::Terminal { .. } | PaneKind::Task { .. } => "idle".to_owned(),
         PaneKind::Agent { intent } => agent_state_word(&intent.status).to_owned(),
         PaneKind::Artifact { .. } => "preview".to_owned(),
     }
@@ -204,7 +200,7 @@ fn glyph_legend(rows: &[SessionMapRowModel]) -> Option<String> {
 mod tests {
     use std::path::PathBuf;
 
-    use mandatum_core::{AgentPaneIntent, CoreAction, StatusLogSource, TaskPaneIntent};
+    use mandatum_core::{AgentPaneIntent, CoreAction, TaskPaneIntent};
 
     use super::*;
 
@@ -331,13 +327,6 @@ mod tests {
                 cwd: None,
             })
             .unwrap();
-        workspace.active_session_mut().add_floating_pane(
-            "log",
-            PaneKind::StatusLog {
-                source: StatusLogSource::Workspace,
-            },
-            None,
-        );
 
         let rows = session_map_rows(&workspace, &|_| None);
         let overlay = session_map_overlay(&rows, 0, SceneSize::new(120, 30));

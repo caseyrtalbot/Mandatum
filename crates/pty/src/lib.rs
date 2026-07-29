@@ -1,14 +1,15 @@
 //! PTY boundary types and native process sessions.
 //!
-//! This crate defines process/session intent, byte-stream backpressure behavior,
-//! and a native OS PTY wrapper without depending on parser, renderer, app, or
-//! core crates.
+//! This crate defines process/session intent and a native OS PTY wrapper
+//! without depending on parser, renderer, app, or core crates.
 
 use std::{
     collections::VecDeque,
     fmt,
     io::{Read, Write},
     path::PathBuf,
+    sync::{Arc, Condvar, Mutex},
+    thread,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -243,7 +244,6 @@ pub enum RestartReason {
 pub enum PtyEvent {
     Output(ByteStreamEvent),
     ChildExited(ChildExit),
-    BackpressureChanged(BackpressureEvent),
 }
 
 pub struct NativePtySession {
@@ -365,11 +365,9 @@ impl NativePtySession {
             reader: NativePtyReader {
                 session_id: self.session_id.clone(),
                 reader: self.reader,
+                scratch: Vec::new(),
             },
-            writer: NativePtyWriter {
-                session_id: self.session_id,
-                writer: Some(writer),
-            },
+            writer: NativePtyWriter::spawn(self.session_id, writer),
         })
     }
 
@@ -521,6 +519,9 @@ pub struct NativePtyParts {
 pub struct NativePtyReader {
     session_id: PtySessionId,
     reader: Box<dyn Read + Send>,
+    /// Reused across reads so each chunk costs one exact-sized copy of the
+    /// bytes actually read instead of a fresh zeroed allocation per read.
+    scratch: Vec<u8>,
 }
 
 impl NativePtyReader {
@@ -536,15 +537,16 @@ impl NativePtyReader {
             return Ok(None);
         }
 
-        let mut bytes = vec![0; max_bytes];
+        if self.scratch.len() < max_bytes {
+            self.scratch.resize(max_bytes, 0);
+        }
         loop {
-            match self.reader.read(&mut bytes) {
+            match self.reader.read(&mut self.scratch[..max_bytes]) {
                 Ok(0) => return Ok(None),
                 Ok(read_bytes) => {
-                    bytes.truncate(read_bytes);
                     return Ok(Some(ByteStreamEvent::output(
                         self.session_id.clone(),
-                        bytes,
+                        self.scratch[..read_bytes].to_vec(),
                     )));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -563,34 +565,134 @@ impl NativePtyReader {
     }
 }
 
+/// Most bytes `NativePtyWriter::write_input` may hold queued for its writer
+/// thread. Interactive input is tiny; only a huge paste into a child that is
+/// not reading can approach this, and such a write fails with
+/// [`NativePtyError::WriteQueueFull`] instead of blocking the caller.
+pub const WRITE_QUEUE_CAPACITY_BYTES: usize = 4 * 1024 * 1024;
+
+/// Shared handoff between `write_input` and the writer thread. `write_input`
+/// only locks, pushes, and notifies, so the caller never blocks on a full
+/// kernel tty buffer; the thread alone performs the blocking writes.
+struct WriteQueue {
+    state: Mutex<WriteQueueState>,
+    changed: Condvar,
+}
+
+struct WriteQueueState {
+    chunks: VecDeque<Vec<u8>>,
+    queued_bytes: usize,
+    closed: bool,
+    /// First write failure observed by the writer thread; surfaced to the
+    /// caller on the next `write_input`.
+    error: Option<String>,
+}
+
+/// The writer thread: drain queued chunks into the PTY, blocking in the OS
+/// where the caller no longer can. Exits once the queue is closed and fully
+/// drained, or on the first write failure.
+fn run_pty_writer(queue: &Arc<WriteQueue>, mut writer: Box<dyn Write + Send>) {
+    loop {
+        let chunk = {
+            let mut state = queue.state.lock().expect("PTY write queue lock");
+            loop {
+                if let Some(chunk) = state.chunks.pop_front() {
+                    state.queued_bytes = state.queued_bytes.saturating_sub(chunk.len());
+                    break chunk;
+                }
+                if state.closed {
+                    return;
+                }
+                state = queue.changed.wait(state).expect("PTY write queue lock");
+            }
+        };
+
+        if let Err(error) = writer.write_all(&chunk).and_then(|()| writer.flush()) {
+            let mut state = queue.state.lock().expect("PTY write queue lock");
+            state.error = Some(error.to_string());
+            state.chunks.clear();
+            state.queued_bytes = 0;
+            return;
+        }
+    }
+}
+
 pub struct NativePtyWriter {
     session_id: PtySessionId,
-    writer: Option<Box<dyn Write + Send>>,
+    queue: Arc<WriteQueue>,
 }
 
 impl NativePtyWriter {
+    /// Wrap the blocking PTY writer in a dedicated writer thread so
+    /// `write_input` can enqueue and return immediately. The thread is
+    /// deliberately detached: it exits on its own once the queue closes and
+    /// drains (or a write fails after the master closes), and joining it here
+    /// could park the caller behind a child that never reads.
+    fn spawn(session_id: PtySessionId, writer: Box<dyn Write + Send>) -> Self {
+        let queue = Arc::new(WriteQueue {
+            state: Mutex::new(WriteQueueState {
+                chunks: VecDeque::new(),
+                queued_bytes: 0,
+                closed: false,
+                error: None,
+            }),
+            changed: Condvar::new(),
+        });
+        let thread_queue = Arc::clone(&queue);
+        thread::spawn(move || run_pty_writer(&thread_queue, writer));
+
+        Self { session_id, queue }
+    }
+
     pub fn session_id(&self) -> &PtySessionId {
         &self.session_id
     }
 
+    /// Queue `bytes` for the writer thread and return immediately. A full
+    /// queue rejects the whole write with [`NativePtyError::WriteQueueFull`]
+    /// rather than blocking the caller or dropping bytes mid-stream.
     pub fn write_input(&mut self, bytes: &[u8]) -> Result<(), NativePtyError> {
-        let Some(writer) = self.writer.as_mut() else {
+        let mut state = self.queue.state.lock().expect("PTY write queue lock");
+        if state.closed {
             return Err(NativePtyError::InputClosed {
                 session_id: self.session_id.clone(),
             });
-        };
-
-        writer
-            .write_all(bytes)
-            .and_then(|()| writer.flush())
-            .map_err(|error| NativePtyError::WriteFailed {
+        }
+        if let Some(message) = &state.error {
+            return Err(NativePtyError::WriteFailed {
                 session_id: self.session_id.clone(),
-                message: error.to_string(),
-            })
+                message: message.clone(),
+            });
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if state.queued_bytes.saturating_add(bytes.len()) > WRITE_QUEUE_CAPACITY_BYTES {
+            return Err(NativePtyError::WriteQueueFull {
+                session_id: self.session_id.clone(),
+                queued_bytes: state.queued_bytes,
+                rejected_bytes: bytes.len(),
+            });
+        }
+
+        state.queued_bytes += bytes.len();
+        state.chunks.push_back(bytes.to_vec());
+        self.queue.changed.notify_all();
+        Ok(())
     }
 
+    /// Refuse further writes; the writer thread drains what is already queued
+    /// and then exits, closing its PTY fd.
     pub fn close_input(&mut self) {
-        self.writer.take();
+        let mut state = self.queue.state.lock().expect("PTY write queue lock");
+        state.closed = true;
+        self.queue.changed.notify_all();
+    }
+}
+
+impl Drop for NativePtyWriter {
+    fn drop(&mut self) {
+        self.close_input();
     }
 }
 
@@ -724,6 +826,14 @@ pub enum NativePtyError {
         session_id: PtySessionId,
         message: String,
     },
+    /// The writer thread's queue is full: the child has stopped reading and
+    /// [`WRITE_QUEUE_CAPACITY_BYTES`] of input are already pending. The whole
+    /// write is rejected — nothing was partially queued.
+    WriteQueueFull {
+        session_id: PtySessionId,
+        queued_bytes: usize,
+        rejected_bytes: usize,
+    },
     InputClosed {
         session_id: PtySessionId,
     },
@@ -792,6 +902,16 @@ impl fmt::Display for NativePtyError {
             } => write!(
                 formatter,
                 "failed to write input for PTY session {session_id}: {message}"
+            ),
+            Self::WriteQueueFull {
+                session_id,
+                queued_bytes,
+                rejected_bytes,
+            } => write!(
+                formatter,
+                "write queue full for PTY session {session_id}: rejected \
+                 {rejected_bytes}-byte write with {queued_bytes} bytes queued \
+                 (capacity {WRITE_QUEUE_CAPACITY_BYTES})"
             ),
             Self::InputClosed { session_id } => {
                 write!(formatter, "input is closed for PTY session {session_id}")
@@ -925,178 +1045,4 @@ pub enum ChildExitStatus {
     Exited { code: i32 },
     Signaled { signal: i32 },
     Unknown,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BackpressureEvent {
-    session_id: PtySessionId,
-    state: BackpressureState,
-}
-
-impl BackpressureEvent {
-    pub fn new(session_id: PtySessionId, state: BackpressureState) -> Self {
-        Self { session_id, state }
-    }
-
-    pub fn session_id(&self) -> &PtySessionId {
-        &self.session_id
-    }
-
-    pub fn state(&self) -> BackpressureState {
-        self.state
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BackpressureState {
-    queued_bytes: usize,
-    capacity_bytes: usize,
-}
-
-impl BackpressureState {
-    pub fn new(queued_bytes: usize, capacity_bytes: usize) -> Result<Self, BackpressureStateError> {
-        if capacity_bytes == 0 {
-            return Err(BackpressureStateError::ZeroCapacity);
-        }
-
-        if queued_bytes > capacity_bytes {
-            return Err(BackpressureStateError::QueuedExceedsCapacity {
-                queued_bytes,
-                capacity_bytes,
-            });
-        }
-
-        Ok(Self {
-            queued_bytes,
-            capacity_bytes,
-        })
-    }
-
-    pub fn queued_bytes(&self) -> usize {
-        self.queued_bytes
-    }
-
-    pub fn capacity_bytes(&self) -> usize {
-        self.capacity_bytes
-    }
-
-    pub fn remaining_bytes(&self) -> usize {
-        self.capacity_bytes - self.queued_bytes
-    }
-
-    pub fn is_full(&self) -> bool {
-        self.queued_bytes == self.capacity_bytes
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BackpressureStateError {
-    ZeroCapacity,
-    QueuedExceedsCapacity {
-        queued_bytes: usize,
-        capacity_bytes: usize,
-    },
-}
-
-impl fmt::Display for BackpressureStateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ZeroCapacity => formatter.write_str("backpressure capacity must be non-zero"),
-            Self::QueuedExceedsCapacity {
-                queued_bytes,
-                capacity_bytes,
-            } => write!(
-                formatter,
-                "queued byte count {queued_bytes} exceeds capacity {capacity_bytes}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for BackpressureStateError {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BufferWrite {
-    accepted_bytes: usize,
-    rejected_bytes: usize,
-    state: BackpressureState,
-}
-
-impl BufferWrite {
-    fn new(accepted_bytes: usize, rejected_bytes: usize, state: BackpressureState) -> Self {
-        Self {
-            accepted_bytes,
-            rejected_bytes,
-            state,
-        }
-    }
-
-    pub fn accepted_bytes(&self) -> usize {
-        self.accepted_bytes
-    }
-
-    pub fn rejected_bytes(&self) -> usize {
-        self.rejected_bytes
-    }
-
-    pub fn state(&self) -> BackpressureState {
-        self.state
-    }
-
-    pub fn fully_accepted(&self) -> bool {
-        self.rejected_bytes == 0
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoundedByteBuffer {
-    bytes: VecDeque<u8>,
-    capacity_bytes: usize,
-}
-
-impl BoundedByteBuffer {
-    pub fn new(capacity_bytes: usize) -> Result<Self, BackpressureStateError> {
-        BackpressureState::new(0, capacity_bytes)?;
-
-        Ok(Self {
-            bytes: VecDeque::new(),
-            capacity_bytes,
-        })
-    }
-
-    pub fn push(&mut self, bytes: &[u8]) -> BufferWrite {
-        let available = self.capacity_bytes - self.bytes.len();
-        let accepted_bytes = bytes.len().min(available);
-        self.bytes.extend(bytes[..accepted_bytes].iter().copied());
-
-        BufferWrite::new(
-            accepted_bytes,
-            bytes.len() - accepted_bytes,
-            self.backpressure(),
-        )
-    }
-
-    pub fn drain(&mut self, max_bytes: usize) -> Vec<u8> {
-        let drained_bytes = max_bytes.min(self.bytes.len());
-        self.bytes.drain(..drained_bytes).collect()
-    }
-
-    pub fn backpressure(&self) -> BackpressureState {
-        BackpressureState {
-            queued_bytes: self.bytes.len(),
-            capacity_bytes: self.capacity_bytes,
-        }
-    }
-
-    pub fn queued_bytes(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub fn capacity_bytes(&self) -> usize {
-        self.capacity_bytes
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
 }

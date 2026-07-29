@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use mandatum_pty::{
-    BackpressureEvent, BackpressureState, BackpressureStateError, BoundedByteBuffer,
     ByteStreamEvent, ChildExit, ChildExitStatus, ChildProcessId, PtyEvent, PtySessionId, PtySize,
     ResizeIntent, RestartIntent, RestartReason, SpawnIntent, SpawnIntentError,
 };
@@ -113,63 +112,10 @@ fn restart_intent_keeps_reason_without_relaunching_processes() {
 }
 
 #[test]
-fn bounded_buffer_reports_backpressure_when_capacity_is_exhausted() {
-    let mut buffer = BoundedByteBuffer::new(5).unwrap();
-
-    let first = buffer.push(b"abc");
-    let second = buffer.push(b"def");
-
-    assert!(first.fully_accepted());
-    assert_eq!(first.accepted_bytes(), 3);
-    assert_eq!(first.rejected_bytes(), 0);
-    assert_eq!(second.accepted_bytes(), 2);
-    assert_eq!(second.rejected_bytes(), 1);
-    assert!(!second.fully_accepted());
-    assert_eq!(
-        second.state(),
-        BackpressureState::new(5, 5).expect("state is valid")
-    );
-    assert!(second.state().is_full());
-    assert_eq!(buffer.queued_bytes(), 5);
-}
-
-#[test]
-fn backpressure_event_targets_the_pty_session() {
-    let state = BackpressureState::new(5, 5).unwrap();
-    let event = BackpressureEvent::new(PtySessionId::new("session-1"), state);
-
-    assert_eq!(event.session_id().as_str(), "session-1");
-    assert_eq!(event.state(), state);
-    assert_eq!(
-        PtyEvent::BackpressureChanged(event.clone()),
-        PtyEvent::BackpressureChanged(event)
-    );
-}
-
-#[test]
-fn draining_bounded_buffer_reopens_capacity_in_fifo_order() {
-    let mut buffer = BoundedByteBuffer::new(6).unwrap();
-
-    buffer.push(b"abcdef");
-    assert_eq!(buffer.drain(2), b"ab");
-    let write = buffer.push(b"ghij");
-
-    assert_eq!(write.accepted_bytes(), 2);
-    assert_eq!(write.rejected_bytes(), 2);
-    assert_eq!(buffer.drain(10), b"cdefgh");
-    assert!(buffer.is_empty());
-    assert_eq!(buffer.backpressure().remaining_bytes(), 6);
-}
-
-#[test]
 fn pty_events_preserve_runtime_order_without_coupling_to_parser() {
     let session_id = PtySessionId::new("session-1");
     let events = [
         PtyEvent::Output(ByteStreamEvent::output(session_id.clone(), b"hello")),
-        PtyEvent::BackpressureChanged(BackpressureEvent::new(
-            session_id.clone(),
-            BackpressureState::new(4, 4).unwrap(),
-        )),
         PtyEvent::ChildExited(ChildExit::new(
             session_id,
             Some(ChildProcessId::new(4242)),
@@ -178,21 +124,5 @@ fn pty_events_preserve_runtime_order_without_coupling_to_parser() {
     ];
 
     assert!(matches!(events[0], PtyEvent::Output(_)));
-    assert!(matches!(events[1], PtyEvent::BackpressureChanged(_)));
-    assert!(matches!(events[2], PtyEvent::ChildExited(_)));
-}
-
-#[test]
-fn backpressure_state_rejects_invalid_capacity_shapes() {
-    assert_eq!(
-        BoundedByteBuffer::new(0).unwrap_err(),
-        BackpressureStateError::ZeroCapacity
-    );
-    assert_eq!(
-        BackpressureState::new(8, 4).unwrap_err(),
-        BackpressureStateError::QueuedExceedsCapacity {
-            queued_bytes: 8,
-            capacity_bytes: 4,
-        }
-    );
+    assert!(matches!(events[1], PtyEvent::ChildExited(_)));
 }

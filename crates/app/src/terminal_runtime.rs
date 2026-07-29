@@ -3,7 +3,8 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
-    thread::JoinHandle,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use mandatum_core::{PaneId, PaneSpec, Workspace};
@@ -123,12 +124,7 @@ impl TerminalPaneRuntime {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.writer.close_input();
-        let _ = self.controller.kill();
-        self.flow.stop();
-        if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
-        }
+        let _ = self.stop();
     }
 
     pub(crate) fn stop(&mut self) -> Result<(), NativePtyError> {
@@ -136,9 +132,55 @@ impl TerminalPaneRuntime {
         let result = self.controller.kill();
         self.flow.stop();
         if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
+            join_reader_with_deadline(handle);
         }
+        reap_child_briefly(&mut self.controller);
         result
+    }
+}
+
+/// How long shutdown waits for the reader thread before detaching it.
+const READER_JOIN_DEADLINE: Duration = Duration::from_millis(250);
+
+/// How long shutdown polls `try_wait` for a killed child before giving up.
+const CHILD_REAP_DEADLINE: Duration = Duration::from_millis(100);
+
+/// Poll interval for both bounded shutdown waits.
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Join the reader thread, detaching it at the deadline. An unbounded join
+/// hangs pane close whenever the reader's blocking read never returns — e.g.
+/// a SIGHUP-immune grandchild keeping the slave fd alive. The reader exits at
+/// EOF on its own once the fd chain finally closes, so detaching leaks
+/// nothing.
+fn join_reader_with_deadline(handle: JoinHandle<()>) {
+    let deadline = Instant::now() + READER_JOIN_DEADLINE;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(SHUTDOWN_POLL_INTERVAL);
+    }
+    let _ = handle.join();
+}
+
+/// Reap a killed child so it does not linger as a zombie: portable-pty's
+/// `kill` delivers the signal but never waits, and kill paths remove the
+/// runtime from the registry before `poll_child_exits` can `try_wait` it.
+/// Signal delivery is asynchronous, so poll briefly and give up on a child
+/// that has not died yet rather than block the UI thread.
+fn reap_child_briefly(controller: &mut NativePtyController) {
+    let deadline = Instant::now() + CHILD_REAP_DEADLINE;
+    loop {
+        match controller.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                thread::sleep(SHUTDOWN_POLL_INTERVAL);
+            }
+        }
     }
 }
 
@@ -201,6 +243,7 @@ impl PendingTerminalPaneRuntime {
     pub(crate) fn shutdown(&mut self) {
         self.writer.close_input();
         let _ = self.controller.kill();
+        reap_child_briefly(&mut self.controller);
     }
 }
 
@@ -347,5 +390,120 @@ pub(crate) fn exit_status_label(status: ChildExitStatus) -> String {
         ChildExitStatus::Exited { code } => format!("exit {code}"),
         ChildExitStatus::Signaled { signal } => format!("signal {signal}"),
         ChildExitStatus::Unknown => "unknown".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use mandatum_pty::{NativePtySession, SpawnIntent};
+
+    use super::*;
+
+    fn spawn_pending(script: &str) -> PendingTerminalPaneRuntime {
+        let size = PtySize::new(80, 24).expect("non-zero size");
+        let intent = SpawnIntent::new(PtySessionId::new("pane-test"), "/bin/sh", size)
+            .expect("valid intent")
+            .with_arguments(["-c", script]);
+        let session = NativePtySession::spawn(intent).expect("spawn test shell");
+        let parts = session.into_split().expect("split session");
+
+        PendingTerminalPaneRuntime {
+            reader: parts.reader,
+            controller: parts.controller,
+            writer: parts.writer,
+            size,
+            restart_generation: 0,
+            runtime_token: 0,
+            cwd_fallback: None,
+        }
+    }
+
+    /// Block until the pane's reader has forwarded output containing `needle`,
+    /// so a test cannot race the shell script it is synchronizing with.
+    fn wait_for_output(tx: &AppEventSender, rx: &crate::events::AppEventReceiver, needle: &[u8]) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = Vec::new();
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "never saw {:?} in PTY output ({:?})",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&seen)
+            );
+            let Ok(event) = tx.recv_timeout(rx, Duration::from_millis(100)) else {
+                continue;
+            };
+            if let crate::events::AppEvent::Pty(
+                crate::process_events::PtyRuntimeEvent::Output { bytes, .. },
+                _,
+            ) = event
+            {
+                seen.extend(bytes);
+                if seen.windows(needle.len()).any(|window| window == needle) {
+                    return;
+                }
+            }
+        }
+    }
+
+    // portable-pty's `kill` signals but never reaps, so without an explicit
+    // wait in shutdown a SIGHUP-immune child killed on pane close lingers as
+    // a zombie for the app's lifetime.
+    #[test]
+    fn shutdown_reaps_a_killed_sighup_immune_child() {
+        let (tx, rx) = AppEventSender::channel();
+        let pending = spawn_pending("trap '' HUP; printf ready; sleep 30");
+        let mut runtime = pending.activate(PaneId::new("pane-reap"), tx.clone());
+        let pid = runtime
+            .controller
+            .process_id()
+            .expect("spawned child has a pid")
+            .get();
+        // Wait for the marker so the kill cannot race the shell's trap.
+        wait_for_output(&tx, &rx, b"ready");
+
+        runtime.shutdown();
+
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        let stat = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stat.trim_start().starts_with('Z'),
+            "child {pid} was left as a zombie (ps stat {stat:?})"
+        );
+    }
+
+    // The shutdown join must be bounded: a reader whose blocking read never
+    // returns (no EOF while something keeps the slave fd alive) is detached
+    // at the deadline instead of hanging the UI thread.
+    #[test]
+    fn join_reader_with_deadline_detaches_a_reader_that_never_finishes() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let handle = thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+
+        let started = Instant::now();
+        join_reader_with_deadline(handle);
+
+        assert!(
+            started.elapsed() < READER_JOIN_DEADLINE + Duration::from_secs(1),
+            "detach took {:?}; the join must be bounded",
+            started.elapsed()
+        );
+        // Release the detached thread so it exits on its own.
+        drop(release_tx);
+    }
+
+    #[test]
+    fn join_reader_with_deadline_joins_a_finished_reader() {
+        let handle = thread::spawn(|| {});
+        // A finished thread joins immediately; only a stuck one costs the
+        // deadline. No timing assertion needed — completion is the check.
+        join_reader_with_deadline(handle);
     }
 }

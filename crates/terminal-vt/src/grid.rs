@@ -104,10 +104,6 @@ impl TerminalGrid {
         self.scrollback.len() + usize::from(self.size.rows())
     }
 
-    pub fn scrollback_row(&self, index: usize) -> Option<&[TerminalCell]> {
-        self.scrollback.get(index).map(Vec::as_slice)
-    }
-
     pub fn scrollback_row_text(&self, index: usize) -> Option<String> {
         self.scrollback.get(index).map(|row| {
             row.iter()
@@ -190,14 +186,11 @@ impl TerminalGrid {
         }
 
         let mut grapheme = character.to_string();
-        let width = grapheme_width(&grapheme);
-        if width == 0 {
+        if grapheme_width(&grapheme) == 0 {
             grapheme.insert(0, '\u{25cc}');
         }
-        GraphemeWrite::New {
-            grapheme: grapheme.clone(),
-            width: grapheme_width(&grapheme).clamp(1, 2) as u8,
-        }
+        let width = grapheme_width(&grapheme).clamp(1, 2) as u8;
+        GraphemeWrite::New { grapheme, width }
     }
 
     pub(crate) fn put_grapheme(&mut self, grapheme: String, width: u8, style: CellStyle) -> bool {
@@ -308,10 +301,6 @@ impl TerminalGrid {
         }
     }
 
-    pub(crate) fn cursor_at_last_column(&self) -> bool {
-        self.cursor.column() + 1 >= self.size.columns()
-    }
-
     /// Line feed within `[top, bottom]`: move down one row, scrolling the region
     /// up (and capturing into scrollback when the top of the screen leaves) once
     /// the cursor reaches the bottom of the region.
@@ -333,17 +322,14 @@ impl TerminalGrid {
         }
     }
 
-    pub(crate) fn tab(&mut self, style: CellStyle) {
+    /// HT: pure cursor motion to the next tab stop, clamped to the last
+    /// column. Never writes cells; xterm's tab leaves existing content intact.
+    pub(crate) fn tab(&mut self) {
         let next_stop = (self.cursor.column() / TAB_WIDTH)
             .saturating_add(1)
             .saturating_mul(TAB_WIDTH);
         let target = next_stop.min(self.size.columns().saturating_sub(1));
-        while self.cursor.column() < target {
-            self.put_grapheme(" ".to_owned(), 1, style);
-            if self.cursor_at_last_column() {
-                break;
-            }
-        }
+        self.cursor.position = GridPosition::new(self.cursor.row(), target);
     }
 
     // --- Erase + edit primitives -----------------------------------------------

@@ -45,6 +45,14 @@ impl TerminalAdapter for VteTerminalAdapter {
         self.state.mouse_mode()
     }
 
+    fn bracketed_paste(&self) -> bool {
+        self.state.bracketed_paste
+    }
+
+    fn application_cursor_keys(&self) -> bool {
+        self.state.application_cursor_keys
+    }
+
     fn size(&self) -> TerminalSize {
         self.state.active_grid().size()
     }
@@ -153,6 +161,11 @@ struct TerminalState {
     mouse_button_event: bool,
     mouse_any_event: bool,
     mouse_sgr: bool,
+    // Bracketed paste (DECSET 2004) and application cursor keys (DECCKM,
+    // DECSET 1), surfaced so the app layer can adjust paste and arrow-key
+    // encoding for the child.
+    bracketed_paste: bool,
+    application_cursor_keys: bool,
 }
 
 impl TerminalState {
@@ -179,6 +192,8 @@ impl TerminalState {
             mouse_button_event: false,
             mouse_any_event: false,
             mouse_sgr: false,
+            bracketed_paste: false,
+            application_cursor_keys: false,
         }
     }
 
@@ -327,10 +342,14 @@ impl TerminalState {
         self.charsets = [Charset::Ascii; 2];
         self.active_charset = 0;
         self.release_mouse_tracking();
+        self.bracketed_paste = false;
+        self.application_cursor_keys = false;
         self.dirty = true;
         self.primary.erase_in_display(2, CellStyle::default());
         self.primary.erase_in_display(3, CellStyle::default());
         self.primary.set_cursor(0, 0);
+        // RIS shows the cursor again (xterm parity with DECTCEM reset).
+        self.primary.set_cursor_visible(true);
     }
 
     /// DECSTR (`CSI ! p`): soft terminal reset. Restores conservative modes
@@ -348,6 +367,8 @@ impl TerminalState {
         self.charsets = [Charset::Ascii; 2];
         self.active_charset = 0;
         self.release_mouse_tracking();
+        self.bracketed_paste = false;
+        self.application_cursor_keys = false;
         self.dirty = true;
         self.active_grid_mut().set_cursor_visible(true);
     }
@@ -397,12 +418,13 @@ impl TerminalState {
 
     // --- Modes -----------------------------------------------------------------
 
-    fn set_mode(&mut self, params: &Params, private: bool, enabled: bool) {
-        if !private {
-            return;
-        }
+    /// DEC private mode set/reset (`CSI ? ... h/l`); the dispatcher only
+    /// routes private-marker sequences here.
+    fn set_mode(&mut self, params: &Params, enabled: bool) {
         for param in params.iter() {
             match param.first().copied().unwrap_or(0) {
+                // DECCKM: application cursor keys.
+                1 => self.application_cursor_keys = enabled,
                 25 => {
                     self.dirty = true;
                     self.active_grid_mut().set_cursor_visible(enabled);
@@ -419,6 +441,7 @@ impl TerminalState {
                 1002 => self.mouse_button_event = enabled,
                 1003 => self.mouse_any_event = enabled,
                 1006 => self.mouse_sgr = enabled,
+                2004 => self.bracketed_paste = enabled,
                 _ => {}
             }
         }
@@ -647,8 +670,7 @@ impl Perform for TerminalState {
             0x09 => {
                 self.wrap_pending = false;
                 self.dirty = true;
-                let pen = self.pen;
-                self.active_grid_mut().tab(pen);
+                self.active_grid_mut().tab();
             }
             0x0a..=0x0c => {
                 self.wrap_pending = false;
@@ -666,29 +688,26 @@ impl Perform for TerminalState {
         if ignore {
             return;
         }
-        let private = intermediates.first() == Some(&b'?');
-
-        // DECSTR (`CSI ! p`) carries the `!` intermediate; nothing else with
-        // intermediates is interpreted below.
-        if action == 'p' {
-            if intermediates == *b"!" {
-                self.soft_reset();
-            }
-            return;
-        }
-
-        match action {
-            'm' => self.apply_sgr(params),
-            'H' | 'f' | 'A' | 'B' | 'e' | 'C' | 'a' | 'D' | 'E' | 'F' | 'G' | '`' | 'd' => {
+        // Dispatch on (intermediates, action). Any private-marker or
+        // intermediate combination not explicitly modeled below is ignored
+        // outright: XTMODKEYS (`CSI > ... m`) must not corrupt the SGR pen,
+        // kitty keyboard probes (`CSI ? u`, `CSI > ... u`) must not trigger
+        // DECRC, and DECSED (`CSI ? J`) must not act as a plain ED.
+        match (intermediates, action) {
+            // DECSTR (`CSI ! p`): soft terminal reset.
+            ([b'!'], 'p') => self.soft_reset(),
+            // DEC private modes (`CSI ? ... h/l`); ANSI SM/RM stay unmodeled.
+            ([b'?'], 'h') => self.set_mode(params, true),
+            ([b'?'], 'l') => self.set_mode(params, false),
+            ([], 'm') => self.apply_sgr(params),
+            ([], 'H' | 'f' | 'A' | 'B' | 'e' | 'C' | 'a' | 'D' | 'E' | 'F' | 'G' | '`' | 'd') => {
                 self.dispatch_cursor_csi(params, action)
             }
-            'J' | 'K' | 'L' | 'M' | '@' | 'P' | 'X' => self.dispatch_edit_csi(params, action),
-            'S' | 'T' => self.dispatch_scroll_csi(params, action),
-            'r' => self.set_scroll_region(params),
-            's' => self.save_cursor(),
-            'u' => self.restore_cursor(),
-            'h' => self.set_mode(params, private, true),
-            'l' => self.set_mode(params, private, false),
+            ([], 'J' | 'K' | 'L' | 'M' | '@' | 'P' | 'X') => self.dispatch_edit_csi(params, action),
+            ([], 'S' | 'T') => self.dispatch_scroll_csi(params, action),
+            ([], 'r') => self.set_scroll_region(params),
+            ([], 's') => self.save_cursor(),
+            ([], 'u') => self.restore_cursor(),
             _ => {}
         }
     }
@@ -877,6 +896,104 @@ mod tests {
                 .foreground,
             Color::Indexed(42)
         );
+    }
+
+    #[test]
+    fn bracketed_paste_tracks_decset_2004_and_resets() {
+        let mut adapter = adapter(8, 2);
+        assert!(!adapter.bracketed_paste());
+        adapter.feed(b"\x1b[?2004h").unwrap();
+        assert!(adapter.bracketed_paste());
+        adapter.feed(b"\x1b[?2004l").unwrap();
+        assert!(!adapter.bracketed_paste());
+
+        // DECSTR (soft reset) and RIS both release the mode.
+        adapter.feed(b"\x1b[?2004h\x1b[!p").unwrap();
+        assert!(!adapter.bracketed_paste());
+        adapter.feed(b"\x1b[?2004h\x1bc").unwrap();
+        assert!(!adapter.bracketed_paste());
+    }
+
+    #[test]
+    fn application_cursor_keys_track_decckm_and_reset() {
+        let mut adapter = adapter(8, 2);
+        assert!(!adapter.application_cursor_keys());
+        adapter.feed(b"\x1b[?1h").unwrap();
+        assert!(adapter.application_cursor_keys());
+        adapter.feed(b"\x1b[?1l").unwrap();
+        assert!(!adapter.application_cursor_keys());
+
+        // DECSTR and RIS restore normal cursor keys (xterm parity).
+        adapter.feed(b"\x1b[?1h\x1b[!p").unwrap();
+        assert!(!adapter.application_cursor_keys());
+        adapter.feed(b"\x1b[?1h\x1bc").unwrap();
+        assert!(!adapter.application_cursor_keys());
+    }
+
+    #[test]
+    fn terminal_parser_exposes_paste_and_cursor_key_modes() {
+        let mut parser = crate::TerminalParser::new(TerminalSize::new(8, 2).unwrap());
+        assert!(!parser.bracketed_paste());
+        assert!(!parser.application_cursor_keys());
+        parser.feed_pty_bytes(b"\x1b[?2004h\x1b[?1h").unwrap();
+        assert!(parser.bracketed_paste());
+        assert!(parser.application_cursor_keys());
+    }
+
+    #[test]
+    fn xtmodkeys_gt_intermediate_does_not_corrupt_sgr_pen() {
+        let mut adapter = adapter(8, 1);
+        // XTMODKEYS (`CSI > 4;2 m`, sent by vim/tmux) is not SGR; the pen must
+        // not pick up underline (4) or dim (2).
+        adapter.feed(b"\x1b[>4;2mX").unwrap();
+        let style = adapter
+            .grid()
+            .cell(GridPosition::new(0, 0))
+            .unwrap()
+            .style();
+        assert_eq!(style, CellStyle::default());
+    }
+
+    #[test]
+    fn kitty_keyboard_probes_do_not_trigger_cursor_restore() {
+        let mut adapter = adapter(10, 2);
+        adapter.feed(b"\x1b[s").unwrap(); // save cursor at (0,0)
+        adapter.feed(b"\x1b[2;5H").unwrap(); // move to (1,4)
+        // Kitty keyboard probes (`CSI ? u`, `CSI > 1 u`) are not DECRC; the
+        // cursor must stay where it is.
+        adapter.feed(b"\x1b[?u").unwrap();
+        assert_eq!(adapter.grid().cursor().position(), GridPosition::new(1, 4));
+        adapter.feed(b"\x1b[>1u").unwrap();
+        assert_eq!(adapter.grid().cursor().position(), GridPosition::new(1, 4));
+    }
+
+    #[test]
+    fn decsed_private_erase_is_ignored_not_treated_as_plain_ed() {
+        let mut adapter = adapter(10, 1);
+        adapter.feed(b"abcdef").unwrap();
+        // DECSED (`CSI ? J`) is unmodeled; it must be ignored rather than
+        // misread as a plain ED that wipes the screen.
+        adapter.feed(b"\x1b[1;1H\x1b[?J").unwrap();
+        assert_eq!(trimmed(&adapter), vec!["abcdef"]);
+    }
+
+    #[test]
+    fn tab_is_pure_cursor_motion_and_preserves_cells() {
+        let mut adapter = adapter(10, 1);
+        // HT moves the cursor to the next tab stop without writing blanks over
+        // existing content (xterm parity).
+        adapter.feed(b"abcdefghij\r\tX").unwrap();
+        assert_eq!(trimmed(&adapter), vec!["abcdefghXj"]);
+        assert_eq!(adapter.grid().cursor().column(), 9);
+    }
+
+    #[test]
+    fn full_reset_restores_cursor_visibility() {
+        let mut adapter = adapter(8, 2);
+        adapter.feed(b"\x1b[?25l").unwrap();
+        assert!(!adapter.grid().cursor().visible());
+        adapter.feed(b"\x1bc").unwrap();
+        assert!(adapter.grid().cursor().visible());
     }
 
     #[test]

@@ -126,9 +126,11 @@ impl PresentationMotion {
         !self.active.is_empty()
     }
 
-    /// Pointer hit targets remain at stable scene geometry. The native shell
-    /// uses this signal to suspend pointer admission while material geometry
-    /// is between those stable endpoints.
+    /// True while pane-geometry motion holds material geometry between
+    /// stable scene endpoints. Pointer hit targets remain at final scene
+    /// geometry throughout and the native shell deliberately keeps admitting
+    /// pointer input during the glide; the signal feeds motion diagnostics
+    /// such as the lab's reduced-motion checkpoint.
     pub fn pointer_geometry_is_moving(&self) -> bool {
         self.pointer_geometry_moving
     }
@@ -229,8 +231,15 @@ impl PresentationMotion {
             );
 
             if candidate.role == TransitionRole::ApprovalArrival && !newly_eligible_emphasis {
-                self.active
-                    .retain(|active| active.node_id != candidate.node_id);
+                // A still-eligible arrival with an unchanged sequence is the
+                // in-flight one-shot: leave its active window alone so plan
+                // changes on unrelated nodes cannot cancel it. Only a plan
+                // that dropped the transition (approval resolution/removal is
+                // authoritative) cancels the node's emphasis.
+                if !has_transition(next, &candidate.node_id, candidate.role) {
+                    self.active
+                        .retain(|active| active.node_id != candidate.node_id);
+                }
                 continue;
             }
 
@@ -1770,6 +1779,62 @@ mod tests {
                 started_at: origin + Duration::from_millis(10),
                 finishes_at: origin + Duration::from_millis(110),
             })
+        );
+    }
+
+    /// An in-flight ApprovalArrival one-shot must survive plan changes on
+    /// unrelated nodes: only losing the transition itself (approval
+    /// resolution) cancels the emphasis window.
+    #[test]
+    fn unrelated_plan_change_preserves_in_flight_approval_arrival() {
+        let origin = Instant::now();
+        let rect = LogicalRect::from_units(100, 100, 1_000, 800);
+        let arrival = transition(
+            TransitionRole::ApprovalArrival,
+            TransitionProperty::Scale,
+            100,
+        );
+        let header_material = |x: i64| {
+            NativePlanCommand::Material(NativeMaterial {
+                node_id: PresentationNodeId::workspace(WorkspaceNodePart::Header),
+                role: NativeMaterialRole::ChromeSurface,
+                logical_rect: LogicalRect::from_units(x, 0, 100, 100),
+                clip: LogicalRect::from_units(x, 0, 100, 100),
+                color: UiColor::rgba(10, 20, 30, 200),
+                corner_radius_units: 0,
+                boundary: None,
+                raised_shadows: None,
+                z_order: 1,
+            })
+        };
+        let plan = |header_x: i64, transitions: Vec<NativeTransition>| {
+            let mut commands = material_plan(rect, Vec::new()).commands().to_vec();
+            commands.push(header_material(header_x));
+            NativePresentationPlan::from_resolved_commands(commands, transitions)
+        };
+        let mut motion = PresentationMotion::default();
+        motion.resolve(&plan(0, Vec::new()), SceneMotionPolicy::default(), origin);
+        motion.resolve(
+            &plan(0, vec![arrival.clone()]),
+            SceneMotionPolicy::default(),
+            origin,
+        );
+        let window = motion
+            .active_transition_window(TransitionRole::ApprovalArrival)
+            .expect("arrival one-shot started");
+
+        // The header moves without any transition of its own while the
+        // arrival is mid-flight; the still-eligible, same-sequence one-shot
+        // keeps its window instead of being canceled by the unrelated change.
+        motion.resolve(
+            &plan(50, vec![arrival]),
+            SceneMotionPolicy::default(),
+            origin + Duration::from_millis(25),
+        );
+        assert_eq!(
+            motion.active_transition_window(TransitionRole::ApprovalArrival),
+            Some(window),
+            "unrelated node changes must not cancel the in-flight one-shot"
         );
     }
 

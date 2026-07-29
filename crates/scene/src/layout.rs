@@ -426,13 +426,17 @@ pub fn layout_panes(workspace: &Workspace, area: SceneRect) -> Vec<PaneLayout> {
     panes
 }
 
-/// The content area inside a pane's one-cell border.
+/// The content area inside a pane's one-cell border. The 1-cell minimum
+/// keeps degenerate panes drawable, but it clamps to the pane's own rect so
+/// the inner area never claims cells outside the pane.
 pub fn pane_inner_rect(area: SceneRect) -> SceneRect {
+    let width = area.width.saturating_sub(2).max(1).min(area.width);
+    let height = area.height.saturating_sub(2).max(1).min(area.height);
     SceneRect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2).max(1),
-        area.height.saturating_sub(2).max(1),
+        area.x.saturating_add(1).min(area.right() - width),
+        area.y.saturating_add(1).min(area.bottom() - height),
+        width,
+        height,
     )
 }
 
@@ -648,6 +652,32 @@ mod tests {
             .unwrap();
 
         assert!(layout_separators(&workspace, SceneRect::new(0, 0, 120, 40)).is_empty());
+    }
+
+    #[test]
+    fn pane_inner_rect_never_leaves_the_pane_area() {
+        // Normal panes: one-cell border all around.
+        assert_eq!(
+            pane_inner_rect(SceneRect::new(10, 5, 40, 20)),
+            SceneRect::new(11, 6, 38, 18)
+        );
+        // Degenerate panes must not claim cells outside their own area: the
+        // 1-cell minimum clamps to the pane rect instead of spilling past it.
+        for area in [
+            SceneRect::new(10, 5, 1, 1),
+            SceneRect::new(10, 5, 2, 2),
+            SceneRect::new(10, 5, 0, 0),
+            SceneRect::new(u16::MAX - 1, u16::MAX - 1, 1, 1),
+        ] {
+            let inner = pane_inner_rect(area);
+            assert!(
+                inner.x >= area.x
+                    && inner.y >= area.y
+                    && inner.right() <= area.right()
+                    && inner.bottom() <= area.bottom(),
+                "inner {inner:?} must stay inside pane {area:?}"
+            );
+        }
     }
 
     #[test]

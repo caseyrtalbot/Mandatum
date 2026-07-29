@@ -19,7 +19,7 @@ use std::{
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, mpsc},
     thread,
 };
 
@@ -29,7 +29,7 @@ use crate::{
 };
 
 use runtime_dir::{ALLOWED_TOOLS, SessionRuntimeDir};
-use session::{ClaudeSessionControl, Shared};
+use session::{ChildHandle, ClaudeSessionControl, Shared};
 
 /// Name of the approval-bridge binary shipped next to the workstation.
 const BRIDGE_BINARY_NAME: &str = "mandatum-approval-bridge";
@@ -230,7 +230,9 @@ impl AgentConnector for ClaudeCliConnector {
 
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared::new());
-        let child = Arc::new(Mutex::new(Some(child)));
+        // The child was spawned into its own process group, so its pid is the
+        // pgid every signal path addresses — until the pump reaps it.
+        let child = Arc::new(ChildHandle::new(Some(child), Some(child_pid)));
 
         let listener_shared = Arc::clone(&shared);
         let listener_tx = tx.clone();
@@ -255,9 +257,8 @@ impl AgentConnector for ClaudeCliConnector {
             control: Box::new(ClaudeSessionControl::new(
                 shared,
                 child,
-                child_pid,
                 vec![listener_thread, stdout_thread, stderr_thread],
-                runtime.socket_path,
+                runtime,
             )),
         })
     }

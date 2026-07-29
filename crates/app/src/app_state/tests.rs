@@ -1412,6 +1412,7 @@ fn shift_tab_reaches_the_child_unless_a_workspace_chord_intercepts() {
                 }
             ),
             &keymap,
+            false,
         ),
         RuntimeInput::Dispatch(CommandId::FocusPrevious)
     );
@@ -3334,7 +3335,9 @@ fn pointer_drag_selects_cells_and_copy_selection_copies_them() {
     state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
     let pane_id = PaneId::new("pane-1");
     wait_for_shell_ready(&mut state, &pane_id);
-    state.handle_event(InputEvent::Paste("echo SELECT_ME\r".to_owned()));
+    // Direct write, not a paste: a shell with bracketed paste enabled would
+    // hold wrapped pasted text in its editor instead of executing it.
+    state.write_to_focused_terminal(b"echo SELECT_ME\r");
     // Wait for the output line: ends with the marker but is not the
     // echoed command line (which contains "echo").
     let printed =
@@ -5630,11 +5633,12 @@ fn search_jumps_a_terminal_pane_to_the_matched_scrollback_row() {
     let temp = TestWorkspaceDir::new();
     let mut state = AppState::new(temp.app_config(true, false));
     state.handle_terminal_resize(100, 30);
-    // Print a marker, then bury it in scrollback with filler lines.
-    state.handle_event(InputEvent::Paste(
-        "echo SEARCH_MARK_XYZ; i=1; while [ $i -le 60 ]; do echo filler_$i; i=$((i+1)); done\r"
-            .to_owned(),
-    ));
+    // Print a marker, then bury it in scrollback with filler lines. Direct
+    // write, not a paste: a shell with bracketed paste enabled would hold
+    // wrapped pasted text in its editor instead of executing it.
+    state.write_to_focused_terminal(
+        b"echo SEARCH_MARK_XYZ; i=1; while [ $i -le 60 ]; do echo filler_$i; i=$((i+1)); done\r",
+    );
     assert!(
         pump_runtime_until(&mut state, |state| {
             grid_text(state, &PaneId::new("pane-1")).contains("filler_60")
@@ -5693,7 +5697,9 @@ fn search_results_stay_stable_and_jumps_clamp_while_a_pane_floods() {
     let temp = TestWorkspaceDir::new();
     let mut state = AppState::new(temp.app_config(true, false));
     state.handle_terminal_resize(100, 30);
-    state.handle_event(InputEvent::Paste("echo FLOOD_TARGET_ABC\r".to_owned()));
+    // Direct write, not a paste: a shell with bracketed paste enabled would
+    // hold wrapped pasted text in its editor instead of executing it.
+    state.write_to_focused_terminal(b"echo FLOOD_TARGET_ABC\r");
     assert!(pump_runtime_until(&mut state, |state| {
         grid_text(state, &PaneId::new("pane-1")).contains("FLOOD_TARGET_ABC")
     }));
@@ -6368,4 +6374,292 @@ fn pane_restart_bumps_the_revision_and_drops_the_retained_surface() {
         "the pre-restart surface must not survive into the fresh runtime"
     );
     state.shutdown();
+}
+
+// The appearance overlay is keyboard-modal, so the pointer must be modal
+// too: a press is consumed (closing the overlay, like help) instead of
+// stealing focus or starting a selection on an obscured pane.
+#[test]
+fn appearance_overlay_consumes_pointer_presses_without_focus_steal() {
+    let mut state = state();
+    state.dispatch(CommandId::SplitRight);
+    frame(&mut state);
+    assert_eq!(focused(&state), "pane-2");
+
+    state.dispatch(CommandId::AdjustAppearance);
+    state.build_scene(POINTER_FRAME);
+    // Pane-1's body sits under (2, 3).
+    send_pointer(&mut state, left(PointerKind::Down, 2, 3));
+    assert!(
+        state.appearance_overlay_scene(POINTER_FRAME).is_none(),
+        "a press closes the modal overlay"
+    );
+    assert_eq!(focused(&state), "pane-2", "the press must not steal focus");
+    assert!(state.pointer_view.is_none());
+    assert!(state.pointer_drag.is_none());
+
+    // A right press is consumed the same way: no context menu underneath.
+    state.dispatch(CommandId::AdjustAppearance);
+    state.build_scene(POINTER_FRAME);
+    send_pointer(&mut state, right_down(2, 3));
+    assert!(state.appearance_overlay_scene(POINTER_FRAME).is_none());
+    assert!(state.context_menu.is_none());
+}
+
+#[test]
+fn appearance_overlay_wheel_moves_its_selection_instead_of_scrolling_panes() {
+    let mut state = state();
+    frame(&mut state);
+    state.dispatch(CommandId::AdjustAppearance);
+    state.build_scene(POINTER_FRAME);
+
+    send_pointer(
+        &mut state,
+        pointer_event(
+            PointerKind::Wheel {
+                dx: 0,
+                dy: 1,
+                precise: false,
+            },
+            None,
+            5,
+            5,
+        ),
+    );
+
+    let overlay = state
+        .appearance_overlay_scene(POINTER_FRAME)
+        .expect("the wheel must not close the overlay");
+    assert_eq!(overlay.selected, 1);
+    assert!(
+        state.pointer_view.is_none(),
+        "the wheel must not reach the pane underneath"
+    );
+}
+
+#[test]
+fn strip_paste_guards_removes_recombining_guard_fragments() {
+    assert_eq!(strip_paste_guards("plain"), "plain");
+    assert_eq!(strip_paste_guards("a\x1b[200~b\x1b[201~c"), "abc");
+    // Removing an inner guard must not splice a fresh one together from
+    // the surrounding bytes: these need a second pass.
+    assert_eq!(strip_paste_guards("\x1b[201\x1b[201~~"), "");
+    assert_eq!(strip_paste_guards("\x1b[20\x1b[200~1~x"), "x");
+}
+
+// Paste is wrapped in DEC 2004 guards exactly while the focused child has
+// bracketed paste enabled, with embedded guard sequences stripped so the
+// clipboard cannot break out of the bracket and smuggle typed input.
+#[test]
+fn paste_honors_the_childs_bracketed_paste_mode_and_strips_embedded_guards() {
+    let mut state = live_state();
+    state.handle_terminal_resize(80, 24);
+    let pane_id = PaneId::new("pane-1");
+    let runtime = state.runtime.terminals().get(&pane_id).unwrap();
+    let restart_generation = runtime.restart_generation;
+    let runtime_token = runtime.runtime_token;
+    let output = |bytes: &[u8]| PtyRuntimeEvent::Output {
+        pane_id: pane_id.clone(),
+        restart_generation,
+        runtime_token,
+        bytes: bytes.to_vec(),
+    };
+
+    // Mode off (the spawn default): paste forwards raw.
+    assert_eq!(
+        state.encode_paste_for_focused_child("plain text"),
+        b"plain text".to_vec()
+    );
+
+    state.apply_pty_runtime_event(output(b"\x1b[?2004h"));
+    assert_eq!(state.runtime.terminal_bracketed_paste(&pane_id), Some(true));
+    assert_eq!(
+        state.encode_paste_for_focused_child("evil\x1b[201~breakout"),
+        b"\x1b[200~evilbreakout\x1b[201~".to_vec()
+    );
+
+    state.apply_pty_runtime_event(output(b"\x1b[?2004l"));
+    assert_eq!(
+        state.runtime.terminal_bracketed_paste(&pane_id),
+        Some(false)
+    );
+    assert_eq!(
+        state.encode_paste_for_focused_child("plain again"),
+        b"plain again".to_vec()
+    );
+    state.shutdown();
+}
+
+// Copy mode on pane A: a press on pane B moves focus AND leaves copy mode,
+// so subsequent keys reach B's shell instead of A's copy-mode keymap (the
+// policy `open_palette` already applies).
+#[test]
+fn clicking_another_pane_exits_copy_mode_and_keys_follow_focus() {
+    let mut state = live_state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    state.dispatch(CommandId::SplitRight);
+    let pane_1 = PaneId::new("pane-1");
+    wait_for_shell_ready(&mut state, &pane_1);
+
+    // Copy mode on the focused pane-2.
+    state.dispatch(CommandId::EnterCopyMode);
+    assert!(state.copy_mode_active());
+    state.build_scene(POINTER_FRAME);
+
+    // Pane-1's body sits under (2, 3).
+    send_pointer(&mut state, left(PointerKind::Down, 2, 3));
+    send_pointer(&mut state, left(PointerKind::Up, 2, 3));
+    assert!(
+        !state.copy_mode_active(),
+        "a press on another pane must exit copy mode"
+    );
+    assert_eq!(focused(&state), "pane-1");
+
+    for character in "echo COPY_EXIT_OK".chars() {
+        state.handle_key(key(KeyCode::Char(character)));
+    }
+    state.handle_key(key(KeyCode::Enter));
+    let reached = pump_runtime_until(&mut state, |state| {
+        grid_text(state, &pane_1).contains("COPY_EXIT_OK")
+    });
+    assert!(
+        reached,
+        "typed keys must reach the newly focused pane; grid: {}",
+        grid_text(&state, &pane_1)
+    );
+    state.shutdown();
+}
+
+// update_pane_id must not survive the seams where pane ids repeat (sessions
+// and restores both restart the `pane-N` sequence): an unrelated same-id
+// task pane's success would otherwise read as a completed update.
+#[test]
+fn session_switch_and_workspace_restore_forget_the_update_pane() {
+    let mut state = state();
+    state.update_pane_id = Some(PaneId::new("pane-1"));
+    state.dispatch(CommandId::NewSession);
+    assert!(state.update_pane_id.is_none());
+
+    let temp = TestWorkspaceDir::new();
+    let mut state = AppState::new(temp.app_config(false, false));
+    state.dispatch(CommandId::SaveWorkspace);
+    state.update_pane_id = Some(PaneId::new("pane-1"));
+    state.dispatch(CommandId::RestoreWorkspace);
+    assert!(
+        state.status().contains("workspace restored"),
+        "{}",
+        state.status()
+    );
+    assert!(state.update_pane_id.is_none());
+}
+
+// The pane-keyed presentation maps are pruned at every seam a pane leaves
+// through: close, session switch, and restore. Stale entries would address
+// unrelated same-id panes later.
+#[test]
+fn pane_close_and_session_seams_prune_pane_keyed_presentation_maps() {
+    let mut state = state();
+    state.dispatch(CommandId::SplitRight);
+    let pane_2 = PaneId::new("pane-2");
+    state.approval_arrivals.insert(pane_2.clone(), 7);
+    state.pane_grid_revisions.insert(pane_2.clone(), 3);
+
+    state.dispatch(CommandId::ClosePane);
+    assert!(!state.approval_arrivals.contains_key(&pane_2));
+    assert!(!state.pane_grid_revisions.contains_key(&pane_2));
+
+    state.approval_arrivals.insert(PaneId::new("pane-1"), 9);
+    state.pane_grid_revisions.insert(PaneId::new("pane-1"), 4);
+    state.dispatch(CommandId::NewSession);
+    assert!(state.approval_arrivals.is_empty());
+    assert!(state.pane_grid_revisions.is_empty());
+}
+
+// Keyboard float movement mirrors the drag path: one durable step per
+// dispatch, and a tiled pane reports instead of moving.
+#[test]
+fn keyboard_float_movement_steps_the_focused_float_and_reports_non_floats() {
+    let mut state = state();
+    state.handle_terminal_resize(POINTER_FRAME.width, POINTER_FRAME.height);
+    state.dispatch(CommandId::SplitRight);
+
+    state.dispatch(CommandId::MoveFloatRight);
+    assert!(
+        state.status().contains("not floating"),
+        "{}",
+        state.status()
+    );
+
+    state.dispatch(CommandId::FloatPane);
+    let pane_2 = PaneId::new("pane-2");
+    let rect_of = |state: &AppState| {
+        state
+            .workspace()
+            .active_session()
+            .layout()
+            .floating()
+            .iter()
+            .find(|floating| floating.pane_id == pane_2)
+            .expect("pane-2 floats")
+            .rect
+            .clone()
+    };
+    let start = rect_of(&state);
+
+    state.dispatch(CommandId::MoveFloatRight);
+    state.dispatch(CommandId::MoveFloatDown);
+    let moved = rect_of(&state);
+    assert_eq!(moved.x, start.x + 2, "one horizontal step is two columns");
+    assert_eq!(moved.y, start.y + 1, "one vertical step is one row");
+
+    state.dispatch(CommandId::MoveFloatLeft);
+    state.dispatch(CommandId::MoveFloatUp);
+    let back = rect_of(&state);
+    assert_eq!((back.x, back.y), (start.x, start.y));
+}
+
+// Stack panes folds the focused tiled pane and its neighbor into one
+// stacked node; without a neighbor it reports instead of mutating.
+#[test]
+fn stack_panes_stacks_the_focused_pane_with_its_neighbor() {
+    let mut state = state();
+    state.dispatch(CommandId::StackPanes);
+    assert!(
+        state.status().contains("command failed"),
+        "{}",
+        state.status()
+    );
+
+    state.dispatch(CommandId::SplitRight);
+    state.dispatch(CommandId::StackPanes);
+    assert!(
+        matches!(
+            state.workspace().active_session().layout().root(),
+            LayoutNode::Stack { .. }
+        ),
+        "{}",
+        state.status()
+    );
+}
+
+// The first-run note's Escape is consumed: it dismisses the note without
+// reaching the shell, and the next key proceeds normally.
+#[test]
+fn first_run_note_escape_is_consumed_and_only_dismisses_the_note() {
+    let mut state = state();
+    state.first_run_note = true;
+    let status_before = state.status().to_owned();
+
+    state.handle_event(InputEvent::Key(key(KeyCode::Escape)));
+    assert!(!state.first_run_note);
+    assert_eq!(
+        state.status(),
+        status_before,
+        "the consumed Escape must not act behind the note"
+    );
+
+    // With the note gone the same key routes normally: the write attempt
+    // reaches the (not spawned) focused terminal and reports.
+    state.handle_event(InputEvent::Key(key(KeyCode::Escape)));
+    assert!(state.status().contains("no live PTY"), "{}", state.status());
 }

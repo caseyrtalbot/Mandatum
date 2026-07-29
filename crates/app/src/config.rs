@@ -496,7 +496,6 @@ fn theme_slot<'a>(theme: &'a mut Theme, key: &str) -> Option<&'a mut SceneColor>
         "agent_waiting" => &mut theme.agent_waiting,
         "agent_failed" => &mut theme.agent_failed,
         "agent_complete" => &mut theme.agent_complete,
-        "agent_idle" => &mut theme.agent_idle,
         _ => return None,
     })
 }
@@ -538,8 +537,16 @@ fn apply_shell(config: &mut LoadedConfig, table: toml::Table, label: &str) {
     for (key, value) in table {
         match key.as_str() {
             "program" => {
-                config.shell_program = expect_string(config, "shell.program", value, label)
-                    .or(config.shell_program.take());
+                let Some(text) = expect_string(config, "shell.program", value, label) else {
+                    continue;
+                };
+                if text.trim().is_empty() {
+                    config
+                        .warnings
+                        .push(format!("{label}: shell.program must not be empty"));
+                    continue;
+                }
+                config.shell_program = Some(text);
             }
             unknown => config
                 .warnings
@@ -552,8 +559,16 @@ fn apply_task(config: &mut LoadedConfig, table: toml::Table, label: &str) {
     for (key, value) in table {
         match key.as_str() {
             "default_command" => {
-                config.task_command = expect_string(config, "task.default_command", value, label)
-                    .or(config.task_command.take());
+                let Some(text) = expect_string(config, "task.default_command", value, label) else {
+                    continue;
+                };
+                if text.trim().is_empty() {
+                    config
+                        .warnings
+                        .push(format!("{label}: task.default_command must not be empty"));
+                    continue;
+                }
+                config.task_command = Some(text);
             }
             unknown => config
                 .warnings
@@ -956,6 +971,29 @@ check = false
         assert_eq!(config.agent_model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(config.font_family.as_deref(), Some("Berkeley Mono"));
         assert_eq!(config.font_size, Some(15.0));
+    }
+
+    #[test]
+    fn empty_shell_program_and_task_command_warn_and_keep_defaults() {
+        let dir = TestConfigDir::new();
+        let user = dir.write(
+            "user.toml",
+            "[shell]\nprogram = \"\"\n[task]\ndefault_command = \"   \"\n",
+        );
+        let config = load_config(Some(&user), &dir.missing("project.toml"));
+        let warnings = config.warnings.join("\n");
+
+        assert!(
+            warnings.contains("shell.program must not be empty"),
+            "warnings: {warnings}"
+        );
+        assert!(
+            warnings.contains("task.default_command must not be empty"),
+            "warnings: {warnings}"
+        );
+        // Empty values never reach the spawn path; defaults apply instead.
+        assert_eq!(config.shell_program, None);
+        assert_eq!(config.task_command, None);
     }
 
     #[test]

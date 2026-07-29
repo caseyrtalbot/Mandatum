@@ -288,6 +288,18 @@ pub trait TerminalAdapter {
     fn mouse_mode(&self) -> MouseMode {
         MouseMode::default()
     }
+
+    /// Whether the child enabled bracketed paste (DECSET 2004). Backends that
+    /// do not interpret DECSET mode changes must report `false`.
+    fn bracketed_paste(&self) -> bool {
+        false
+    }
+
+    /// Whether the child enabled application cursor keys (DECCKM, DECSET 1).
+    /// Backends that do not interpret DECSET mode changes must report `false`.
+    fn application_cursor_keys(&self) -> bool {
+        false
+    }
 }
 
 /// Owns one terminal parser backend per pane and hides the concrete choice.
@@ -333,6 +345,16 @@ impl TerminalParser {
     pub fn mouse_mode(&self) -> MouseMode {
         self.adapter.mouse_mode()
     }
+
+    /// Whether the child enabled bracketed paste (DECSET 2004).
+    pub fn bracketed_paste(&self) -> bool {
+        self.adapter.bracketed_paste()
+    }
+
+    /// Whether the child enabled application cursor keys (DECCKM, DECSET 1).
+    pub fn application_cursor_keys(&self) -> bool {
+        self.adapter.application_cursor_keys()
+    }
 }
 
 impl TerminalAdapter for TerminalParser {
@@ -358,6 +380,14 @@ impl TerminalAdapter for TerminalParser {
 
     fn mouse_mode(&self) -> MouseMode {
         self.mouse_mode()
+    }
+
+    fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste()
+    }
+
+    fn application_cursor_keys(&self) -> bool {
+        self.application_cursor_keys()
     }
 }
 

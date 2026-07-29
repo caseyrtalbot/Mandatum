@@ -496,8 +496,6 @@ pub struct Theme {
     pub agent_waiting: SceneColor,
     pub agent_failed: SceneColor,
     pub agent_complete: SceneColor,
-    /// Draft/blocked/unknown agent states.
-    pub agent_idle: SceneColor,
 }
 
 impl Default for Theme {
@@ -685,7 +683,6 @@ fn mandatum_dark() -> Theme {
         agent_waiting: SceneColor::Ansi(3),  // yellow
         agent_failed: SceneColor::Ansi(1),   // red
         agent_complete: SceneColor::Ansi(6), // cyan
-        agent_idle: SceneColor::Default,
     }
 }
 
@@ -713,7 +710,6 @@ fn mandatum_light() -> Theme {
         agent_waiting: SceneColor::Ansi(5),  // magenta
         agent_failed: SceneColor::Ansi(1),   // red
         agent_complete: SceneColor::Ansi(4), // blue
-        agent_idle: SceneColor::Default,
     }
 }
 
@@ -744,7 +740,6 @@ fn mandatum_high_contrast() -> Theme {
         agent_waiting: SceneColor::Ansi(11),  // bright yellow
         agent_failed: SceneColor::Ansi(9),    // bright red
         agent_complete: SceneColor::Ansi(14), // bright cyan
-        agent_idle: SceneColor::Ansi(15),
     }
 }
 
@@ -1072,7 +1067,6 @@ mod tests {
                 ("waiting state", theme.agent_waiting, terminal_background),
                 ("failure state", theme.agent_failed, terminal_background),
                 ("complete state", theme.agent_complete, terminal_background),
-                ("idle state", theme.agent_idle, terminal_background),
             ] {
                 assert_scene_contrast(&theme, pair_name, foreground, background, text_minimum);
             }

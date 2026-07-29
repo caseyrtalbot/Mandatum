@@ -11,6 +11,9 @@ rust-version.workspace = true
 # and std channels only, mirroring the PTY runtime.
 [dependencies]
 mandatum-core = { workspace = true }
+# Directory-handle-relative unlinks for session runtime-dir cleanup; syscall
+# wrappers only, no runtime.
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

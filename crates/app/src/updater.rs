@@ -247,10 +247,12 @@ pub(crate) fn spawn_release_check(sender: AppEventSender, stamp_file: PathBuf) {
             if !should_check(&stamp_file, now) {
                 return;
             }
+            // Stamp the attempt before fetching: a failing endpoint is
+            // retried next interval, not hammered every launch.
+            record_check(&stamp_file, now);
             let Some(latest) = fetch_latest_version() else {
                 return;
             };
-            record_check(&stamp_file, now);
             if version_is_newer(&latest, CURRENT_VERSION) {
                 let _ = sender.send(AppEvent::UpdateAvailable(latest));
             }

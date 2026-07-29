@@ -1,11 +1,28 @@
 #![cfg(unix)]
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use mandatum_pty::{
     ChildExitStatus, NativePtyError, NativePtySession, PtyEvent, PtySessionId, PtySize,
-    ResizeIntent, SpawnIntent,
+    ResizeIntent, SpawnIntent, WRITE_QUEUE_CAPACITY_BYTES,
 };
+
+/// Apple's `openpty` routes through `ptsname`'s static buffer, so concurrent
+/// in-process calls can corrupt each other and fail with a garbage errno.
+/// The product spawns panes serially on one thread and never hits this; the
+/// test harness runs every test at once, so spawns serialize here instead.
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+fn spawn_serialized(intent: SpawnIntent) -> Result<NativePtySession, NativePtyError> {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    NativePtySession::spawn(intent)
+}
 
 fn size() -> PtySize {
     PtySize::new(80, 24).unwrap()
@@ -48,7 +65,7 @@ fn read_until_contains(session: &mut NativePtySession, needle: &[u8]) -> Vec<u8>
 
 #[test]
 fn native_pty_spawns_command_and_preserves_raw_output_bytes() {
-    let mut session = NativePtySession::spawn(shell_intent(
+    let mut session = spawn_serialized(shell_intent(
         "native-output",
         "printf 'hello'; printf '\\377'",
     ))
@@ -72,7 +89,7 @@ fn native_pty_spawns_command_and_preserves_raw_output_bytes() {
 
 #[test]
 fn native_pty_writes_input_bytes_to_child() {
-    let mut session = NativePtySession::spawn(shell_intent(
+    let mut session = spawn_serialized(shell_intent(
         "native-input",
         "stty -echo; IFS= read line; printf 'reply:%s' \"$line\"",
     ))
@@ -91,7 +108,7 @@ fn native_pty_writes_input_bytes_to_child() {
 
 #[test]
 fn native_pty_reports_child_exit_status() {
-    let mut session = NativePtySession::spawn(shell_intent("native-exit", "exit 7")).unwrap();
+    let mut session = spawn_serialized(shell_intent("native-exit", "exit 7")).unwrap();
 
     let exit = session.wait().unwrap();
 
@@ -110,7 +127,7 @@ fn native_pty_rejects_spawn_failure_without_runtime_session() {
     )
     .unwrap();
 
-    let error = match NativePtySession::spawn(intent) {
+    let error = match spawn_serialized(intent) {
         Ok(_) => panic!("spawn should fail"),
         Err(error) => error,
     };
@@ -134,7 +151,7 @@ fn native_pty_rejects_missing_cwd_instead_of_home_fallback() {
     let intent =
         shell_intent("native-missing-cwd", "pwd").with_cwd("/definitely/not/a/real/directory");
 
-    let error = match NativePtySession::spawn(intent) {
+    let error = match spawn_serialized(intent) {
         Ok(_) => panic!("spawn should fail"),
         Err(error) => error,
     };
@@ -150,7 +167,7 @@ fn native_pty_rejects_missing_cwd_instead_of_home_fallback() {
 
 #[test]
 fn native_pty_resizes_matching_session_only() {
-    let mut session = NativePtySession::spawn(shell_intent("native-resize", "sleep 5")).unwrap();
+    let mut session = spawn_serialized(shell_intent("native-resize", "sleep 5")).unwrap();
     let new_size = PtySize::new(100, 30).unwrap();
 
     let mismatch = session
@@ -183,8 +200,7 @@ fn native_pty_resizes_matching_session_only() {
 
 #[test]
 fn native_pty_closed_input_rejects_later_writes() {
-    let mut session =
-        NativePtySession::spawn(shell_intent("native-closed-input", "sleep 5")).unwrap();
+    let mut session = spawn_serialized(shell_intent("native-closed-input", "sleep 5")).unwrap();
 
     session.close_input();
 
@@ -201,7 +217,7 @@ fn native_pty_closed_input_rejects_later_writes() {
 
 #[test]
 fn native_pty_split_supports_concurrent_read_write_and_control() {
-    let session = NativePtySession::spawn(shell_intent(
+    let session = spawn_serialized(shell_intent(
         "native-split",
         "stty -echo; IFS= read line; printf 'split:%s' \"$line\"",
     ))
@@ -236,9 +252,123 @@ fn native_pty_split_supports_concurrent_read_write_and_control() {
     );
 }
 
+// The split writer feeds a dedicated writer thread, so pasting far more than
+// the kernel tty buffer into a child that never reads must enqueue and return
+// instead of blocking the caller.
+#[test]
+fn native_pty_split_writer_enqueues_without_blocking_when_child_never_reads() {
+    let session = spawn_serialized(shell_intent("native-writer-nonblocking", "sleep 5")).unwrap();
+    let mut parts = session.into_split().unwrap();
+    let chunk = vec![b'x'; 64 * 1024];
+
+    let started = Instant::now();
+    for _ in 0..8 {
+        parts.writer.write_input(&chunk).unwrap();
+    }
+
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "write_input blocked for {:?} behind a full tty buffer",
+        started.elapsed()
+    );
+
+    parts.controller.kill().unwrap();
+    let _ = parts.controller.wait().unwrap();
+}
+
+#[test]
+fn native_pty_split_writer_rejects_writes_past_queue_capacity() {
+    let session = spawn_serialized(shell_intent("native-writer-overflow", "sleep 5")).unwrap();
+    let mut parts = session.into_split().unwrap();
+
+    // One oversized chunk overflows even an empty queue, so the rejection is
+    // deterministic regardless of how much the writer thread has drained.
+    let oversized = vec![b'x'; WRITE_QUEUE_CAPACITY_BYTES + 1];
+    match parts.writer.write_input(&oversized) {
+        Err(NativePtyError::WriteQueueFull {
+            session_id,
+            queued_bytes: _,
+            rejected_bytes,
+        }) => {
+            assert_eq!(session_id.as_str(), "native-writer-overflow");
+            assert_eq!(rejected_bytes, WRITE_QUEUE_CAPACITY_BYTES + 1);
+        }
+        other => panic!("expected WriteQueueFull, got {other:?}"),
+    }
+
+    parts.controller.kill().unwrap();
+    let _ = parts.controller.wait().unwrap();
+}
+
+// Closing the writer must not drop queued bytes: the writer thread drains
+// what was accepted before it exits.
+#[test]
+fn native_pty_split_writer_drains_queued_input_after_close() {
+    let session = spawn_serialized(shell_intent(
+        "native-writer-drain",
+        "stty -echo; IFS= read line; printf 'drained:%s' \"$line\"",
+    ))
+    .unwrap();
+    let mut parts = session.into_split().unwrap();
+
+    parts.writer.write_input(b"sample\n").unwrap();
+    parts.writer.close_input();
+    assert_eq!(
+        parts.writer.write_input(b"ignored").unwrap_err(),
+        NativePtyError::InputClosed {
+            session_id: PtySessionId::new("native-writer-drain"),
+        }
+    );
+
+    let mut output = Vec::new();
+    for _ in 0..8 {
+        let Some(event) = parts.reader.read_event(1024).unwrap() else {
+            break;
+        };
+        let PtyEvent::Output(chunk) = event else {
+            panic!("expected output event");
+        };
+        output.extend(chunk.into_bytes());
+        if contains_bytes(&output, b"drained:sample") {
+            break;
+        }
+    }
+
+    assert!(contains_bytes(&output, b"drained:sample"));
+    assert_eq!(
+        parts.controller.wait().unwrap().status(),
+        ChildExitStatus::Exited { code: 0 }
+    );
+}
+
+// Dropping the writer while its thread is blocked mid-write must return
+// immediately: the thread is detached and exits on its own once the child
+// dies, so shutdown never waits on a wedged write.
+#[test]
+fn native_pty_split_writer_drop_returns_while_writes_are_blocked() {
+    let session = spawn_serialized(shell_intent("native-writer-shutdown", "sleep 5")).unwrap();
+    let mut parts = session.into_split().unwrap();
+    let chunk = vec![b'x'; 64 * 1024];
+    for _ in 0..8 {
+        parts.writer.write_input(&chunk).unwrap();
+    }
+
+    let started = Instant::now();
+    drop(parts.writer);
+
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "dropping the writer blocked for {:?}",
+        started.elapsed()
+    );
+
+    parts.controller.kill().unwrap();
+    let _ = parts.controller.wait().unwrap();
+}
+
 #[test]
 fn native_pty_split_controller_resizes_matching_session_only() {
-    let session = NativePtySession::spawn(shell_intent("native-split-resize", "sleep 5")).unwrap();
+    let session = spawn_serialized(shell_intent("native-split-resize", "sleep 5")).unwrap();
     let mut parts = session.into_split().unwrap();
     let new_size = PtySize::new(90, 20).unwrap();
 

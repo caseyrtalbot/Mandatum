@@ -475,6 +475,18 @@ impl RuntimeEngine {
             .map(|runtime| runtime.parser.mouse_mode())
     }
 
+    pub(crate) fn terminal_bracketed_paste(&self, pane_id: &PaneId) -> Option<bool> {
+        self.terminals
+            .get(pane_id)
+            .map(|runtime| runtime.parser.bracketed_paste())
+    }
+
+    pub(crate) fn terminal_application_cursor_keys(&self, pane_id: &PaneId) -> Option<bool> {
+        self.terminals
+            .get(pane_id)
+            .map(|runtime| runtime.parser.application_cursor_keys())
+    }
+
     pub(crate) fn write_terminal(
         &mut self,
         pane_id: &PaneId,

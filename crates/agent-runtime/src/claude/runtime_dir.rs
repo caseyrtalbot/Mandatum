@@ -9,6 +9,7 @@
 
 use std::{
     fs, io,
+    os::fd::OwnedFd,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -29,13 +30,24 @@ pub(crate) const ALLOWED_TOOLS: &str = "Read,Glob,Grep,Bash,Write,Edit,MultiEdit
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// The only two entries the launch path ever creates inside a session
+/// directory. Cleanup unlinks these by name and nothing else.
+const SOCKET_FILE_NAME: &str = "approval.sock";
+const SETTINGS_FILE_NAME: &str = "settings.json";
+
 /// Filesystem layout for one live session.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct SessionRuntimeDir {
     /// Where the approval listener binds; removed on shutdown.
     pub(crate) socket_path: PathBuf,
     /// The generated `--settings` file, inside the private session directory.
     pub(crate) settings_path: PathBuf,
+    /// The session directory itself.
+    dir: PathBuf,
+    /// Handle to `dir`, opened when this session created it. Cleanup unlinks
+    /// through this fd rather than through `dir`, so the pathname can never be
+    /// re-resolved to somewhere else between creation and shutdown.
+    dir_fd: OwnedFd,
 }
 
 /// Create an owner-only session directory below the sticky system temporary
@@ -46,11 +58,77 @@ pub(crate) fn prepare_session_dir(_cwd: &Path) -> Result<SessionRuntimeDir, Agen
     create_private_dir(&root)?;
     let dir = root.join(&session_id);
     create_private_dir(&dir)?;
+    bind_session_dir(dir)
+}
 
+/// Bind a runtime-dir handle to a directory that already exists, validating it
+/// through the handle itself.
+fn bind_session_dir(dir: PathBuf) -> Result<SessionRuntimeDir, AgentConnectorError> {
+    let dir_fd = open_private_dir(&dir)?;
     Ok(SessionRuntimeDir {
-        settings_path: dir.join("settings.json"),
-        socket_path: dir.join("approval.sock"),
+        settings_path: dir.join(SETTINGS_FILE_NAME),
+        socket_path: dir.join(SOCKET_FILE_NAME),
+        dir,
+        dir_fd,
     })
+}
+
+impl SessionRuntimeDir {
+    /// Best-effort removal of this session's runtime directory at shutdown.
+    ///
+    /// Only the two entries the launch path created are unlinked, and they are
+    /// unlinked relative to the directory handle opened at creation: a
+    /// same-uid process that rebinds names under the per-user root cannot
+    /// redirect them onto another session's files. The directory itself is
+    /// removed non-recursively and only while it is still an immediate child
+    /// of the per-user root, so a directory someone swapped into this name is
+    /// left alone (it is not empty, and `remove_dir` fails). Cleanup failure
+    /// never fails shutdown.
+    pub(crate) fn cleanup(&self) {
+        use rustix::fs::{AtFlags, unlinkat};
+
+        for name in [SOCKET_FILE_NAME, SETTINGS_FILE_NAME] {
+            let _ = unlinkat(&self.dir_fd, name, AtFlags::empty());
+        }
+        if self.dir.parent() == Some(short_socket_dir().as_path()) {
+            let _ = fs::remove_dir(&self.dir);
+        }
+    }
+}
+
+/// Open a handle to an owner-only directory and re-check ownership and mode
+/// through the handle. `O_NOFOLLOW` keeps the open off symlinks, and the
+/// `fstat` describes the directory now held rather than whatever the name
+/// resolved to a moment earlier.
+fn open_private_dir(dir: &Path) -> Result<OwnedFd, AgentConnectorError> {
+    use rustix::fs::{Mode, OFlags, fstat, open};
+
+    let handle = open(
+        dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| AgentConnectorError::LaunchFailed {
+        message: format!(
+            "could not open runtime directory {}: {error}",
+            dir.display()
+        ),
+    })?;
+    let stat = fstat(&handle).map_err(|error| AgentConnectorError::LaunchFailed {
+        message: format!(
+            "could not inspect runtime directory {}: {error}",
+            dir.display()
+        ),
+    })?;
+    let mode = Mode::from_raw_mode(stat.st_mode as rustix::fs::RawMode);
+    if stat.st_uid != effective_uid()
+        || mode.intersection(Mode::RWXU | Mode::RWXG | Mode::RWXO) != Mode::RWXU
+    {
+        return Err(AgentConnectorError::LaunchFailed {
+            message: format!("{} is not a private runtime directory", dir.display()),
+        });
+    }
+    Ok(handle)
 }
 
 /// Margin the bridge's own verdict timeout keeps under the hook timeout, so
@@ -142,7 +220,7 @@ fn generate_session_id() -> String {
     )
 }
 
-fn short_socket_dir() -> PathBuf {
+pub(crate) fn short_socket_dir() -> PathBuf {
     PathBuf::from(format!("{SHORT_SOCKET_DIR_PREFIX}-{}", effective_uid()))
 }
 
@@ -297,6 +375,94 @@ mod tests {
             create_private_dir(&symlink_path).expect_err("runtime symlink must fail closed");
         assert!(problem.to_string().contains("must not be a symlink"));
         fs::remove_dir_all(&cwd).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+    }
+
+    /// Cleanup unlinks the two entries the launch path wrote and nothing
+    /// else, and the directory only goes if that leaves it empty. Anything
+    /// unexpected inside it survives — there is no recursive removal to reach
+    /// through.
+    #[test]
+    fn cleanup_removes_only_its_own_entries_and_never_recurses() {
+        let cwd = temp_cwd("cleanup");
+        let runtime = prepare_session_dir(&cwd).unwrap();
+        let session_dir = runtime.dir.clone();
+        fs::write(&runtime.settings_path, "{}").unwrap();
+        fs::write(&runtime.socket_path, "").unwrap();
+        let stranger = session_dir.join("not-ours");
+        fs::write(&stranger, "someone else's file").unwrap();
+
+        runtime.cleanup();
+
+        assert!(!runtime.socket_path.exists());
+        assert!(!runtime.settings_path.exists());
+        assert!(
+            stranger.exists(),
+            "cleanup must not remove entries it did not create"
+        );
+        assert!(
+            session_dir.is_dir(),
+            "a non-empty session dir must survive: remove_dir, never remove_dir_all",
+        );
+
+        fs::remove_dir_all(&session_dir).unwrap();
+        fs::remove_dir_all(&cwd).unwrap();
+    }
+
+    /// The session-dir pathname is not proof of identity: a same-uid process
+    /// can move this session's directory aside and rebind the name to one of
+    /// its own. Cleanup unlinks through the handle opened at creation, so it
+    /// follows the directory it created and leaves the impostor untouched.
+    #[test]
+    fn cleanup_follows_the_creation_handle_not_the_pathname() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let cwd = temp_cwd("rebound");
+        let runtime = prepare_session_dir(&cwd).unwrap();
+        let session_dir = runtime.dir.clone();
+        fs::write(&runtime.settings_path, "{}").unwrap();
+        fs::write(&runtime.socket_path, "").unwrap();
+
+        let moved = session_dir.with_extension("moved");
+        fs::rename(&session_dir, &moved).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&session_dir)
+            .unwrap();
+        let other_session_socket = session_dir.join(SOCKET_FILE_NAME);
+        fs::write(&other_session_socket, "another live session").unwrap();
+
+        runtime.cleanup();
+
+        assert!(
+            other_session_socket.exists(),
+            "cleanup must not unlink through a rebound pathname",
+        );
+        assert!(session_dir.is_dir(), "the rebound directory must survive");
+        assert!(!moved.join(SOCKET_FILE_NAME).exists());
+        assert!(!moved.join(SETTINGS_FILE_NAME).exists());
+
+        fs::remove_dir_all(&session_dir).unwrap();
+        fs::remove_dir_all(&moved).unwrap();
+        fs::remove_dir_all(&cwd).unwrap();
+    }
+
+    /// A runtime dir that is not an immediate child of the per-user root is
+    /// never removed, however empty it is.
+    #[test]
+    fn cleanup_never_removes_a_directory_outside_the_private_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let outside = temp_cwd("outside-root");
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = bind_session_dir(outside.clone()).unwrap();
+
+        runtime.cleanup();
+
+        assert!(
+            outside.is_dir(),
+            "cleanup must never remove a directory outside the mandatum root",
+        );
         fs::remove_dir_all(&outside).unwrap();
     }
 

@@ -621,7 +621,6 @@ impl AppState {
                 PaneKind::Task { .. } => PaneSceneKind::Task,
                 PaneKind::Agent { .. } => PaneSceneKind::Agent,
                 PaneKind::Artifact { .. } => PaneSceneKind::Artifact,
-                PaneKind::StatusLog { .. } => PaneSceneKind::StatusLog,
             })
             .unwrap_or(PaneSceneKind::Terminal);
         let focused_pane_label = focused
@@ -749,7 +748,8 @@ impl AppState {
                     && self.session_map.is_none()
                     && self.appearance_view.is_none() =>
             {
-                if self.write_to_focused_terminal(text.as_bytes()) {
+                let bytes = self.encode_paste_for_focused_child(&text);
+                if self.write_to_focused_terminal(&bytes) {
                     self.mark_redraw();
                 }
             }
@@ -1081,7 +1081,13 @@ impl AppState {
             }
         }
 
-        match key_to_input_with_keymap(key, &self.keymap) {
+        // Cursor keys encode the form the focused child's DECCKM state asks
+        // for (SS3 application form for unmodified arrows/Home/End).
+        let application_cursor_keys = self
+            .runtime
+            .terminal_application_cursor_keys(self.workspace.active_session().focused_pane_id())
+            .unwrap_or(false);
+        match key_to_input_with_keymap(key, &self.keymap, application_cursor_keys) {
             RuntimeInput::Quit => {
                 self.should_quit = true;
                 self.status = "quitting".to_owned();
@@ -1380,19 +1386,24 @@ impl AppState {
                         PaneKind::Task { .. } => "task",
                         PaneKind::Agent { .. } => "agent",
                         PaneKind::Artifact { .. } => "artifact",
-                        PaneKind::StatusLog { .. } => "status",
                     };
                     (pane_id.to_string(), kind.to_owned())
                 })
             })
             .collect();
-        let closed: Vec<String> = before.difference(&after).map(ToString::to_string).collect();
+        let closed: Vec<PaneId> = before.difference(&after).cloned().collect();
         for (pane, kind) in created {
             self.timeline
                 .record(TimelineEventKind::PaneCreated { pane, kind });
         }
-        for pane in closed {
-            self.timeline.record(TimelineEventKind::PaneClosed { pane });
+        for pane_id in closed {
+            // Pane-keyed presentation maps follow the pane out; a stale
+            // entry could address an unrelated same-id pane later.
+            self.approval_arrivals.remove(&pane_id);
+            self.pane_grid_revisions.remove(&pane_id);
+            self.timeline.record(TimelineEventKind::PaneClosed {
+                pane: pane_id.to_string(),
+            });
         }
     }
 
@@ -1834,6 +1845,35 @@ impl AppState {
         self.pointer_drag = None;
         self.pointer_forward = None;
         self.context_menu = None;
+        // Pane ids repeat across restores: a restored same-id task pane's
+        // exit must not read as the forgotten update completing, and the
+        // pane-keyed presentation maps must not address the new panes.
+        self.update_pane_id = None;
+        self.approval_arrivals.clear();
+        self.pane_grid_revisions.clear();
+    }
+
+    /// Encode pasted text for the focused child: wrapped in DEC 2004 paste
+    /// guards when the child enabled bracketed paste, raw bytes otherwise.
+    /// Guard sequences embedded in the payload are stripped first so paste
+    /// content can never terminate the bracket early and smuggle the rest of
+    /// the clipboard to the child as typed input.
+    fn encode_paste_for_focused_child(&self, text: &str) -> Vec<u8> {
+        let focused = self.workspace.active_session().focused_pane_id();
+        if !self
+            .runtime
+            .terminal_bracketed_paste(focused)
+            .unwrap_or(false)
+        {
+            return text.as_bytes().to_vec();
+        }
+        let sanitized = strip_paste_guards(text);
+        let mut bytes =
+            Vec::with_capacity(PASTE_GUARD_START.len() + sanitized.len() + PASTE_GUARD_END.len());
+        bytes.extend_from_slice(PASTE_GUARD_START.as_bytes());
+        bytes.extend_from_slice(sanitized.as_bytes());
+        bytes.extend_from_slice(PASTE_GUARD_END.as_bytes());
+        bytes
     }
 
     /// Write child input and report whether the operation changed visible app
@@ -2456,6 +2496,11 @@ impl AppState {
         self.pointer_view = None;
         self.context_menu = None;
         self.objective_prompt = None;
+        // Same-id panes in the new session must not inherit the old
+        // session's update tracking or pane-keyed presentation entries.
+        self.update_pane_id = None;
+        self.approval_arrivals.clear();
+        self.pane_grid_revisions.clear();
     }
 
     /// The live agent runtime view for a pane, if a session is attached.
@@ -3180,6 +3225,13 @@ impl AppState {
             self.close_help();
             return;
         }
+        if self.appearance_view.is_some() {
+            // The appearance overlay is keyboard-driven with no hit targets:
+            // any press closes it, and the press is consumed like the other
+            // modal overlays (no focus steal or click-through underneath).
+            self.close_appearance();
+            return;
+        }
         if self.timeline_view.is_some() {
             if let Some(HitTargetKind::TimelineItem(index)) =
                 target.as_ref().map(|target| target.kind.clone())
@@ -3345,13 +3397,13 @@ impl AppState {
 
         // Begin a cell selection on a live terminal grid (the copy-mode
         // selection model, driven by the pointer). Copy mode owns its own
-        // pane's viewport.
-        if self
-            .copy_mode
-            .as_ref()
-            .is_some_and(|state| state.pane_id == pane_id)
-        {
-            return;
+        // pane's viewport; a press on a different pane exits copy mode so
+        // keys follow the new focus instead of the abandoned copy surface
+        // (the same policy `open_palette` applies).
+        match &self.copy_mode {
+            Some(state) if state.pane_id == pane_id => return,
+            Some(_) => self.copy_mode = None,
+            None => {}
         }
         let scroll_offset = match &self.pointer_view {
             Some(view) if view.pane_id == pane_id => view.scroll_offset,
@@ -3631,6 +3683,12 @@ impl AppState {
             }
             return;
         }
+        if self.appearance_view.is_some() {
+            if dy != 0 {
+                self.move_appearance_selection(isize::from(dy));
+            }
+            return;
+        }
         if self.objective_prompt.is_some() {
             return;
         }
@@ -3890,7 +3948,6 @@ impl AppState {
                 commands.push(CommandId::SetAgentObjective);
             }
             PaneKind::Artifact { .. } => {}
-            PaneKind::StatusLog { .. } => {}
         }
         commands.push(CommandId::NewTerminal);
         // Splits address the tiled tree; a floating pane cannot be split.
@@ -4196,7 +4253,6 @@ impl AppState {
                     }
                 }
                 PaneKind::Artifact { .. } => {}
-                PaneKind::StatusLog { .. } => {}
             }
         }
         let mut timeline = self.timeline.read_tail().events;
@@ -4499,6 +4555,21 @@ impl AppState {
     fn close_appearance(&mut self) {
         self.appearance_view = None;
         self.status = "appearance closed".to_owned();
+    }
+
+    /// Wheel counterpart of the overlay's ↑/↓ keys, mirroring the other
+    /// modal overlays' wheel-moves-selection behavior.
+    fn move_appearance_selection(&mut self, delta: isize) {
+        let row_count = appearance::appearance_fields(self.font_facts.is_some()).len();
+        let Some(view) = self.appearance_view.as_mut() else {
+            return;
+        };
+        if row_count == 0 {
+            view.selected = 0;
+            return;
+        }
+        let current = view.selected.min(row_count - 1) as isize;
+        view.selected = (current + delta).clamp(0, row_count as isize - 1) as usize;
     }
 
     fn handle_appearance_key(&mut self, key: Key) {
@@ -5188,6 +5259,28 @@ impl AppState {
             self.pane_scene_cache.surface_rebuilds,
             self.pane_scene_cache.surface_reuses,
         )
+    }
+}
+
+/// DEC 2004 bracketed-paste guards, as written around a forwarded paste.
+const PASTE_GUARD_START: &str = "\x1b[200~";
+const PASTE_GUARD_END: &str = "\x1b[201~";
+
+/// Remove embedded paste-guard sequences (start and end) from pasted text.
+/// Runs to a fixpoint because a single pass can splice a new guard together
+/// out of the bytes surrounding a removed one (`\x1b[201` + `\x1b[201~` +
+/// `~` collapses to `\x1b[201~`). Each pass strictly shrinks the string, so
+/// the loop terminates.
+fn strip_paste_guards(text: &str) -> String {
+    let mut sanitized = text.to_owned();
+    loop {
+        let stripped = sanitized
+            .replace(PASTE_GUARD_START, "")
+            .replace(PASTE_GUARD_END, "");
+        if stripped == sanitized {
+            return sanitized;
+        }
+        sanitized = stripped;
     }
 }
 

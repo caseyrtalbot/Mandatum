@@ -1035,7 +1035,7 @@ fn chip_tone_fills_keep_label_contrast_and_neutral_badges_stay_plain_text() {
         (PaneBadgeKind::Task, PresentationTone::Running),
         (PaneBadgeKind::Agent, PresentationTone::Waiting),
         (PaneBadgeKind::Artifact, PresentationTone::Failure),
-        (PaneBadgeKind::Status, PresentationTone::Complete),
+        (PaneBadgeKind::Zoomed, PresentationTone::Complete),
         (PaneBadgeKind::Floating, PresentationTone::AgentIdentity),
         (PaneBadgeKind::Stacked, PresentationTone::Neutral),
     ];

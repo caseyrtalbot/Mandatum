@@ -80,6 +80,8 @@ pub enum AgentControlError {
     AlreadyDecided { approval_id: String },
     /// The session's worker has already exited.
     SessionClosed,
+    /// A signal to the session's process group could not be delivered.
+    SignalFailed { message: String },
 }
 
 impl fmt::Display for AgentControlError {
@@ -93,6 +95,9 @@ impl fmt::Display for AgentControlError {
                 write!(f, "approval {approval_id:?} already has a decision")
             }
             Self::SessionClosed => write!(f, "the agent session is closed"),
+            Self::SignalFailed { message } => {
+                write!(f, "failed to signal the agent session: {message}")
+            }
         }
     }
 }

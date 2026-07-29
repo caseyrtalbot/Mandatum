@@ -1864,7 +1864,6 @@ fn pane_scene(
         PaneKind::Artifact { intent } => {
             PaneContent::Artifact(state.artifact_content(pane.id(), intent))
         }
-        PaneKind::StatusLog { .. } => PaneContent::Empty(empty_content(state, pane)),
     };
 
     let mut scene = PaneScene {
@@ -2087,7 +2086,6 @@ fn pane_scene_kind(kind: &PaneKind) -> PaneSceneKind {
         PaneKind::Task { .. } => PaneSceneKind::Task,
         PaneKind::Agent { .. } => PaneSceneKind::Agent,
         PaneKind::Artifact { .. } => PaneSceneKind::Artifact,
-        PaneKind::StatusLog { .. } => PaneSceneKind::StatusLog,
     }
 }
 

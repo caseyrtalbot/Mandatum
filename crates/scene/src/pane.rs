@@ -47,7 +47,6 @@ pub enum PaneBadgeKind {
     Task,
     Agent,
     Artifact,
-    Status,
     Floating,
     Stacked,
     Zoomed,
@@ -62,7 +61,6 @@ impl PaneBadgeKind {
             Self::Task => "task",
             Self::Agent => "agent",
             Self::Artifact => "artifact",
-            Self::Status => "status",
             Self::Floating => "floating",
             Self::Stacked => "stack",
             Self::Zoomed => "zoom",
@@ -81,7 +79,6 @@ impl PaneScene {
             PaneSceneKind::Task => PaneBadgeKind::Task,
             PaneSceneKind::Agent => PaneBadgeKind::Agent,
             PaneSceneKind::Artifact => PaneBadgeKind::Artifact,
-            PaneSceneKind::StatusLog => PaneBadgeKind::Status,
         }];
         if self.floating {
             badges.push(PaneBadgeKind::Floating);
@@ -310,7 +307,6 @@ pub enum PaneSceneKind {
     Task,
     Agent,
     Artifact,
-    StatusLog,
 }
 
 impl PaneSceneKind {
@@ -320,7 +316,6 @@ impl PaneSceneKind {
             Self::Task => "task",
             Self::Agent => "agent",
             Self::Artifact => "artifact",
-            Self::StatusLog => "status",
         }
     }
 }

@@ -72,7 +72,6 @@ pub enum PaneKind {
     Task { intent: TaskPaneIntent },
     Agent { intent: AgentPaneIntent },
     Artifact { intent: ArtifactPaneIntent },
-    StatusLog { source: StatusLogSource },
 }
 
 /// Durable intent for one project-local artifact preview.
@@ -170,13 +169,4 @@ pub enum AgentStatus {
     Failed,
     Complete,
     Unknown,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StatusLogSource {
-    Workspace,
-    Project,
-    Tasks,
-    Agents,
 }

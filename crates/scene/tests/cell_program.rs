@@ -195,7 +195,6 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
         agent_waiting: SceneColor::Rgb(140, 141, 142),
         agent_failed: SceneColor::Rgb(150, 151, 152),
         agent_complete: SceneColor::Rgb(160, 161, 162),
-        agent_idle: SceneColor::Rgb(170, 171, 172),
     };
     let task_id = PaneId::new("task-pane");
     let agent_id = PaneId::new("agent-pane");
@@ -281,7 +280,7 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
                 content_revision: 0,
                 id: empty_id,
                 title: "empty".to_owned(),
-                kind: PaneSceneKind::StatusLog,
+                kind: PaneSceneKind::Terminal,
                 area: SceneRect::new(20, 8, 30, 10),
                 focused: false,
                 floating: true,
@@ -1261,7 +1260,7 @@ fn ready_artifact_marks_only_its_final_visible_body_cells() {
                 content_revision: 0,
                 id: later_id.clone(),
                 title: "later".to_owned(),
-                kind: PaneSceneKind::StatusLog,
+                kind: PaneSceneKind::Terminal,
                 area: SceneRect::new(10, 5, 8, 4),
                 focused: false,
                 floating: true,

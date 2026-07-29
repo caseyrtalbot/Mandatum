@@ -121,11 +121,11 @@ impl Drop for PtyFlowCredit {
     }
 }
 
-/// Drop the read-buffer slack before charging flow control: `read_event`
-/// hands back a chunk-capacity allocation no matter how few bytes the read
-/// returned, while the flow credit charges only `len`. Right-sizing keeps
-/// charged bytes equal to retained allocation, so fragmented short reads
-/// cannot hold chunk-sized buffers far beyond the in-flight window.
+/// Drop any read-buffer slack before charging flow control. The PTY reader
+/// now hands back exact-sized chunks, so this is normally a no-op; it pins
+/// the invariant locally all the same: the flow credit charges only `len`,
+/// so retained allocation must equal charged bytes even if the reader
+/// implementation changes.
 fn right_size_chunk(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes.shrink_to_fit();
     bytes
@@ -181,8 +181,7 @@ pub(crate) fn spawn_reader_thread(
                         break;
                     }
                 }
-                Ok(Some(PtyEvent::ChildExited(_))) | Ok(Some(PtyEvent::BackpressureChanged(_))) => {
-                }
+                Ok(Some(PtyEvent::ChildExited(_))) => {}
                 Ok(None) => {
                     let _ = tx.send(AppEvent::Pty(
                         PtyRuntimeEvent::ReaderClosed {

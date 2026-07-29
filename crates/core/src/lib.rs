@@ -13,7 +13,7 @@ pub use ids::{PaneId, ProjectId, SessionId, WorkspaceId};
 pub use layout::{FloatingPane, FloatingRect, Layout, LayoutNode, SplitAxis, SplitDirection};
 pub use pane::{
     AgentApprovalRecord, AgentPaneIntent, AgentStatus, ArtifactFit, ArtifactPaneIntent, PaneKind,
-    PaneSpec, StatusLogSource, TaskPaneIntent,
+    PaneSpec, TaskPaneIntent,
 };
 pub use persistence::{
     PersistedWorkspace, PersistenceError, SESSION_SCHEMA_VERSION, deserialize_workspace,

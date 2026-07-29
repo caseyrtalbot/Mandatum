@@ -15,8 +15,10 @@ use glyphon::{
 // The renderer consumes ONLY the scene contract. It never imports
 // mandatum-terminal-vt: the real app host converts its grids before the
 // snapshot reaches this crate, so no parser type crosses into paint.
+#[cfg(test)]
+use mandatum_scene::CellOccupancy;
 use mandatum_scene::{
-    ArtifactState, CellOccupancy, CellProgram, CellSelection, LogicalRect, OverlayScene,
+    ArtifactState, CellProgram, CellSelection, LogicalRect, OverlayScene,
     PaneContent, PaneNodePart, PresentationNodeId, PresentationNodeRole, ProgramCell,
     RasterSurface, SceneColor, SceneRect, TerminalPalette, TextPaintScopeKind, Theme, UiColor,
     TransitionRole, WorkflowNodePart, WorkspaceScene, compile_cell_program, layout,
@@ -880,6 +882,24 @@ impl RowBufferPool {
     }
 }
 
+/// Colors and text flags for one final topmost cell, resolved without
+/// materializing its grapheme. The render path only needs paint here — glyph
+/// text flows through row runs — so keeping this `Copy` and string-free keeps
+/// per-cell resolution allocation-free on the hot path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedCellPaint {
+    foreground: [u8; 4],
+    background: [u8; 4],
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+}
+
+/// Test-only full materialization: paint plus the grapheme string, so tests
+/// can assert blank/continuation cell text without the render path paying for
+/// per-cell string allocation.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResolvedCell {
     grapheme: String,
@@ -910,7 +930,7 @@ fn native_frame_colors(theme: &Theme) -> NativeFrameColors {
 
 #[derive(Debug)]
 struct PreparedCellProgram {
-    cells: Vec<(u16, u16, ResolvedCell, bool, TextPaintScopeKind, bool)>,
+    cells: Vec<(u16, u16, ResolvedCellPaint, bool, TextPaintScopeKind, bool)>,
     rows: Vec<RowRun>,
     /// Box-drawing/block-element cells intercepted before shaping. They are
     /// emitted as quads at exact snapped cell bounds instead of glyphs.
@@ -1545,7 +1565,7 @@ fn raster_replacement_layers(
         .collect()
 }
 
-fn resolve_program_cell(cell: &ProgramCell, theme: &Theme, surface_srgb: bool) -> ResolvedCell {
+fn resolve_cell_paint(cell: &ProgramCell, theme: &Theme, surface_srgb: bool) -> ResolvedCellPaint {
     let palette = &theme.terminal_palette;
     let mut foreground = resolve(cell.style.foreground, palette.foreground, palette);
     let mut background = resolve(cell.style.background, palette.background, palette);
@@ -1579,6 +1599,20 @@ fn resolve_program_cell(cell: &ProgramCell, theme: &Theme, surface_srgb: bool) -
         std::mem::swap(&mut foreground, &mut background);
     }
 
+    let alpha = if cell.style.dim { 150 } else { 255 };
+    ResolvedCellPaint {
+        foreground: [foreground[0], foreground[1], foreground[2], alpha],
+        background: [background[0], background[1], background[2], 255],
+        bold: cell.style.bold,
+        italic: cell.style.italic,
+        underline: cell.style.underline,
+        strikethrough: cell.style.strikethrough,
+    }
+}
+
+#[cfg(test)]
+fn resolve_program_cell(cell: &ProgramCell, theme: &Theme, surface_srgb: bool) -> ResolvedCell {
+    let paint = resolve_cell_paint(cell, theme, surface_srgb);
     let grapheme = if cell.style.hidden {
         " ".to_owned()
     } else {
@@ -1590,26 +1624,25 @@ fn resolve_program_cell(cell: &ProgramCell, theme: &Theme, surface_srgb: bool) -
             CellOccupancy::Cluster(cluster) => cluster.clone(),
         }
     };
-    let alpha = if cell.style.dim { 150 } else { 255 };
     ResolvedCell {
         grapheme,
-        foreground: [foreground[0], foreground[1], foreground[2], alpha],
-        background: [background[0], background[1], background[2], 255],
-        bold: cell.style.bold,
-        italic: cell.style.italic,
-        underline: cell.style.underline,
-        strikethrough: cell.style.strikethrough,
+        foreground: paint.foreground,
+        background: paint.background,
+        bold: paint.bold,
+        italic: paint.italic,
+        underline: paint.underline,
+        strikethrough: paint.strikethrough,
     }
 }
 
 fn resolved_glyph_style(cell: &ProgramCell, theme: &Theme, surface_srgb: bool) -> ResolvedGlyphStyle {
-    let cell = resolve_program_cell(cell, theme, surface_srgb);
+    let paint = resolve_cell_paint(cell, theme, surface_srgb);
     ResolvedGlyphStyle {
-        foreground: cell.foreground,
-        bold: cell.bold,
-        italic: cell.italic,
-        underline: cell.underline,
-        strikethrough: cell.strikethrough,
+        foreground: paint.foreground,
+        bold: paint.bold,
+        italic: paint.italic,
+        underline: paint.underline,
+        strikethrough: paint.strikethrough,
     }
 }
 
@@ -1631,7 +1664,7 @@ fn prepare_cell_program(
             (
                 x,
                 y,
-                resolve_program_cell(cell, theme, surface_srgb),
+                resolve_cell_paint(cell, theme, surface_srgb),
                 should_paint_cell_background(scene, legacy_presentation, x, y, cell, scope.kind),
                 scope.kind,
                 cell.cursor,
@@ -2903,6 +2936,10 @@ pub struct GpuText {
     /// rebuilds identical bytes the upload is skipped; the comparison is
     /// content-based, so it can never publish a stale frame.
     uploaded_quads: Vec<f32>,
+    /// Same content-skip contract as `uploaded_quads`, for `material_inst_buf`
+    /// and `raster_inst_buf`.
+    uploaded_material_instances: Vec<f32>,
+    uploaded_raster_instances: Vec<f32>,
     material_inst_buf: wgpu::Buffer,
     material_inst_capacity_floats: usize,
     res_buf: wgpu::Buffer,
@@ -3376,6 +3413,8 @@ impl GpuText {
             frame_material_instances: Vec::new(),
             frame_raster_instances: Vec::new(),
             uploaded_quads: Vec::new(),
+            uploaded_material_instances: Vec::new(),
+            uploaded_raster_instances: Vec::new(),
             material_inst_buf,
             material_inst_capacity_floats,
             res_buf,
@@ -3628,6 +3667,8 @@ impl GpuText {
         let scale = self.scale;
         let next_device_generation = self.device_generation.saturating_add(1);
         let next_surface_generation = self.surface_generation.saturating_add(1);
+        let shaping_cache_stats = self.shaping_cache.stats();
+        let shaping_cache_had_entries = self.shaping_cache.len() > 0;
         let mut replacement =
             Self::new_with_device_generation(self.window.clone(), profile, next_device_generation)
                 .await?;
@@ -3642,7 +3683,16 @@ impl GpuText {
         replacement.surface_reconfigurations = self.surface_reconfigurations;
         replacement.device_recreations = self.device_recreations;
         replacement.injected_faults = self.injected_faults;
+        // Lifecycle telemetry survives exactly as it does across
+        // `recreate_device`; only the fallback report stays fresh, because it
+        // is keyed to the new profile's font generation.
+        replacement.raster_cache_entries_high_water = self.raster_cache_entries_high_water;
+        replacement.raster_cache_bytes_high_water = self.raster_cache_bytes_high_water;
+        replacement.row_run_diagnostics = self.row_run_diagnostics.clone();
         replacement.shaping_cache_enabled = self.shaping_cache_enabled;
+        replacement
+            .shaping_cache
+            .preserve_stats_after_cold_reset(shaping_cache_stats, shaping_cache_had_entries);
         retire_gpu_generation(&self.device_fault, next_device_generation);
         *self = replacement;
         Ok(())
@@ -3954,12 +4004,19 @@ impl GpuText {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            // A fresh buffer holds nothing; the retained upload copy must not
+            // satisfy the skip comparison against it.
+            self.uploaded_material_instances.clear();
         }
-        if !self.frame_material_instances.is_empty() {
+        if commit_instance_upload(
+            &mut self.frame_material_instances,
+            &mut self.uploaded_material_instances,
+        ) && !self.uploaded_material_instances.is_empty()
+        {
             self.queue.write_buffer(
                 &self.material_inst_buf,
                 0,
-                bytes_of_slice(&self.frame_material_instances),
+                bytes_of_slice(&self.uploaded_material_instances),
             );
         }
         let frame_colors = native_frame_colors(theme);
@@ -4080,12 +4137,19 @@ impl GpuText {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            // A fresh buffer holds nothing; the retained upload copy must not
+            // satisfy the skip comparison against it.
+            self.uploaded_raster_instances.clear();
         }
-        if !self.frame_raster_instances.is_empty() {
+        if commit_instance_upload(
+            &mut self.frame_raster_instances,
+            &mut self.uploaded_raster_instances,
+        ) && !self.uploaded_raster_instances.is_empty()
+        {
             self.queue.write_buffer(
                 &self.raster_inst_buf,
                 0,
-                bytes_of_slice(&self.frame_raster_instances),
+                bytes_of_slice(&self.uploaded_raster_instances),
             );
         }
 
@@ -4105,52 +4169,77 @@ impl GpuText {
             },
         );
 
-        let text_areas = rows.iter().map(|row| {
-            let profile = row_shaping_profile(&row.row, metrics, self.cell_w, self.scale);
-            let area = row_text_area_geometry(
-                &row.row,
-                profile,
-                self.cell_w,
-                self.cell_h,
-                self.scale,
-                self.config.width,
-                self.config.height,
-            );
-            TextArea {
-                buffer: match &row.buffer {
-                    ShapedBuffer::Shared(buffer) => buffer.as_ref(),
-                    ShapedBuffer::RowPool(index) => &self.row_buffers.rows[*index],
-                },
-                left: area.left,
-                top: area.top,
-                scale: 1.0,
-                bounds: area.bounds,
-                default_color: GColor::rgb(
-                    frame_colors.default_foreground[0],
-                    frame_colors.default_foreground[1],
-                    frame_colors.default_foreground[2],
-                ),
-                custom_glyphs: &[],
-            }
-        });
-        if self
-            .text_renderer
-            .prepare(
+        let text_areas = || {
+            rows.iter().map(|row| {
+                let profile = row_shaping_profile(&row.row, metrics, self.cell_w, self.scale);
+                let area = row_text_area_geometry(
+                    &row.row,
+                    profile,
+                    self.cell_w,
+                    self.cell_h,
+                    self.scale,
+                    self.config.width,
+                    self.config.height,
+                );
+                TextArea {
+                    buffer: match &row.buffer {
+                        ShapedBuffer::Shared(buffer) => buffer.as_ref(),
+                        ShapedBuffer::RowPool(index) => &self.row_buffers.rows[*index],
+                    },
+                    left: area.left,
+                    top: area.top,
+                    scale: 1.0,
+                    bounds: area.bounds,
+                    default_color: GColor::rgb(
+                        frame_colors.default_foreground[0],
+                        frame_colors.default_foreground[1],
+                        frame_colors.default_foreground[2],
+                    ),
+                    custom_glyphs: &[],
+                }
+            })
+        };
+        let mut prepared_text = self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            text_areas(),
+            &mut self.swash_cache,
+        );
+        if prepared_text.is_err() {
+            // A full atlas may only be full of glyphs still pinned by
+            // `glyphs_in_use` marks from earlier frames. Trim clears those
+            // marks, so one retry can evict stale glyphs before the failure
+            // is surfaced as fatal.
+            self.atlas.trim();
+            prepared_text = self.text_renderer.prepare(
                 &self.device,
                 &self.queue,
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                text_areas,
+                text_areas(),
                 &mut self.swash_cache,
-            )
-            .is_err()
-        {
+            );
+        }
+        if prepared_text.is_err() {
             if let Some(fault) = take_gpu_fault(&self.device_fault, self.device_generation) {
                 return Err(fault);
             }
             return Err(GpuRenderError::TextAtlasFull);
         }
+        // glyphon refuses to evict any key in `glyphs_in_use` and only
+        // `trim()` clears that set. Trimming directly after `prepare` covers
+        // every exit path that registered this frame's glyphs — including
+        // non-presented exits like Timeout or Occluded, which previously
+        // skipped the post-present trim and grew the atlas until
+        // `TextAtlasFull` under streaming output. Trim only clears the in-use
+        // marks; this frame's rasterized glyphs stay resident for the render
+        // pass below, and the next `prepare` re-registers every glyph it
+        // still needs.
+        self.atlas.trim();
         let frame_prepare = frame_prepare_started.elapsed();
         let timings = GpuFrameTimings {
             shaping,
@@ -4345,11 +4434,6 @@ impl GpuText {
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
-        // glyphon refuses to evict any key in `glyphs_in_use` and only
-        // `trim()` clears that set; trimming once per presented frame keeps
-        // glyph churn from growing the atlas until `TextAtlasFull`. The next
-        // `prepare` re-registers every glyph it still needs.
-        self.atlas.trim();
         store_prepared_scene(&mut self.prepared_scene_cache, cache_key, prepared);
         let present = Instant::now();
         if reconfigure_after_present {
@@ -4458,7 +4542,7 @@ fn indexed_palette(i: u8) -> [u8; 3] {
 /// `cell_w`/`cell_h` are whole physical pixels, so an `n`-cell instance covers
 /// exactly the same pixels as `n` single-cell instances.
 fn build_cell_background_instances(
-    cells: &[(u16, u16, ResolvedCell, bool, TextPaintScopeKind, bool)],
+    cells: &[(u16, u16, ResolvedCellPaint, bool, TextPaintScopeKind, bool)],
     cell_w: f32,
     cell_h: f32,
     base: &mut Vec<f32>,
@@ -4650,12 +4734,18 @@ fn font_family(family: &str) -> Family<'_> {
     }
 }
 
-fn bytes_of<T: Copy>(value: &T) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) }
+// Deliberately concrete over `f32`: a generic `T: Copy` version would admit
+// padded types, whose padding bytes are uninitialized and undefined behavior
+// to read through a `&[u8]` view. `f32` arrays and slices have no padding.
+fn bytes_of<const N: usize>(value: &[f32; N]) -> &[u8] {
+    bytes_of_slice(value)
 }
 
-fn bytes_of_slice<T: Copy>(slice: &[T]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
+fn bytes_of_slice(slice: &[f32]) -> &[u8] {
+    // SAFETY: `f32` has no padding or invalid bit patterns, the slice's
+    // allocation spans `size_of_val` initialized bytes, and `u8` alignment
+    // is never stricter than `f32`'s.
+    unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), std::mem::size_of_val(slice)) }
 }
 
 const QUAD_WGSL: &str = r#"
@@ -6169,7 +6259,7 @@ mod tests {
     fn final_cell_markers_clip_artifacts_behind_later_panes() {
         let artifact = pane(PaneSceneKind::Artifact, ready_artifact(4, 2, 1));
         let mut covering = pane(
-            PaneSceneKind::StatusLog,
+            PaneSceneKind::Terminal,
             PaneContent::Empty(EmptyContent {
                 cwd_label: "/tmp".to_owned(),
                 restart_generation: 0,
@@ -6493,7 +6583,7 @@ mod tests {
         };
         let tiled = pane(PaneSceneKind::Terminal, PaneContent::Terminal(surface));
         let mut floating = pane(
-            PaneSceneKind::StatusLog,
+            PaneSceneKind::Terminal,
             PaneContent::Empty(EmptyContent {
                 cwd_label: "/tmp".to_owned(),
                 restart_generation: 0,
@@ -6522,7 +6612,13 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(final_cells.len(), 1);
-        assert_eq!(final_cells[0].2.grapheme, " ");
+        // The translated tuple carries paint only; the topmost compiled cell
+        // itself must materialize as a blank grapheme.
+        let topmost = prepared
+            .cell_program()
+            .cell_at(3, 6)
+            .expect("topmost compiled cell");
+        assert_eq!(resolve_program_cell(topmost, &theme, true).grapheme, " ");
         assert_eq!(
             final_cells[0].2.background,
             [
@@ -7199,8 +7295,7 @@ mod tests {
     /// the `base_instance_count` draw ordering intact.
     #[test]
     fn background_instances_merge_same_color_runs_within_the_base_batch_only() {
-        let cell = |background: [u8; 4]| ResolvedCell {
-            grapheme: " ".to_owned(),
+        let cell = |background: [u8; 4]| ResolvedCellPaint {
             foreground: [255, 255, 255, 255],
             background,
             bold: false,
@@ -8009,7 +8104,7 @@ mod tests {
         let mut horizontal_first = pane(PaneSceneKind::Terminal, terminal_content());
         horizontal_first.area = SceneRect::new(0, 1, 40, 22);
         horizontal_first.focused = false;
-        let mut horizontal_second = pane(PaneSceneKind::StatusLog, empty());
+        let mut horizontal_second = pane(PaneSceneKind::Terminal, empty());
         horizontal_second.id = PaneId::new("pane-2");
         horizontal_second.area = SceneRect::new(40, 1, 40, 22);
         let mut horizontal = scene(vec![horizontal_first, horizontal_second]);

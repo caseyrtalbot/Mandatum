@@ -102,7 +102,10 @@ fn filter_indices(events: &[TimelineEvent], query: &str, now_ms: u64) -> Vec<usi
 
 /// Parse "30s" / "5m" / "2h" / "1d" into milliseconds.
 fn parse_duration_ms(text: &str) -> Option<u64> {
-    let (digits, unit) = text.split_at(text.len().checked_sub(1)?);
+    // `split_at_checked` returns None when the last character is multi-byte
+    // (the split index lands inside it), which is just another unparsable
+    // window.
+    let (digits, unit) = text.split_at_checked(text.len().checked_sub(1)?)?;
     let value: u64 = digits.parse().ok()?;
     let unit_ms = match unit {
         "s" => 1_000,
@@ -297,6 +300,9 @@ mod tests {
             filter_indices(&events, "since:banana", now),
             Vec::<usize>::new()
         );
+        // A multi-byte final character must not panic on a char boundary;
+        // it is unparsable, so it matches nothing like any other bad window.
+        assert_eq!(filter_indices(&events, "since:é", now), Vec::<usize>::new());
     }
 
     #[test]

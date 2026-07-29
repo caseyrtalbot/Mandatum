@@ -1411,6 +1411,7 @@ name = "mandatum-agent-runtime"
 version = "0.5.0"
 dependencies = [
  "mandatum-core",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
 ]
