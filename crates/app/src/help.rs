@@ -39,6 +39,16 @@ pub(crate) fn help_rows(keymap: &Keymap) -> Vec<HelpEntry> {
     let mut rows = Vec::new();
     let palette_chord = format_chord(keymap.toggle_palette);
 
+    // The running version, from the same compiled-in value `mandatum
+    // --version` reports. Help is where a user looks for it; availability of
+    // a newer one is the header's job, not this table's.
+    rows.push(heading("mandatum", "Mandatum"));
+    rows.push(entry(
+        "mandatum-version",
+        "Version",
+        crate::updater::CURRENT_VERSION.to_owned(),
+    ));
+
     rows.push(heading("workspace-control", "Workspace control"));
     rows.push(entry(
         "workspace-command-palette",
@@ -319,6 +329,21 @@ mod tests {
             row(&rows, "Move float left").keys,
             "palette (type to search)"
         );
+    }
+
+    #[test]
+    fn help_states_the_running_version_and_finds_it_by_search() {
+        let rows = help_rows(&Keymap::default());
+        assert_eq!(row(&rows, "Version").keys, crate::updater::CURRENT_VERSION);
+        // The version is reachable the way a user looks for it.
+        for query in ["version", crate::updater::CURRENT_VERSION] {
+            assert!(
+                filter_help_rows(&rows, query)
+                    .iter()
+                    .any(|row| row.label == "Version"),
+                "searching help for {query:?} must surface the version"
+            );
+        }
     }
 
     #[test]

@@ -3,6 +3,11 @@
 //! segments with resolved rects, so a stranger reads session state from the
 //! top line alone. When nothing needs attention the strip shows calm
 //! session facts — never blank, never noisy.
+//!
+//! The update lifecycle rides the same segment mechanism at a calm tone, but
+//! it is not attention: it appends after whatever the line already says
+//! rather than replacing the calm facts, because an available update blocks
+//! nothing.
 
 use mandatum_core::{AgentStatus, PaneId, PaneKind, Session};
 use mandatum_scene::{
@@ -116,6 +121,27 @@ fn attention_items(state: &AppState, session: &Session) -> Vec<AttentionItem> {
     items
 }
 
+/// The update lifecycle's one segment, when there is something to say. An
+/// installed update outranks an available one: once the swap has happened,
+/// reopening is the only step left.
+fn update_item(state: &AppState) -> Option<AttentionItem> {
+    if state.update_installed() {
+        return Some(AttentionItem {
+            kind: AttentionKind::UpdateInstalled,
+            tone: PresentationTone::Complete,
+            label: "updated · reopen to finish".to_owned(),
+            pane: None,
+        });
+    }
+    let version = state.update_available()?;
+    Some(AttentionItem {
+        kind: AttentionKind::UpdateAvailable,
+        tone: PresentationTone::Complete,
+        label: format!("{version} available"),
+        pane: None,
+    })
+}
+
 /// Build the header scene for one frame: the composed strip text plus
 /// attention segments at their exact char offsets, so frontends paint the
 /// text and restyle the segments without recomputing anything.
@@ -127,7 +153,26 @@ pub(crate) fn header_scene(state: &AppState, area: SceneRect) -> HeaderScene {
 
     // "·" is the one separator across all chrome; the header is no exception.
     let mut text = format!(" {} ·", state.workspace().name());
-    let mut attention = Vec::with_capacity(items.len());
+    let mut attention = Vec::with_capacity(items.len() + 1);
+
+    // Append one segment's label to `text` and record its resolved rect at
+    // the offset the label just landed on.
+    let push_segment =
+        |text: &mut String, attention: &mut Vec<AttentionSegment>, item: AttentionItem| {
+            let start = u16::try_from(display_width(text)).unwrap_or(u16::MAX);
+            text.push_str(&item.label);
+            let width = u16::try_from(display_width(&item.label)).unwrap_or(u16::MAX);
+            let x = area.x.saturating_add(start);
+            let clamped_width = width.min(area.right().saturating_sub(x));
+            attention.push(AttentionSegment {
+                kind: item.kind,
+                tone: item.tone,
+                rect: SceneRect::new(x, area.y, clamped_width, area.height.min(1)),
+                label: item.label,
+                pane: item.pane,
+            });
+        };
+
     if items.is_empty() {
         let pane_count = session.panes().len();
         text.push_str(&format!(
@@ -152,22 +197,18 @@ pub(crate) fn header_scene(state: &AppState, area: SceneRect) -> HeaderScene {
                 text.push_str(" ·");
             }
             text.push(' ');
-            let start = u16::try_from(display_width(&text)).unwrap_or(u16::MAX);
-            text.push_str(&item.label);
-            let width = u16::try_from(display_width(&item.label)).unwrap_or(u16::MAX);
-            let x = area.x.saturating_add(start);
-            let clamped_width = width.min(area.right().saturating_sub(x));
-            attention.push(AttentionSegment {
-                kind: item.kind,
-                tone: item.tone,
-                rect: SceneRect::new(x, area.y, clamped_width, area.height.min(1)),
-                label: item.label,
-                pane: item.pane,
-            });
+            push_segment(&mut text, &mut attention, item);
         }
     }
     if zoomed {
         text.push_str(" · zoom");
+    }
+    // The update segment rides last on either line: it is the only strip
+    // fact that is not about this session, and it must never displace one
+    // that is.
+    if let Some(item) = update_item(state) {
+        text.push_str(" · ");
+        push_segment(&mut text, &mut attention, item);
     }
 
     HeaderScene {

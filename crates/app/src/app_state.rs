@@ -18,10 +18,10 @@ use mandatum_core::{
 };
 use mandatum_pty::PtySize;
 use mandatum_scene::{
-    ArtifactState, ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget, HitTargetKind,
-    LogicalHitTarget, LogicalPoint, OverlayScene, PaletteOverlay, PaneSceneKind, PromptOverlay,
-    SceneRect, SceneSize, SearchOverlay, SemanticKey, SessionMapOverlay, Theme, TimelineOverlay,
-    ViewportMetrics, WelcomeOverlay, WorkspaceScene,
+    ArtifactState, AttentionKind, ContextMenuEntry, ContextMenuOverlay, HelpOverlay, HitTarget,
+    HitTargetKind, LogicalHitTarget, LogicalPoint, OverlayScene, PaletteOverlay, PaneSceneKind,
+    PromptOverlay, SceneRect, SceneSize, SearchOverlay, SemanticKey, SessionMapOverlay, Theme,
+    TimelineOverlay, ViewportMetrics, WelcomeOverlay, WorkspaceScene,
     cell_program::scalar_range_to_columns,
     input::{
         CompositionEvent, InputEvent, Key, KeyCode, PointerButton, PointerEvent, PointerKind,
@@ -519,20 +519,25 @@ impl AppState {
     /// chord, the right-click menu, and the help key are always written on
     /// screen.
     pub(crate) fn control_hint(&self) -> String {
-        let mut hint = format!(
+        format!(
             "{} commands · right-click menu · {} help",
             format_chord(self.keymap.toggle_palette),
             help_route(&self.keymap)
-        );
-        // Update facts persist here — transient status lines get overwritten
-        // by the next action, and an available or half-finished update must
-        // stay written on screen.
-        if self.update_installed {
-            hint.push_str(" · updated: reopen to finish");
-        } else if let Some(version) = &self.update_available {
-            hint.push_str(&format!(" · {version} available: update"));
-        }
-        hint
+        )
+    }
+
+    /// A newer release seen by the launch-time check, for the header's update
+    /// segment. Update facts live in the header, not the status strip:
+    /// transient status lines get overwritten by the next action, and a
+    /// pending or half-finished update must stay written on screen.
+    pub(crate) fn update_available(&self) -> Option<&str> {
+        self.update_available.as_deref()
+    }
+
+    /// Whether an update landed in the bundle this session, leaving only the
+    /// reopen.
+    pub(crate) fn update_installed(&self) -> bool {
+        self.update_installed
     }
 
     /// Whether the config asked for reduced motion. Nothing animates yet;
@@ -1703,8 +1708,9 @@ impl AppState {
             }
             AppEvent::UpdateAvailable(version) => {
                 if crate::updater::version_is_newer(&version, crate::updater::CURRENT_VERSION) {
-                    self.status =
-                        format!("Mandatum {version} is available · palette: Update Mandatum");
+                    self.status = format!(
+                        "Mandatum {version} is available · click the header note, or palette: Update Mandatum"
+                    );
                     self.update_available = Some(version);
                     self.mark_redraw();
                 }
@@ -3283,8 +3289,27 @@ impl AppState {
             // The status strip is the workspace's own front door: clicking
             // it opens the command palette named in its permanent hint.
             (HitTargetKind::StatusStrip, Some(PointerButton::Left)) => self.open_palette(),
-            // An attention segment jumps straight to the pane that needs
-            // eyes (the keyboard route is Focus next waiting agent).
+            // The update segment is the in-app update door: clicking it runs
+            // the same command the palette does. Every other attention
+            // segment jumps straight to the pane that needs eyes (the
+            // keyboard route is Focus next waiting agent).
+            (
+                HitTargetKind::AttentionSegment {
+                    kind: AttentionKind::UpdateAvailable,
+                    ..
+                },
+                Some(PointerButton::Left),
+            ) => self.update_mandatum(),
+            (
+                HitTargetKind::AttentionSegment {
+                    kind: AttentionKind::UpdateInstalled,
+                    ..
+                },
+                Some(PointerButton::Left),
+            ) => {
+                self.status = "quit and reopen Mandatum to finish the update".to_owned();
+                self.mark_redraw();
+            }
             (HitTargetKind::AttentionSegment { pane, .. }, Some(PointerButton::Left)) => match pane
             {
                 Some(pane_id) => self.focus_pane_for_pointer(&pane_id),

@@ -12,15 +12,22 @@ impl Compiler {
         self.paint_rect(header.area, base);
         self.paint_text(header.area, &header.text, base);
 
-        let attention = SceneCellStyle {
-            foreground: theme.attention,
-            background: theme.header_background,
-            bold: true,
-            ..SceneCellStyle::default()
-        };
+        // Blocking conditions take the theme's attention color; a calm
+        // segment (an available update) takes the complete accent, so the
+        // strip never spends alarm on something that blocks nothing.
         for segment in &header.attention {
-            self.paint_rect(segment.rect, attention);
-            self.paint_text(segment.rect, &segment.label, attention);
+            let style = SceneCellStyle {
+                foreground: if segment.kind.is_blocking() {
+                    theme.attention
+                } else {
+                    theme.agent_complete
+                },
+                background: theme.header_background,
+                bold: true,
+                ..SceneCellStyle::default()
+            };
+            self.paint_rect(segment.rect, style);
+            self.paint_text(segment.rect, &segment.label, style);
         }
     }
 

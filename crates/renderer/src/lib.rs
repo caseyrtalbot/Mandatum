@@ -446,6 +446,30 @@ mod tests {
     }
 
     #[test]
+    fn a_non_blocking_segment_takes_the_calm_accent_not_the_attention_color() {
+        let mut scene = scene(vec![pane(PaneContent::Terminal(text_surface(&["sh"])))]);
+        let text = " Mandatum | 0.8.0 available";
+        let label = "0.8.0 available";
+        let start = (text.chars().count() - label.chars().count()) as u16;
+        scene.header.text = text.to_owned();
+        scene.header.attention = vec![AttentionSegment {
+            kind: AttentionKind::UpdateAvailable,
+            tone: PresentationTone::Complete,
+            rect: SceneRect::new(start, 0, label.chars().count() as u16, 1),
+            label: label.to_owned(),
+            pane: None,
+        }];
+        let terminal = draw(&scene);
+        let buffer = terminal.backend().buffer();
+
+        // An available update never spends the alarm color: it takes the
+        // complete accent (cyan in mandatum-dark).
+        let segment_cell = buffer.cell((start, 0u16)).unwrap();
+        assert_eq!(segment_cell.fg, Color::Cyan);
+        assert!(segment_cell.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
     fn terminal_surface_renders_text_with_cursor_mark() {
         let terminal = draw(&scene(vec![pane(PaneContent::Terminal(text_surface(&[
             "sh", "ok",

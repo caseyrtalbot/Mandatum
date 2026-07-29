@@ -261,6 +261,24 @@ pub enum AttentionKind {
     ApprovalWaiting,
     TaskFailed,
     AgentBlockedOrFailed,
+    /// A newer release exists. Not blocking work: it rides the strip at a
+    /// calm tone, after every condition that is.
+    UpdateAvailable,
+    /// An update landed in the bundle; the running process still holds the
+    /// old inode until it is reopened.
+    UpdateInstalled,
+}
+
+impl AttentionKind {
+    /// Whether the condition blocks the user's work. Blocking conditions own
+    /// the strip's attention styling and evict the calm session facts;
+    /// non-blocking ones ride alongside them.
+    pub fn is_blocking(self) -> bool {
+        match self {
+            Self::ApprovalWaiting | Self::TaskFailed | Self::AgentBlockedOrFailed => true,
+            Self::UpdateAvailable | Self::UpdateInstalled => false,
+        }
+    }
 }
 
 /// The cell region that communicates the same meaning in `CellProgram`.
@@ -426,9 +444,11 @@ pub struct PreeditScene {
 }
 
 /// The attention strip at the top of the frame. Never blank: when something
-/// needs attention `text` leads with the workspace name and the
+/// blocking needs attention `text` leads with the workspace name and the
 /// [`AttentionSegment`]s follow at their resolved rects; when calm, `text`
-/// is the full session-facts line and `attention` is empty.
+/// is the full session-facts line. Non-blocking segments (see
+/// [`AttentionKind::is_blocking`]) ride the end of either line, so a pending
+/// update never costs the session facts their place.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderScene {
     pub area: SceneRect,

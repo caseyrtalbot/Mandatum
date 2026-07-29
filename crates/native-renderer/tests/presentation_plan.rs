@@ -1137,3 +1137,71 @@ fn chip_tone_fills_keep_label_contrast_and_neutral_badges_stay_plain_text() {
         }
     }
 }
+
+// A non-blocking header segment (an available update) must reach the native
+// plan as a calm chip: the complete tone's tint and text, never the failure
+// emphasis an attention node takes.
+#[test]
+fn a_calm_header_segment_plans_the_complete_tone_not_failure() {
+    let workspace_id = PresentationNodeId::workspace(WorkspaceNodePart::Surface);
+    let update_id = PresentationNodeId::workspace(WorkspaceNodePart::Attention {
+        pane: None,
+        kind: AttentionKind::UpdateAvailable,
+    });
+    let scene = scene(
+        vec![
+            node(
+                workspace_id.clone(),
+                None,
+                PresentationNodeRole::Workspace,
+                PresentationNodeState::default(),
+                LogicalRect::from_units(0, 0, 800 * 64, 600 * 64),
+                SceneRect::new(0, 0, 100, 30),
+            ),
+            node(
+                update_id.clone(),
+                Some(workspace_id),
+                PresentationNodeRole::Attention,
+                PresentationNodeState {
+                    attention: false,
+                    tone: PresentationTone::Complete,
+                    ..PresentationNodeState::default()
+                },
+                LogicalRect::from_units(600 * 64, 0, 160 * 64, 20 * 64),
+                SceneRect::new(75, 0, 20, 1),
+            ),
+        ],
+        Vec::new(),
+    );
+    let theme = Theme::default();
+    let plan = prepare_native_presentation(&scene, &theme).unwrap();
+
+    let material = plan
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            NativePlanCommand::Material(material) if material.node_id == update_id => {
+                Some(material)
+            }
+            _ => None,
+        })
+        .expect("the calm segment still gets a chip material");
+    let complete = theme.ui.palette.complete;
+    assert_eq!(
+        material.color,
+        UiColor::rgba(complete.red, complete.green, complete.blue, 16),
+        "the chip fills with the complete tint, not the failure one"
+    );
+    assert_eq!(material.boundary, None);
+
+    let text = plan
+        .commands()
+        .iter()
+        .find_map(|command| match command {
+            NativePlanCommand::Text(text) if text.node_id == update_id => Some(text),
+            _ => None,
+        })
+        .expect("the calm segment receives a typed glyph scope");
+    assert_eq!(text.color, complete);
+    assert_ne!(text.color, theme.ui.palette.failure);
+}

@@ -56,18 +56,40 @@ mandatum
 The window opens on a shell right there. Prefer clicking? Launch
 Mandatum.app from Finder instead and it opens on your home directory.
 Split the window and run a task or a dev server beside it as the work
-grows. Later:
+grows.
 
-```sh
-mandatum update    # replace the app with the latest release
-mandatum --version
+## Update
+
+Mandatum tells you when a new version is out. A note appears at the end of
+the top line:
+
+```
+Mandatum · myproject · 3 panes · 0.8.0 available
 ```
 
-No terminal needed: the command palette's "Update Mandatum" runs the same
-updater as a visible task pane, and once a day the app quietly checks for
-a newer release and names it in the status strip (`[update] check = false`
-turns the check off). Updates verify checksums before touching the
-installed app, and they refuse downgrades.
+Click it. The update runs in a new pane where you can watch it, and the
+note turns into `updated · reopen to finish` when it is done. Reopen
+Mandatum at whatever moment suits you; your open shells keep running
+until you do.
+
+From a terminal instead:
+
+```sh
+mandatum update
+```
+
+To see which version you are running, press `F1`; it is the first row.
+`mandatum --version` answers the same question from a shell.
+
+Mandatum checks for a new version once a day, at launch. To turn that off,
+add this to `~/.config/mandatum/config.toml`:
+
+```toml
+[update]
+check = false
+```
+
+You can still update whenever you like with the steps above.
 
 ## Around the workspace
 

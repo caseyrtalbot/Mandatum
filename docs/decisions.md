@@ -622,6 +622,12 @@ never noisy. Amended 2026-07-26: the connector kind appears only while
 the session contains an agent pane. The label is configuration, not
 activity; a workspace of plain terminals (which may host any CLI,
 including other vendors' agents) must not claim an agent connector.
+Amended 2026-07-29: `AttentionKind::is_blocking` splits the strip's two
+populations. Blocking conditions behave exactly as above — they take the
+attention color and evict the calm facts. A non-blocking segment (the
+update lifecycle) appends after whatever the line already says, at its
+own tone, so it can never cost the session facts their place. See "The
+Update Lifecycle Rides The Header, Not The Status Strip".
 
 Verification: attention aggregation tests in the scene builder, the
 segment-restyle renderer test, the attention click test in `app_state`,
@@ -3674,18 +3680,20 @@ with `MANDATUM_INSTALL_DIR` pinned to the installer's default so the
 launcher cannot derive an install directory inside the bundle; a dev
 binary falls back to a `mandatum` on PATH, and a machine with neither
 gets an honest status line instead of a pane. The running binary keeps
-its inode through the swap, so success sets a persistent status-strip
-prompt — "updated: reopen to finish" — rather than auto-relaunching:
-relaunch kills live PTYs, and durable intent restores while processes
-do not, so the user picks the moment.
+its inode through the swap, so success sets a persistent prompt —
+"updated · reopen to finish" — rather than auto-relaunching: relaunch
+kills live PTYs, and durable intent restores while processes do not, so
+the user picks the moment. (That prompt and the availability note below
+shipped in the status strip and moved to the header on 2026-07-29; see
+"The Update Lifecycle Rides The Header, Not The Status Strip".)
 
 A launch-time release check (`[update] check`, default on) reads the
 version from the `releases/latest` redirect target via `curl --head` —
 no bytes downloaded, same TLS floor as the installer — at most once per
 day (stamp beside the user config), on an OS thread reporting through
-the unified event channel. A newer version writes a persistent
-status-strip note naming the palette route. Failures are silent: an
-offline launch surfaces nothing. The check lives in FrontendHost
+the unified event channel. A newer version writes a persistent note
+naming the route to the updater. Failures are silent: an offline launch
+surfaces nothing. The check lives in FrontendHost
 construction so both frontends get it; the test-baseline AppConfig
 keeps it off, so no test construction reaches the network.
 
@@ -3749,3 +3757,69 @@ Verification: `phase_four_overlay_family` pins the inset title-band
 rect (red before the fix) and pins that inner bands keep their full
 node rects; displayed check of the Appearance overlay top edge across
 the dark, light, and high-contrast themes; full ci/gate.sh green.
+
+## The Update Lifecycle Rides The Header, Not The Status Strip
+
+Status: accepted (2026-07-29)
+
+Context: the in-app update command and the launch-time check shipped
+their user-visible facts as text appended to the status strip's
+permanent control hint — "· 0.5.0 available: update" beside the palette
+chord, the right-click menu, and the help route. Two problems followed.
+The note competed with the strip's breadcrumbs, which exist so a
+stranger always has the entry points written on screen. And it was
+inert: the strip's one hit target opens the palette, so the note named
+a command it could not run. Separately, nothing in the app stated the
+running version; `mandatum --version` on the command line was the only
+answer.
+
+Decision: update facts move to the header as one non-blocking attention
+segment, and the running version becomes a help row.
+
+The segment reuses the existing mechanism rather than adding a pill
+primitive — `AttentionSegment` already carries a tone, a resolved rect,
+a `HitTargetKind::AttentionSegment` hit target, and an accessibility
+projection, so the note inherits click routing, both frontends' paint
+paths, and the native chip material for free. Two kinds join
+`AttentionKind`: `UpdateAvailable` ("0.8.0 available", clicking runs
+`update-mandatum`) and `UpdateInstalled` ("updated · reopen to finish",
+clicking restates the remaining step). Installed outranks available:
+after the swap, reopening is all that is left.
+
+`AttentionKind::is_blocking` keeps the two populations honest. An
+available update blocks nothing, so it must not behave like an approval
+or a failed task: it appends after whatever the line already says
+instead of evicting the calm session facts, it sorts behind every
+blocking condition, and it paints at the complete tone rather than the
+attention color — red for a release note would spend alarm the
+condition has not earned. The `attention` flag on its presentation node
+is false for the same reason; the native plan colors an attention node
+with the failure palette.
+
+The status strip returns to breadcrumbs only, so an update fact has
+exactly one home on screen. The transient status line still names both
+routes when the check fires.
+
+Help gains a "Mandatum · Version" row from the same compiled-in
+`CARGO_PKG_VERSION` that `mandatum --version` and the release-tag check
+read, so the three can never disagree. Help states the running version
+only; availability is the header's job, which keeps `help_rows` a pure
+function of the keymap.
+
+Consequences: the header can now carry a segment with no pane to jump
+to, and pointer routing matches on kind before falling through to the
+pane jump. A frontend that styled every segment with the attention
+color would now be wrong; both in-tree frontends read the tone.
+
+Verification: `the_update_note_rides_beside_session_facts_and_behind_
+real_attention` pins coexistence, ordering, and that each segment's rect
+points at its own label; `clicking_the_update_note_runs_the_updater`
+pins the click path from hit target to task pane;
+`update_available_event_writes_the_persistent_header_note_for_newer_
+versions_only` pins the calm tone and that the strip keeps no update
+text; `a_non_blocking_segment_takes_the_calm_accent_not_the_attention_
+color` pins the painted cell color in the terminal frontend and
+`a_calm_header_segment_plans_the_complete_tone_not_failure` pins the
+chip material and glyph color in the native plan;
+`help_states_the_running_version_and_finds_it_by_search` pins the
+version row and its searchability. Full `./ci/gate.sh` green.

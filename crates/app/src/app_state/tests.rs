@@ -4068,10 +4068,13 @@ fn update_mandatum_runs_the_updater_task_and_prompts_relaunch_on_success() {
         state.status(),
         "Mandatum 99.0.0 installed · quit and reopen to finish"
     );
-    assert!(
-        state.control_hint().ends_with("updated: reopen to finish"),
-        "{}",
-        state.control_hint()
+    assert_eq!(
+        update_segment(&mut state).map(|segment| (segment.kind, segment.label)),
+        Some((
+            AttentionKind::UpdateInstalled,
+            "updated · reopen to finish".to_owned()
+        )),
+        "the reopen prompt persists in the header"
     );
     assert!(
         state.update_pane_id.is_none(),
@@ -4109,18 +4112,28 @@ fn update_task_failure_never_claims_an_install() {
         state.status()
     );
     assert!(
-        !state.control_hint().contains("reopen to finish"),
+        update_segment(&mut state).is_none(),
         "a failed update must not prompt a relaunch"
     );
 
     state.shutdown();
 }
 
+/// The header's update segment for the current frame, if there is one. Update
+/// facts live in the header, so tests read them where a user does.
+fn update_segment(state: &mut AppState) -> Option<mandatum_scene::AttentionSegment> {
+    state
+        .build_scene(POINTER_FRAME)
+        .header
+        .attention
+        .into_iter()
+        .find(|segment| !segment.kind.is_blocking())
+}
+
 #[test]
-fn update_available_event_writes_the_persistent_hint_for_newer_versions_only() {
+fn update_available_event_writes_the_persistent_header_note_for_newer_versions_only() {
     let mut state = state();
-    let base_hint = state.control_hint();
-    assert!(!base_hint.contains("available"));
+    assert!(update_segment(&mut state).is_none());
 
     // An older or equal version is ignored.
     state
@@ -4130,7 +4143,7 @@ fn update_available_event_writes_the_persistent_hint_for_newer_versions_only() {
         .unwrap();
     state.drain_events();
     assert!(state.update_available.is_none());
-    assert_eq!(state.control_hint(), base_hint);
+    assert!(update_segment(&mut state).is_none());
 
     state
         .runtime
@@ -4139,16 +4152,131 @@ fn update_available_event_writes_the_persistent_hint_for_newer_versions_only() {
         .unwrap();
     state.drain_events();
     assert_eq!(state.update_available.as_deref(), Some("99.0.0"));
-    assert!(
-        state.control_hint().ends_with("99.0.0 available: update"),
-        "{}",
-        state.control_hint()
-    );
+    let segment = update_segment(&mut state).expect("the header carries the available update");
+    assert_eq!(segment.label, "99.0.0 available");
+    assert_eq!(segment.kind, AttentionKind::UpdateAvailable);
+    // A calm tone, not the failure/waiting emphasis: an update blocks nothing.
+    assert_eq!(segment.tone, mandatum_scene::PresentationTone::Complete);
     assert!(
         state.status().contains("Update Mandatum"),
         "{}",
         state.status()
     );
+    // The status strip keeps its breadcrumbs only — update facts have exactly
+    // one home.
+    assert!(
+        !state.control_hint().contains("available"),
+        "{}",
+        state.control_hint()
+    );
+}
+
+#[test]
+fn the_update_note_rides_beside_session_facts_and_behind_real_attention() {
+    let mut state = state();
+    state
+        .runtime
+        .event_sender()
+        .send(AppEvent::UpdateAvailable("99.0.0".to_owned()))
+        .unwrap();
+    state.drain_events();
+
+    // Calm header: the session facts keep their place and the update note
+    // appends after them.
+    let calm = state.build_scene(POINTER_FRAME).header;
+    assert!(calm.text.contains("1 pane"), "{}", calm.text);
+    assert!(calm.text.ends_with("99.0.0 available"), "{}", calm.text);
+    assert_eq!(calm.attention.len(), 1);
+
+    // A blocking condition takes the line, and the update note still rides
+    // last rather than being displaced.
+    state.dispatch(CommandId::RunTask);
+    let task_pane = state.workspace().active_session().focused_pane_id().clone();
+    state.set_task_status_for_test(&task_pane, "failed: exit 3");
+
+    let busy = state.build_scene(POINTER_FRAME).header;
+    let kinds: Vec<_> = busy
+        .attention
+        .iter()
+        .map(|segment| segment.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![AttentionKind::TaskFailed, AttentionKind::UpdateAvailable],
+        "the update note sorts behind every blocking condition"
+    );
+    assert!(busy.text.ends_with("99.0.0 available"), "{}", busy.text);
+    // Each segment's rect must land on its own label in the composed text.
+    // Every glyph in this fixture is single-width, so a char offset is the
+    // display column the rect carries (`attention.rs` covers the wide-glyph
+    // case directly).
+    for segment in &busy.attention {
+        let column = usize::from(segment.rect.x.saturating_sub(busy.area.x));
+        let at_rect: String = busy.text.chars().skip(column).collect();
+        assert!(
+            at_rect.starts_with(&segment.label),
+            "segment {:?} rect must point at its label in {:?}",
+            segment.label,
+            busy.text
+        );
+    }
+
+    state.shutdown();
+}
+
+#[test]
+fn clicking_the_update_note_runs_the_updater() {
+    let mut state = state();
+    state.updater = Some(crate::updater::ResolvedUpdater {
+        command: "printf 'UPDATE_OK\\n'".to_owned(),
+        bundle: None,
+    });
+    state
+        .runtime
+        .event_sender()
+        .send(AppEvent::UpdateAvailable("99.0.0".to_owned()))
+        .unwrap();
+    state.drain_events();
+
+    frame(&mut state);
+    let segment = update_segment(&mut state).expect("the header carries the available update");
+    let scene = state.build_scene(POINTER_FRAME);
+    let target = scene
+        .hit_targets
+        .iter()
+        .find(|target| {
+            matches!(
+                &target.kind,
+                HitTargetKind::AttentionSegment {
+                    kind: AttentionKind::UpdateAvailable,
+                    ..
+                }
+            )
+        })
+        .expect("the update note is clickable")
+        .clone();
+    assert_eq!(target.rect, segment.rect);
+    assert!(
+        !target.rect.is_empty(),
+        "the note must have a clickable rect"
+    );
+
+    send_pointer(
+        &mut state,
+        left(PointerKind::Down, target.rect.x, target.rect.y),
+    );
+
+    let pane_id = state
+        .update_pane_id
+        .clone()
+        .expect("the click launched the updater");
+    let pane = state.workspace().active_session().pane(&pane_id).unwrap();
+    let PaneKind::Task { intent } = pane.kind() else {
+        panic!("update must run as a task pane");
+    };
+    assert_eq!(intent.command, "printf 'UPDATE_OK\\n'");
+
+    state.shutdown();
 }
 
 #[test]

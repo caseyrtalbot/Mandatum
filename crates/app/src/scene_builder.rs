@@ -1538,12 +1538,24 @@ fn presentation_state_for_hit_target(
         }
         _ => (false, false),
     };
+    // Tone and the attention flag follow the segment's kind, matching the
+    // tones `attention::attention_items` assigns. A non-blocking segment is
+    // not attention: it must not take the failure emphasis the native plan
+    // gives an attention node.
     let (attention, tone) = match kind {
-        HitTargetKind::AttentionSegment {
-            kind: mandatum_scene::AttentionKind::ApprovalWaiting,
-            ..
-        } => (true, mandatum_scene::PresentationTone::Waiting),
-        HitTargetKind::AttentionSegment { .. } => (true, mandatum_scene::PresentationTone::Failure),
+        HitTargetKind::AttentionSegment { kind, .. } => match kind {
+            mandatum_scene::AttentionKind::ApprovalWaiting => {
+                (true, mandatum_scene::PresentationTone::Waiting)
+            }
+            mandatum_scene::AttentionKind::TaskFailed
+            | mandatum_scene::AttentionKind::AgentBlockedOrFailed => {
+                (true, mandatum_scene::PresentationTone::Failure)
+            }
+            mandatum_scene::AttentionKind::UpdateAvailable
+            | mandatum_scene::AttentionKind::UpdateInstalled => {
+                (false, mandatum_scene::PresentationTone::Complete)
+            }
+        },
         _ => (false, mandatum_scene::PresentationTone::Neutral),
     };
     PresentationNodeState {
