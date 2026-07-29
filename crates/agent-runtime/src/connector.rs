@@ -61,8 +61,11 @@ pub enum AgentConnectorError {
 impl fmt::Display for AgentConnectorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // No "launch failed" prefix here: every caller that surfaces this
+            // error already names the operation and pane, and a self-prefixed
+            // Display doubled that context in the status line.
             Self::InvalidSpec { message } => write!(f, "invalid launch spec: {message}"),
-            Self::LaunchFailed { message } => write!(f, "agent launch failed: {message}"),
+            Self::LaunchFailed { message } => write!(f, "{message}"),
         }
     }
 }

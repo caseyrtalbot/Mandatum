@@ -344,7 +344,8 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
     assert_eq!(focused_suffix.style.foreground, theme.focus_title);
     assert!(focused_suffix.style.bold);
 
-    let failed_status = program.cell_at(1, 5).expect("failed task status row");
+    // Callout rows carry one leading pad cell for the native tone stroke.
+    let failed_status = program.cell_at(2, 5).expect("failed task status row");
     assert_eq!(
         failed_status.occupancy,
         CellOccupancy::grapheme('f'.to_string())
@@ -360,7 +361,9 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
     assert_eq!(agent_status.style.foreground, theme.agent_waiting);
     assert!(agent_status.style.bold);
 
-    let approval_header = program.cell_at(41, 6).expect("approval header row");
+    // Empty action/summary rows no longer render, and callout rows carry one
+    // leading pad cell for the native tone stroke.
+    let approval_header = program.cell_at(42, 4).expect("approval header row");
     assert_eq!(
         approval_header.occupancy,
         CellOccupancy::grapheme('a'.to_string())
@@ -368,7 +371,7 @@ fn mixed_scene_compiles_semantic_chrome_content_and_later_pane_opacity() {
     assert_eq!(approval_header.style.foreground, theme.agent_waiting);
     assert!(approval_header.style.bold, "pulse-on emphasizes the header");
 
-    let approval_scope = program.cell_at(41, 7).expect("approval scope row");
+    let approval_scope = program.cell_at(42, 5).expect("approval scope row");
     assert_eq!(
         approval_scope.occupancy,
         CellOccupancy::grapheme('s'.to_string())
@@ -1046,7 +1049,7 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
         Vec::new(),
     );
     let program = compile_cell_program(&welcome, &theme);
-    let intro = program.cell_at(6, 4).expect("welcome introduction");
+    let intro = program.cell_at(7, 4).expect("welcome introduction");
     assert_eq!(intro.occupancy, CellOccupancy::grapheme('W'.to_string()));
     assert!(intro.style.bold);
     let key = program.cell_at(8, 6).expect("welcome key");
@@ -1060,7 +1063,8 @@ fn prompt_help_and_welcome_preserve_input_hierarchy_and_footer() {
             .occupancy,
         CellOccupancy::grapheme('H'.to_string())
     );
-    let dismissal = program.cell_at(6, 9).expect("welcome dismissal");
+    // One leading pad cell, the shared band-painter inset convention.
+    let dismissal = program.cell_at(7, 9).expect("welcome dismissal");
     assert_eq!(
         dismissal.occupancy,
         CellOccupancy::grapheme('P'.to_string())
@@ -1097,12 +1101,14 @@ fn huge_chrome_and_overlay_rectangles_only_emit_in_frame_cells() {
         "raw rectangle area must not determine compiler work: emitted {} cells",
         emitted.len()
     );
+    // The intro row's leading pad cell is the only intro cell that survives
+    // this 4-wide frame; its presence proves the clipped row still emitted.
     assert_eq!(
         program
             .cell_at(3, 2)
             .expect("clipped overlay content")
             .occupancy,
-        CellOccupancy::grapheme('W'.to_string())
+        CellOccupancy::grapheme(' '.to_string())
     );
 }
 
@@ -1201,7 +1207,7 @@ fn many_full_frame_replacements_compact_to_final_topmost_cells() {
     );
     assert_eq!(
         program
-            .cell_at(1, 1)
+            .cell_at(2, 1)
             .expect("final overlay owner")
             .occupancy,
         CellOccupancy::grapheme('F'.to_string())

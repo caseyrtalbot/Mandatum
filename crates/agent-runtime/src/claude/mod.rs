@@ -299,14 +299,17 @@ fn spawn_claude(
     if let Some(model) = &spec.model {
         command.arg("--model").arg(model);
     }
-    command
-        .spawn()
-        .map_err(|error| AgentConnectorError::LaunchFailed {
-            message: format!(
-                "failed to spawn {}: {error}",
-                config.claude_binary.display()
-            ),
-        })
+    command.spawn().map_err(|error| {
+        let binary = config.claude_binary.display();
+        // A missing binary is the one launch failure every new install hits;
+        // name the fix instead of echoing "os error 2" at the user.
+        let message = if error.kind() == io::ErrorKind::NotFound {
+            format!("`{binary}` was not found on PATH — install Claude Code or add it to PATH")
+        } else {
+            format!("could not start `{binary}`: {error}")
+        };
+        AgentConnectorError::LaunchFailed { message }
+    })
 }
 
 fn stdio_error(stream: &str) -> AgentConnectorError {

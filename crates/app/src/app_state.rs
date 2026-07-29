@@ -2221,6 +2221,7 @@ impl AppState {
                     intent.status = AgentStatus::Running;
                     intent.pending_approvals = 0;
                     intent.pending_approval_ids.clear();
+                    intent.last_error = None;
                 });
                 self.approval_arrivals.remove(&pane_id);
                 self.timeline.record(TimelineEventKind::AgentStatus {
@@ -2247,6 +2248,7 @@ impl AppState {
             Err(error) => {
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Failed;
+                    intent.last_error = Some(error.to_string());
                 });
                 self.timeline.record(TimelineEventKind::AgentLaunchRefused {
                     pane: pane_id.to_string(),
@@ -2443,6 +2445,7 @@ impl AppState {
                 self.approval_arrivals.remove(&pane_id);
                 self.update_agent_intent(&pane_id, |intent| {
                     intent.status = AgentStatus::Failed;
+                    intent.last_error = Some(error.clone());
                 });
                 self.timeline.record(TimelineEventKind::AgentStatus {
                     pane: pane_id.to_string(),

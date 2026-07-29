@@ -116,6 +116,12 @@ pub struct AgentPaneIntent {
     /// after a restart.
     #[serde(default)]
     pub approval_history: Vec<AgentApprovalRecord>,
+    /// Why the pane is in a failed state. Durable alongside the failed
+    /// status itself: a launch that never produced a session has no live
+    /// runtime to ask, and a restored failed pane must still say why.
+    /// Cleared when a launch succeeds.
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 impl AgentPaneIntent {
@@ -145,6 +151,7 @@ impl AgentPaneIntent {
             changed_files: Vec::new(),
             latest_summary: None,
             approval_history: Vec::new(),
+            last_error: None,
         }
     }
 }

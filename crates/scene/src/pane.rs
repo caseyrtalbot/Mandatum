@@ -4,6 +4,7 @@ use mandatum_core::{AgentStatus, ArtifactFit, PaneId};
 use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::cell_program::display_width;
 use crate::geometry::SceneRect;
 use crate::surface::{RasterSurface, TerminalSurface};
 use crate::workspace::PresentationTone;
@@ -114,7 +115,7 @@ impl PaneScene {
         let mut right = rail.right();
         let mut placed = Vec::new();
         for kind in self.badge_kinds().into_iter().rev() {
-            let width = u16::try_from(kind.label().len())
+            let width = u16::try_from(display_width(kind.label()))
                 .unwrap_or(u16::MAX)
                 .saturating_add(2);
             if width > right.saturating_sub(rail.x) {
@@ -584,26 +585,24 @@ impl AgentContent {
                 ));
             }
         }
-        rows.extend([
-            WorkflowRow::new(
+        // Empty fields stay off the card: a rail of "idle / none / 0" rows
+        // reads as a debug dump and buries the rows that carry state.
+        if let Some(action) = &self.current_action {
+            rows.push(WorkflowRow::new(
                 WorkflowNodePart::Action,
                 WorkflowRowRole::Metadata,
                 PresentationTone::Neutral,
-                format!(
-                    "action: {}",
-                    bounded_workflow_fragment(self.current_action.as_deref().unwrap_or("idle"))
-                ),
-            ),
-            WorkflowRow::new(
+                format!("action: {}", bounded_workflow_fragment(action)),
+            ));
+        }
+        if let Some(summary) = &self.latest_summary {
+            rows.push(WorkflowRow::new(
                 WorkflowNodePart::Summary,
                 WorkflowRowRole::Metadata,
                 PresentationTone::Neutral,
-                format!(
-                    "summary: {}",
-                    bounded_workflow_fragment(self.latest_summary.as_deref().unwrap_or("none"))
-                ),
-            ),
-        ]);
+                format!("summary: {}", bounded_workflow_fragment(summary)),
+            ));
+        }
         match &self.pending_approval {
             Some(prompt) => {
                 rows.push(WorkflowRow::new(
@@ -645,21 +644,15 @@ impl AgentContent {
                     format!("keys: {}", bounded_workflow_fragment(&prompt.key_hint)),
                 ));
             }
-            None => rows.push(WorkflowRow::new(
+            None if self.pending_approvals > 0 => rows.push(WorkflowRow::new(
                 WorkflowNodePart::Approval,
                 WorkflowRowRole::Metadata,
                 PresentationTone::Neutral,
                 format!("pending approvals: {}", self.pending_approvals),
             )),
+            None => {}
         }
-        if self.changed_files.is_empty() {
-            rows.push(WorkflowRow::new(
-                WorkflowNodePart::ChangedFiles,
-                WorkflowRowRole::List,
-                PresentationTone::Neutral,
-                "changed files: none",
-            ));
-        } else {
+        if !self.changed_files.is_empty() {
             rows.push(WorkflowRow::new(
                 WorkflowNodePart::ChangedFiles,
                 WorkflowRowRole::List,
@@ -949,10 +942,11 @@ mod tests {
         assert_eq!(lines[0], "objective: review failing tests");
         assert!(lines.contains(&"objective: review failing tests".to_owned()));
         assert!(lines.contains(&"status: blocked".to_owned()));
-        assert!(lines.contains(&"action: idle".to_owned()));
         assert!(lines.contains(&"pending approvals: 1".to_owned()));
-        assert!(lines.contains(&"changed files: none".to_owned()));
-        assert!(lines.contains(&"summary: none".to_owned()));
+        // Fields with nothing to report stay off the card entirely.
+        assert!(!lines.iter().any(|line| line.starts_with("action:")));
+        assert!(!lines.iter().any(|line| line.starts_with("summary:")));
+        assert!(!lines.iter().any(|line| line.starts_with("changed files")));
     }
 
     #[test]

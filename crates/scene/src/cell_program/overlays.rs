@@ -594,10 +594,12 @@ impl Compiler {
         if inner.is_empty() {
             return;
         }
+        // One leading pad cell so the introduction, key entries (2 cells),
+        // and dismissal share one aligned left rhythm instead of three edges.
         self.paint_text_row(
             inner,
             0,
-            &welcome.introduction,
+            &format!(" {}", welcome.introduction),
             SceneCellStyle {
                 bold: true,
                 ..surface
@@ -640,10 +642,12 @@ impl Compiler {
         }
         let dismissal_row = welcome.entries.len().saturating_add(3);
         if dismissal_row < usize::from(inner.height) {
+            // Leading cell of padding, matching every other band painter's
+            // horizontal inset convention.
             self.paint_text_row(
                 inner,
                 dismissal_row,
-                &welcome.dismissal,
+                &format!(" {}", welcome.dismissal),
                 SceneCellStyle {
                     dim: true,
                     ..surface
@@ -811,7 +815,15 @@ impl Compiler {
                 );
                 scalar_position += scalar_len;
             }
-            for grapheme in format!("  {}", item.detail).graphemes(true) {
+            // The detail (category, disabled reason, or preview) is secondary:
+            // dim plus the chrome's shared "·" separator keeps it from
+            // reading as part of the command label.
+            let detail = if item.detail.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", item.detail)
+            };
+            for grapheme in detail.graphemes(true) {
                 let cell_style = SceneCellStyle {
                     dim: true,
                     ..line_style

@@ -125,7 +125,8 @@ pub(crate) fn header_scene(state: &AppState, area: SceneRect) -> HeaderScene {
     let zoomed = session.layout().zoomed().is_some();
     let items = attention_items(state, session);
 
-    let mut text = format!(" {} |", state.workspace().name());
+    // "·" is the one separator across all chrome; the header is no exception.
+    let mut text = format!(" {} ·", state.workspace().name());
     let mut attention = Vec::with_capacity(items.len());
     if items.is_empty() {
         let pane_count = session.panes().len();

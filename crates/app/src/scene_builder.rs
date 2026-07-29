@@ -857,7 +857,12 @@ fn overlay_row_logical_rect(
     theme: &mandatum_scene::Theme,
 ) -> LogicalRect {
     let rect = viewport.logical_rect_for_cells(cell_rect);
-    inset_logical_rect(rect, theme.ui.spacing.overlay_row_padding_x)
+    // Half the band padding: row text starts one cell (~overlay_row_padding_x)
+    // in, so the selection fill and its leading indicator must begin left of
+    // the first glyph or the highlight edge lands exactly on it. The smaller
+    // inset leaves visible fill padding before the text, the way native menu
+    // selection reads everywhere else on the platform.
+    inset_logical_rect(rect, theme.ui.spacing.space_1)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -955,8 +960,14 @@ fn push_pane_presentation(
     }
     for (kind, cell_rect) in pane.badge_rects() {
         // Default panes are terminals; a "terminal" chip on every rail is
-        // pure noise natively. The terminal fallback keeps its badge cells.
-        if kind == PaneBadgeKind::Terminal {
+        // pure noise natively. The same holds for any kind chip that only
+        // repeats the pane's own title ("agent" pane titled "agent"). The
+        // terminal fallback keeps its badge cells.
+        let repeats_title = matches!(
+            kind,
+            PaneBadgeKind::Task | PaneBadgeKind::Agent | PaneBadgeKind::Artifact
+        ) && pane.title.trim().eq_ignore_ascii_case(kind.label());
+        if kind == PaneBadgeKind::Terminal || repeats_title {
             continue;
         }
         let badge_cell_rect = viewport.logical_rect_for_cells(cell_rect);
@@ -2034,7 +2045,11 @@ fn agent_content(state: &AppState, pane_id: &PaneId, intent: &AgentPaneIntent) -
         changed_files,
         latest_summary: intent.latest_summary.clone(),
         current_action: live.and_then(|runtime| runtime.current_action.map(str::to_owned)),
-        last_error: live.and_then(|runtime| runtime.last_error.map(str::to_owned)),
+        // A launch that never produced a session has no live runtime; the
+        // durable intent still carries why it failed.
+        last_error: live
+            .and_then(|runtime| runtime.last_error.map(str::to_owned))
+            .or_else(|| intent.last_error.clone()),
         relaunch_hint: Some(state.command_key_hint(mandatum_commands::CommandId::StartAgent))
             .filter(|hint| !hint.is_empty()),
         pending_approval: live
@@ -4385,6 +4400,57 @@ mod tests {
         assert!(
             lines.contains(&"relaunch: ctrl+p g · right-click menu".to_owned()),
             "{lines:?}"
+        );
+
+        state.shutdown();
+    }
+
+    // A launch that never produced a session has no live runtime to ask, so
+    // the failure reason must reach the card from durable intent alone.
+    #[test]
+    fn launch_failure_without_a_session_still_states_the_error_on_the_card() {
+        use mandatum_agent_runtime::{
+            AgentConnector, AgentConnectorError, AgentLaunchSpec, AgentSession,
+        };
+
+        struct RefusingConnector;
+        impl AgentConnector for RefusingConnector {
+            fn launch(&self, _: &AgentLaunchSpec) -> Result<AgentSession, AgentConnectorError> {
+                Err(AgentConnectorError::LaunchFailed {
+                    message: "`claude` was not found on PATH — install Claude Code or add it \
+                              to PATH"
+                        .to_owned(),
+                })
+            }
+            fn name(&self) -> &str {
+                "refusing"
+            }
+        }
+
+        let mut state = AppState::new(config(false));
+        state.set_agent_connector(Box::new(RefusingConnector));
+        state.dispatch(CommandId::StartAgent);
+        let pane_id = state.workspace().active_session().focused_pane_id().clone();
+
+        let scene = build_workspace_scene(&state, SceneSize::new(100, 30));
+        let lines = scene_pane(&scene, pane_id.as_str()).detail_lines();
+        assert!(lines.contains(&"status: failed".to_owned()), "{lines:?}");
+        assert!(
+            lines.iter().any(|line| line.starts_with("error: `claude` was not found on PATH")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"relaunch: ctrl+p g · right-click menu".to_owned()),
+            "{lines:?}"
+        );
+        // The transient status line names the pane and the reason exactly
+        // once — no doubled "launch failed" prefix.
+        assert!(
+            state.status().starts_with(&format!(
+                "agent launch failed for {pane_id}: `claude` was not found"
+            )),
+            "{}",
+            state.status()
         );
 
         state.shutdown();

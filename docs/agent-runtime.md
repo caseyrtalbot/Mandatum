@@ -45,9 +45,11 @@ conformance gate). Owns:
   ([L3-GATE] tested by `stale_agent_events_after_restart_are_ignored`).
 - Durable folding: accepted events update `mandatum_core::AgentPaneIntent`
   (status, latest summary, changed-file path list, pending approval count and
-  ids, decided-approval history). Live-only state (current action, ~200-line
-  output tail, full `ApprovalRequest` detail) lives behind `RuntimeEngine` and
-  is never serialized ([L3-GATE] tested by
+  ids, decided-approval history, and the last failure reason — a launch that
+  never produced a session has no live runtime to ask, and a restored failed
+  pane must still say why; a successful launch clears it). Live-only state
+  (current action, ~200-line output tail, full `ApprovalRequest` detail)
+  lives behind `RuntimeEngine` and is never serialized ([L3-GATE] tested by
   `agent_runtime_state_is_not_serialized_with_workspace_intent`).
 - Approval history: every decision appends an `AgentApprovalRecord
   { approval_id, command, approved }` to the durable intent, so past

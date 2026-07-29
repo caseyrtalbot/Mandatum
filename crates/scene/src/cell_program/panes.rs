@@ -97,7 +97,7 @@ impl Compiler {
                     self.paint_text_row(
                         inner,
                         row,
-                        &fit_line(&workflow.text, inner.width),
+                        &workflow_row_line(workflow, inner.width),
                         workflow_row_style(workflow, theme, false),
                     );
                 }
@@ -122,11 +122,11 @@ impl Compiler {
                                 .as_ref()
                                 .is_some_and(|prompt| prompt.pulse_on);
                         let style = workflow_row_style(row, theme, pulse);
-                        (row.text.clone(), style)
+                        (workflow_row_line(row, inner.width), style)
                     })
                     .collect::<Vec<_>>();
                 for (row, (text, style)) in lines.iter().enumerate() {
-                    self.paint_text_row(inner, row, &fit_line(text, inner.width), *style);
+                    self.paint_text_row(inner, row, text, *style);
                 }
             }
             PaneContent::Artifact(artifact) => {
@@ -135,7 +135,7 @@ impl Compiler {
                     self.paint_text_row(
                         inner,
                         row,
-                        &fit_line(&workflow.text, inner.width),
+                        &workflow_row_line(workflow, inner.width),
                         workflow_row_style(workflow, theme, false),
                     );
                 }
@@ -243,6 +243,17 @@ impl Compiler {
                 self.paint_cell(x, y, cell);
             }
         }
+    }
+}
+
+/// One workflow row fitted to the pane width. Callout rows take one leading
+/// pad cell: their native container draws a rounded tone stroke over exactly
+/// these cells, and text starting at cell zero sits on that stroke.
+fn workflow_row_line(row: &WorkflowRow, width: u16) -> String {
+    if row.role == WorkflowRowRole::Callout {
+        fit_line(&format!(" {}", row.text), width)
+    } else {
+        fit_line(&row.text, width)
     }
 }
 
