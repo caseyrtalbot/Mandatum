@@ -515,14 +515,14 @@ work changes visible product state. `FrontendHost::heartbeat` performs
 child-exit polling and reports whether that generation changed. The native
 shell independently wakes for the renderer's next animation deadline or the
 250 ms heartbeat, and requests a frame only for active motion or real scene
-change. While pane geometry or overlay scale lies between scene-owned stable
-hit-target endpoints, the shell suspends pointer admission until a successful
-stable present.
+change. While pane geometry or overlay scale animates between stable endpoints, hit
+targets stay at the scene-owned final geometry, so pointer admission
+continues uninterrupted.
 
 ### `workflows`
 
 Owns developer-workflow definitions and cross-actor handoff policy. Built
-today: `TaskRecipe`, `AgentThreadSpec`, and `TaskFailureHandoff`, which shape
+today: `AgentThreadSpec` and `TaskFailureHandoff`, which shape
 durable pane intent for `mandatum-core` and turn bounded, explicitly untrusted
 task-failure evidence into an agent mandate. Evidence is JSON-escaped and each
 physical line is prefixed inside an unforgeable frame. It launches no runtime.

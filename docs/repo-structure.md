@@ -184,8 +184,8 @@ The shared workstation runtime and maintained terminal shell:
 
 ### `crates/workflows`
 
-Durable workflow intent and cross-actor handoff policy: `TaskRecipe` and
-`AgentThreadSpec` shape pane intent for `mandatum-core`;
+Durable workflow intent and cross-actor handoff policy: `AgentThreadSpec`
+shapes pane intent for `mandatum-core`;
 `TaskFailureHandoff` bounds, JSON-escapes, prefixes, and labels every
 failed-task fact before creating an agent mandate. No runtime launching, no
 history (see docs/workflows.md for what remains unbuilt here).

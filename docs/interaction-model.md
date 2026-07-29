@@ -145,7 +145,8 @@ until the user invokes workspace-level control.
 ## Session Map
 
 "Show session map" (palette `m`) opens a modal tree of every session and
-its panes. Each pane row carries a kind glyph (terminal/task/agent/status),
+its panes. Each pane row carries a kind glyph
+(terminal/task/agent/artifact),
 its title, a live state (`open`, `running`, `succeeded: exit 0`,
 `failed: exit 3`, `waiting-approval`, `blocked`, `failed`, `complete`,
 `idle`) — exit facts use the same vocabulary as the pane body and the
@@ -158,8 +159,9 @@ Up/Down (or Ctrl+N/P, or the wheel) move the selection; Enter — or a click
 on any row — focuses the selected pane, switching the active session when
 needed (a session row switches without changing that session's focus).
 Esc closes. The footer names these keys and carries a legend for the
-glyphs actually on screen (`▸ session · ❯ terminal · ▶ task · ◆ agent · ≡
-status · ● focused`), generated from the same table the rows draw from so
+glyphs actually on screen (`▸ session · ❯ terminal · ▶ task · ◆ agent · ▣
+artifact · ● focused`), generated from the same table the rows
+draw from so
 it cannot drift; the full legend also lives in the help overlay. Each visible
 row and the footer occupy a two-terminal-row control block. The native
 material, semantic presentation node, and pointer target share that rectangle,
@@ -361,8 +363,8 @@ request receives one brief inward emphasis instead of perpetual blinking.
 the stable current state, and schedules no animation frames. The static focus,
 selection, waiting, failure, and approval cues remain visible without motion.
 While programmatic pane geometry or overlay scale is visually between stable
-endpoints, native pointer admission pauses so the user cannot act on geometry
-that differs from the scene-owned hit targets.
+endpoints, hit targets remain at the scene-owned final geometry, so pointer
+input keeps acting on the stable layout rather than the in-flight visuals.
 
 The fixed-reference approval-arrival start, midpoint, end, and reduced states
 have been displayed and accepted. The reduced frame matches the stable end

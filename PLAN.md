@@ -49,8 +49,8 @@ current contract ships the desktop application:
 - `install.sh` verifies the checksum, installs the app to `/Applications`
   (or `~/Applications`), and installs the `mandatum` launcher last;
 - `mandatum` opens the app in the current directory, and `mandatum update`
-  re-runs the hosted installer, which refuses downgrades and rolls back a
-  failed swap; and
+  re-runs the installer copy bundled into the release binary, which refuses
+  downgrades and rolls back a failed swap; and
 - binaries are ad-hoc signed, so publishing requires no Apple credentials
   or repository secrets.
 

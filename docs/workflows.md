@@ -47,8 +47,7 @@ Built:
    normal connector and approval gate.
 
 Not yet built: named multi-recipe catalog (one configured task command
-exists today; `TaskRecipe` in `crates/workflows` shapes durable intent
-only), task history with cwd/duration/start-time fields.
+exists today), task history with cwd/duration/start-time fields.
 
 ## Dev Server Loop
 

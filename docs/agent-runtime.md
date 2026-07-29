@@ -19,7 +19,10 @@ conformance gate). Owns:
   connector trait; a session is a `std::sync::mpsc::Receiver<AgentSessionEvent>`
   plus a boxed `AgentSessionControl` (decide / interrupt / shutdown / is_alive).
 - `AgentSessionEvent`: Status, Action, Summary, OutputChunk, CommandRun,
-  FilesChanged, ApprovalRequested, Completed, Failed, Closed.
+  FilesChanged, ApprovalRequested, Completed, Failed, Closed. CommandRun and
+  FilesChanged are emitted only after a non-error `tool_result`, so failed or
+  rejected tools never register — but the facts are agent-reported, parsed
+  from the child's stream, not reconciled against the filesystem.
 - The approval protocol: `ApprovalRequest { approval_id, command, scope,
   risk }` answered by `ApprovalDecision { approval_id, Approved | Rejected }`.
   Risk bands are advisory heuristics (`assess_command_risk`); the gate itself

@@ -679,8 +679,8 @@ Implementation status (2026-07-24):
   reports whether child-exit work changed visible product state;
 - the native shell schedules animation deadlines independently from the
   250 ms child-exit heartbeat, redraws for active motion or a changed scene
-  generation, and suspends pointer admission while pane or overlay hit-bearing
-  geometry is between stable endpoints; and
+  generation, and keeps hit targets at the stable end-state geometry while
+  pane or overlay visuals glide between endpoints; and
 - focused deterministic source tests cover start, midpoint, end, interruption,
   reversal, convergence, direct/reduced policy, redraw, and idle behavior;
 - `attention-motion-start`, `attention-motion-midpoint`,
