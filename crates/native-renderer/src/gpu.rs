@@ -1665,7 +1665,7 @@ fn prepare_cell_program(
                 x,
                 y,
                 resolve_cell_paint(cell, theme, surface_srgb),
-                should_paint_cell_background(scene, legacy_presentation, x, y, cell, scope.kind),
+                should_paint_cell_background(scene, legacy_presentation, x, y, cell, scope.kind, scope.clip),
                 scope.kind,
                 cell.cursor,
             )
@@ -2016,13 +2016,26 @@ fn apply_native_text_scopes(
                     segment.y,
                     scope_occupied_rows[projection.scope_index].len() > 1,
                 )?);
+                // The scope color replaces the hue but keeps the resolved
+                // alpha: dim cells (palette categories, disabled reasons,
+                // hint bands) already encode their de-emphasis there, and a
+                // full-alpha override erased it.
+                let scoped_color = |current: [u8; 4]| {
+                    [
+                        projection.color[0],
+                        projection.color[1],
+                        projection.color[2],
+                        current[3].min(projection.color[3]),
+                    ]
+                };
                 if !segment.cursor {
-                    segment.glyph_style.foreground = projection.color;
+                    segment.glyph_style.foreground = scoped_color(segment.glyph_style.foreground);
                 }
                 add_native_face(&mut segment.glyph_style, projection.metrics.style.face);
+                let cursor = segment.cursor;
                 for range in &mut segment.style_ranges {
-                    if !segment.cursor {
-                        range.style.foreground = projection.color;
+                    if !cursor {
+                        range.style.foreground = scoped_color(range.style.foreground);
                     }
                     add_native_face(&mut range.style, projection.metrics.style.face);
                 }
@@ -2043,6 +2056,14 @@ fn should_paint_legacy_background(
     cell: &ProgramCell,
     scope: TextPaintScopeKind,
 ) -> bool {
+    // Test seam: a clip matching the scene's sole terminal viewport, so the
+    // ownership edge test passes for the pane that projects it.
+    let clip = scene
+        .presentation
+        .terminal_viewports
+        .first()
+        .map(|mapping| mapping.visible_cell_rect)
+        .unwrap_or_else(|| SceneRect::new(0, 0, scene.size.width, scene.size.height));
     should_paint_cell_background(
         scene,
         scene.presentation == mandatum_scene::ScenePresentation::default(),
@@ -2050,6 +2071,7 @@ fn should_paint_legacy_background(
         y,
         cell,
         scope,
+        clip,
     )
 }
 
@@ -2062,7 +2084,8 @@ fn should_paint_cell_background(
     x: u16,
     y: u16,
     cell: &ProgramCell,
-    scope: TextPaintScopeKind,
+    scope_kind: TextPaintScopeKind,
+    scope_clip: SceneRect,
 ) -> bool {
     if legacy_presentation {
         return true;
@@ -2073,18 +2096,33 @@ fn should_paint_cell_background(
     {
         return true;
     }
-    match scope {
+    match scope_kind {
         TextPaintScopeKind::Header
         | TextPaintScopeKind::Status
         | TextPaintScopeKind::PaneChrome
         | TextPaintScopeKind::PaneDecoration => false,
         TextPaintScopeKind::PaneContent => {
+            // Viewport containment alone is not ownership: a floating pane's
+            // cells can sit inside an underlying terminal's viewport rect,
+            // and painting them with the terminal default background left a
+            // text-length slab behind every workflow row on floating cards.
+            // The owner's content clip is its pane-inner rect, which shares
+            // the mapping's exact left/right edges (task viewports only shift
+            // vertically) and contains it vertically; an unrelated pane
+            // stacked above matches that geometry only by coincidence.
             cell.style.background != SceneColor::Default
                 || scene
                     .presentation
                     .terminal_viewports
                     .iter()
-                    .any(|mapping| mapping.visible_cell_rect.contains(x, y))
+                    .any(|mapping| {
+                        let rect = mapping.visible_cell_rect;
+                        rect.contains(x, y)
+                            && rect.x == scope_clip.x
+                            && rect.right() == scope_clip.right()
+                            && rect.y >= scope_clip.y
+                            && rect.bottom() <= scope_clip.bottom()
+                    })
         }
         TextPaintScopeKind::Overlay
         | TextPaintScopeKind::OverlayDecoration
@@ -2187,9 +2225,18 @@ fn row_shaping_profile(
         font_size,
         identity.style.line_height_units as f32 / 64.0 * scale,
     );
+    // Interface glyphs never advance on less than the terminal cell. App
+    // strings are composed in cell space, and spaces break shaping runs, so
+    // every word re-anchors on the terminal grid; a sub-cell quantum shrinks
+    // each word below its declared span and the shortfall surfaces as a word
+    // gap that grows with word length ("menu: ↑/↓ choose" reads as
+    // double-spaced). Flooring the quantum at the cell keeps smaller roles
+    // evenly letter-spaced on the shared grid, while roles larger than the
+    // terminal keep their wider quantum and rely on the quantum-scaled clip.
+    let scaled_advance = terminal_cell_advance * (font_size / terminal_metrics.font_size);
     RowShapingProfile {
         metrics,
-        cell_advance: terminal_cell_advance * (font_size / terminal_metrics.font_size),
+        cell_advance: scaled_advance.max(terminal_cell_advance),
         metric_generation: identity.generation,
         metric_slot: identity.role as u8,
     }
@@ -2267,20 +2314,24 @@ fn row_text_area_geometry(
     };
     let centered_top =
         logical_rect.y + ((logical_rect.height - profile.metrics.line_height).max(0.0) / 2.0);
-    let semantic_left = i32::try_from(vertical_clip.0).unwrap_or(i32::MAX);
     let semantic_top = i32::try_from(vertical_clip.1).unwrap_or(i32::MAX);
-    let semantic_right =
-        i32::try_from(vertical_clip.0.saturating_add(vertical_clip.2)).unwrap_or(i32::MAX);
     let semantic_bottom =
         i32::try_from(vertical_clip.1.saturating_add(vertical_clip.3)).unwrap_or(i32::MAX);
 
+    // Cells own the horizontal extent; the semantic line box owns only the
+    // vertical extent. Every glyph in the program was painted inside its
+    // scope's cell clip, so it is product-intended text — the node's inset
+    // logical rect expresses padding, and clamping glyph rasters to it ate
+    // the leading glyph of any band whose painter starts at cell zero
+    // ("Esc dismisses" rendered as "sc dismisses"). Padding is delivered by
+    // the painters' leading cell, never by shearing glyphs.
     RowTextAreaGeometry {
         left,
         top: centered_top,
         bounds: TextBounds {
-            left: cell_bounds.left.max(semantic_left),
+            left: cell_bounds.left,
             top: semantic_top,
-            right: cell_bounds.right.min(semantic_right),
+            right: cell_bounds.right,
             bottom: semantic_bottom,
         },
     }
@@ -4666,12 +4717,12 @@ fn cell_clip_scissor(
 /// extent advances on the run's shaping quantum: the same `cell_advance` the
 /// shaper quantized every glyph to. For terminal rows the quantum equals the
 /// terminal cell width, so the clip stays cell-grid exact. App-owned roles
-/// scale the quantum by their font-size ratio, so their glyphs are wider or
-/// narrower than the terminal cells they are declared in; deriving the clip
-/// from the terminal grid there would shear the final glyph of every run
-/// whose role shapes wider than the terminal cell (a 13pt Title over an
-/// 11.5pt terminal loses ~1.8px per cell). Vertical bounds remain
-/// terminal-grid exact.
+/// whose size exceeds the terminal scale the quantum up by their font-size
+/// ratio, so their glyphs are wider than the terminal cells they are declared
+/// in; deriving the clip from the terminal grid there would shear the final
+/// glyph of every run (a 13pt Title over an 11.5pt terminal loses ~1.8px per
+/// cell). Smaller roles keep the terminal quantum and stay cell-grid exact.
+/// Vertical bounds remain terminal-grid exact.
 #[allow(clippy::too_many_arguments)]
 fn glyph_text_bounds(
     origin_left: f32,
@@ -5571,7 +5622,10 @@ mod tests {
         let configured_terminal = Metrics::new(36.0, 47.0);
         let header_profile = row_shaping_profile(header, configured_terminal, 18.0, 2.0);
         assert_eq!(header_profile.metrics, Metrics::new(26.0, 36.0));
-        assert_eq!(header_profile.cell_advance, 13.0);
+        // A role smaller than the terminal keeps the terminal advance: words
+        // re-anchor per cell, so a sub-cell quantum would open a gap that
+        // grows with word length.
+        assert_eq!(header_profile.cell_advance, 18.0);
         assert_eq!(
             header_profile.metric_generation,
             header.native_metrics.unwrap().generation
