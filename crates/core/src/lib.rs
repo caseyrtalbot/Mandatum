@@ -526,6 +526,7 @@ mod tests {
                         command: "cargo test".to_owned(),
                         approved: true,
                     }],
+                    last_error: None,
                 },
             },
             Some(PathBuf::from("/tmp/project")),

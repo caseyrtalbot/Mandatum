@@ -1075,12 +1075,12 @@ mod tests {
             .iter()
             .find(|row| row.contains("Split pane right"))
             .expect("split row rendered");
-        assert!(split_row.contains("Split pane right  layout"));
+        assert!(split_row.contains("Split pane right · layout"));
         let hint_byte = split_row.rfind('v').expect("key hint rendered");
         let hint_end = split_row[..hint_byte].chars().count() + 1;
         // Border cell plus the one-cell trailing margin (see the menu test).
         assert_eq!(hint_end as u16, area.right().saturating_sub(2));
-        assert!(all.contains("Run task  task"));
+        assert!(all.contains("Run task · task"));
         assert!(all.contains("type to search · enter run · esc close"));
     }
 

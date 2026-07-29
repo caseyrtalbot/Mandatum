@@ -547,7 +547,14 @@ fn palette_compiles_one_opaque_styled_cell_program_aligned_with_item_targets() {
     assert_eq!(key_hint.occupancy, CellOccupancy::grapheme('v'.to_string()));
     assert!(key_hint.style.dim);
 
-    let detail = program.cell_at(24, 7).expect("palette detail");
+    // "label · detail": the dim middle-dot separator precedes the detail.
+    let separator = program.cell_at(23, 7).expect("palette detail separator");
+    assert_eq!(
+        separator.occupancy,
+        CellOccupancy::grapheme('·'.to_string())
+    );
+    assert!(separator.style.dim);
+    let detail = program.cell_at(25, 7).expect("palette detail");
     assert_eq!(detail.occupancy, CellOccupancy::grapheme('l'.to_string()));
     assert!(detail.style.dim);
 
