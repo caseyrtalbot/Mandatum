@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "mandatum-agent-runtime"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "mandatum-core",
  "rustix 1.1.4",
@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "mandatum-app"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "crossterm",
  "mandatum-agent-runtime",
@@ -1440,14 +1440,14 @@ dependencies = [
 
 [[package]]
 name = "mandatum-commands"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "mandatum-core",
 ]
 
 [[package]]
 name = "mandatum-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "mandatum-native-renderer"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "glyphon",
  "lru 0.16.4",
@@ -1486,14 +1486,14 @@ dependencies = [
 
 [[package]]
 name = "mandatum-pty"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "portable-pty",
 ]
 
 [[package]]
 name = "mandatum-renderer"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "mandatum-scene",
  "ratatui",
@@ -1501,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "mandatum-scene"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "mandatum-core",
  "serde",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "mandatum-terminal-vt"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "unicode-segmentation",
  "unicode-width",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "mandatum-workflows"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "mandatum-core",
  "serde_json",
