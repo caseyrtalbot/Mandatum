@@ -4436,7 +4436,9 @@ mod tests {
         let lines = scene_pane(&scene, pane_id.as_str()).detail_lines();
         assert!(lines.contains(&"status: failed".to_owned()), "{lines:?}");
         assert!(
-            lines.iter().any(|line| line.starts_with("error: `claude` was not found on PATH")),
+            lines
+                .iter()
+                .any(|line| line.starts_with("error: `claude` was not found on PATH")),
             "{lines:?}"
         );
         assert!(
