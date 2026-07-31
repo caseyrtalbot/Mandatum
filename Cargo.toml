@@ -58,7 +58,7 @@ ttf-parser = "0.25"
 # with the unicode-script version cosmic-text itself uses.
 unicode-script = "0.5"
 png = "0.18"
-pollster = "0.4"
+pollster = "1.0"
 # preserve_order keeps config-file key order so "later binding wins"
 # means document order, not alphabetical order.
 toml = { version = "0.8", features = ["preserve_order"] }
