@@ -37,7 +37,7 @@ version = "0.7.0"
 [workspace.dependencies]
 crossterm = "0.29"
 glyphon = "0.12"
-lru = "0.16"
+lru = "0.18"
 mandatum-agent-runtime = { path = "crates/agent-runtime" }
 mandatum-core = { path = "crates/core" }
 mandatum-commands = { path = "crates/commands" }
