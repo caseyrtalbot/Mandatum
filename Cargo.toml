@@ -65,7 +65,7 @@ toml = { version = "0.8", features = ["preserve_order"] }
 # The appearance overlay writes user config edits; toml_edit (already in
 # the tree under toml's serializer) preserves the user's comments and
 # formatting where a toml round-trip would discard them.
-toml_edit = "0.22"
+toml_edit = "0.25"
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
 vte = "0.15"
